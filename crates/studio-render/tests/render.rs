@@ -274,3 +274,162 @@ fn footage_shows_the_source_frame_for_the_current_time() {
     renderer.render(&project, Id(1), 5, SIZE, SIZE, &video).unwrap();
     assert_eq!(*video.asked.borrow(), vec![6, 3, 7]);
 }
+
+// Regression tests for bugs found in review --------------------------------------------------
+
+fn text_layer(id: u64, text: &str, size: Vec2, position: Vec2) -> Layer {
+    let style = TextStyle { font_family: "Helvetica".into(), font_size: 40.0, line_height: 48.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() };
+    let mut layer = solid(id, 0, size, position);
+    layer.content = LayerContent::Text { text: text.into(), style };
+    layer
+}
+
+#[test]
+fn a_full_text_cache_never_drops_a_raster_the_frame_still_needs() {
+    let mut renderer = Renderer::new().unwrap();
+    // Fill the cache to one short of its limit (64), one text per frame.
+    for n in 0..63 {
+        let project = project(vec![text_layer(2, &format!("text {n}"), Vec2::new(80.0, 48.0), Vec2::new(50.0, 50.0))]);
+        renderer.render(&project, Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
+    }
+    // Then a frame with two texts the cache hasn't seen: both must draw.
+    let two = project(vec![
+        text_layer(2, "new A", Vec2::new(80.0, 48.0), Vec2::new(50.0, 25.0)),
+        text_layer(3, "new B", Vec2::new(80.0, 48.0), Vec2::new(50.0, 75.0)),
+    ]);
+    let frame = renderer.render(&two, Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
+    assert_eq!(frame.text_sizes.len(), 2);
+}
+
+#[test]
+fn text_larger_than_the_gpu_limit_draws_instead_of_crashing() {
+    // 200 px text at 4000% is far past the 8192-pixel texture limit.
+    let mut big = text_layer(2, "Studio Studio", Vec2::new(80.0, 48.0), Vec2::new(50.0, 50.0));
+    big.transform.as_mut().unwrap().scale = Animated::constant(Vec2::new(4000.0, 4000.0));
+    if let LayerContent::Text { style, .. } = &mut big.content {
+        style.font_size = 200.0;
+    }
+    let mut renderer = Renderer::new().unwrap();
+    renderer.render(&project(vec![big]), Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
+}
+
+#[test]
+fn text_scaled_past_eight_times_is_drawn_at_its_full_size() {
+    // Small text, so even at 1600% it fits in the frame. Raster scales stop at 8×, but the drawn
+    // text must keep growing: twice the scale is about four times the ink.
+    let ink = |scale: f32| {
+        let mut layer = text_layer(2, "I", Vec2::new(3.0, 5.0), Vec2::new(50.0, 50.0));
+        if let LayerContent::Text { style, .. } = &mut layer.content {
+            (style.font_size, style.line_height) = (4.0, 5.0);
+        }
+        layer.transform.as_mut().unwrap().scale = Animated::constant(Vec2::new(scale, scale));
+        let frame = render(&project(vec![layer]));
+        (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).filter(|&(x, y)| pixel(&frame, x, y)[0] > 128).count() as f32
+    };
+    let (at_8, at_16) = (ink(800.0), ink(1600.0));
+    assert!(at_16 > at_8 * 3.0, "ink at 1600%: {at_16}, at 800%: {at_8}");
+}
+
+#[test]
+fn images_larger_than_the_gpu_limit_are_scaled_down_to_fit() {
+    use studio_core::model::{ProjectItem, ProjectItemKind};
+    let path = std::env::temp_dir().join(format!("studio-wide-{}.png", std::process::id()));
+    image::RgbaImage::from_pixel(9000, 2, image::Rgba([0, 255, 0, 255])).save(&path).unwrap();
+    let mut layer = full(2, 0);
+    layer.content = LayerContent::Image { item: Id(60) };
+    let mut project = project(vec![layer]);
+    project.items.push(ProjectItem {
+        id: Id(60),
+        name: "wide.png".into(),
+        kind: ProjectItemKind::Image,
+        label: LabelColor::Aqua,
+        parent: None,
+        size: Some(Vec2::new(100.0, 100.0)),
+        duration_seconds: None,
+        frame_rate: None,
+        has_audio: false,
+        color: None,
+        path: Some(path.clone()),
+    });
+    let frame = render(&project);
+    std::fs::remove_file(&path).unwrap();
+    assert!(close(pixel(&frame, 50, 50), [0, 255, 0]));
+}
+
+#[test]
+fn two_layers_of_one_clip_each_show_their_own_moment() {
+    use studio_core::model::{ProjectItem, ProjectItemKind};
+    // Left half shows source frame 0 (red); right half is slipped one frame later (blue).
+    let mut left = solid(2, 0, Vec2::new(50.0, 100.0), Vec2::new(25.0, 50.0));
+    let mut right = solid(3, 0, Vec2::new(50.0, 100.0), Vec2::new(75.0, 50.0));
+    left.content = LayerContent::Footage { item: Id(50) };
+    right.content = LayerContent::Footage { item: Id(50) };
+    right.start_frame = -1;
+    let mut project = project(vec![left, right]);
+    project.items.push(ProjectItem {
+        id: Id(50),
+        name: "clip.mov".into(),
+        kind: ProjectItemKind::Footage,
+        label: LabelColor::Aqua,
+        parent: None,
+        size: Some(Vec2::new(50.0, 100.0)),
+        duration_seconds: Some(10.0),
+        frame_rate: Some(FrameRate::new(24, 1)),
+        has_audio: false,
+        color: None,
+        path: Some("/clip.mov".into()),
+    });
+    let video = StripedVideo { asked: Default::default() };
+    let frame = Renderer::new().unwrap().render(&project, Id(1), 0, SIZE, SIZE, &video).unwrap();
+    assert!(close(pixel(&frame, 25, 50), [255, 0, 0]), "left: {:?}", pixel(&frame, 25, 50));
+    assert!(close(pixel(&frame, 75, 50), [0, 0, 255]), "right: {:?}", pixel(&frame, 75, 50));
+}
+
+#[test]
+fn a_matte_that_draws_nothing_hides_its_layer_instead_of_reusing_another_matte() {
+    // Top first: an ended solid used as A's matte, A (blue), a small matte M2, B (red).
+    let mut ended = full(2, 0xffffff);
+    (ended.in_frame, ended.out_frame) = (5, 10);
+    let mut a = full(3, 0x0000ff);
+    a.track_matte = TrackMatte::Alpha;
+    let m2 = solid(4, 0xffffff, Vec2::new(20.0, 20.0), Vec2::new(50.0, 50.0));
+    let mut b = full(5, 0xff0000);
+    b.track_matte = TrackMatte::Alpha;
+    let frame = render(&project(vec![ended, a, m2, b]));
+    // At the center only B shows through its matte; A's matte has ended, so A is hidden.
+    assert!(close(pixel(&frame, 50, 50), [255, 0, 0]), "center: {:?}", pixel(&frame, 50, 50));
+    assert!(close(pixel(&frame, 10, 10), [0, 0, 0]), "outside both mattes: {:?}", pixel(&frame, 10, 10));
+}
+
+#[test]
+fn semi_transparent_edges_are_filtered_without_dark_fringes() {
+    use studio_core::model::{ProjectItem, ProjectItemKind};
+    // A 2×1 image, opaque white and fully transparent, stretched over the frame: halfway
+    // across, the color is half-covered white, not darkened by the transparent pixel's black.
+    let path = std::env::temp_dir().join(format!("studio-edge-{}.png", std::process::id()));
+    let mut edge = image::RgbaImage::new(2, 1);
+    edge.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
+    edge.put_pixel(1, 0, image::Rgba([0, 0, 0, 0]));
+    edge.save(&path).unwrap();
+    let mut layer = full(2, 0);
+    layer.content = LayerContent::Image { item: Id(61) };
+    let mut project = project(vec![layer]);
+    project.items.push(ProjectItem {
+        id: Id(61),
+        name: "edge.png".into(),
+        kind: ProjectItemKind::Image,
+        label: LabelColor::Aqua,
+        parent: None,
+        size: Some(Vec2::new(100.0, 100.0)),
+        duration_seconds: None,
+        frame_rate: None,
+        has_audio: false,
+        color: None,
+        path: Some(path.clone()),
+    });
+    let frame = render(&project);
+    std::fs::remove_file(&path).unwrap();
+    // Linear 0.5 coverage of white over black is about 188 in sRGB.
+    let middle = pixel(&frame, 50, 50);
+    assert!(middle[0] > 175, "midpoint {middle:?}");
+}

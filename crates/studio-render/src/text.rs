@@ -14,6 +14,9 @@ pub struct TextImage {
     pub pixels: Vec<u8>,
     /// The text box in the layer's source pixels (before raster scaling).
     pub size: Vec2,
+    /// The scale the raster was actually drawn at: the one asked for, unless that would have
+    /// made it too big (over 8× or larger than `max_size` pixels).
+    pub scale: f32,
 }
 
 pub struct TextRenderer {
@@ -73,15 +76,19 @@ impl TextRenderer {
     }
 
     /// Rasterizes the text at `scale` output pixels per source pixel.
-    pub fn rasterize(&mut self, text: &str, style: &TextStyle, scale: f32) -> TextImage {
-        let scale = scale.clamp(0.05, 8.0);
-        let (buffer, size) = self.layout(text, style, scale);
-        // Leave room around the glyphs for the stroke.
-        let stroke = style.stroke.map(|(color, width)| (color, width * scale));
-        let pad = stroke.map_or(0.0, |(_, width)| width).ceil() as i32 + 1;
-        let width = (size.x * scale).ceil() as i32 + pad * 2;
-        let height = (size.y * scale).ceil() as i32 + pad * 2;
-        let (width, height) = (width.max(1) as usize, height.max(1) as usize);
+    /// Draws `text` at `scale`, never larger than `max_size` pixels on a side (the GPU's
+    /// texture limit); very large text is drawn at a lower scale and stretched.
+    pub fn rasterize(&mut self, text: &str, style: &TextStyle, scale: f32, max_size: u32) -> TextImage {
+        let mut scale = scale.clamp(0.05, 8.0);
+        let mut laid_out = self.raster_layout(text, style, scale);
+        let biggest = laid_out.2.max(laid_out.3);
+        if biggest > max_size as usize {
+            // Shrink to fit, with a little room for the padding not scaling exactly.
+            scale *= max_size as f32 / biggest as f32 * 0.98;
+            laid_out = self.raster_layout(text, style, scale);
+        }
+        let (buffer, size, width, height, pad, stroke) = laid_out;
+        let (width, height) = (width.min(max_size as usize), height.min(max_size as usize));
 
         // Glyph coverage, 0-1.
         let mut coverage = vec![0.0_f32; width * height];
@@ -112,7 +119,20 @@ impl TextRenderer {
 
         let stroke_coverage = stroke.map(|(_, stroke_width)| stroke_mask(&coverage, width, height, stroke_width.max(0.0)));
         let pixels = paint(&coverage, stroke_coverage.as_deref(), style.fill, stroke.map(|(color, _)| color));
-        TextImage { width: width as u32, height: height as u32, pixels, size }
+        TextImage { width: width as u32, height: height as u32, pixels, size, scale }
+    }
+
+    /// Lays text out at `scale`: the buffer, the text box, the raster size with padding for
+    /// the stroke, the padding, and the stroke at raster scale.
+    #[allow(clippy::type_complexity)]
+    fn raster_layout(&mut self, text: &str, style: &TextStyle, scale: f32) -> (Buffer, Vec2, usize, usize, i32, Option<(Rgba, f32)>) {
+        let (buffer, size) = self.layout(text, style, scale);
+        // Leave room around the glyphs for the stroke.
+        let stroke = style.stroke.map(|(color, width)| (color, width * scale));
+        let pad = stroke.map_or(0.0, |(_, width)| width).ceil() as i32 + 1;
+        let width = (size.x * scale).ceil() as i32 + pad * 2;
+        let height = (size.y * scale).ceil() as i32 + pad * 2;
+        (buffer, size, width.max(1) as usize, height.max(1) as usize, pad, stroke)
     }
 }
 
@@ -199,7 +219,7 @@ mod tests {
         let short = text.measure("Hi", &style());
         let long = text.measure("Hello there", &style());
         assert!(long.x > short.x * 2.0, "{short:?} vs {long:?}");
-        let image = text.rasterize("Hi", &style(), 1.0);
+        let image = text.rasterize("Hi", &style(), 1.0, 8192);
         let ink = image.pixels.chunks(4).filter(|px| px[3] > 128).count();
         assert!(ink > 100, "glyphs were drawn ({ink} solid pixels)");
     }
@@ -217,8 +237,8 @@ mod tests {
     #[test]
     fn stroke_adds_coverage_around_glyphs() {
         let mut text = TextRenderer::new();
-        let plain = text.rasterize("O", &style(), 1.0);
-        let stroked = text.rasterize("O", &TextStyle { stroke: Some((Rgba::hex(0xff0000), 6.0)), ..style() }, 1.0);
+        let plain = text.rasterize("O", &style(), 1.0, 8192);
+        let stroked = text.rasterize("O", &TextStyle { stroke: Some((Rgba::hex(0xff0000), 6.0)), ..style() }, 1.0, 8192);
         let ink = |image: &TextImage| image.pixels.chunks(4).filter(|px| px[3] > 128).count();
         assert!(ink(&stroked) > ink(&plain) + 200);
         // Stroke pixels are red.

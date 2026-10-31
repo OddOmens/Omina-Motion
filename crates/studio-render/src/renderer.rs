@@ -119,7 +119,39 @@ pub struct Renderer {
     /// The measured text box for each cached raster.
     text_boxes: HashMap<u64, Vec2>,
     images: HashMap<PathBuf, Option<MediaTexture>>,
-    videos: HashMap<PathBuf, VideoTexture>,
+    /// The current picture of each footage layer. Keyed by layer, so two layers showing
+    /// different moments of the same clip each have their own.
+    videos: HashMap<Id, VideoTexture>,
+    /// The largest texture side the GPU accepts; larger images and text are scaled down to fit.
+    max_texture: u32,
+}
+
+/// Converts straight-alpha sRGB pixels to premultiplied ones, still sRGB encoded: each color is
+/// multiplied by its alpha in linear light, then encoded back. The texture's sRGB format decodes
+/// them to premultiplied linear values before filtering, so semi-transparent edges blend
+/// correctly instead of picking up the (often black) color of transparent neighbors.
+fn premultiply(pixels: &[u8]) -> Vec<u8> {
+    // Opaque pixels are unchanged, so most images and all video frames skip the math.
+    if pixels.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255) {
+        return pixels.to_vec();
+    }
+    let to_linear: Vec<f32> = (0..=255).map(|value| srgb_to_linear(f32::from(value as u8) / 255.0)).collect();
+    let encode = |linear: f32| {
+        let c = linear.clamp(0.0, 1.0);
+        let srgb = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+        (srgb * 255.0).round() as u8
+    };
+    let mut out = Vec::with_capacity(pixels.len());
+    for pixel in pixels.as_chunks::<4>().0 {
+        let alpha = f32::from(pixel[3]) / 255.0;
+        if pixel[3] == 255 {
+            out.extend_from_slice(pixel);
+        } else {
+            out.extend([0, 1, 2].map(|channel| encode(to_linear[usize::from(pixel[channel])] * alpha)));
+            out.push(pixel[3]);
+        }
+    }
+    out
 }
 
 fn srgb_to_linear(value: f32) -> f32 {
@@ -163,6 +195,7 @@ impl Renderer {
             ..Default::default()
         }))
         .map_err(|error| RenderError(format!("could not open the GPU: {error}")))?;
+        let max_texture = device.limits().max_texture_dimension_2d;
 
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -278,6 +311,7 @@ impl Renderer {
             text_boxes: HashMap::new(),
             images: HashMap::new(),
             videos: HashMap::new(),
+            max_texture,
         })
     }
 
@@ -509,14 +543,13 @@ impl Renderer {
     /// its box in source pixels and the raster's padding in source pixels.
     fn prepare_text(&mut self, text: &str, style: &TextStyle, raster_scale: f32) -> (u64, Vec2, Vec2) {
         let key = text_key(text, style, raster_scale);
+        // The cache is trimmed after all of a frame's text is prepared (see `render`), never
+        // here: a raster prepared earlier in this frame must still be there to draw.
         if !self.text_cache.contains_key(&key) {
-            if self.text_cache.len() >= TEXT_CACHE_LIMIT {
-                self.text_cache.clear();
-                self.text_boxes.clear();
-            }
-            let image = self.text.rasterize(text, style, raster_scale);
+            let image = self.text.rasterize(text, style, raster_scale, self.max_texture);
             let view = self.upload(image.width, image.height, &image.pixels);
-            let drawn = Vec2::new(image.width as f32 / raster_scale, image.height as f32 / raster_scale);
+            // Sized by the scale actually drawn at, which can be lower than the one asked for.
+            let drawn = Vec2::new(image.width as f32 / image.scale, image.height as f32 / image.scale);
             self.text_cache.insert(key, MediaTexture { view, size: drawn });
             let measured = image.size;
             // Remember the box with the raster, so it is not measured again.
@@ -529,7 +562,10 @@ impl Renderer {
         (key, measured, pad)
     }
 
+    /// Uploads straight-alpha sRGB pixels as a texture holding premultiplied colors (see
+    /// `premultiply`), so the GPU's filtering blends edges correctly.
     fn upload(&self, width: u32, height: u32, pixels: &[u8]) -> wgpu::TextureView {
+        let pixels = &premultiply(pixels);
         self.device
             .create_texture_with_data(
                 &self.queue,
@@ -549,11 +585,12 @@ impl Renderer {
             .create_view(&Default::default())
     }
 
-    /// Uploads a decoded video frame, reusing the clip's texture when the size is unchanged.
-    fn prepare_video(&mut self, path: &std::path::Path, picture: &VideoFrame) {
+    /// Uploads a footage layer's decoded frame, reusing its texture when the size is unchanged.
+    /// Video frames are opaque, so they need no premultiplying.
+    fn prepare_video(&mut self, layer: Id, picture: &VideoFrame) {
         let size = Vec2::new(picture.width as f32, picture.height as f32);
-        let reusable = self.videos.get(path).is_some_and(|video| video.texture.size == size);
-        if reusable && self.videos[path].index == picture.index {
+        let reusable = self.videos.get(&layer).is_some_and(|video| video.texture.size == size);
+        if reusable && self.videos[&layer].index == picture.index {
             return;
         }
         if !reusable {
@@ -568,9 +605,9 @@ impl Renderer {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
-            self.videos.insert(path.to_owned(), VideoTexture { texture: MediaTexture { view, size }, raw: texture, index: -1 });
+            self.videos.insert(layer, VideoTexture { texture: MediaTexture { view, size }, raw: texture, index: -1 });
         }
-        let video = self.videos.get_mut(path).expect("inserted above");
+        let video = self.videos.get_mut(&layer).expect("inserted above");
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &video.raw, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
             &picture.rgba,
@@ -583,7 +620,10 @@ impl Renderer {
     /// Loads an image file into a texture once. Failed loads are remembered so they are not retried every frame.
     fn prepare_image(&mut self, path: &PathBuf) -> bool {
         if !self.images.contains_key(path) {
+            let max = self.max_texture;
             let loaded = image::open(path).ok().map(|image| {
+                // Larger than the GPU accepts: scale down to fit (the layer stretches it back).
+                let image = if image.width() > max || image.height() > max { image.resize(max, max, image::imageops::FilterType::Triangle) } else { image };
                 let rgba = image.to_rgba8();
                 let (width, height) = rgba.dimensions();
                 MediaTexture { view: self.upload(width, height, rgba.as_raw()), size: Vec2::new(width as f32, height as f32) }
@@ -636,13 +676,23 @@ impl Renderer {
                         let index = (seconds * rate.fps() + 1e-6).floor() as i64;
                         if let Some(picture) = video.frame(&path, index) {
                             used_proxy |= picture.from_proxy;
-                            self.prepare_video(&path, &picture);
+                            self.prepare_video(layer.id, &picture);
                         }
                     }
                 }
                 _ => {}
             }
         }
+
+        // Keep caches bounded: text rasters beyond the limit and pictures of footage layers not
+        // on screen are let go, but never anything this frame uses.
+        if self.text_cache.len() > TEXT_CACHE_LIMIT {
+            let in_use: HashSet<u64> = text_keys.values().map(|(key, ..)| *key).collect();
+            self.text_cache.retain(|key, _| in_use.contains(key));
+            self.text_boxes.retain(|key, _| in_use.contains(key));
+        }
+        let on_screen: HashSet<Id> = composition.layers.iter().filter(|layer| layer.is_active_at(frame)).map(|layer| layer.id).collect();
+        self.videos.retain(|layer, _| on_screen.contains(layer));
 
         self.ensure_targets(width, height);
         let targets = self.targets.as_ref().expect("targets were just created");
@@ -683,7 +733,12 @@ impl Renderer {
             let matte = match (layer.track_matte, index.checked_sub(1).map(|above| &composition.layers[above])) {
                 (studio_core::model::TrackMatte::None, _) | (_, None) => None,
                 (_, Some(matte_layer)) => world_transform(composition, matte_layer.id, at).map(|matte_world| {
-                    self.draw_layer(&mut encoder, targets, project, matte_layer, matte_world, scale, &text_keys, slot::MATTE_A);
+                    // Start from an empty matte: a matte layer that draws nothing (one that has
+                    // ended, or has nothing to show) must not leave an earlier matte behind.
+                    self.clear(&mut encoder, &targets.work[slot::MATTE_A].view, [0.0; 4]);
+                    if matte_layer.is_active_at(frame) {
+                        self.draw_layer(&mut encoder, targets, project, matte_layer, matte_world, scale, &text_keys, slot::MATTE_A);
+                    }
                     self.apply_effects(&mut encoder, targets, matte_layer, at, time, scale, slot::MATTE_A, slot::MATTE_B)
                 }),
             };
@@ -764,8 +819,8 @@ impl Renderer {
                     None => self.draw_source(encoder, targets, target, world, scale, &placeholder(), full),
                 }
             }
-            LayerContent::Footage { item } => {
-                let picture = project.item(*item).and_then(|item| item.path.as_ref()).and_then(|path| self.videos.get(path));
+            LayerContent::Footage { .. } => {
+                let picture = self.videos.get(&layer.id);
                 match picture {
                     Some(video) => {
                         // Stretch the decoded picture (which may be scaled down for preview) over the layer.
