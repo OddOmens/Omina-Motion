@@ -30,11 +30,13 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         ProjectItemKind::Solid => LayerContent::Solid { color: item.color.unwrap_or(crate::model::Rgba::hex(0x333333)) },
     };
 
+    // A bogus or enormous media length (from a damaged file or a misreported probe) is kept
+    // within the frame limit, so the out point below cannot overflow.
     let duration = match item.duration_seconds {
         Some(seconds) => composition.frame_rate.seconds_to_frames(seconds),
         None => composition.duration_frames - in_frame,
     }
-    .max(1);
+    .clamp(1, crate::model::MAX_FRAME);
     let size = item.size.unwrap_or(composition.size());
     let has_picture = content.has_picture();
 
@@ -44,7 +46,7 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         label: item.label,
         size,
         in_frame,
-        out_frame: in_frame + duration,
+        out_frame: in_frame.saturating_add(duration),
         start_frame: in_frame,
         blend_mode: BlendMode::Normal,
         track_matte: TrackMatte::None,
@@ -465,6 +467,16 @@ mod tests {
         assert_eq!(comp.layers[0].out_frame, comp.duration_frames);
         let music = comp.layers.last().unwrap();
         assert!(music.transform.is_none() && !music.switches.visible);
+    }
+
+    #[test]
+    fn an_absurd_media_length_cannot_overflow_the_out_point() {
+        let mut project = sample::sample_project();
+        let info = FootageInfo { size: Vec2::new(64.0, 36.0), duration_seconds: 1.0e30, frame_rate: FrameRate::new(24, 1), has_audio: false };
+        let item = import_footage(&mut project, "/media/odd.mp4".into(), &info);
+        let layer = add_layer_from_item(&mut project, ids::MAIN_COMP, item, 0, 10).unwrap();
+        let layer = project.composition(ids::MAIN_COMP).unwrap().layer(layer).unwrap();
+        assert!(layer.out_frame > layer.in_frame && layer.out_frame <= 10 + crate::model::MAX_FRAME);
     }
 
     #[test]

@@ -3,6 +3,11 @@
 use crate::animation::{Animated, Vec2};
 use crate::time::FrameRate;
 
+/// The furthest a frame number can be from frame 0: about 1,400 years at 24 fps. Frames stay
+/// well inside this, so time arithmetic (spans, shifts, sums) can never overflow; project
+/// files with frames beyond it are refused.
+pub const MAX_FRAME: i64 = 1 << 40;
+
 /// Identifies any object in a project. Ids are unique within a project and never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Id(pub u64);
@@ -416,7 +421,7 @@ pub struct Project {
 
 impl Project {
     pub fn new(items: Vec<ProjectItem>, compositions: Vec<Composition>) -> Self {
-        let next_id = Self::highest_id(&items, &compositions) + 1;
+        let next_id = Self::highest_id(&items, &compositions).saturating_add(1);
         Self { items, compositions, next_id }
     }
 
@@ -432,7 +437,7 @@ impl Project {
     /// Makes sure new ids start above every id in use, for example after loading a file
     /// whose saved counter is stale or was edited by hand.
     pub fn refresh_next_id(&mut self) {
-        self.next_id = self.next_id.max(Self::highest_id(&self.items, &self.compositions) + 1);
+        self.next_id = self.next_id.max(Self::highest_id(&self.items, &self.compositions).saturating_add(1));
     }
 
     /// Returns a fresh id that no object in this project uses.

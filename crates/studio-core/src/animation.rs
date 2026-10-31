@@ -224,7 +224,8 @@ impl<T: Lerp> Animated<T> {
             .find(|pair| frame < pair[1].frame as f64)
             .expect("frame lies strictly between the first and last keyframe");
         let (from, to) = (pair[0], pair[1]);
-        let t = ((frame - from.frame as f64) / (to.frame - from.frame) as f64) as f32;
+        // In floating point: subtracting frame numbers as integers could overflow on extreme frames.
+        let t = ((frame - from.frame as f64) / (to.frame as f64 - from.frame as f64)) as f32;
         from.value.lerp(to.value, from.easing.apply(t))
     }
 

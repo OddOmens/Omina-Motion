@@ -67,6 +67,10 @@ pub fn can_slip(project: &Project, composition: &Composition, layer: &Layer) -> 
 /// the in and out points; the source must still cover them. Returns whether anything changed.
 pub fn slip_to(project: &mut Project, comp: Id, layer: Id, start: i64) -> bool {
     let Some((layer, Some(length))) = editable(project, comp, layer) else { return false };
+    // A source shorter than the layer (after a frame rate change, say) cannot cover it anywhere.
+    if length < layer.out_frame - layer.in_frame {
+        return false;
+    }
     // The source has to start by the in point and run to the out point.
     let start = start.clamp(layer.out_frame - length, layer.in_frame);
     let changed = start != layer.start_frame;
@@ -145,6 +149,16 @@ mod tests {
         assert_eq!(timing(&project, clip), (0, 48, 96), "the source must still reach the out point");
         slip_to(&mut project, ids::MAIN_COMP, clip, 100);
         assert_eq!(timing(&project, clip), (48, 48, 96), "the source must start by the in point");
+    }
+
+    #[test]
+    fn a_source_shorter_than_its_layer_cannot_slip() {
+        let (mut project, clip) = with_clip();
+        // At half the frame rate, the 4-second source is 48 frames, but the layer is still 96 long.
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        comp.frame_rate = FrameRate::new(12, 1);
+        assert!(!slip_to(&mut project, ids::MAIN_COMP, clip, 30));
+        assert_eq!(timing(&project, clip), (24, 24, 120));
     }
 
     #[test]

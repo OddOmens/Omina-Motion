@@ -73,12 +73,16 @@ pub fn from_text(text: &str) -> Result<(Project, EditorView), String> {
     if header.version > FORMAT_VERSION {
         return Err("This project was saved by a newer version of Studio. Update Studio to open it.".into());
     }
-    let file: FileIn = serde_json::from_str(text).map_err(|error| format!("The project file is damaged: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|error| format!("The project file is damaged: {error}"))?;
+    if has_oversized_number(&value) {
+        return Err("The project file is damaged: it holds a number too large to use.".into());
+    }
+    let file: FileIn = serde_json::from_value(value).map_err(|error| format!("The project file is damaged: {error}"))?;
     let FileIn { mut project, mut view } = file;
     restore_effect_info(&mut project);
     fill_missing_start_frames(&mut project);
-    project.refresh_next_id();
     check(&project)?;
+    project.refresh_next_id();
 
     // Fall back to the first composition if the saved one is missing, and keep the playhead
     // and work area inside the composition.
@@ -92,8 +96,37 @@ pub fn from_text(text: &str) -> Result<(Project, EditorView), String> {
     Ok((project, view))
 }
 
+/// Ids are kept far below the top of their range, so new ones can always be allocated.
+const MAX_ID: u64 = 1 << 53;
+/// The longest media a project item may say it is, in seconds (about 30 years).
+const MAX_MEDIA_SECONDS: f64 = 1.0e9;
+
+/// Whether any number in the file is too large for the values it fills (32-bit floats), which
+/// would load as infinity and spread through the math.
+fn has_oversized_number(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number.as_f64().is_some_and(|n| n.abs() > f64::from(f32::MAX)) && number.as_i64().is_none() && number.as_u64().is_none(),
+        serde_json::Value::Array(items) => items.iter().any(has_oversized_number),
+        serde_json::Value::Object(fields) => fields.values().any(has_oversized_number),
+        _ => false,
+    }
+}
+
+/// The frames a layer uses: its in, out and source start points and all its keyframes.
+fn layer_frames(layer: &crate::model::Layer) -> Vec<i64> {
+    let mut frames = vec![layer.in_frame, layer.out_frame, layer.start_frame];
+    for path in layer.property_paths() {
+        if let Some(property) = layer.property(path, 0) {
+            frames.extend(property.keyframes);
+        }
+    }
+    frames
+}
+
 /// Checks what the editor relies on, so a hand-edited or damaged file cannot crash it.
 fn check(project: &Project) -> Result<(), String> {
+    use crate::model::MAX_FRAME;
+    let damaged = |what: &str| Err(format!("The project file is damaged: {what}."));
     if project.compositions.is_empty() {
         return Err("The project has no compositions.".into());
     }
@@ -104,6 +137,12 @@ fn check(project: &Project) -> Result<(), String> {
         }
         if item.frame_rate.is_some_and(|rate| rate.numerator == 0 || rate.denominator == 0) {
             return Err(format!("The project file is damaged: \"{}\" has no valid frame rate.", item.name));
+        }
+        if item.id.0 > MAX_ID {
+            return damaged(&format!("\"{}\" has an id too large to use", item.name));
+        }
+        if item.duration_seconds.is_some_and(|seconds| !(0.0..=MAX_MEDIA_SECONDS).contains(&seconds)) {
+            return damaged(&format!("\"{}\" has an impossible length", item.name));
         }
     }
     for comp in &project.compositions {
@@ -116,6 +155,9 @@ fn check(project: &Project) -> Result<(), String> {
             background: comp.background,
         };
         settings.validate().map_err(|error| format!("Composition \"{}\" is damaged: {error}", comp.name))?;
+        if comp.duration_frames > MAX_FRAME || comp.id.0 > MAX_ID {
+            return damaged(&format!("composition \"{}\" is impossibly long", comp.name));
+        }
         let mut layer_ids = std::collections::HashSet::new();
         for layer in &comp.layers {
             if !layer_ids.insert(layer.id) {
@@ -123,6 +165,18 @@ fn check(project: &Project) -> Result<(), String> {
             }
             if layer.out_frame <= layer.in_frame {
                 return Err(format!("Layer \"{}\" is damaged: it ends before it starts.", layer.name));
+            }
+            if layer_frames(layer).iter().any(|frame| frame.abs() > MAX_FRAME) {
+                return damaged(&format!("layer \"{}\" has a time too far from the start", layer.name));
+            }
+            if layer.id.0 > MAX_ID || layer.effects.iter().any(|effect| effect.id.0 > MAX_ID) {
+                return damaged(&format!("layer \"{}\" has an id too large to use", layer.name));
+            }
+            // Parents must exist in the same composition and never loop back.
+            if let Some(parent) = layer.parent
+                && !crate::edit::can_parent(comp, layer.id, parent)
+            {
+                return damaged(&format!("layer \"{}\" has a missing or looping parent", layer.name));
             }
         }
     }
@@ -217,6 +271,37 @@ mod tests {
         let zero_rate = text.replacen("\"numerator\": 24", "\"numerator\": 0", 1);
         assert!(from_text(&zero_rate).is_err());
         assert!(from_text(&text[..text.len() / 2]).unwrap_err().contains("damaged"));
+    }
+
+    /// The sample's first layer (the title) in a saved file.
+    fn title(file: &mut serde_json::Value) -> &mut serde_json::Value {
+        &mut file["project"]["compositions"][0]["layers"][0]
+    }
+
+    /// The sample saved as JSON, changed by `damage`, then opened.
+    fn open_damaged(damage: impl FnOnce(&mut serde_json::Value)) -> Result<(Project, EditorView), String> {
+        let mut file: serde_json::Value = serde_json::from_str(&to_text(&sample_project(), view()).unwrap()).unwrap();
+        damage(&mut file);
+        from_text(&file.to_string())
+    }
+
+    #[test]
+    fn hostile_values_are_refused_instead_of_crashing_later() {
+        // A parent loop (title ↔ grade), and a parent that doesn't exist.
+        let looped = open_damaged(|file| {
+            let grade = file["project"]["compositions"][0]["layers"][1]["id"].clone();
+            let title_id = title(file)["id"].clone();
+            title(file)["parent"] = grade;
+            file["project"]["compositions"][0]["layers"][1]["parent"] = title_id;
+        });
+        assert!(looped.unwrap_err().contains("parent"));
+        assert!(open_damaged(|file| title(file)["parent"] = serde_json::json!(424242)).unwrap_err().contains("parent"));
+        // Frames at the edge of the integer range, an id with no room above it, a huge length, a huge float.
+        assert!(open_damaged(|file| title(file)["out_frame"] = serde_json::json!(i64::MAX)).is_err());
+        assert!(open_damaged(|file| title(file)["transform"]["opacity"]["keyframes"][0]["frame"] = serde_json::json!(-i64::MAX)).is_err());
+        assert!(open_damaged(|file| title(file)["id"] = serde_json::json!(u64::MAX)).is_err());
+        assert!(open_damaged(|file| file["project"]["items"][3]["duration_seconds"] = serde_json::json!(1e30)).is_err());
+        assert!(open_damaged(|file| title(file)["size"]["x"] = serde_json::json!(1e300)).unwrap_err().contains("too large"));
     }
 
     #[test]
