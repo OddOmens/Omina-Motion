@@ -1,0 +1,25 @@
+[package]
+name = "studio"
+description = "Studio desktop editor: one app for compositing and editing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+studio-core.workspace = true
+studio-render = { path = "../../crates/studio-render" }
+studio-media = { path = "../../crates/studio-media" }
+studio-export = { path = "../../crates/studio-export" }
+# Wakes the UI thread when a background decoder has a frame ready.
+async-channel = "2"
+gpui-kit.workspace = true
+# The same image library GPUI uses, for handing it rendered frames and reading image sizes.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Headless UI tests: real views in an offscreen window, driven by simulated input.
+gpui-kit = { workspace = true, features = ["test-support"] }

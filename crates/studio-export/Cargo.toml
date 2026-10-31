@@ -1,0 +1,15 @@
+[package]
+name = "studio-export"
+description = "Exports Studio compositions to movie files: GPU rendering, audio mixing and encoding. No UI, so it also runs on a headless render machine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+studio-core.workspace = true
+studio-render = { path = "../studio-render" }
+studio-media = { path = "../studio-media" }
+
+[lints]
+workspace = true

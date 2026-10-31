@@ -1,0 +1,785 @@
+//! The compositor. For each visible layer, bottom to top: draw its source into a
+//! composition-sized texture with its world transform (anti-aliased), run its effects,
+//! then composite it onto everything below with its opacity, blend mode and track matte.
+//! Adjustment layers apply their effects to everything below them instead.
+//! Work happens in 16-bit float linear light; the result is converted to sRGB BGRA.
+
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+
+use studio_core::animation::Vec2;
+use studio_core::media::{VideoFrame, VideoSource};
+use studio_core::model::{Id, Layer, LayerContent, Project, Rgba, TextStyle};
+use studio_core::transform::{Affine, world_transform};
+use wgpu::util::DeviceExt as _;
+
+use crate::effects::{self, Pass};
+use crate::text::TextRenderer;
+
+const WORK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
+const MEDIA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+const MSAA_SAMPLES: u32 = 4;
+/// Text rasters kept in memory; older ones are dropped when the cache is full.
+const TEXT_CACHE_LIMIT: usize = 64;
+
+#[derive(Debug)]
+pub struct RenderError(pub String);
+
+impl std::fmt::Display for RenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RenderError {}
+
+/// A finished frame.
+pub struct RenderedFrame {
+    pub width: u32,
+    pub height: u32,
+    /// sRGB pixels in BGRA order, `width * 4` bytes per row.
+    pub bgra: Vec<u8>,
+    /// Measured text box sizes, so the editor can keep text layer bounds exact.
+    pub text_sizes: Vec<(Id, Vec2)>,
+    /// True if any footage in the frame was drawn from a low-resolution proxy.
+    pub used_proxy: bool,
+}
+
+struct Target {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+/// Textures for one output size, reused frame to frame.
+struct Targets {
+    width: u32,
+    height: u32,
+    /// Work textures, addressed by index so passes can ping-pong between them.
+    work: Vec<Target>,
+    msaa: Target,
+    output: Target,
+    readback: wgpu::Buffer,
+    padded_row: u32,
+}
+
+/// Work texture roles. Each pair ping-pongs: a pass reads one and writes the other.
+mod slot {
+    pub const ACCUM_A: usize = 0;
+    pub const ACCUM_B: usize = 1;
+    pub const LAYER_A: usize = 2;
+    pub const LAYER_B: usize = 3;
+    pub const MATTE_A: usize = 4;
+    pub const MATTE_B: usize = 5;
+    pub const AUX_A: usize = 6;
+    pub const AUX_B: usize = 7;
+    pub const COUNT: usize = 8;
+}
+
+struct MediaTexture {
+    view: wgpu::TextureView,
+    size: Vec2,
+}
+
+/// A clip's current frame on the GPU, rewritten in place as playback moves.
+struct VideoTexture {
+    texture: MediaTexture,
+    raw: wgpu::Texture,
+    /// Which source frame the texture holds.
+    index: i64,
+}
+
+/// What `layer.wgsl` fills a layer's rectangle with.
+enum Source<'a> {
+    /// A premultiplied linear color.
+    Solid([f32; 4]),
+    /// A straight-alpha sRGB texture (text, images).
+    Texture(&'a wgpu::TextureView),
+    /// Media that is not decoded yet: a checker in this premultiplied linear color.
+    Placeholder([f32; 4]),
+}
+
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    layer_pipeline: wgpu::RenderPipeline,
+    layer_layout: wgpu::BindGroupLayout,
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_layout: wgpu::BindGroupLayout,
+    effect_pipeline: wgpu::RenderPipeline,
+    effect_layout: wgpu::BindGroupLayout,
+    output_pipeline: wgpu::RenderPipeline,
+    output_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    blank: wgpu::TextureView,
+    targets: Option<Targets>,
+    text: TextRenderer,
+    text_cache: HashMap<u64, MediaTexture>,
+    /// The measured text box for each cached raster.
+    text_boxes: HashMap<u64, Vec2>,
+    images: HashMap<PathBuf, Option<MediaTexture>>,
+    videos: HashMap<PathBuf, VideoTexture>,
+}
+
+fn srgb_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+}
+
+/// A color as premultiplied linear RGBA for the shaders.
+fn linear(color: Rgba) -> [f32; 4] {
+    let a = color.a.clamp(0.0, 1.0);
+    [srgb_to_linear(color.r) * a, srgb_to_linear(color.g) * a, srgb_to_linear(color.b) * a, a]
+}
+
+/// The largest factor by which a transform enlarges things, for choosing raster resolution.
+fn max_scale(transform: Affine) -> f32 {
+    (transform.a.hypot(transform.b)).max(transform.c.hypot(transform.d))
+}
+
+fn text_key(text: &str, style: &TextStyle, raster_scale: f32) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    style.font_family.hash(&mut hasher);
+    style.font_weight.hash(&mut hasher);
+    for value in [style.font_size, style.line_height, style.tracking, (raster_scale * 16.0).round()] {
+        value.to_bits().hash(&mut hasher);
+    }
+    format!("{:?}{:?}{:?}", style.fill, style.stroke, style.align).hash(&mut hasher);
+    hasher.finish()
+}
+
+impl Renderer {
+    /// Creates a renderer on the default GPU. No window or display is needed.
+    pub fn new() -> Result<Self, RenderError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        }))
+        .map_err(|error| RenderError(format!("no GPU available: {error}")))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("studio-render"),
+            ..Default::default()
+        }))
+        .map_err(|error| RenderError(format!("could not open the GPU: {error}")))?;
+
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let uniform_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        };
+        let sampler_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let layout = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries })
+        };
+        let layer_layout = layout("layer", &[uniform_entry, texture_entry(1), sampler_entry(2)]);
+        let composite_layout = layout("composite", &[uniform_entry, texture_entry(1), texture_entry(2), texture_entry(3)]);
+        let effect_layout = layout("effect", &[uniform_entry, texture_entry(1), texture_entry(2), sampler_entry(3)]);
+        let output_layout = layout("output", &[texture_entry(0)]);
+
+        let pipeline = |label: &str, source: &str, layout: &wgpu::BindGroupLayout, format, samples, blend| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[Some(layout)],
+                immediate_size: 0,
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        // Layers draw premultiplied color over a transparent target.
+        let premultiplied = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let layer_pipeline = pipeline("layer", include_str!("shaders/layer.wgsl"), &layer_layout, WORK_FORMAT, MSAA_SAMPLES, premultiplied);
+        let composite_pipeline = pipeline("composite", include_str!("shaders/composite.wgsl"), &composite_layout, WORK_FORMAT, 1, None);
+        let effect_pipeline = pipeline("effect", include_str!("shaders/effect.wgsl"), &effect_layout, WORK_FORMAT, 1, None);
+        let output_pipeline = pipeline("output", include_str!("shaders/output.wgsl"), &output_layout, OUTPUT_FORMAT, 1, None);
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let blank = device
+            .create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("blank"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: MEDIA_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[0, 0, 0, 0],
+            )
+            .create_view(&Default::default());
+
+        Ok(Self {
+            device,
+            queue,
+            layer_pipeline,
+            layer_layout,
+            composite_pipeline,
+            composite_layout,
+            effect_pipeline,
+            effect_layout,
+            output_pipeline,
+            output_layout,
+            sampler,
+            blank,
+            targets: None,
+            text: TextRenderer::new(),
+            text_cache: HashMap::new(),
+            text_boxes: HashMap::new(),
+            images: HashMap::new(),
+            videos: HashMap::new(),
+        })
+    }
+
+    /// The text box size for a style, in source pixels (no GPU work).
+    pub fn measure_text(&mut self, text: &str, style: &TextStyle) -> Vec2 {
+        self.text.measure(text, style)
+    }
+
+    fn ensure_targets(&mut self, width: u32, height: u32) {
+        if self.targets.as_ref().is_some_and(|t| t.width == width && t.height == height) {
+            return;
+        }
+        let make = |label: &str, format, samples, usage| {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            Target { texture, view }
+        };
+        let work_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let work = (0..slot::COUNT).map(|_| make("work", WORK_FORMAT, 1, work_usage)).collect();
+        let msaa = make("msaa", WORK_FORMAT, MSAA_SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let output = make("output", OUTPUT_FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        // Buffer rows must be a multiple of 256 bytes.
+        let padded_row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: u64::from(padded_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        self.targets = Some(Targets { width, height, work, msaa, output, readback, padded_row });
+    }
+
+    fn uniform(&self, bytes: &[u8]) -> wgpu::Buffer {
+        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("uniform"),
+            contents: bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
+    }
+
+    fn clear(&self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, color: [f32; 4]) {
+        let [r, g, b, a] = color.map(f64::from);
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }), store: wgpu::StoreOp::Store },
+            })],
+            ..Default::default()
+        });
+    }
+
+    /// Runs a fullscreen pass with `pipeline` and `bind_group` into `target`.
+    fn fullscreen(&self, encoder: &mut wgpu::CommandEncoder, pipeline: &wgpu::RenderPipeline, bind_group: &wgpu::BindGroup, target: &wgpu::TextureView) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("fullscreen"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Draws a layer source into work slot `target`. `rect` is the drawn rectangle in the layer's
+    /// source pixels (origin, size); `world` maps source pixels to composition pixels.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_source(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        target: usize,
+        world: Affine,
+        scale: f32,
+        source: &Source,
+        rect: (Vec2, Vec2),
+    ) {
+        let (width, height) = (targets.width as f32, targets.height as f32);
+        let (mode, color, view, cell) = match source {
+            Source::Solid(color) => (0.0, *color, &self.blank, 0.0),
+            Source::Texture(view) => (1.0, [0.0; 4], *view, 0.0),
+            Source::Placeholder(color) => (2.0, *color, &self.blank, 40.0),
+        };
+        let (origin, size) = rect;
+        // Source pixels → composition pixels → output pixels → clip space (y up).
+        let to_clip = Affine { a: 2.0 * scale / width, b: 0.0, c: 0.0, d: -2.0 * scale / height, tx: -1.0, ty: 1.0 };
+        let matrix = Affine::translate(origin).then(world).then(to_clip);
+        let uniform: [f32; 16] = [
+            matrix.a, matrix.b, matrix.c, matrix.d, //
+            matrix.tx, matrix.ty, size.x, size.y, //
+            color[0], color[1], color[2], color[3], //
+            mode, cell, 0.0, 0.0,
+        ];
+        let buffer = self.uniform(bytemuck::cast_slice(&uniform));
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("layer"),
+            layout: &self.layer_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("layer"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &targets.msaa.view,
+                depth_slice: None,
+                resolve_target: Some(&targets.work[target].view),
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.layer_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
+impl Renderer {
+    /// One effect shader pass from work slot `from` (plus `aux`) into slot `to`.
+    #[allow(clippy::too_many_arguments)]
+    fn effect_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, id: u32, params: [f32; 8], time: f32, from: usize, aux: usize, to: usize) {
+        let mut uniform = [0u8; 64];
+        uniform[..4].copy_from_slice(&id.to_le_bytes());
+        let floats: [f32; 12] = [
+            params[0], params[1], params[2], params[3], //
+            params[4], params[5], params[6], params[7], //
+            targets.width as f32, targets.height as f32, time, 0.0,
+        ];
+        uniform[16..].copy_from_slice(bytemuck::cast_slice(&floats));
+        let buffer = self.uniform(&uniform);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("effect"),
+            layout: &self.effect_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&targets.work[from].view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&targets.work[aux].view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        self.fullscreen(encoder, &self.effect_pipeline, &bind_group, &targets.work[to].view);
+    }
+
+    /// A two-pass Gaussian blur from `from` into `to`, using `spare` in between.
+    fn blur(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, sigma: f32, from: usize, spare: usize, to: usize) {
+        self.effect_pass(encoder, targets, 1, [sigma, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, from, from, spare);
+        self.effect_pass(encoder, targets, 1, [sigma, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, spare, spare, to);
+    }
+
+    /// Runs `layer`'s enabled effects on the image in slot `image`, ping-ponging with `other`
+    /// and using the aux slots as scratch. Returns the slot that holds the result.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_effects(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, layer: &Layer, frame: f64, time: f32, scale: f32, mut image: usize, mut other: usize) -> usize {
+        if !layer.switches.effects_enabled {
+            return image;
+        }
+        for effect in layer.effects.iter().filter(|effect| effect.enabled) {
+            let Some(passes) = effects::passes(effect, frame, scale) else { continue };
+            for pass in passes {
+                match pass {
+                    Pass::Shader { id, params } => {
+                        self.effect_pass(encoder, targets, id, params, time, image, image, other);
+                        std::mem::swap(&mut image, &mut other);
+                    }
+                    Pass::Blur { sigma } => {
+                        self.blur(encoder, targets, sigma, image, slot::AUX_A, other);
+                        std::mem::swap(&mut image, &mut other);
+                    }
+                    Pass::Glow { threshold, sigma, intensity } => {
+                        self.effect_pass(encoder, targets, 30, [threshold, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, image, slot::AUX_A);
+                        self.blur(encoder, targets, sigma, slot::AUX_A, other, slot::AUX_B);
+                        self.effect_pass(encoder, targets, 31, [intensity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, slot::AUX_B, other);
+                        std::mem::swap(&mut image, &mut other);
+                    }
+                    Pass::Shadow { offset, opacity, sigma } => {
+                        self.effect_pass(encoder, targets, 32, [offset[0], offset[1], opacity, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, image, slot::AUX_A);
+                        self.blur(encoder, targets, sigma, slot::AUX_A, other, slot::AUX_B);
+                        self.effect_pass(encoder, targets, 33, [0.0; 8], time, image, slot::AUX_B, other);
+                        std::mem::swap(&mut image, &mut other);
+                    }
+                }
+            }
+        }
+        image
+    }
+
+    /// Composites `layer_slot` over the backdrop in `from`, writing `to`.
+    #[allow(clippy::too_many_arguments)]
+    fn composite(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, from: usize, layer_slot: usize, matte: Option<usize>, modes: [u32; 3], opacity: f32, to: usize) {
+        let mut uniform = [0u8; 32];
+        for (index, mode) in modes.iter().enumerate() {
+            uniform[index * 4..index * 4 + 4].copy_from_slice(&mode.to_le_bytes());
+        }
+        uniform[16..20].copy_from_slice(&opacity.to_le_bytes());
+        let buffer = self.uniform(&uniform);
+        let matte_view = matte.map_or(&self.blank, |slot| &targets.work[slot].view);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite"),
+            layout: &self.composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&targets.work[from].view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&targets.work[layer_slot].view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(matte_view) },
+            ],
+        });
+        self.fullscreen(encoder, &self.composite_pipeline, &bind_group, &targets.work[to].view);
+    }
+
+    /// Makes sure the text raster for a layer exists at `raster_scale`, returning its cache key,
+    /// its box in source pixels and the raster's padding in source pixels.
+    fn prepare_text(&mut self, text: &str, style: &TextStyle, raster_scale: f32) -> (u64, Vec2, Vec2) {
+        let key = text_key(text, style, raster_scale);
+        if !self.text_cache.contains_key(&key) {
+            if self.text_cache.len() >= TEXT_CACHE_LIMIT {
+                self.text_cache.clear();
+                self.text_boxes.clear();
+            }
+            let image = self.text.rasterize(text, style, raster_scale);
+            let view = self.upload(image.width, image.height, &image.pixels);
+            let drawn = Vec2::new(image.width as f32 / raster_scale, image.height as f32 / raster_scale);
+            self.text_cache.insert(key, MediaTexture { view, size: drawn });
+            let measured = image.size;
+            // Remember the box with the raster, so it is not measured again.
+            self.text_boxes.insert(key, measured);
+        }
+        let drawn = self.text_cache[&key].size;
+        let measured = self.text_boxes[&key];
+        // The raster is padded equally on all sides (for stroke); find that padding.
+        let pad = (drawn - measured) * 0.5;
+        (key, measured, pad)
+    }
+
+    fn upload(&self, width: u32, height: u32, pixels: &[u8]) -> wgpu::TextureView {
+        self.device
+            .create_texture_with_data(
+                &self.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("media"),
+                    size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: MEDIA_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                pixels,
+            )
+            .create_view(&Default::default())
+    }
+
+    /// Uploads a decoded video frame, reusing the clip's texture when the size is unchanged.
+    fn prepare_video(&mut self, path: &std::path::Path, picture: &VideoFrame) {
+        let size = Vec2::new(picture.width as f32, picture.height as f32);
+        let reusable = self.videos.get(path).is_some_and(|video| video.texture.size == size);
+        if reusable && self.videos[path].index == picture.index {
+            return;
+        }
+        if !reusable {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("video"),
+                size: wgpu::Extent3d { width: picture.width, height: picture.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: MEDIA_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            self.videos.insert(path.to_owned(), VideoTexture { texture: MediaTexture { view, size }, raw: texture, index: -1 });
+        }
+        let video = self.videos.get_mut(path).expect("inserted above");
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &video.raw, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &picture.rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(picture.width * 4), rows_per_image: Some(picture.height) },
+            wgpu::Extent3d { width: picture.width, height: picture.height, depth_or_array_layers: 1 },
+        );
+        video.index = picture.index;
+    }
+
+    /// Loads an image file into a texture once. Failed loads are remembered so they are not retried every frame.
+    fn prepare_image(&mut self, path: &PathBuf) -> bool {
+        if !self.images.contains_key(path) {
+            let loaded = image::open(path).ok().map(|image| {
+                let rgba = image.to_rgba8();
+                let (width, height) = rgba.dimensions();
+                MediaTexture { view: self.upload(width, height, rgba.as_raw()), size: Vec2::new(width as f32, height as f32) }
+            });
+            self.images.insert(path.clone(), loaded);
+        }
+        self.images[path].is_some()
+    }
+
+    /// Renders composition `comp` of `project` at `frame` into a `width` × `height` image.
+    /// The composition is scaled to fit the output width. Footage frames come from `video`.
+    pub fn render(
+        &mut self,
+        project: &Project,
+        comp: Id,
+        frame: i64,
+        width: u32,
+        height: u32,
+        video: &dyn VideoSource,
+    ) -> Result<RenderedFrame, RenderError> {
+        let composition = project.composition(comp).ok_or_else(|| RenderError("the composition does not exist".into()))?;
+        let (width, height) = (width.clamp(1, 8192), height.clamp(1, 8192));
+        let scale = width as f32 / composition.width as f32;
+        let at = frame as f64;
+        let time = (frame as f64 / composition.frame_rate.fps()) as f32;
+
+        // Prepare text rasters and images first (this needs `&mut self`), noting text box sizes.
+        let mut text_sizes = Vec::new();
+        let mut used_proxy = false;
+        let mut text_keys: HashMap<Id, (u64, Vec2, Vec2)> = HashMap::new();
+        for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame)) {
+            match &layer.content {
+                LayerContent::Text { text, style } => {
+                    let raster_scale = world_transform(composition, layer.id, at).map_or(scale, |w| max_scale(w) * scale);
+                    let prepared = self.prepare_text(text, style, raster_scale.max(0.05));
+                    text_sizes.push((layer.id, prepared.1));
+                    text_keys.insert(layer.id, prepared);
+                }
+                LayerContent::Image { item } => {
+                    if let Some(path) = project.item(*item).and_then(|item| item.path.clone()) {
+                        self.prepare_image(&path);
+                    }
+                }
+                LayerContent::Footage { item } => {
+                    let source = project.item(*item).and_then(|source| source.path.clone().zip(source.frame_rate));
+                    if let Some((path, rate)) = source {
+                        // Which source frame plays now: time since the source's start (which trimming
+                        // and slipping move), converted to the clip's frame rate.
+                        let seconds = (frame - layer.start_frame) as f64 / composition.frame_rate.fps();
+                        let index = (seconds * rate.fps() + 1e-6).floor() as i64;
+                        if let Some(picture) = video.frame(&path, index) {
+                            used_proxy |= picture.from_proxy;
+                            self.prepare_video(&path, &picture);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.ensure_targets(width, height);
+        let targets = self.targets.as_ref().expect("targets were just created");
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let (mut accum, mut spare) = (slot::ACCUM_A, slot::ACCUM_B);
+        self.clear(&mut encoder, &targets.work[accum].view, linear(composition.background));
+
+        let any_solo = composition.layers.iter().any(|layer| layer.switches.solo);
+        // A layer with a track matte uses the layer above it as the matte; that layer is not drawn itself.
+        let matte_sources: HashSet<Id> = composition
+            .layers
+            .windows(2)
+            .filter(|pair| pair[1].track_matte != studio_core::model::TrackMatte::None)
+            .map(|pair| pair[0].id)
+            .collect();
+
+        for (index, layer) in composition.layers.iter().enumerate().rev() {
+            let shown = layer.switches.visible && layer.is_active_at(frame) && layer.content.has_picture() && (!any_solo || layer.switches.solo);
+            if !shown || matte_sources.contains(&layer.id) {
+                continue;
+            }
+            let Some(world) = world_transform(composition, layer.id, at) else { continue };
+            let opacity = layer.transform.as_ref().map_or(1.0, |t| (t.opacity.value_at(at) / 100.0).clamp(0.0, 1.0));
+
+            if matches!(layer.content, LayerContent::Adjustment) {
+                // Effects run on a copy of everything below, then blend back in where the layer covers.
+                self.effect_pass(&mut encoder, targets, 0, [0.0; 8], time, accum, accum, slot::LAYER_A);
+                let adjusted = self.apply_effects(&mut encoder, targets, layer, at, time, scale, slot::LAYER_A, slot::LAYER_B);
+                self.draw_source(&mut encoder, targets, slot::MATTE_A, world, scale, &Source::Solid([1.0; 4]), (Vec2::default(), layer.size));
+                self.composite(&mut encoder, targets, accum, adjusted, Some(slot::MATTE_A), [0, 0, 1], opacity, spare);
+                std::mem::swap(&mut accum, &mut spare);
+                continue;
+            }
+
+            self.draw_layer(&mut encoder, targets, project, layer, world, scale, &text_keys, slot::LAYER_A);
+            let image = self.apply_effects(&mut encoder, targets, layer, at, time, scale, slot::LAYER_A, slot::LAYER_B);
+
+            let matte = match (layer.track_matte, index.checked_sub(1).map(|above| &composition.layers[above])) {
+                (studio_core::model::TrackMatte::None, _) | (_, None) => None,
+                (_, Some(matte_layer)) => world_transform(composition, matte_layer.id, at).map(|matte_world| {
+                    self.draw_layer(&mut encoder, targets, project, matte_layer, matte_world, scale, &text_keys, slot::MATTE_A);
+                    self.apply_effects(&mut encoder, targets, matte_layer, at, time, scale, slot::MATTE_A, slot::MATTE_B)
+                }),
+            };
+            let blend = layer.blend_mode as u32;
+            let matte_mode = if matte.is_some() { layer.track_matte as u32 } else { 0 };
+            self.composite(&mut encoder, targets, accum, image, matte, [blend, matte_mode, 0], opacity, spare);
+            std::mem::swap(&mut accum, &mut spare);
+        }
+
+        // Convert to sRGB and copy to the readback buffer.
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("output"),
+            layout: &self.output_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&targets.work[accum].view) }],
+        });
+        self.fullscreen(&mut encoder, &self.output_pipeline, &bind_group, &targets.output.view);
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &targets.output.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &targets.readback,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(targets.padded_row), rows_per_image: Some(height) },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+
+        let slice = targets.readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .map_err(|error| RenderError(format!("the GPU did not finish: {error}")))?;
+        let mut bgra = Vec::with_capacity((width * height * 4) as usize);
+        {
+            let mapped = slice.get_mapped_range().map_err(|error| RenderError(format!("could not read the frame back: {error}")))?;
+            for row in mapped.chunks(targets.padded_row as usize).take(height as usize) {
+                bgra.extend_from_slice(&row[..(width * 4) as usize]);
+            }
+        }
+        targets.readback.unmap();
+        Ok(RenderedFrame { width, height, bgra, text_sizes, used_proxy })
+    }
+
+    /// Draws one layer's source (solid, text, image or a placeholder) into work slot `target`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_layer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        project: &Project,
+        layer: &Layer,
+        world: Affine,
+        scale: f32,
+        text_keys: &HashMap<Id, (u64, Vec2, Vec2)>,
+        target: usize,
+    ) {
+        let placeholder = || Source::Placeholder(linear(layer.label.color()));
+        let full = (Vec2::default(), layer.size);
+        match &layer.content {
+            LayerContent::Solid { color } => self.draw_source(encoder, targets, target, world, scale, &Source::Solid(linear(*color)), full),
+            LayerContent::Text { .. } => {
+                if let Some((key, measured, pad)) = text_keys.get(&layer.id) {
+                    let texture = &self.text_cache[key];
+                    // Fit the text box to the layer's box, so the anchor point stays where the user put it.
+                    let fit = Vec2::new(layer.size.x / measured.x.max(1.0), layer.size.y / measured.y.max(1.0));
+                    let world = Affine::scale(fit).then(world);
+                    let rect = (Vec2::new(-pad.x, -pad.y), texture.size);
+                    self.draw_source(encoder, targets, target, world, scale, &Source::Texture(&texture.view), rect);
+                }
+            }
+            LayerContent::Image { item } => {
+                let loaded = project.item(*item).and_then(|item| item.path.as_ref()).and_then(|path| self.images.get(path)).and_then(Option::as_ref);
+                match loaded {
+                    Some(image) => {
+                        // Stretch the image to the layer's size (they match unless the file changed).
+                        let fit = Vec2::new(layer.size.x / image.size.x.max(1.0), layer.size.y / image.size.y.max(1.0));
+                        self.draw_source(encoder, targets, target, Affine::scale(fit).then(world), scale, &Source::Texture(&image.view), (Vec2::default(), image.size));
+                    }
+                    None => self.draw_source(encoder, targets, target, world, scale, &placeholder(), full),
+                }
+            }
+            LayerContent::Footage { item } => {
+                let picture = project.item(*item).and_then(|item| item.path.as_ref()).and_then(|path| self.videos.get(path));
+                match picture {
+                    Some(video) => {
+                        // Stretch the decoded picture (which may be scaled down for preview) over the layer.
+                        let fit = Vec2::new(layer.size.x / video.texture.size.x.max(1.0), layer.size.y / video.texture.size.y.max(1.0));
+                        let world = Affine::scale(fit).then(world);
+                        self.draw_source(encoder, targets, target, world, scale, &Source::Texture(&video.texture.view), (Vec2::default(), video.texture.size));
+                    }
+                    // Still decoding (or the file is missing): show the placeholder.
+                    None => self.draw_source(encoder, targets, target, world, scale, &placeholder(), full),
+                }
+            }
+            // Nested compositions are not rendered yet.
+            LayerContent::Composition { .. } => self.draw_source(encoder, targets, target, world, scale, &placeholder(), full),
+            LayerContent::Adjustment | LayerContent::Audio { .. } => {}
+        }
+    }
+}
