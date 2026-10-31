@@ -44,6 +44,9 @@ struct Playing {
     player: AudioPlayer,
     session: Session,
     clips: Vec<AudioClip>,
+    /// Where the sound was started from, for tests to check against the picture.
+    #[cfg_attr(not(test), allow(dead_code))]
+    start_seconds: f64,
 }
 
 pub struct Sound {
@@ -95,15 +98,17 @@ impl Sound {
             }
             _ => {
                 let fps = session.frame_rate.fps();
+                // From the session's start frame, which a restart above may have moved.
+                let start_seconds = session.start_frame as f64 / fps;
                 let timeline = AudioTimeline {
                     clips: clips.clone(),
-                    start_seconds: start_frame as f64 / fps,
+                    start_seconds,
                     range_seconds: (session.work_area.start / fps, session.work_area.end / fps),
                     looping: session.looping,
                 };
                 // Replacing the old player stops its sound first.
                 self.playing = None;
-                self.playing = Some(Playing { player: output.play(timeline), session, clips });
+                self.playing = Some(Playing { player: output.play(timeline), session, clips, start_seconds });
             }
         }
         self.playing.as_ref().map(|playing| playing.player.heard())
@@ -143,7 +148,9 @@ mod tests {
         let restarted = state.playback_started().unwrap();
         assert_ne!(Some(restarted), first);
         assert_eq!(restarted.1, 30);
-        assert_eq!(sound.playing.as_ref().unwrap().session.work_area, FrameRange::new(24.0, 120.0));
+        let playing = sound.playing.as_ref().unwrap();
+        assert_eq!(playing.session.work_area, FrameRange::new(24.0, 120.0));
+        assert_eq!(playing.start_seconds, 30.0 / 24.0, "the sound restarts from the playhead too, not from the old start");
     }
 
     #[test]

@@ -87,31 +87,33 @@ impl EditorState {
         self.keyframe_drag = Some(KeyframeDrag { keys: self.selected_keyframes.iter().map(|key| (*key, key.frame)).collect() });
     }
 
-    /// Moves the dragged keyframes `delta` frames from where they started. Keyframes that
-    /// would land on another keyframe, or outside the composition, stay where they are.
+    /// Moves the dragged keyframes `delta` frames from where they started. They move as a
+    /// group: at the composition's start or end the whole group stops, keeping its spacing.
+    /// A keyframe that would land on another (unselected) keyframe stays where it is.
     pub fn drag_keyframes(&mut self, delta: i64) {
         let Some(origins) = self.keyframe_drag.as_ref().map(|drag| drag.keys.iter().map(|(origin, _)| origin.frame).collect::<Vec<_>>()) else { return };
+        let (Some(&first), Some(&last)) = (origins.iter().min(), origins.iter().max()) else { return };
         let exclude = super::snap::SnapExclusions { selected_keyframes: true, ..Default::default() };
-        let delta = self.snapped_delta(&origins, delta, exclude);
+        let delta = self.snapped_delta(&origins, delta, exclude).clamp(-first, self.duration() - 1 - last);
         let Some(mut drag) = self.keyframe_drag.take() else { return };
-        let last_frame = self.duration() - 1;
-        // Move in the drag direction's order so neighbors moving together never collide.
-        let mut order: Vec<usize> = (0..drag.keys.len()).collect();
-        let moving_right = drag.keys.first().is_some_and(|(origin, current)| current - origin.frame < delta);
-        order.sort_by_key(|&index| drag.keys[index].1);
-        if moving_right {
-            order.reverse();
-        }
-        for index in order {
+        // Each keyframe heads for its own target. Move those going right from the rightmost
+        // first, then those going left from the leftmost first, so keys moving together never
+        // land on one another.
+        let target = |index: usize| drag.keys[index].0.frame + delta;
+        let mut right: Vec<usize> = (0..drag.keys.len()).filter(|&i| target(i) > drag.keys[i].1).collect();
+        let mut left: Vec<usize> = (0..drag.keys.len()).filter(|&i| target(i) < drag.keys[i].1).collect();
+        right.sort_by_key(|&i| std::cmp::Reverse(drag.keys[i].1));
+        left.sort_by_key(|&i| drag.keys[i].1);
+        for index in right.into_iter().chain(left) {
             let (origin, current) = drag.keys[index];
-            let target = (origin.frame + delta).clamp(0, last_frame);
+            let to = origin.frame + delta;
             let moved = self
                 .composition_mut()
                 .layer_mut(origin.layer)
                 .and_then(|layer| layer.animated_mut(origin.path))
-                .is_some_and(|animated| animated.move_keyframe(current, target));
+                .is_some_and(|animated| animated.move_keyframe(current, to));
             if moved {
-                drag.keys[index].1 = target;
+                drag.keys[index].1 = to;
             }
         }
         self.selected_keyframes = drag.keys.iter().map(|(origin, current)| KeyframeRef { frame: *current, ..*origin }).collect();
@@ -225,6 +227,10 @@ mod tests {
         PropertyPath::Transform(TransformProperty::Opacity)
     }
 
+    fn rotation() -> PropertyPath {
+        PropertyPath::Transform(TransformProperty::Rotation)
+    }
+
     fn title_keys(state: &EditorState) -> Vec<i64> {
         let title = state.composition().layers[0].id;
         state.composition().layer(title).unwrap().property(opacity(), 0).unwrap().keyframes
@@ -269,6 +275,38 @@ mod tests {
         state.begin_keyframe_drag();
         state.drag_keyframes(12); // would land on 36
         assert_eq!(title_keys(&state), vec![24, 36, 156, 168]);
+    }
+
+    #[test]
+    fn a_keyframe_group_stops_together_at_the_composition_edges() {
+        let mut state = EditorState::new();
+        let title = state.composition().layers[0].id;
+        for frame in [24, 36] {
+            state.select_keyframe(KeyframeRef { layer: title, path: opacity(), frame }, true);
+        }
+        state.begin_keyframe_drag();
+        for step in 1..=40 {
+            state.drag_keyframes(-step);
+        }
+        assert_eq!(title_keys(&state), vec![0, 12, 156, 168], "the spacing survives hitting frame 0");
+    }
+
+    #[test]
+    fn a_stuck_keyframe_does_not_scramble_the_rest_of_the_group() {
+        let mut state = EditorState::new();
+        let title = state.composition().layers[0].id;
+        let last = state.composition().duration_frames - 1;
+        // A keyframe on the last frame, plus the pair at 24 and 36.
+        state.toggle_stopwatch(title, rotation());
+        state.composition_mut().layer_mut(title).unwrap().animated_mut(rotation()).unwrap().move_keyframe(0, last);
+        let keys = [(rotation(), last), (opacity(), 24), (opacity(), 36)];
+        for (path, frame) in keys {
+            state.select_keyframe(KeyframeRef { layer: title, path, frame }, true);
+        }
+        state.begin_keyframe_drag();
+        state.drag_keyframes(24); // held back: the last-frame key can't go further
+        state.drag_keyframes(-12);
+        assert_eq!(title_keys(&state), vec![12, 24, 156, 168], "both opacity keys moved together");
     }
 
     #[test]

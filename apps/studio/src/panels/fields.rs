@@ -85,10 +85,20 @@ pub fn format_value(value: f32, format: FieldFormat) -> String {
     format!("{:.*}{}", format.decimals, value, format.unit)
 }
 
-/// Reads a typed value, ignoring units and spaces ("120 px", "45°", "50%"). Returns `None` for non-numbers.
+/// Reads a typed value, ignoring units and spaces ("120 px", "45°", "50%"). Rotations may be
+/// typed the way they are shown, as revolutions and degrees ("1x+30°" is 390°). Returns `None`
+/// for non-numbers.
 pub fn parse_value(text: &str) -> Option<f32> {
-    let cleaned: String = text.chars().filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
-    cleaned.parse::<f32>().ok().filter(|value| value.is_finite())
+    let number = |part: &str| -> Option<f32> {
+        let cleaned: String = part.chars().filter(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+')).collect();
+        cleaned.parse::<f32>().ok().filter(|value| value.is_finite())
+    };
+    if let Some((revolutions, degrees)) = text.split_once(['x', 'X'])
+        && let (Some(revolutions), Some(degrees)) = (number(revolutions), number(degrees))
+    {
+        return Some(revolutions * 360.0 + degrees).filter(|value| value.is_finite());
+    }
+    number(text)
 }
 
 impl Workspace {
@@ -228,6 +238,12 @@ mod tests {
         assert_eq!(parse_value("-45°"), Some(-45.0));
         assert_eq!(parse_value("50%"), Some(50.0));
         assert_eq!(parse_value("abc"), None);
+        // Rotation, typed as it is shown.
+        assert_eq!(parse_value("1x+30.0°"), Some(390.0));
+        assert_eq!(parse_value("-1x-30°"), Some(-390.0));
+        assert_eq!(parse_value("0x+45"), Some(45.0));
+        let rotation = FieldFormat { step: 0.5, decimals: 1, unit: "°", rotation: true };
+        assert_eq!(parse_value(&format_value(-390.0, rotation)), Some(-390.0), "what is shown reads back");
         assert_eq!(parse_value(""), None);
     }
 }

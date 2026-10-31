@@ -71,9 +71,18 @@ pub fn add_layer_from_item(
     let composition = project.composition_mut(comp_id)?;
     let start = in_frame.clamp(0, composition.duration_frames - 1);
     let layer = layer_from_item(&item, composition, start, id)?;
-    let index = stack_index.min(composition.layers.len());
+    let index = keep_matte_pairs(composition, stack_index.min(composition.layers.len()));
     composition.layers.insert(index, layer);
     Some(id)
+}
+
+/// Where to insert a layer near `index` without coming between a layer and its track matte
+/// (the layer directly above one that uses a matte): above the whole matte group instead.
+fn keep_matte_pairs(composition: &Composition, mut index: usize) -> usize {
+    while index > 0 && composition.layers.get(index).is_some_and(|below| below.track_matte != crate::model::TrackMatte::None) {
+        index -= 1;
+    }
+    index
 }
 
 /// Adds the catalog effect `name`, with all its parameters at their defaults, to a layer.
@@ -385,19 +394,31 @@ pub fn edit_text(composition: &mut Composition, layer_id: Id, edit: impl FnOnce(
     }
 }
 
+/// Whether `parent` can become `layer`'s parent: it exists, and it is neither the layer itself
+/// nor one of its descendants (which would make a loop). Stops safely even if the existing
+/// parent chain already loops, as a damaged project file could make it.
+pub fn can_parent(composition: &Composition, layer: Id, parent: Id) -> bool {
+    if composition.layer(parent).is_none() {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut ancestor = Some(parent);
+    while let Some(current) = ancestor {
+        if current == layer || !seen.insert(current) {
+            return false;
+        }
+        ancestor = composition.layer(current).and_then(|found| found.parent);
+    }
+    true
+}
+
 /// Sets a layer's parent. A layer cannot be parented to itself or to one of its own descendants.
 ///
 /// As in After Effects, the layer stays where it is on screen: its position, rotation and scale are
 /// re-expressed in the new parent's space, using the parents' transforms at `frame`.
 pub fn set_parent(composition: &mut Composition, layer_id: Id, parent: Option<Id>, frame: i64) -> bool {
-    if let Some(parent_id) = parent {
-        let mut ancestor = Some(parent_id);
-        while let Some(current) = ancestor {
-            if current == layer_id {
-                return false;
-            }
-            ancestor = composition.layer(current).and_then(|layer| layer.parent);
-        }
+    if parent.is_some_and(|parent| !can_parent(composition, layer_id, parent)) {
+        return false;
     }
     let at = frame as f64;
     let Some(layer) = composition.layer(layer_id) else { return false };
@@ -444,6 +465,35 @@ mod tests {
         assert_eq!(comp.layers[0].out_frame, comp.duration_frames);
         let music = comp.layers.last().unwrap();
         assert!(music.transform.is_none() && !music.switches.visible);
+    }
+
+    #[test]
+    fn parenting_refuses_loops_even_in_damaged_projects() {
+        let mut project = sample::sample_project();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let (a, b, c) = (comp.layers[0].id, comp.layers[1].id, comp.layers[2].id);
+        assert!(set_parent(comp, a, Some(b), 0));
+        assert!(!can_parent(comp, b, a), "B can't follow its own child");
+        assert!(!can_parent(comp, a, a));
+        assert!(!can_parent(comp, a, Id(9999)), "a missing layer can't be a parent");
+        // A loop already in the file (A → B → A): asking about C must still finish.
+        comp.layer_mut(b).unwrap().parent = Some(a);
+        assert!(!can_parent(comp, c, a));
+        assert!(!set_parent(comp, c, Some(a), 0));
+    }
+
+    #[test]
+    fn new_layers_never_split_a_layer_from_its_track_matte() {
+        let mut project = sample::sample_project();
+        // B-roll (stack position 3) uses the logo above it as its matte.
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        comp.layers[3].track_matte = crate::model::TrackMatte::Alpha;
+        let (logo, b_roll) = (comp.layers[2].id, comp.layers[3].id);
+        let added = add_layer_from_item(&mut project, ids::MAIN_COMP, ids::GRAY_SOLID, 3, 0).unwrap();
+        let order: Vec<Id> = project.composition(ids::MAIN_COMP).unwrap().layers.iter().map(|l| l.id).collect();
+        let at = |id: Id| order.iter().position(|x| *x == id).unwrap();
+        assert_eq!(at(b_roll), at(logo) + 1, "the matte stays directly above");
+        assert_eq!(at(added) + 1, at(logo), "the new layer goes above the pair");
     }
 
     #[test]

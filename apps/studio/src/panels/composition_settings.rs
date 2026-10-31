@@ -63,18 +63,29 @@ impl Fields {
         let width = text(&self.width).parse::<u32>().map_err(|_| "Width must be a whole number of pixels.")?;
         let height = text(&self.height).parse::<u32>().map_err(|_| "Height must be a whole number of pixels.")?;
         let frame_rate = parse_frame_rate(&text(&self.frame_rate)).ok_or("Enter a frame rate such as 24, 29.97 or 60.")?;
-        let seconds = text(&self.duration_seconds).parse::<f64>().ok().filter(|s| s.is_finite() && *s > 0.0).ok_or("Duration must be a positive number of seconds.")?;
+        let duration_text = text(&self.duration_seconds);
+        let seconds = duration_text.parse::<f64>().ok().filter(|s| s.is_finite() && *s > 0.0).ok_or("Duration must be a positive number of seconds.")?;
+        // The field shows seconds rounded to two decimals, which at high frame rates is not a
+        // whole number of frames. Left as it was shown (at the same rate), it keeps the exact length.
+        let untouched = duration_text == duration_label(base) && frame_rate == base.frame_rate;
+        let duration_frames = if untouched { base.duration_frames } else { frame_rate.seconds_to_frames(seconds).max(1) };
         let settings = CompositionSettings {
             name: text(&self.name),
             width,
             height,
             frame_rate,
-            duration_frames: frame_rate.seconds_to_frames(seconds).max(1),
+            duration_frames,
             background: base.background,
         };
         settings.validate()?;
         Ok(settings)
     }
+}
+
+/// The duration as the dialog shows it: seconds, to two decimals at most.
+fn duration_label(settings: &CompositionSettings) -> String {
+    let seconds = settings.duration_frames as f64 / settings.frame_rate.fps();
+    format!("{seconds:.2}").trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 fn labeled(label: &'static str, input: &Entity<InputState>) -> impl IntoElement {
@@ -94,14 +105,13 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
     } else {
         base
     };
-    let seconds = base.duration_frames as f64 / base.frame_rate.fps();
     let make = |value: String, window: &mut Window, cx: &mut Context<Workspace>| cx.new(|cx| InputState::new(window, cx).default_value(value));
     let fields = Fields {
         name: make(base.name.clone(), window, cx),
         width: make(base.width.to_string(), window, cx),
         height: make(base.height.to_string(), window, cx),
         frame_rate: make(format_frame_rate(base.frame_rate), window, cx),
-        duration_seconds: make(format!("{seconds:.2}").trim_end_matches('0').trim_end_matches('.').to_owned(), window, cx),
+        duration_seconds: make(duration_label(&base), window, cx),
     };
     let target = cx.weak_entity();
 

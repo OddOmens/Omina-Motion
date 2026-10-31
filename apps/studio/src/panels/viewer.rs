@@ -37,6 +37,8 @@ pub struct ViewerRender {
     last_error: Option<String>,
     /// Whether the frame on screen shows footage from a proxy (it is replaced as full quality arrives).
     showing_proxy: bool,
+    /// How long the last viewer frame took to render, shown under the timeline.
+    pub last_render_ms: Option<f64>,
 }
 
 /// Footage is decoded at most this wide for the viewer.
@@ -52,6 +54,7 @@ impl ViewerRender {
             image: None,
             last_error: None,
             showing_proxy: false,
+            last_render_ms: None,
         }
     }
 }
@@ -62,7 +65,10 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
     let state = &workspace.state;
     // While playing, decoders work ahead of the playhead.
     workspace.render.media.set_playing(state.is_playing());
-    match renderer.render(&state.project, state.active_comp, state.current_frame, width, height, &workspace.render.media) {
+    let started = std::time::Instant::now();
+    let rendered = renderer.render(&state.project, state.active_comp, state.current_frame, width, height, &workspace.render.media);
+    workspace.render.last_render_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+    match rendered {
         Ok(frame) => {
             workspace.render.last_error = None;
             workspace.render.showing_proxy = frame.used_proxy;

@@ -58,8 +58,7 @@ pub fn panel(
                 .child(SharedString::from(title.to_string()))
                 .test_support()
         }))
-        .child(div().flex_1())
-        .child(div().pr_1().child(Icon::new(IconName::Menu).size(px(14.0)).text_color(hsla(color::MUTED))));
+        .child(div().flex_1());
 
     div()
         .size_full()

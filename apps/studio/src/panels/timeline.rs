@@ -16,6 +16,7 @@ use gpui_kit::{
     MouseButton, MouseDownEvent, ParentElement, TestSupportExt as _, ScrollEvent, StatefulInteractiveElement, Styled,
     Window, div, prelude::FluentBuilder as _, px, relative, rgba,
 };
+use studio_core::edit;
 use studio_core::model::{BlendMode, Id, Layer, TrackMatte};
 use studio_core::time::{FrameRange, format_timecode, ruler_tick_step};
 
@@ -100,7 +101,8 @@ pub struct TimelineUi {
 impl Default for TimelineUi {
     fn default() -> Self {
         Self {
-            outline_width: 640.0,
+            // Wide enough to show every column, Parent & Link included.
+            outline_width: columns::FULL,
             graph: MeasuredBounds::default(),
             rows: MeasuredBounds::default(),
             drop_preview: None,
@@ -414,8 +416,10 @@ fn layer_outline(layer: &Layer, index: usize, expanded: bool, workspace: &Worksp
             (mode.label().to_owned(), mode == layer.blend_mode, action)
         })
         .collect();
+    // A matte is the layer above, so the top layer has none to use.
     let mattes = TrackMatte::ALL
         .iter()
+        .filter(|&&matte| index > 1 || matte == TrackMatte::None || matte == layer.track_matte)
         .map(|&matte| {
             let action: Box<dyn Fn(&mut Workspace)> = Box::new(move |this| this.state.set_track_matte(id, matte));
             (matte.label().to_owned(), matte == layer.track_matte, action)
@@ -428,7 +432,9 @@ fn layer_outline(layer: &Layer, index: usize, expanded: bool, workspace: &Worksp
         .map_or("None".to_owned(), |position| format!("{}. {}", position + 1, layers[position].name));
     let mut parents: Vec<MenuOption> =
         vec![("None".into(), layer.parent.is_none(), Box::new(move |this: &mut Workspace| this.state.set_parent(id, None)))];
-    for (position, candidate) in layers.iter().enumerate().filter(|(_, candidate)| candidate.id != id) {
+    // Only layers that can be the parent: not this layer, and none of its children (a loop).
+    let composition = workspace.state.composition();
+    for (position, candidate) in layers.iter().enumerate().filter(|(_, candidate)| edit::can_parent(composition, id, candidate.id)) {
         let parent = candidate.id;
         parents.push((
             format!("{}. {}", position + 1, candidate.name),
@@ -1075,7 +1081,11 @@ pub fn render(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Work
         .items_center()
         .w_full()
         .gap_1()
-        .child(div().px_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Frame Render Time: 0ms"))
+        // Measured around the viewer's last render.
+        .child(div().px_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(match workspace.render.last_render_ms {
+            Some(ms) => format!("Frame Render Time: {ms:.1} ms"),
+            None => "Frame Render Time: –".to_owned(),
+        }))
         .child(div().flex_1())
         .child(icon_button("zoom-out", IconName::Mountain, "Zoom Out (Alt + Scroll)", false, cx.listener(|this, _, _, cx| {
             zoom_around_playhead(this, 1.5);

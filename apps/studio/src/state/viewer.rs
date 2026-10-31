@@ -51,12 +51,13 @@ impl EditorState {
         }
     }
 
-    /// Starts moving the selected layers.
+    /// Starts moving the selected layers (locked ones stay put).
     pub fn begin_move(&mut self) {
         let frame = self.current_frame as f64;
         let starts = self
             .selected_layers
             .iter()
+            .filter(|&&id| self.composition().layer(id).is_some_and(|layer| !layer.switches.locked))
             .filter_map(|&id| {
                 let position = self.pair(id, POSITION)?;
                 Some((id, position, parent_space(self.composition(), id, frame)))
@@ -74,6 +75,9 @@ impl EditorState {
         else {
             return;
         };
+        if target.switches.locked {
+            return;
+        }
         let Some(anchor) = target.transform.as_ref().map(|t| t.anchor_point.value_at(frame as f64)) else { return };
         let size = target.size;
         let corner = match handle {

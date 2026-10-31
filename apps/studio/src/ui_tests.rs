@@ -240,22 +240,30 @@ fn the_type_tool_places_text_and_typing_sets_it(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn typing_a_space_in_a_field_does_not_toggle_playback(cx: &mut TestAppContext) {
+fn typing_in_a_field_never_triggers_editor_shortcuts(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.select_layer(TITLE, false)));
     render(visual);
     visual.update(|window, cx| window.click(ElementId::Name("source-text".into()), cx));
     render(visual);
+    // Real key presses, not text input: these keys are also editor shortcuts (S snapping,
+    // V selection tool, Space play, Alt+[ trim), which must not fire while typing.
+    let (_, in_before, _) = layer_timing(&workspace, visual, TITLE);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.set_current_frame(60)));
     visual.update(|window, cx| {
         window.press("cmd-a", cx);
-        window.input("A B", cx);
+        for key in ["s", "space", "v", "alt-["] {
+            window.press(key, cx);
+        }
         window.press("enter", cx);
     });
     render(visual);
     visual.update(|_, cx| {
         let ws = workspace.read(cx);
         assert!(!ws.state.is_playing(), "space typed into a field stays in the field");
-        assert_eq!(ws.state.text_of(TITLE).unwrap().0, "A B");
+        assert!(ws.state.snapping, "S typed into a field does not toggle snapping");
+        assert_eq!(ws.state.composition().layer(TITLE).unwrap().in_frame, in_before, "Alt+[ typed into a field does not trim");
+        assert!(ws.state.text_of(TITLE).unwrap().0.starts_with("s v"), "the keys were typed: {:?}", ws.state.text_of(TITLE).unwrap().0);
     });
     // Outside a field, Space plays.
     visual.update(|window, cx| window.press("space", cx));
@@ -984,4 +992,32 @@ fn s_turns_snapping_off_and_on(cx: &mut TestAppContext) {
     assert!((moved - (title_in + 18)).abs() <= 1, "without snapping it stays where dragged ({moved})");
     visual.update(|window, cx| window.press("s", cx));
     visual.update(|_, cx| assert!(workspace.read(cx).state.snapping));
+}
+
+#[gpui_kit::test]
+fn ok_on_unchanged_composition_settings_keeps_the_exact_length(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // 123 frames at 120 fps is 1.025 s, shown as "1.02" (or "1.03"): not a whole number of frames.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let settings = studio_core::edit::CompositionSettings {
+            frame_rate: studio_core::time::FrameRate::new(120, 1),
+            duration_frames: 123,
+            ..ws.state.composition_settings()
+        };
+        ws.state.update_composition(&settings).unwrap();
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.press("cmd-k", cx));
+    render(visual);
+    click_label(visual, "OK");
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().duration_frames, 123));
+}
+
+#[gpui_kit::test]
+fn the_parent_column_is_visible_at_the_default_layout(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let outline = visual.update(|_, cx| workspace.read(cx).ui.timeline.outline_width);
+    assert!(outline >= 762.0, "every outline column fits, Parent & Link included ({outline} px)");
 }

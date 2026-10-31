@@ -51,23 +51,26 @@ actions!(studio, [
     Quit
 ]);
 
-/// Key context the editor's shortcuts are bound in. Text inputs have their own context, which
-/// takes precedence, so typing a space or pressing Backspace in a field never reaches these.
+/// Key context the editor's shortcuts are bound in.
 const KEY_CONTEXT: &str = "Studio";
+/// Where shortcuts that are plain keys (Space, letters, Delete, Alt+key) apply: anywhere in the
+/// editor except while a text field has focus. On macOS a key binding wins over typing, so
+/// without this, typing "s" or a space into a field would toggle snapping or start playback.
+const NOT_TYPING: &str = "Studio && !Input";
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("space", TogglePlayback, Some(KEY_CONTEXT)),
-        KeyBinding::new("pagedown", NextFrame, Some(KEY_CONTEXT)),
-        KeyBinding::new("pageup", PreviousFrame, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-pagedown", NextTenFrames, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-pageup", PreviousTenFrames, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", FirstFrame, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", LastFrame, Some(KEY_CONTEXT)),
-        KeyBinding::new("delete", Delete, Some(KEY_CONTEXT)),
-        KeyBinding::new("backspace", Delete, Some(KEY_CONTEXT)),
-        KeyBinding::new("f9", EasyEase, Some(KEY_CONTEXT)),
-        KeyBinding::new("v", SelectionTool, Some(KEY_CONTEXT)),
+        KeyBinding::new("space", TogglePlayback, Some(NOT_TYPING)),
+        KeyBinding::new("pagedown", NextFrame, Some(NOT_TYPING)),
+        KeyBinding::new("pageup", PreviousFrame, Some(NOT_TYPING)),
+        KeyBinding::new("shift-pagedown", NextTenFrames, Some(NOT_TYPING)),
+        KeyBinding::new("shift-pageup", PreviousTenFrames, Some(NOT_TYPING)),
+        KeyBinding::new("home", FirstFrame, Some(NOT_TYPING)),
+        KeyBinding::new("end", LastFrame, Some(NOT_TYPING)),
+        KeyBinding::new("delete", Delete, Some(NOT_TYPING)),
+        KeyBinding::new("backspace", Delete, Some(NOT_TYPING)),
+        KeyBinding::new("f9", EasyEase, Some(NOT_TYPING)),
+        KeyBinding::new("v", SelectionTool, Some(NOT_TYPING)),
         KeyBinding::new("cmd-t", TypeTool, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-k", CompositionSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-n", NewComposition, Some(KEY_CONTEXT)),
@@ -80,15 +83,15 @@ pub fn bind_keys(cx: &mut App) {
         // ⌘M, as After Effects' Add to Render Queue.
         KeyBinding::new("cmd-m", Export, Some(KEY_CONTEXT)),
         // As in After Effects: trim the selected layers' in or out point to the playhead.
-        KeyBinding::new("alt-[", TrimInToPlayhead, Some(KEY_CONTEXT)),
-        KeyBinding::new("alt-]", TrimOutToPlayhead, Some(KEY_CONTEXT)),
+        KeyBinding::new("alt-[", TrimInToPlayhead, Some(NOT_TYPING)),
+        KeyBinding::new("alt-]", TrimOutToPlayhead, Some(NOT_TYPING)),
         // After Effects' Split Layer.
         KeyBinding::new("cmd-shift-d", SplitLayer, Some(KEY_CONTEXT)),
         // Premiere's Ripple Delete.
-        KeyBinding::new("shift-delete", RippleDelete, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-backspace", RippleDelete, Some(KEY_CONTEXT)),
+        KeyBinding::new("shift-delete", RippleDelete, Some(NOT_TYPING)),
+        KeyBinding::new("shift-backspace", RippleDelete, Some(NOT_TYPING)),
         // Premiere's snapping toggle.
-        KeyBinding::new("s", ToggleSnapping, Some(KEY_CONTEXT)),
+        KeyBinding::new("s", ToggleSnapping, Some(NOT_TYPING)),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
     // The editor window handles Quit itself, to offer saving first. This only runs when no
@@ -290,6 +293,23 @@ impl Workspace {
         cx.spawn(async move |_, cx| {
             while frames_ready.recv().await.is_ok() {
                 cx.update(|cx| cx.notify(viewer));
+            }
+        })
+        .detach();
+        // The proxy builder signals here as a proxy's status changes (queued, progress, ready,
+        // failed): refresh the Project panel, which shows it, and the viewer, which can then
+        // switch to the finished proxy.
+        let (proxy_changed, proxies_changed) = async_channel::bounded::<()>(1);
+        render.proxies.set_on_change(move || {
+            let _ = proxy_changed.try_send(());
+        });
+        let project_panel = panels.project.entity_id();
+        cx.spawn(async move |_, cx| {
+            while proxies_changed.recv().await.is_ok() {
+                cx.update(|cx| {
+                    cx.notify(project_panel);
+                    cx.notify(viewer);
+                });
             }
         })
         .detach();

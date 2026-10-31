@@ -264,7 +264,11 @@ impl EditorState {
     // Selection and rows -----------------------------------------------------
 
     /// Selects a layer. Selecting layers clears any keyframe selection, as in After Effects.
+    /// Locked layers cannot be selected, so nothing can move, scale or delete them.
     pub fn select_layer(&mut self, id: Id, additive: bool) {
+        if self.composition().layer(id).is_some_and(|layer| layer.switches.locked) {
+            return;
+        }
         self.selected_keyframes.clear();
         if !additive {
             self.selected_layers = vec![id];
@@ -346,6 +350,11 @@ impl EditorState {
         if let Some(layer) = self.composition_mut().layer_mut(layer) {
             let slot = switch.slot(&mut layer.switches);
             *slot = !*slot;
+        }
+        // Locking a layer lets go of it and its keyframes, as in After Effects.
+        if switch == Switch::Locked && self.composition().layer(layer).is_some_and(|l| l.switches.locked) {
+            self.selected_layers.retain(|id| *id != layer);
+            self.selected_keyframes.retain(|key| key.layer != layer);
         }
     }
 
@@ -940,6 +949,30 @@ mod tests {
         let longer = CompositionSettings { duration_frames: 480, ..state.composition_settings() };
         state.update_composition(&longer).unwrap();
         assert_eq!(state.view_range.end, 480.0);
+    }
+
+    #[test]
+    fn locked_layers_cannot_be_selected_moved_or_scaled() {
+        let mut state = EditorState::new();
+        let title = state.composition().layers[0].id;
+        let position = PropertyPath::Transform(TransformProperty::Position);
+        state.select_layer(title, false);
+        state.toggle_switch(title, Switch::Locked);
+        assert!(state.selected_layers.is_empty(), "locking lets go of the layer");
+        state.select_layer(title, false);
+        assert!(state.selected_layers.is_empty(), "a locked layer can't be selected");
+
+        // Even if a stale selection still held it, viewer drags leave it alone.
+        state.selected_layers = vec![title];
+        let before = state.composition().layer(title).unwrap().property(position, 60).unwrap().value;
+        state.begin_move();
+        state.drag_in_viewer(Vec2::new(100.0, 0.0), false);
+        state.end_viewer_drag();
+        state.begin_scale(title, ScaleHandle::BottomRight);
+        state.drag_in_viewer(Vec2::new(100.0, 100.0), false);
+        state.end_viewer_drag();
+        let layer = state.composition().layer(title).unwrap();
+        assert_eq!(layer.property(position, 60).unwrap().value, before);
     }
 
     #[test]
