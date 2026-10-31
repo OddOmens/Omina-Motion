@@ -26,6 +26,23 @@ pub const PROXY_WIDTH: u32 = 1280;
 /// Reports progress (0–1) as it goes and stops early, returning `Ok(false)`, if `cancelled` says so.
 /// The file is written under a temporary name and only renamed into place when complete.
 pub fn build_proxy(source: &Path, output: &Path, width: u32, progress: &dyn Fn(f32), cancelled: &dyn Fn() -> bool) -> Result<bool, MediaError> {
+    let partial = output.with_extension("partial.mov");
+    let built = encode_proxy(source, &partial, width, progress, cancelled);
+    if !matches!(built, Ok(true)) {
+        // Cancelled or failed: never leave a partial file in the cache.
+        let _ = std::fs::remove_file(&partial);
+        return built;
+    }
+    std::fs::rename(&partial, output).map_err(|error| {
+        let _ = std::fs::remove_file(&partial);
+        MediaError(format!("could not save the proxy: {error}"))
+    })?;
+    progress(1.0);
+    Ok(true)
+}
+
+/// Writes the proxy to `partial`. Returns `Ok(false)` if cancelled.
+fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32), cancelled: &dyn Fn() -> bool) -> Result<bool, MediaError> {
     crate::decode::init()?;
     let info = crate::decode::probe(source)?;
     let mut input = ffmpeg::format::input(source)?;
@@ -40,8 +57,7 @@ pub fn build_proxy(source: &Path, output: &Path, width: u32, progress: &dyn Fn(f
     let out_width = info.width.min(width.max(2)) & !1;
     let out_height = ((u64::from(info.height) * u64::from(out_width) / u64::from(info.width.max(1))) as u32).max(2) & !1;
 
-    let partial = output.with_extension("partial.mov");
-    let mut output_context = ffmpeg::format::output(&partial)?;
+    let mut output_context = ffmpeg::format::output(partial)?;
     let global_header = output_context.format().flags().contains(ffmpeg::format::Flags::GLOBAL_HEADER);
     let codec = ffmpeg::encoder::find_by_name("prores_ks").ok_or_else(|| MediaError("this FFmpeg has no ProRes encoder".into()))?;
     let mut out_stream = output_context.add_stream(codec)?;
@@ -104,14 +120,16 @@ pub fn build_proxy(source: &Path, output: &Path, width: u32, progress: &dyn Fn(f
 
     for (stream, packet) in input.packets() {
         if cancelled() {
-            drop(output_context);
-            let _ = std::fs::remove_file(&partial);
             return Ok(false);
         }
         if stream.index() != in_index {
             continue;
         }
-        decoder.send_packet(&packet)?;
+        match decoder.send_packet(&packet) {
+            // A damaged packet: skip it, as players do.
+            Err(ffmpeg::Error::InvalidData) => continue,
+            result => result?,
+        }
         encode_ready(&mut decoder, &mut encoder, &mut output_context, &mut done)?;
         progress((done as f32 / total as f32).min(0.99));
     }
@@ -120,9 +138,6 @@ pub fn build_proxy(source: &Path, output: &Path, width: u32, progress: &dyn Fn(f
     encoder.send_eof()?;
     write_packets(&mut encoder, &mut output_context)?;
     output_context.write_trailer()?;
-    drop(output_context);
-    std::fs::rename(&partial, output).map_err(|error| MediaError(format!("could not save the proxy: {error}")))?;
-    progress(1.0);
     Ok(true)
 }
 

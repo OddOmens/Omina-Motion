@@ -105,3 +105,25 @@ fn scrubbing_uses_the_proxy_then_upgrades_to_full_quality() {
     // On a clip this small the original can win the race; on long-GOP footage the proxy arrives first.
     println!("the proxy frame was shown first: {saw_proxy}");
 }
+
+#[test]
+fn a_failed_build_leaves_no_partial_file_behind() {
+    let folder = std::env::temp_dir().join(format!("studio-proxy-fail-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    // A folder where the finished proxy should go, so saving it fails at the very end.
+    let output = folder.join("blocked.mov");
+    std::fs::create_dir_all(&output).unwrap();
+    let built = build_proxy(&clip(), &output, 64, &|_| {}, &|| false);
+    assert!(built.is_err());
+    let leftovers: Vec<_> = std::fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().file_name()).filter(|name| name != "blocked.mov").collect();
+    assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[test]
+fn damaged_footage_still_gets_a_proxy() {
+    let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/damaged.mp4");
+    let output = std::env::temp_dir().join(format!("studio-proxy-damaged-{}.mov", std::process::id()));
+    assert_eq!(build_proxy(&source, &output, 64, &|_| {}, &|| false), Ok(true));
+    std::fs::remove_file(&output).unwrap();
+}

@@ -105,6 +105,9 @@ pub struct VideoDecoder {
     frame_count: i64,
     /// The source frame the next decoded picture will be, if decoding is moving forward from a known spot.
     next_index: Option<i64>,
+    /// The file's final picture, once decoding has reached the end: shown for any later frame,
+    /// since files can claim more frames than they hold.
+    final_picture: Option<VideoFrame>,
 }
 
 /// Jumps shorter than this decode forward instead of seeking, which is faster for small skips.
@@ -148,6 +151,7 @@ impl VideoDecoder {
             frame_rate: info.frame_rate,
             frame_count: info.frame_count,
             next_index: Some(0),
+            final_picture: None,
         })
     }
 
@@ -207,7 +211,11 @@ impl VideoDecoder {
             let mut fed = false;
             for (stream, packet) in self.input.packets() {
                 if stream.index() == self.stream_index {
-                    self.decoder.send_packet(&packet)?;
+                    match self.decoder.send_packet(&packet) {
+                        // A damaged packet: skip it and keep going, as players do.
+                        Err(ffmpeg::Error::InvalidData) => continue,
+                        result => result?,
+                    }
                     fed = true;
                     break;
                 }
@@ -220,12 +228,47 @@ impl VideoDecoder {
         }
     }
 
-    /// Moves to the keyframe at or before source frame `index`.
-    fn seek_before(&mut self, index: i64) -> Result<(), MediaError> {
-        let seconds = self.start_seconds + index as f64 / self.frame_rate.fps();
-        let target = (seconds * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
+    /// Moves to `seconds` into the stream (from its start), landing at or before it.
+    fn seek_to(&mut self, seconds: f64) -> Result<(), MediaError> {
+        let target = ((self.start_seconds + seconds.max(0.0)) * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
         // Land on the keyframe at or before the target (FFmpeg uses the range end as the latest allowed point).
         self.input.seek(target, ..target)?;
+        self.decoder.flush();
+        self.next_index = None;
+        Ok(())
+    }
+
+    /// Seeks so that decoding starts at or before source frame `index`, and returns the first
+    /// picture decoded there (or `None` past the end). Some formats (MPEG-TS) seek to a byte
+    /// position rather than a keyframe, and the decoder then skips ahead to the next keyframe,
+    /// past the target; in that case this steps back further (1 s, 2 s, 4 s, ...) and tries again.
+    fn seek_at_or_before(&mut self, index: i64) -> Result<Option<(ffmpeg::frame::Video, i64)>, MediaError> {
+        let seconds = index as f64 / self.frame_rate.fps();
+        let mut back = 0.0;
+        loop {
+            // Once stepping back reaches the start, read from the very beginning of the file:
+            // even a seek to time 0 can land after the first keyframe in these formats.
+            let at_start = seconds - back <= 0.0;
+            if at_start {
+                self.rewind()?;
+            } else {
+                self.seek_to(seconds - back)?;
+            }
+            if let Some(first) = self.decode_next()? {
+                let first_index = self.index_of(&first).unwrap_or(index);
+                if first_index <= index || at_start {
+                    return Ok(Some((first, first_index)));
+                }
+            } else if at_start {
+                return Ok(None);
+            }
+            back = if back == 0.0 { 1.0 } else { back * 2.0 };
+        }
+    }
+
+    /// Goes back to the very beginning of the file by opening it again.
+    fn rewind(&mut self) -> Result<(), MediaError> {
+        self.input = ffmpeg::format::input(&self.path)?;
         self.decoder.flush();
         self.next_index = None;
         Ok(())
@@ -241,13 +284,24 @@ impl VideoDecoder {
     /// `Ok(None)`) once it says so, for example because the viewer has moved elsewhere.
     pub fn frame_unless(&mut self, index: i64, cancelled: &dyn Fn() -> bool) -> Result<Option<VideoFrame>, MediaError> {
         let index = index.clamp(0, self.frame_count - 1);
-        let close_ahead = self.next_index.is_some_and(|next| index >= next && index - next <= FORWARD_DECODE_LIMIT);
-        if !close_ahead {
-            self.seek_before(index)?;
+        // Past the end already found: the final picture, without decoding again.
+        if let Some(last) = self.final_picture.as_ref().filter(|last| index >= last.index) {
+            return Ok(Some(VideoFrame { index, ..last.clone() }));
         }
+        let close_ahead = self.next_index.is_some_and(|next| index >= next && index - next <= FORWARD_DECODE_LIMIT);
+        let mut pending = if close_ahead { None } else { self.seek_at_or_before(index)? };
         let mut last = None;
-        while let Some(decoded) = self.decode_next()? {
-            let decoded_index = self.index_of(&decoded).unwrap_or(index);
+        loop {
+            let (decoded, decoded_index) = match pending.take() {
+                Some(first) => first,
+                None => match self.decode_next()? {
+                    Some(decoded) => {
+                        let decoded_index = self.index_of(&decoded).unwrap_or(index);
+                        (decoded, decoded_index)
+                    }
+                    None => break,
+                },
+            };
             self.next_index = Some(decoded_index + 1);
             if decoded_index >= index {
                 return self.convert(decoded, decoded_index).map(Some);
@@ -257,11 +311,18 @@ impl VideoDecoder {
             }
             last = Some((decoded, decoded_index));
         }
-        // Past the last frame: show the final picture.
-        match last {
-            Some((decoded, decoded_index)) => self.convert(decoded, decoded_index).map(Some),
-            None => Err(MediaError(format!("frame {index} could not be decoded"))),
-        }
+        // The end of the file came first: the file has fewer frames than it claimed.
+        let Some((decoded, decoded_index)) = last else {
+            // Nothing left to decode from here (the decoder had already reached the end): look again from a seek.
+            if close_ahead {
+                self.next_index = None;
+                return self.frame_unless(index, cancelled);
+            }
+            return Err(MediaError(format!("frame {index} could not be decoded")));
+        };
+        let picture = self.convert(decoded, decoded_index)?;
+        self.final_picture = Some(picture.clone());
+        Ok(Some(VideoFrame { index, ..picture }))
     }
 
     /// Converts a decoded picture to RGBA. Hardware pictures are downloaded first; this happens only

@@ -74,7 +74,14 @@ impl AudioDecoder {
         let stream_index = stream.index();
         let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?.decoder().audio()?;
         let time_base = f64::from(stream.time_base());
-        let start_seconds = if stream.start_time() == ffmpeg::ffi::AV_NOPTS_VALUE { 0.0 } else { stream.start_time() as f64 * time_base };
+        // Time 0 is where the picture starts, when there is one: the video decoder counts frames
+        // from the video stream's start, and the two streams often start at different times (a
+        // late audio track, or a few milliseconds of codec priming). Sound before that is dropped,
+        // and a later start is preceded by silence, so sound and picture stay in step.
+        let stream_start = |stream: &ffmpeg::format::stream::Stream| {
+            (stream.start_time() != ffmpeg::ffi::AV_NOPTS_VALUE).then(|| stream.start_time() as f64 * f64::from(stream.time_base()))
+        };
+        let start_seconds = input.streams().best(Type::Video).and_then(|video| stream_start(&video)).or_else(|| stream_start(&stream)).unwrap_or(0.0);
         Ok(Self {
             input,
             stream_index,
@@ -85,7 +92,8 @@ impl AudioDecoder {
             start_seconds,
             pending: VecDeque::new(),
             position: 0,
-            seek_target: None,
+            // Line the first audio up by its timestamp, as after a seek to the start.
+            seek_target: Some(0),
             ended: false,
         })
     }
@@ -180,7 +188,11 @@ impl AudioDecoder {
             let mut fed = false;
             for (stream, packet) in self.input.packets() {
                 if stream.index() == self.stream_index {
-                    self.decoder.send_packet(&packet)?;
+                    match self.decoder.send_packet(&packet) {
+                        // A damaged packet: skip it, as players do.
+                        Err(ffmpeg::Error::InvalidData) => continue,
+                        result => result?,
+                    }
                     fed = true;
                     break;
                 }

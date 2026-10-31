@@ -64,6 +64,10 @@ struct Clip {
     frame_count: Option<i64>,
     error: Option<String>,
     proxy_worker: bool,
+    /// Frames that just failed to decode (full quality, proxy). They are not tried again until
+    /// the viewer asks for another frame; retrying straight away would spin forever.
+    failed_full: Option<i64>,
+    failed_proxy: Option<i64>,
 }
 
 impl Clip {
@@ -75,11 +79,11 @@ impl Clip {
     fn next_full_job(&self, playing: bool) -> Option<i64> {
         let last = self.frame_count? - 1;
         let wanted = self.wanted.clamp(0, last);
-        if !self.full.has(wanted) {
+        if !self.full.has(wanted) && self.failed_full != Some(wanted) {
             return Some(wanted);
         }
         if playing {
-            return (wanted + 1..=(wanted + PREFETCH).min(last)).find(|index| !self.full.has(*index));
+            return (wanted + 1..=(wanted + PREFETCH).min(last)).find(|index| !self.full.has(*index) && self.failed_full != Some(*index));
         }
         None
     }
@@ -87,7 +91,7 @@ impl Clip {
     /// The frame the proxy worker should decode: the wanted one, if neither worker has it.
     fn next_proxy_job(&self) -> Option<i64> {
         let wanted = self.clamp(self.wanted);
-        (!self.full.has(wanted) && !self.proxy.has(wanted)).then_some(wanted)
+        (!self.full.has(wanted) && !self.proxy.has(wanted) && self.failed_proxy != Some(wanted)).then_some(wanted)
     }
 
     /// Whether a full-quality decode of `job` is no longer useful, because the viewer moved elsewhere.
@@ -196,6 +200,7 @@ impl VideoSource for FrameServer {
         let index = clip.clamp(index);
         if clip.wanted != index || is_new {
             clip.wanted = index;
+            (clip.failed_full, clip.failed_proxy) = (None, None);
             self.shared.work.notify_all();
         }
         let start_proxy = proxy.filter(|_| !clip.proxy_worker);
@@ -267,7 +272,10 @@ fn full_quality_worker(shared: &Shared, path: &Path, max_width: u32) {
                 }
                 // Abandoned because the viewer moved on; the next request starts fresh.
                 Ok(None) => {}
-                Err(error) => clip.error = Some(error.to_string()),
+                Err(error) => {
+                    clip.error = Some(error.to_string());
+                    clip.failed_full = Some(job);
+                }
             }
             clip.wanted == job
         };
@@ -283,7 +291,13 @@ fn proxy_worker(shared: &Shared, path: &Path, proxy_file: &Path) {
     let Ok(mut decoder) = VideoDecoder::open(proxy_file, PROXY_WIDTH, false) else { return };
     // Proxies match their source frame for frame, but wait for the source's length to be known.
     while let Some(job) = wait_for_job(shared, path, |clip, _| clip.frame_count.and(clip.next_proxy_job())) {
-        let Ok(mut frame) = decoder.frame(job) else { continue };
+        let Ok(mut frame) = decoder.frame(job) else {
+            // Don't retry the same frame straight away (see `failed_proxy`).
+            if let Some(clip) = shared.lock().clips.get_mut(path) {
+                clip.failed_proxy = Some(job);
+            }
+            continue;
+        };
         frame.from_proxy = true;
         let wanted_now = {
             let mut state = shared.lock();
@@ -295,5 +309,38 @@ fn proxy_worker(shared: &Shared, path: &Path, proxy_file: &Path) {
         if wanted_now {
             shared.notify_ready();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_that_failed_is_not_retried_until_the_viewer_moves() {
+        let mut clip = Clip { frame_count: Some(48), wanted: 5, ..Clip::default() };
+        assert_eq!(clip.next_full_job(false), Some(5));
+        clip.failed_full = Some(5);
+        assert_eq!(clip.next_full_job(false), None, "no retry of the failed frame");
+        assert_eq!(clip.next_full_job(true), Some(6), "while playing, later frames still decode");
+        clip.failed_proxy = Some(5);
+        assert_eq!(clip.next_proxy_job(), None);
+    }
+
+    #[test]
+    fn asking_for_another_frame_clears_the_failure() {
+        let server = FrameServer::new(64, None);
+        let path = Path::new("/no/such/clip.mp4");
+        server.frame(path, 5);
+        {
+            let mut state = server.shared.lock();
+            let clip = state.clips.get_mut(path).unwrap();
+            clip.failed_full = Some(5);
+            clip.failed_proxy = Some(5);
+        }
+        server.frame(path, 6);
+        let state = server.shared.lock();
+        let clip = &state.clips[path];
+        assert_eq!((clip.failed_full, clip.failed_proxy), (None, None));
     }
 }

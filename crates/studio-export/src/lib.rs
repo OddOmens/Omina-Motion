@@ -70,7 +70,11 @@ pub fn export(
 
     let mut renderer = Renderer::new().map_err(|error| format!("The GPU could not be used: {error}"))?;
     let temporary = temporary_path(&request.path);
-    let mut writer = MovieWriter::create(&temporary, settings).map_err(|error| format!("The movie could not be created: {error}"))?;
+    let mut writer = MovieWriter::create(&temporary, settings).map_err(|error| {
+        // FFmpeg may have created the file before failing (an encoder refusing the size, say).
+        let _ = std::fs::remove_file(&temporary);
+        format!("The movie could not be created: {error}")
+    })?;
     let result = (|| {
         let video = ExactFrames::new();
         // Sound for each frame: from where the previous frame's sound ended up to this frame's end.
@@ -88,6 +92,10 @@ pub fn export(
             let picture = renderer
                 .render(project, request.composition, frame, composition.width, composition.height, &video)
                 .map_err(|error| format!("Frame {frame} could not be rendered: {error}"))?;
+            // A source frame that could not be decoded would show the previous one instead: stop.
+            if let Some((path, error)) = video.errors().into_iter().next() {
+                return Err(format!("{} could not be decoded ({error}).", path.display()));
+            }
             writer.write_video(&picture.bgra, picture.width, picture.height).map_err(|error| format!("Frame {frame} could not be encoded: {error}"))?;
             if !clips.is_empty() {
                 let until = to_sample(frame + 1);
@@ -97,9 +105,6 @@ pub fn export(
                 mixed = until;
             }
             progress(Progress { done: frame - frames.start + 1, total });
-        }
-        if let Some((path, error)) = video.errors().into_iter().next() {
-            return Err(format!("{} could not be decoded: {error}", path.display()));
         }
         Ok(Outcome::Finished)
     })();

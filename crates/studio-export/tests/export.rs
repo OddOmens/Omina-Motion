@@ -132,3 +132,15 @@ fn impossible_requests_are_refused_with_a_reason() {
     let empty = ExportRequest { frames: 30..30, ..request(comp, scratch("none.mp4"), MovieFormat::H264) };
     assert_eq!(export(&project, &empty, &mut |_| {}, &|| false).unwrap_err(), "There are no frames to export.");
 }
+
+#[test]
+fn footage_that_cannot_be_read_stops_the_export_with_a_reason() {
+    let (mut project, comp) = project();
+    // Point the clip at a file that is gone: exporting must fail, not repeat a stale picture.
+    let footage = project.items.iter_mut().find(|item| item.name == "colors.mp4").unwrap();
+    footage.path = Some(scratch("missing-source.mp4"));
+    let path = scratch("from-missing.mp4");
+    let error = export(&project, &request(comp, path.clone(), MovieFormat::H264), &mut |_| {}, &|| false).unwrap_err();
+    assert!(error.contains("could not be decoded"), "{error}");
+    assert!(!path.exists());
+}
