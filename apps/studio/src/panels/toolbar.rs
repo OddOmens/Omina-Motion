@@ -1,7 +1,7 @@
 //! The window's chrome around the panels: a slim top bar (the project's name and the progress
-//! of background jobs) and a rail down the left side, CapCut style: Settings at the top, then
-//! Export, Import and New Comp, then the buttons that pick the panel beside it (Media, Effects,
-//! Libraries) and the editing tools. The rail holds only things that work.
+//! of background jobs) and a rail down the left side, CapCut style: at the top, the buttons that
+//! pick the panel beside it (Media, Libraries, Effects) and the editing tools; at the bottom,
+//! New Comp, Import and Export, then Settings. The rail holds only things that work.
 //!
 //! The Pen button (G) draws custom shapes point by point. The Shape button picks the Shape tool on a click; pressing and holding it (or right-clicking)
 //! opens a menu beside it to choose which shape the tool draws.
@@ -20,7 +20,7 @@ use crate::theme::{color, hsla, size};
 use crate::workspace::{LeftPanel, Tool, Workspace};
 
 /// Width of the left rail: room for an icon and its name.
-pub const RAIL_WIDTH: f32 = 68.0;
+pub const RAIL_WIDTH: f32 = 56.0;
 
 /// The top bar: where you are on the left, and background jobs' progress on the right.
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
@@ -46,7 +46,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
 }
 
 fn separator() -> gpui_kit::Div {
-    div().h(px(1.0)).w(px(36.0)).my_1p5().bg(hsla(color::HAIRLINE))
+    div().h(px(1.0)).w(px(30.0)).my_1p5().bg(hsla(color::HAIRLINE))
 }
 
 /// How long the Shape button must be held to open the shape menu.
@@ -81,17 +81,17 @@ fn rail_button_look(id: &'static str, icon: IconName, label: &'static str, activ
     div()
         .id(id)
         .w(px(RAIL_WIDTH - 12.0))
-        .py_1p5()
+        .py_1()
         .flex()
         .flex_col()
         .items_center()
         .gap_1()
-        .rounded(px(8.0))
-        .text_size(px(10.0))
+        .rounded(px(6.0))
+        .text_size(px(8.0))
         .text_color(hsla(if active { color::TEXT } else { color::MUTED }))
         .when(active, |button| button.bg(hsla(color::ROW_SELECTED)))
         .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
-        .child(Icon::new(icon).size(px(20.0)))
+        .child(Icon::new(icon).size(px(16.0)))
         .child(label)
 }
 
@@ -215,20 +215,22 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .gap_1()
         .py_2()
         .bg(hsla(color::BACKGROUND))
-        .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, cx))
-        .child(separator())
-        // Getting work in and out: export (⌘M), import (⌘I) and a new composition (⌘N).
-        .child(rail_button("rail-export", IconName::Download, "Export", false, super::export::open, cx))
-        .child(rail_button("rail-import", IconName::FileInput, "Import", false, |this, window, cx| this.import(window, cx), cx))
-        .child(rail_button("rail-new-comp", IconName::Clapperboard, "New Comp", false, |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
-        .child(separator())
+        // At the top: the side panels, then the tools.
         .child(rail_button("rail-media", IconName::Folder, "Media", side == LeftPanel::Media, show(LeftPanel::Media), cx))
-        .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
         .child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx))
+        .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
         .child(separator())
         .child(rail_button("tool-selection", IconName::MousePointer2, "Select", tool == Tool::Selection, pick(Tool::Selection), cx))
+        .child(rail_button("tool-cut", IconName::Scissors, "Cut", tool == Tool::Cut, pick(Tool::Cut), cx))
         .child(rail_button("tool-type", IconName::Type, "Text", tool == Tool::Type, pick(Tool::Type), cx))
         .child(shape_button(workspace, cx))
         .child(rail_button("tool-pen", IconName::PenTool, "Pen", tool == Tool::Pen, pick(Tool::Pen), cx))
-        .child(rail_button("tool-cut", IconName::Scissors, "Cut", tool == Tool::Cut, pick(Tool::Cut), cx))
+        // At the bottom: getting work in and out (new composition ⌘N, import ⌘I, export ⌘M),
+        // and Settings last.
+        .child(div().flex_1())
+        .child(rail_button("rail-new-comp", IconName::Clapperboard, "New Comp", false, |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
+        .child(rail_button("rail-import", IconName::FileInput, "Import", false, |this, window, cx| this.import(window, cx), cx))
+        .child(rail_button("rail-export", IconName::Download, "Export", false, super::export::open, cx))
+        .child(separator())
+        .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, cx))
 }
