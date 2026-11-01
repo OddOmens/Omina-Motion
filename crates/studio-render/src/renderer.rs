@@ -118,7 +118,9 @@ pub struct Renderer {
     text_cache: HashMap<u64, MediaTexture>,
     /// The measured text box for each cached raster.
     text_boxes: HashMap<u64, Vec2>,
-    images: HashMap<PathBuf, Option<MediaTexture>>,
+    /// Loaded images (or `None` where loading failed), with the file's modification time when
+    /// loaded: a file that changes on disk, or appears after failing, is loaded again.
+    images: HashMap<PathBuf, (Option<std::time::SystemTime>, Option<MediaTexture>)>,
     /// The current picture of each footage layer. Keyed by layer, so two layers showing
     /// different moments of the same clip each have their own.
     videos: HashMap<Id, VideoTexture>,
@@ -619,7 +621,8 @@ impl Renderer {
 
     /// Loads an image file into a texture once. Failed loads are remembered so they are not retried every frame.
     fn prepare_image(&mut self, path: &PathBuf) -> bool {
-        if !self.images.contains_key(path) {
+        let modified = std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok();
+        if self.images.get(path).is_none_or(|(loaded_at, _)| *loaded_at != modified) {
             let max = self.max_texture;
             let loaded = image::open(path).ok().map(|image| {
                 // Larger than the GPU accepts: scale down to fit (the layer stretches it back).
@@ -628,9 +631,9 @@ impl Renderer {
                 let (width, height) = rgba.dimensions();
                 MediaTexture { view: self.upload(width, height, rgba.as_raw()), size: Vec2::new(width as f32, height as f32) }
             });
-            self.images.insert(path.clone(), loaded);
+            self.images.insert(path.clone(), (modified, loaded));
         }
-        self.images[path].is_some()
+        self.images[path].1.is_some()
     }
 
     /// Renders composition `comp` of `project` at `frame` into a `width` × `height` image.
@@ -693,6 +696,10 @@ impl Renderer {
         }
         let on_screen: HashSet<Id> = composition.layers.iter().filter(|layer| layer.is_active_at(frame)).map(|layer| layer.id).collect();
         self.videos.retain(|layer, _| on_screen.contains(layer));
+        // Images stay loaded while the project has them (reloading a still is slow), and are let
+        // go once removed from it.
+        let in_project: HashSet<&PathBuf> = project.items.iter().filter_map(|item| item.path.as_ref()).collect();
+        self.images.retain(|path, _| in_project.contains(path));
 
         self.ensure_targets(width, height);
         let targets = self.targets.as_ref().expect("targets were just created");
@@ -809,7 +816,7 @@ impl Renderer {
                 }
             }
             LayerContent::Image { item } => {
-                let loaded = project.item(*item).and_then(|item| item.path.as_ref()).and_then(|path| self.images.get(path)).and_then(Option::as_ref);
+                let loaded = project.item(*item).and_then(|item| item.path.as_ref()).and_then(|path| self.images.get(path)).and_then(|(_, texture)| texture.as_ref());
                 match loaded {
                     Some(image) => {
                         // Stretch the image to the layer's size (they match unless the file changed).

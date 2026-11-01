@@ -433,3 +433,39 @@ fn semi_transparent_edges_are_filtered_without_dark_fringes() {
     let middle = pixel(&frame, 50, 50);
     assert!(middle[0] > 175, "midpoint {middle:?}");
 }
+
+#[test]
+fn an_image_changed_on_disk_is_shown_as_it_is_now() {
+    use studio_core::model::{ProjectItem, ProjectItemKind};
+    let path = std::env::temp_dir().join(format!("studio-changing-{}.png", std::process::id()));
+    let mut layer = full(2, 0);
+    layer.content = LayerContent::Image { item: Id(62) };
+    let mut project = project(vec![layer]);
+    project.items.push(ProjectItem {
+        id: Id(62),
+        name: "changing.png".into(),
+        kind: ProjectItemKind::Image,
+        label: LabelColor::Aqua,
+        parent: None,
+        size: Some(Vec2::new(100.0, 100.0)),
+        duration_seconds: None,
+        frame_rate: None,
+        has_audio: false,
+        color: None,
+        path: Some(path.clone()),
+    });
+    let mut renderer = Renderer::new().unwrap();
+    let draw = |renderer: &mut Renderer| pixel(&renderer.render(&project, Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap(), 50, 50);
+    // Missing at first: the placeholder. Once the file appears, it shows; when it is edited, the edit shows.
+    let _ = std::fs::remove_file(&path);
+    assert!(!close(draw(&mut renderer), [0, 255, 0]));
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 255, 0, 255])).save(&path).unwrap();
+    assert!(close(draw(&mut renderer), [0, 255, 0]), "the file appeared");
+    // Make sure the modification time moves on, even on coarse file systems.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255])).save(&path).unwrap();
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1)).unwrap();
+    assert!(close(draw(&mut renderer), [0, 0, 255]), "the edit shows");
+    std::fs::remove_file(&path).unwrap();
+}

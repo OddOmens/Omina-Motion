@@ -65,6 +65,18 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
     let state = &workspace.state;
     // While playing, decoders work ahead of the playhead.
     workspace.render.media.set_playing(state.is_playing());
+    // Let go of footage the open composition no longer uses (deleted layers, other
+    // compositions), so its decoder threads stop and its frames are freed.
+    let footage: std::collections::HashSet<&std::path::Path> = state
+        .composition()
+        .layers
+        .iter()
+        .filter_map(|layer| match layer.content {
+            studio_core::model::LayerContent::Footage { item } => state.project.item(item)?.path.as_deref(),
+            _ => None,
+        })
+        .collect();
+    workspace.render.media.release_unused(|path| footage.contains(path));
     let started = std::time::Instant::now();
     let rendered = renderer.render(&state.project, state.active_comp, state.current_frame, width, height, &workspace.render.media);
     workspace.render.last_render_ms = Some(started.elapsed().as_secs_f64() * 1000.0);

@@ -95,6 +95,13 @@ impl History {
         self.saved_version = self.version;
     }
 
+    /// Notes a save made in the middle of a drag. The drag is not recorded yet (it becomes one
+    /// undo step when it ends), and what was saved is unfinished, so the project still counts
+    /// as having unsaved changes until the next save.
+    pub fn mark_saved_mid_change(&mut self) {
+        self.saved_version = u64::MAX;
+    }
+
     /// Whether `project` differs from what was last saved (or opened).
     pub fn has_unsaved_changes(&self, project: &Project) -> bool {
         self.version != self.saved_version || *project != self.baseline

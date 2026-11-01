@@ -13,6 +13,9 @@ use ffmpeg::{ChannelLayout, frame};
 
 use crate::decode::{MediaError, init};
 
+/// How far before a seek target decoding starts, so the sound is settled by the target.
+const SEEK_RUN_UP_SECONDS: f64 = 0.1;
+
 /// The mixer always works in stereo: left, right, left, right, ...
 pub const CHANNELS: usize = 2;
 
@@ -63,6 +66,11 @@ pub struct AudioDecoder {
     position: i64,
     /// After a seek: the frame reading should start at. Decoded audio before it is dropped.
     seek_target: Option<i64>,
+    /// The output frame the resampler's next samples belong to, once known. Only the first
+    /// block after a seek is placed by its timestamp: after that the resampler carries a few
+    /// samples over from each block into the next, so a block's output starts earlier than its
+    /// own timestamp says, and positions are counted on from the output instead.
+    next_output: Option<i64>,
     ended: bool,
 }
 
@@ -94,6 +102,7 @@ impl AudioDecoder {
             position: 0,
             // Line the first audio up by its timestamp, as after a seek to the start.
             seek_target: Some(0),
+            next_output: None,
             ended: false,
         })
     }
@@ -107,7 +116,10 @@ impl AudioDecoder {
     /// FFmpeg lands on a packet at or before the spot, and the audio in between is dropped.
     pub fn seek(&mut self, frame: i64) -> Result<(), MediaError> {
         let frame = frame.max(0);
-        let seconds = self.start_seconds + frame as f64 / f64::from(self.sample_rate);
+        // Land a little early: compressed audio (AAC, MP3) decodes each block from the ones
+        // before it, and the resampler needs a run-up too, so the first samples after a cold
+        // start are wrong (a click). The extra is decoded and dropped (see `seek_target`).
+        let seconds = self.start_seconds + (frame as f64 / f64::from(self.sample_rate) - SEEK_RUN_UP_SECONDS).max(0.0);
         let target = (seconds * f64::from(ffmpeg::ffi::AV_TIME_BASE)) as i64;
         self.input.seek(target, ..target)?;
         self.decoder.flush();
@@ -116,6 +128,7 @@ impl AudioDecoder {
         self.pending.clear();
         self.position = frame;
         self.seek_target = Some(frame);
+        self.next_output = None;
         self.ended = false;
         Ok(())
     }
@@ -141,8 +154,9 @@ impl AudioDecoder {
             self.ended = true;
             return Ok(());
         };
-        let starts_at = self.frame_of(&decoded);
+        let starts_at = self.next_output.or_else(|| self.frame_of(&decoded));
         let samples = self.resample(decoded)?;
+        self.next_output = starts_at.map(|start| start + (samples.len() / CHANNELS) as i64);
         match self.seek_target {
             // The first audio after a seek: line it up with the frame that was asked for.
             Some(target) => {

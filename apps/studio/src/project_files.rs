@@ -99,7 +99,7 @@ impl Workspace {
         let written = self.state.project_text().and_then(|text| write_atomically(path, &text).map_err(|error| error.to_string()));
         match written {
             Ok(()) => {
-                self.state.mark_saved(path.to_path_buf());
+                self.state.mark_saved(path.to_path_buf(), cx.has_active_drag());
                 cx.notify();
                 true
             }

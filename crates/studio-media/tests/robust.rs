@@ -76,3 +76,26 @@ fn sound_lines_up_with_the_picture_when_its_stream_starts_later() {
     assert!(loudness(0.5, 0.9) > 0.05, "no sound after its start: {}", loudness(0.5, 0.9));
 }
 
+
+#[test]
+fn compressed_sound_after_a_seek_matches_reading_straight_through() {
+    // `tone.m4a`: 2 s of a 440 Hz tone as AAC, whose frames depend on the ones before them.
+    let path = fixture("tone.m4a");
+    let mut straight = AudioDecoder::open(&path, 48_000).unwrap();
+    let mut all = vec![0.0; 96_000 * CHANNELS];
+    let read = straight.read(&mut all).unwrap();
+    // Seek to spots inside the file (as a loop or a clip start does) and compare what follows.
+    for start in [24_000_usize, 48_000, 61_234] {
+        let mut sought = AudioDecoder::open(&path, 48_000).unwrap();
+        sought.seek(start as i64).unwrap();
+        let mut block = vec![0.0; 2_000 * CHANNELS];
+        let got = sought.read(&mut block).unwrap();
+        assert!(start + got <= read);
+        let worst = block[..got * CHANNELS]
+            .iter()
+            .zip(&all[start * CHANNELS..(start + got) * CHANNELS])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(worst < 0.01, "after seeking to {start}, the sound differs by up to {worst} (a click)");
+    }
+}

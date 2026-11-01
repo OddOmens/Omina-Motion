@@ -691,8 +691,14 @@ impl EditorState {
     }
 
     /// Notes that the project was written to `path`.
-    pub fn mark_saved(&mut self, path: PathBuf) {
+    /// `ui_drag` is whether the UI has a drag of its own going (see `record_history`).
+    pub fn mark_saved(&mut self, path: PathBuf, ui_drag: bool) {
         self.file = Some(path);
+        // Mid-drag, recording now would split the drag into two undo steps.
+        if ui_drag || self.is_dragging() {
+            self.history.mark_saved_mid_change();
+            return;
+        }
         self.history.mark_saved(&self.project);
     }
 
@@ -1015,6 +1021,24 @@ mod tests {
     }
 
     #[test]
+    fn saving_in_the_middle_of_a_drag_keeps_it_one_undo_step() {
+        let mut state = EditorState::new();
+        let title = state.composition().layers[0].id;
+        state.select_layer(title, false);
+        let before = state.project.clone();
+        state.begin_move();
+        state.drag_in_viewer(Vec2::new(10.0, 0.0), false);
+        state.mark_saved(PathBuf::from("/tmp/mid-drag.studio"), false);
+        assert!(state.has_unsaved_changes(), "what was saved is unfinished");
+        state.drag_in_viewer(Vec2::new(40.0, 0.0), false);
+        state.end_viewer_drag();
+        state.record_history(false);
+        assert!(state.undo());
+        assert_eq!(state.project, before, "one undo reverts the whole drag");
+        assert!(!state.can_undo());
+    }
+
+    #[test]
     fn saved_projects_open_again_with_their_view() {
         let folder = std::env::temp_dir().join(format!("studio-save-test-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
@@ -1026,7 +1050,7 @@ mod tests {
         state.set_current_frame(77);
         assert!(state.has_unsaved_changes());
         std::fs::write(&path, state.project_text().unwrap()).unwrap();
-        state.mark_saved(path.clone());
+        state.mark_saved(path.clone(), false);
         assert!(!state.has_unsaved_changes());
         assert_eq!(state.document_name(), "Promo");
 
