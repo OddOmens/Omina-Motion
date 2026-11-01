@@ -209,6 +209,8 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             this.state.loop_playback = !this.state.loop_playback;
             cx.notify();
         })))
+        .child(div().w(px(1.0)).h(px(16.0)).mx_1().bg(hsla(color::HAIRLINE)))
+        .child(crate::panels::graph_editor::button(workspace, cx))
         .child(div().flex_1())
         .child(div().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)))
         .child(div().flex_1())

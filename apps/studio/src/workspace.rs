@@ -192,8 +192,10 @@ pub struct UiState {
     /// Pointer x and starting value of the field being scrubbed.
     pub field_anchor: Option<(f32, f32)>,
     pub editing: Option<EditingField>,
-    /// The curve shown in the Flow panel.
+    /// The last curve used in the graph editor, shown when the selection has none of its own.
     pub flow_curve: CubicBezier,
+    /// Where the graph editor popover is open (below the Easings button), if it is.
+    pub graph_editor: Option<gpui_kit::Point<gpui_kit::Pixels>>,
     /// Font families offered in the Text section, looked up once at startup.
     pub font_families: Vec<&'static str>,
     pub timeline: panels::timeline::TimelineUi,
@@ -370,6 +372,7 @@ impl Workspace {
                 field_anchor: None,
                 editing: None,
                 flow_curve: studio_core::animation::EASING_PRESETS[0].1,
+                graph_editor: None,
                 font_families: panels::properties::installed_font_families(cx),
                 timeline: timeline_ui,
                 window_title: String::new(),

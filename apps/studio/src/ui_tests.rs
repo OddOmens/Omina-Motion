@@ -8,7 +8,7 @@ use gpui_kit::test::{TestEventExt as _, TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{
     AppContext as _, ElementId, Entity, MouseButton, Pixels, Point, TestAppContext, VisualTestContext, point, px, size,
 };
-use studio_core::animation::{EASING_PRESETS, Easing, Vec2};
+use studio_core::animation::{Easing, Vec2};
 use studio_core::model::{Id, LayerContent};
 use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
 
@@ -184,17 +184,62 @@ fn dragging_a_keyframe_moves_it_in_time(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn flow_presets_apply_easing_to_selected_keyframes(cx: &mut TestAppContext) {
+fn the_graph_editor_applies_easing_families_to_selected_keyframes(cx: &mut TestAppContext) {
+    use studio_core::animation::{EASING_FAMILIES, EaseMode};
     let (workspace, visual) = open(cx);
     visual.update(|_, cx| {
         workspace.update(cx, |ws, _| ws.state.select_keyframe(KeyframeRef { layer: TITLE, path: OPACITY, frame: 24 }, false))
     });
     render(visual);
-    visual.update(|window, cx| window.click(ElementId::Name("tab:Effects:1".into()), cx));
+    visual.update(|window, cx| window.click("easings", cx));
     render(visual);
-    visual.update(|window, cx| window.click(("flow-preset", 2_usize), cx));
+    let easing = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.selection_easing());
+    // Expo, out form.
+    visual.update(|window, cx| window.click(ElementId::Name("easing:Expo:Out".into()), cx));
     render(visual);
-    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.selection_easing(), Some(Easing::Curve(EASING_PRESETS[2].1))));
+    let expo = EASING_FAMILIES.iter().find(|(name, _)| *name == "Expo").unwrap().1;
+    assert_eq!(easing(visual), Some(Easing::Curve(expo[1])));
+    // Bounce, both ends.
+    visual.update(|window, cx| window.click(ElementId::Name("easing:Bounce:Both".into()), cx));
+    render(visual);
+    assert_eq!(easing(visual), Some(Easing::Bounce(EaseMode::Both)));
+    // Linear and Hold rows.
+    visual.update(|window, cx| window.click(("easing-row", 1_usize), cx));
+    render(visual);
+    assert_eq!(easing(visual), Some(Easing::Hold));
+}
+
+#[gpui_kit::test]
+fn dragging_a_graph_handle_makes_a_custom_curve(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| {
+        workspace.update(cx, |ws, _| ws.state.select_keyframe(KeyframeRef { layer: TITLE, path: OPACITY, frame: 24 }, false))
+    });
+    render(visual);
+    visual.update(|window, cx| window.click("easings", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("easing:Quad:Both".into()), cx));
+    render(visual);
+    let handle = center_of(visual, ("graph-handle", 0_usize));
+    visual.update(|window, cx| window.drag(handle, point(handle.x + px(40.0), handle.y - px(60.0)), cx));
+    render(visual);
+    let Some(Easing::Curve(curve)) = visual.update(|_, cx| workspace.read(cx).state.selection_easing()) else { panic!("a curve") };
+    assert!(curve.x1 > 0.5 && curve.y1 > 0.2, "the first handle moved right and up: {curve:?}");
+}
+
+#[gpui_kit::test]
+fn clicking_away_closes_the_graph_editor(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("easings", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.graph_editor.is_some()));
+    let elsewhere = center_of(visual, "project-items");
+    visual.update(|window, cx| {
+        window.pointer_down(elsewhere, MouseButton::Left, cx);
+        window.pointer_up(elsewhere, MouseButton::Left, cx);
+    });
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.graph_editor.is_none()));
 }
 
 #[gpui_kit::test]

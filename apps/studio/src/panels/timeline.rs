@@ -687,7 +687,7 @@ fn graph_row(row: &TimelineRow, workspace: &Workspace, cx: &mut Context<Workspac
                 // Marker shapes follow After Effects: diamond for linear, hourglass for eased, square for hold.
                 let icon = match easing {
                     Easing::Linear => IconName::Diamond,
-                    Easing::Curve(_) => IconName::Hourglass,
+                    Easing::Curve(_) | Easing::Elastic(_) | Easing::Bounce(_) => IconName::Hourglass,
                     Easing::Hold => IconName::Square,
                 };
                 div()
@@ -945,6 +945,7 @@ fn controls(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                 .child(div().text_size(px(10.0)).text_color(hsla(color::MUTED)).child(format!("{:05} ({})", state.current_frame, rate.label()))),
         )
         .child(div().flex_1())
+        .child(super::graph_editor::button(workspace, cx))
         // The two views: Layers (After Effects) and Tracks (CapCut).
         .child(view_switch(workspace.ui.timeline.view, cx))
         .child(icon_button("snapping", IconName::Magnet, "Snapping (S)", state.snapping, cx.listener(|this, _, _, cx| {
@@ -1140,7 +1141,7 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
         }));
 
     let open_menu = ui.open_menu.as_ref().map(|open| deferred(anchored().position(open.position).child(open.menu.clone())).with_priority(1));
-    let body = body.children(open_menu);
+    let body = body.children(open_menu).children(super::graph_editor::popover(workspace, cx));
 
     let footer = div()
         .flex()

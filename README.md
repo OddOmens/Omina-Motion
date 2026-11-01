@@ -32,7 +32,10 @@ Inside `apps/studio/src`:
   per row, thumbnails and waveforms.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout.
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).
-- `project_files.rs`: Save, Save As, Open, and asking about unsaved changes before quitting or opening.
+- `project_files.rs`: Save, Save As, Open, asking about unsaved changes, reopening the last project, and the
+  recovery copy of unsaved work.
+- `app_settings.rs`: what Studio remembers between runs (last project, window placement, recovery copy).
+- `panels/graph_editor.rs`: the Easings popover: easing families (In / Out / Both) and a curve editor.
 - `panels/`: one module per panel. `panels/views.rs` wraps each panel in a cached GPUI view.
 - `assets.rs`: the bundled Lucide icons. Add any new `IconName` here; a test fails if one is missing.
 - `ui_tests.rs`: headless UI tests that click, drag and type into the real window offscreen.

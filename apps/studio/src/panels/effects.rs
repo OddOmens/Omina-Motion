@@ -33,11 +33,7 @@ impl Render for EffectDragPreview {
 }
 
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
-    let tabs = ["Effects & Presets", "Flow"];
-    if workspace.ui.tab(PanelId::Effects) == 1 {
-        let body = super::flow::body(workspace, cx);
-        return panel(PanelId::Effects, &tabs, None, body, workspace, cx);
-    }
+    let tabs = ["Effects & Presets"];
     let open = &workspace.ui.open_effect_categories;
     let mut list = div().id("effects-list").size_full().overflow_y_scroll().py_1();
     for (category_index, category) in CATEGORIES.iter().enumerate() {

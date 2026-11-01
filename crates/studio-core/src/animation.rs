@@ -96,6 +96,27 @@ impl CubicBezier {
     }
 }
 
+/// Which end of a segment an easing shapes: the start, the end, or both, as in the classic
+/// "ease in / ease out / ease in-out" families.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum EaseMode {
+    In,
+    Out,
+    Both,
+}
+
+impl EaseMode {
+    pub const ALL: [Self; 3] = [Self::In, Self::Out, Self::Both];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::In => "In",
+            Self::Out => "Out",
+            Self::Both => "Both",
+        }
+    }
+}
+
 /// How a segment moves from one keyframe to the next.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Easing {
@@ -103,6 +124,10 @@ pub enum Easing {
     /// Keeps the first keyframe's value until the next keyframe, then jumps.
     Hold,
     Curve(CubicBezier),
+    /// Overshoots and springs back, settling at the end (or winding up at the start).
+    Elastic(EaseMode),
+    /// Bounces against the end value like a dropped ball (or off the start).
+    Bounce(EaseMode),
 }
 
 impl Easing {
@@ -111,9 +136,64 @@ impl Easing {
             Self::Linear => t,
             Self::Hold => 0.0,
             Self::Curve(curve) => curve.ease(t),
+            Self::Elastic(mode) => shaped(mode, t, elastic_out),
+            Self::Bounce(mode) => shaped(mode, t, bounce_out),
         }
     }
 }
+
+/// An easing from its "out" form: "in" is the same played backwards, "both" is "in" for the
+/// first half and "out" for the second.
+fn shaped(mode: EaseMode, t: f32, out: fn(f32) -> f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    match mode {
+        EaseMode::Out => out(t),
+        EaseMode::In => 1.0 - out(1.0 - t),
+        EaseMode::Both if t < 0.5 => (1.0 - out(1.0 - 2.0 * t)) * 0.5,
+        EaseMode::Both => (1.0 + out(2.0 * t - 1.0)) * 0.5,
+    }
+}
+
+/// The standard elastic ease-out: a decaying oscillation around the end value.
+fn elastic_out(t: f32) -> f32 {
+    if t <= 0.0 || t >= 1.0 {
+        return t.clamp(0.0, 1.0);
+    }
+    let period = std::f32::consts::TAU / 3.0;
+    2f32.powf(-10.0 * t) * ((t * 10.0 - 0.75) * period).sin() + 1.0
+}
+
+/// The standard bounce ease-out: four parabolic bounces of shrinking height.
+fn bounce_out(t: f32) -> f32 {
+    const N: f32 = 7.5625;
+    const D: f32 = 2.75;
+    if t < 1.0 / D {
+        N * t * t
+    } else if t < 2.0 / D {
+        let t = t - 1.5 / D;
+        N * t * t + 0.75
+    } else if t < 2.5 / D {
+        let t = t - 2.25 / D;
+        N * t * t + 0.9375
+    } else {
+        let t = t - 2.625 / D;
+        N * t * t + 0.984_375
+    }
+}
+
+/// The classic easing families as curves, for the graph editor: each with its In, Out and
+/// Both (in-out) forms. Elastic and Bounce, which a single curve can't draw, are `Easing`
+/// variants of their own.
+pub const EASING_FAMILIES: &[(&str, [CubicBezier; 3])] = &[
+    ("Quad", [CubicBezier::new(0.11, 0.0, 0.5, 0.0), CubicBezier::new(0.5, 1.0, 0.89, 1.0), CubicBezier::new(0.45, 0.0, 0.55, 1.0)]),
+    ("Cubic", [CubicBezier::new(0.32, 0.0, 0.67, 0.0), CubicBezier::new(0.33, 1.0, 0.68, 1.0), CubicBezier::new(0.65, 0.0, 0.35, 1.0)]),
+    ("Quart", [CubicBezier::new(0.5, 0.0, 0.75, 0.0), CubicBezier::new(0.25, 1.0, 0.5, 1.0), CubicBezier::new(0.76, 0.0, 0.24, 1.0)]),
+    ("Quint", [CubicBezier::new(0.64, 0.0, 0.78, 0.0), CubicBezier::new(0.22, 1.0, 0.36, 1.0), CubicBezier::new(0.83, 0.0, 0.17, 1.0)]),
+    ("Sine", [CubicBezier::new(0.12, 0.0, 0.39, 0.0), CubicBezier::new(0.61, 1.0, 0.88, 1.0), CubicBezier::new(0.37, 0.0, 0.63, 1.0)]),
+    ("Expo", [CubicBezier::new(0.7, 0.0, 0.84, 0.0), CubicBezier::new(0.16, 1.0, 0.3, 1.0), CubicBezier::new(0.87, 0.0, 0.13, 1.0)]),
+    ("Circ", [CubicBezier::new(0.55, 0.0, 1.0, 0.45), CubicBezier::new(0.0, 0.55, 0.45, 1.0), CubicBezier::new(0.85, 0.0, 0.15, 1.0)]),
+    ("Back", [CubicBezier::new(0.36, 0.0, 0.66, -0.56), CubicBezier::new(0.34, 1.56, 0.64, 1.0), CubicBezier::new(0.68, -0.6, 0.32, 1.6)]),
+];
 
 /// After Effects' Easy Ease (F9): a symmetric slow-in, slow-out curve.
 pub const EASY_EASE: CubicBezier = CubicBezier::new(0.33, 0.0, 0.67, 1.0);
@@ -338,6 +418,48 @@ impl<T: Lerp> Animated<T> {
     /// The nearest keyframe frame after `frame`, if any.
     pub fn next_keyframe(&self, frame: i64) -> Option<i64> {
         self.keyframes.iter().map(|keyframe| keyframe.frame).find(|&candidate| candidate > frame)
+    }
+}
+
+#[cfg(test)]
+mod easing_family_tests {
+    use super::*;
+
+    #[test]
+    fn elastic_and_bounce_start_and_end_on_their_keyframes() {
+        for mode in EaseMode::ALL {
+            for easing in [Easing::Elastic(mode), Easing::Bounce(mode)] {
+                assert!(easing.apply(0.0).abs() < 1e-4, "{easing:?} starts at 0");
+                assert!((easing.apply(1.0) - 1.0).abs() < 1e-4, "{easing:?} ends at 1");
+            }
+        }
+        // Both forms pass through the middle.
+        assert!((Easing::Bounce(EaseMode::Both).apply(0.5) - 0.5).abs() < 1e-4);
+        assert!((Easing::Elastic(EaseMode::Both).apply(0.5) - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn elastic_overshoots_and_bounce_stays_inside() {
+        let samples = |easing: Easing| (0..=200).map(move |i| easing.apply(i as f32 / 200.0));
+        assert!(samples(Easing::Elastic(EaseMode::Out)).any(|v| v > 1.01), "elastic springs past the end");
+        assert!(samples(Easing::Bounce(EaseMode::Out)).all(|v| (-1e-4..=1.0001).contains(&v)), "bounce never passes the end");
+    }
+
+    #[test]
+    fn in_is_out_played_backwards() {
+        for t in [0.1_f32, 0.3, 0.7, 0.9] {
+            let (ease_in, ease_out) = (Easing::Bounce(EaseMode::In).apply(t), Easing::Bounce(EaseMode::Out).apply(1.0 - t));
+            assert!((ease_in - (1.0 - ease_out)).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn every_family_runs_from_start_to_end() {
+        for (name, curves) in EASING_FAMILIES {
+            for curve in curves {
+                assert!(curve.ease(0.0).abs() < 1e-3 && (curve.ease(1.0) - 1.0).abs() < 1e-3, "{name} {curve:?}");
+            }
+        }
     }
 }
 
