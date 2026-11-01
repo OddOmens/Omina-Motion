@@ -177,7 +177,7 @@ fn layer_frames(layer: &crate::model::Layer) -> Vec<i64> {
 }
 
 /// Checks what the editor relies on, so a hand-edited or damaged file cannot crash it.
-fn check(project: &Project) -> Result<(), String> {
+pub(crate) fn check(project: &Project) -> Result<(), String> {
     use crate::model::MAX_FRAME;
     let damaged = |what: &str| Err(format!("The project file is damaged: {what}."));
     if project.compositions.is_empty() {
@@ -224,6 +224,11 @@ fn check(project: &Project) -> Result<(), String> {
             }
             if layer.id.0 > MAX_ID || layer.effects.iter().any(|effect| effect.id.0 > MAX_ID) {
                 return damaged(&format!("layer \"{}\" has an id too large to use", layer.name));
+            }
+            if let crate::model::LayerContent::Shape { style } = &layer.content
+                && !(style.corner_radius.is_finite() && style.corner_radius >= 0.0 && (3..=crate::model::MAX_SHAPE_POINTS).contains(&style.points))
+            {
+                return damaged(&format!("shape layer \"{}\" has impossible corners or points", layer.name));
             }
             // Parents must exist in the same composition and never loop back.
             if let Some(parent) = layer.parent

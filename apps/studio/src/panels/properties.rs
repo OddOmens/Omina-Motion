@@ -12,12 +12,12 @@ use gpui_kit::{
     AnyElement, App, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px, rgba,
 };
-use studio_core::model::{BlendMode, Id, Layer, LayerContent, Rgba, TextAlign, TextStyle, TrackMatte};
+use studio_core::model::{BlendMode, Id, Layer, LayerContent, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 
 use super::chrome::{divider, hint, icon_button, panel, section};
 use super::fields::{FieldTarget, property_row, value_field};
-use crate::state::{Switch, TextSetting};
+use crate::state::{ShapeSetting, Switch, TextSetting};
 use crate::theme::{color, hsla};
 use crate::workspace::{EditTarget, PanelId, Workspace};
 
@@ -301,6 +301,26 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
         )
 }
 
+/// A shape layer's settings: which shape, its fill, and (where it has them) rounded corners
+/// and the number of sides or points.
+fn shape_section(layer: &Layer, style: &ShapeStyle, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let weak = cx.weak_entity();
+    let kinds = ShapeKind::ALL.iter().map(|&kind| (kind.name().to_owned(), kind == style.kind, kind)).collect();
+    let fill = style.fill;
+    let swatches = SWATCHES.iter().map(|(name, hex)| ((*name).to_owned(), fill.to_rgba_u32() == Rgba::hex(*hex).to_rgba_u32(), Rgba::hex(*hex))).collect();
+    let swatch = div().size(px(18.0)).flex_none().rounded(px(4.0)).border_1().border_color(hsla(color::HAIRLINE)).bg(rgba(fill.to_rgba_u32()));
+    let field = |setting: ShapeSetting, cx: &mut Context<Workspace>| value_field(FieldTarget::Shape { layer: id, setting }, workspace, cx);
+    let points_label = if style.kind == ShapeKind::Star { "Points" } else { "Sides" };
+    div()
+        .child(divider())
+        .child(section("Shape", None))
+        .child(labeled_row("Shape", choice_menu("shape-kind", style.kind.name().to_owned(), kinds, move |this, kind| this.state.set_shape_kind(id, kind), weak.clone())))
+        .child(labeled_row("Fill", div().flex().items_center().gap_2().child(swatch).child(div().flex_1().child(choice_menu("shape-fill", "Color".into(), swatches, move |this, color| this.state.set_shape_fill(id, color), weak)))))
+        .when(style.kind.has_corners(), |section| section.child(labeled_row("Corner Radius", field(ShapeSetting::CornerRadius, cx))))
+        .when(style.kind.has_points(), |section| section.child(labeled_row(points_label, field(ShapeSetting::Points, cx))))
+}
+
 fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let composition = workspace.state.composition();
     let selected: Vec<&Layer> = workspace.state.selected_layers.iter().filter_map(|id| composition.layer(*id)).collect();
@@ -315,6 +335,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
     };
     let text = match &layer.content {
         LayerContent::Text { text, style } => Some(text_section(layer, text, style, workspace, cx)),
+        LayerContent::Shape { style } => Some(shape_section(layer, style, workspace, cx)),
         _ => None,
     };
     // Tell the user when an edit will change several keyframes at once.

@@ -4,8 +4,8 @@
 use crate::animation::Vec2;
 use crate::transform::Affine;
 use crate::model::{
-    BlendMode, Composition, Id, Layer, LayerContent, LayerSwitches, Project, ProjectItem, ProjectItemKind, Rgba,
-    TextStyle, TrackMatte, Transform,
+    BlendMode, Composition, Id, Layer, LayerContent, LayerSwitches, MAX_SHAPE_POINTS, Project, ProjectItem, ProjectItemKind,
+    Rgba, ShapeStyle, TextStyle, TrackMatte, Transform,
 };
 use crate::time::FrameRate;
 
@@ -273,26 +273,42 @@ pub fn apply_composition_settings(project: &mut Project, id: Id, settings: &Comp
 
 /// Adds a text layer at the top of the stack, centered on `position` and starting at `in_frame`.
 pub fn add_text_layer(project: &mut Project, comp_id: Id, text: &str, position: Vec2, in_frame: i64) -> Option<Id> {
-    let id = project.allocate_id();
-    let composition = project.composition_mut(comp_id)?;
     let style = TextStyle::default();
     let size = style.estimate_size(text);
-    let mut transform = Transform::centered(size, position);
-    // Text layers anchor at the center of their text box so they scale and rotate in place.
-    transform.anchor_point = crate::animation::Animated::constant(size * 0.5);
-    // On a new track above everything, as the top layer.
+    let name: String = text.lines().next().unwrap_or("Text").chars().take(40).collect();
+    add_top_layer(project, comp_id, name, LayerContent::Text { text: text.to_owned(), style }, size, position, in_frame)
+}
+
+/// Adds a shape layer of `size` at the top of the stack, centered on `position` and starting at
+/// `in_frame`. Its name is the shape's, numbered after any shape layers already named that way.
+pub fn add_shape_layer(project: &mut Project, comp_id: Id, style: ShapeStyle, size: Vec2, position: Vec2, in_frame: i64) -> Option<Id> {
+    let base = style.kind.name();
+    let taken = project.composition(comp_id)?.layers.iter().filter(|layer| layer.name.starts_with(base)).count();
+    let name = format!("{base} {}", taken + 1);
+    let size = Vec2::new(size.x.max(1.0), size.y.max(1.0));
+    add_top_layer(project, comp_id, name, LayerContent::Shape { style }, size, position, in_frame)
+}
+
+/// Adds a layer showing `content` at the top of the stack, on a new track above everything,
+/// centered on `position` and running from `in_frame` to the end of the composition.
+fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: LayerContent, size: Vec2, position: Vec2, in_frame: i64) -> Option<Id> {
+    let id = project.allocate_id();
+    let composition = project.composition_mut(comp_id)?;
+    // Anchored at the center of the box, so the layer scales and rotates in place.
+    let transform = Transform::centered(size, position);
     let track = crate::tracks::make_room_at(composition, 0, false);
+    let in_frame = in_frame.clamp(0, composition.duration_frames - 1);
     composition.layers.insert(
         0,
         Layer {
             id,
-            name: text.lines().next().unwrap_or("Text").chars().take(40).collect(),
+            name,
             label: crate::model::LabelColor::Red,
-            content: LayerContent::Text { text: text.to_owned(), style },
+            content,
             size,
-            in_frame: in_frame.clamp(0, composition.duration_frames - 1),
+            in_frame,
             out_frame: composition.duration_frames,
-            start_frame: in_frame.clamp(0, composition.duration_frames - 1),
+            start_frame: in_frame,
             track,
             blend_mode: BlendMode::Normal,
             track_matte: TrackMatte::None,
@@ -305,6 +321,20 @@ pub fn add_text_layer(project: &mut Project, comp_id: Id, text: &str, position: 
     );
     crate::tracks::normalize(composition);
     Some(id)
+}
+
+/// Changes a shape layer's style with `edit`, keeping the values in range: corner radius from
+/// 0 to half the shorter side, and 3 to `MAX_SHAPE_POINTS` sides or points. Returns whether
+/// the layer is a shape.
+pub fn edit_shape(composition: &mut Composition, layer_id: Id, edit: impl FnOnce(&mut ShapeStyle)) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    let size = layer.size;
+    let LayerContent::Shape { style } = &mut layer.content else { return false };
+    edit(style);
+    let radius = if style.corner_radius.is_finite() { style.corner_radius } else { 0.0 };
+    style.corner_radius = radius.clamp(0.0, ShapeStyle::max_corner_radius(size));
+    style.points = style.points.clamp(3, MAX_SHAPE_POINTS);
+    true
 }
 
 /// Adds an image file to the project as an Image item of `size` pixels. Returns its id.

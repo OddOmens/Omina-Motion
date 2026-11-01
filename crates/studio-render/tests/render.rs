@@ -3,8 +3,8 @@
 use studio_core::animation::{Animated, Vec2};
 use studio_core::effects;
 use studio_core::model::{
-    BlendMode, Composition, Id, LabelColor, Layer, LayerContent, LayerSwitches, Project, Rgba, TextStyle, TrackMatte,
-    Transform,
+    BlendMode, Composition, Id, LabelColor, Layer, LayerContent, LayerSwitches, Project, Rgba, ShapeKind, ShapeStyle, TextStyle,
+    TrackMatte, Transform,
 };
 use studio_core::sample::{ids, sample_project};
 use studio_core::time::FrameRate;
@@ -252,6 +252,55 @@ fn every_rendered_effect_is_fast_at_1080p() {
         }
     }
     assert!(slow.is_empty(), "too slow for playback at 1080p: {slow:?}");
+}
+
+/// An 80 × 80 white shape in the middle of the frame, over black.
+fn shape_frame(kind: ShapeKind, corner_radius: f32) -> studio_render::RenderedFrame {
+    let mut layer = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
+    layer.content = LayerContent::Shape { style: ShapeStyle { fill: Rgba::hex(0xffffff), corner_radius, ..ShapeStyle::new(kind) } };
+    render(&project(vec![layer]))
+}
+
+#[test]
+fn shapes_fill_their_outline() {
+    let lit = |frame: &studio_render::RenderedFrame, x, y| pixel(frame, x, y)[0] > 200;
+    let dark = |frame: &studio_render::RenderedFrame, x, y| pixel(frame, x, y)[0] < 40;
+    // The box runs from 10 to 90 on both axes.
+    let rectangle = shape_frame(ShapeKind::Rectangle, 0.0);
+    assert!(lit(&rectangle, 50, 50) && lit(&rectangle, 12, 12), "a plain rectangle fills its corners");
+    assert!(dark(&rectangle, 5, 5), "and nothing outside");
+    let ellipse = shape_frame(ShapeKind::Ellipse, 0.0);
+    assert!(lit(&ellipse, 50, 50) && lit(&ellipse, 50, 12) && dark(&ellipse, 14, 14), "an ellipse leaves the corners empty");
+    let triangle = shape_frame(ShapeKind::Triangle, 0.0);
+    assert!(lit(&triangle, 50, 80) && lit(&triangle, 14, 87) && dark(&triangle, 14, 14) && dark(&triangle, 86, 14), "a triangle points up");
+    for kind in [ShapeKind::Polygon, ShapeKind::Star] {
+        let frame = shape_frame(kind, 0.0);
+        assert!(lit(&frame, 50, 50) && dark(&frame, 12, 12), "{kind:?} is filled in the middle only");
+    }
+    // A star's notches are empty where a polygon of the same size is filled.
+    let (polygon, star) = (shape_frame(ShapeKind::Polygon, 0.0), shape_frame(ShapeKind::Star, 0.0));
+    let filled = |frame: &studio_render::RenderedFrame| (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).filter(|&(x, y)| pixel(frame, x, y)[0] > 128).count();
+    assert!(filled(&star) < filled(&polygon) * 3 / 4, "the star is notched: {} vs {}", filled(&star), filled(&polygon));
+}
+
+#[test]
+fn corner_radius_rounds_every_shape_but_the_ellipse() {
+    let rounded = shape_frame(ShapeKind::Rectangle, 30.0);
+    assert!(pixel(&rounded, 12, 12)[0] < 40, "the corner is cut away");
+    assert!(pixel(&rounded, 50, 12)[0] > 200, "the straight edge is not");
+    let coverage = |frame: &studio_render::RenderedFrame| (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).map(|(x, y)| u32::from(pixel(frame, x, y)[0])).sum::<u32>();
+    for kind in [ShapeKind::Triangle, ShapeKind::Polygon] {
+        let (sharp, soft) = (shape_frame(kind, 0.0), shape_frame(kind, 12.0));
+        assert!(coverage(&soft) < coverage(&sharp), "rounding {kind:?} trims its corners");
+        assert!(coverage(&soft) > coverage(&sharp) / 2, "without shrinking {kind:?} away");
+    }
+    // A star's points are rounded off, reaching as far but blunter: more of the rows just under
+    // the top point are filled.
+    let (sharp, soft) = (shape_frame(ShapeKind::Star, 0.0), shape_frame(ShapeKind::Star, 12.0));
+    let tip = |frame: &studio_render::RenderedFrame| (10..18).flat_map(|y| (30..70).map(move |x| (x, y))).map(|(x, y)| u32::from(pixel(frame, x, y)[0])).sum::<u32>();
+    assert!(tip(&soft) > tip(&sharp), "the top point is blunter: {} vs {}", tip(&soft), tip(&sharp));
+    assert!(pixel(&soft, 50, 8)[0] < 40, "and reaches no further than the box");
+    assert_eq!(shape_frame(ShapeKind::Ellipse, 30.0).bgra, shape_frame(ShapeKind::Ellipse, 0.0).bgra, "an ellipse has no corners");
 }
 
 #[test]
@@ -536,4 +585,29 @@ fn an_image_changed_on_disk_is_shown_as_it_is_now() {
     file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(1)).unwrap();
     assert!(close(draw(&mut renderer), [0, 0, 255]), "the edit shows");
     std::fs::remove_file(&path).unwrap();
+}
+
+/// Saves every shape, sharp and rounded, to `SHAPE_SHEET` as a PNG for a visual check.
+/// Run with `SHAPE_SHEET=/path/shapes.png cargo test -p studio-render --test render shape_sheet -- --ignored`.
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn shape_sheet() {
+    let path = std::env::var("SHAPE_SHEET").expect("set SHAPE_SHEET to the PNG to write");
+    let (cell, gap) = (200.0, 20.0);
+    let mut layers = Vec::new();
+    for (row, radius) in [0.0, 30.0].into_iter().enumerate() {
+        for (column, kind) in ShapeKind::ALL.into_iter().enumerate() {
+            let center = Vec2::new(gap + cell * 0.5 + column as f32 * (cell + gap), gap + cell * 0.5 + row as f32 * (cell + gap));
+            let mut layer = solid((10 + row * 5 + column) as u64, 0, Vec2::new(cell, cell * if column == 0 { 0.7 } else { 1.0 }), center);
+            layer.content = LayerContent::Shape { style: ShapeStyle { fill: Rgba::hex(0x8b5cf6), corner_radius: radius, ..ShapeStyle::new(kind) } };
+            layers.push(layer);
+        }
+    }
+    let (width, height) = (5 * 220 + 20, 2 * 220 + 20);
+    let mut scene = project(layers);
+    (scene.compositions[0].width, scene.compositions[0].height) = (width, height);
+    let mut renderer = Renderer::new().unwrap();
+    let frame = renderer.render(&scene, Id(1), 0, width, height, &studio_core::media::NoVideo).unwrap();
+    let rgba: Vec<u8> = frame.bgra.chunks(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+    image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8).unwrap();
 }

@@ -34,6 +34,11 @@ actions!(studio, [
     EasyEase,
     SelectionTool,
     TypeTool,
+    ShapeTool,
+    CutTool,
+    Copy,
+    Paste,
+    Duplicate,
     CompositionSettings,
     NewComposition,
     Import,
@@ -72,6 +77,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f9", EasyEase, Some(NOT_TYPING)),
         KeyBinding::new("v", SelectionTool, Some(NOT_TYPING)),
         KeyBinding::new("cmd-t", TypeTool, Some(KEY_CONTEXT)),
+        KeyBinding::new("q", ShapeTool, Some(NOT_TYPING)),
+        KeyBinding::new("c", CutTool, Some(NOT_TYPING)),
+        // Outside text fields, so copying and pasting text in a field still works.
+        KeyBinding::new("cmd-c", Copy, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-v", Paste, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-d", Duplicate, Some(NOT_TYPING)),
         KeyBinding::new("cmd-k", CompositionSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-n", NewComposition, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-i", Import, Some(KEY_CONTEXT)),
@@ -118,6 +129,10 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Undo", Undo),
             MenuItem::action("Redo", Redo),
             MenuItem::separator(),
+            MenuItem::action("Copy", Copy),
+            MenuItem::action("Paste", Paste),
+            MenuItem::action("Duplicate", Duplicate),
+            MenuItem::separator(),
             MenuItem::action("Trim In Point to Playhead", TrimInToPlayhead),
             MenuItem::action("Trim Out Point to Playhead", TrimOutToPlayhead),
             MenuItem::action("Split Layer", SplitLayer),
@@ -151,11 +166,16 @@ pub enum PanelId {
     Align,
 }
 
-/// Toolbar tools that work today. The rest of the palette is shown disabled.
+/// The editing tools on the rail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     Selection,
+    /// Click in the viewer to type a new text layer.
     Type,
+    /// Drag in the viewer to draw a shape layer (the kind is `UiState::shape_kind`).
+    Shape,
+    /// Click a clip in the timeline to split it there, like Premiere's Razor tool.
+    Cut,
 }
 
 /// Drag payloads. GPUI routes drops by type, so each kind of drag has its own type.
@@ -190,6 +210,12 @@ pub struct UiState {
     /// What the panel beside the rail shows.
     pub left_panel: LeftPanel,
     pub tool: Tool,
+    /// The shape the Shape tool draws, picked from the rail's shape menu.
+    pub shape_kind: studio_core::model::ShapeKind,
+    /// Whether the rail's shape menu is open (press and hold the Shape button).
+    pub shape_menu: bool,
+    /// Whether the Shape button is held down, so a long press can open the menu.
+    pub shape_press: bool,
     /// Active tab index for panels with tabs.
     pub tabs: HashMap<PanelId, usize>,
     pub collapsed_folders: HashSet<Id>,
@@ -215,6 +241,8 @@ pub struct UiState {
     /// The Export dialog's choices, and the export running now, if any.
     pub export_choice: panels::export::ExportChoice,
     pub export_job: Option<panels::export::ExportJob>,
+    /// Keeps the open dialog's field links alive (Composition Settings' locked aspect ratio).
+    pub dialog_subscriptions: Vec<Subscription>,
     /// Set when the user chose to quit while exporting: quit once the export has stopped.
     pub quit_after_export: bool,
 }
@@ -374,6 +402,9 @@ impl Workspace {
                 active_panel: PanelId::Timeline,
                 left_panel: LeftPanel::Media,
                 tool: Tool::Selection,
+                shape_kind: studio_core::model::ShapeKind::Rectangle,
+                shape_menu: false,
+                shape_press: false,
                 tabs: HashMap::new(),
                 collapsed_folders: HashSet::new(),
                 closed_effect_categories: HashSet::new(),
@@ -389,6 +420,7 @@ impl Workspace {
                 window_title: String::new(),
                 export_choice: Default::default(),
                 export_job: None,
+                dialog_subscriptions: Vec::new(),
                 quit_after_export: false,
             },
             focus,
@@ -660,6 +692,28 @@ impl Render for Workspace {
                 this.ui.tool = Tool::Type;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ShapeTool, _, cx| {
+                this.ui.tool = Tool::Shape;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CutTool, _, cx| {
+                this.ui.tool = Tool::Cut;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Copy, _, cx| {
+                this.state.copy_selection();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Paste, _, cx| {
+                if !this.state.paste().is_empty() {
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Duplicate, _, cx| {
+                if !this.state.duplicate_selection().is_empty() {
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &CompositionSettings, window, cx| {
                 panels::composition_settings::open(this, false, window, cx);
             }))
@@ -704,6 +758,7 @@ impl Render for Workspace {
                 this.state.clear_snap_line();
                 this.ui.field_anchor = None;
                 this.ui.viewer_anchor = None;
+                this.ui.shape_press = false;
                 // Redraw so the finished drag is recorded as one undo step right away, rather
                 // than merging with whatever edit comes next.
                 cx.notify();

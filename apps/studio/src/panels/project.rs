@@ -170,7 +170,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                     .gap_1p5()
                     .pl(px(8.0 + depth as f32 * 14.0))
                     .child(twirl)
-                    .child(Icon::new(kind_icon(item.kind)).size(px(14.0)).text_color(hsla(color::MUTED)))
+                    // An expanded folder shows as open, as in Finder.
+                    .child(Icon::new(if is_folder && is_open { IconName::FolderOpen } else { kind_icon(item.kind) }).size(px(14.0)).text_color(hsla(color::MUTED)))
                     .child(div().truncate().child(item.name.clone())),
             )
             .child(div().w(px(96.0)).pl_2().text_color(hsla(color::MUTED)).child(type_label(item, workspace)));

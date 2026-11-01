@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use studio_core::animation::Vec2;
 use studio_core::media::{VideoFrame, VideoSource};
-use studio_core::model::{Id, Layer, LayerContent, Project, Rgba, TextStyle};
+use studio_core::model::{Id, Layer, LayerContent, Project, Rgba, ShapeKind, ShapeStyle, TextStyle};
 use studio_core::transform::{Affine, world_transform};
 use wgpu::util::DeviceExt as _;
 
@@ -98,6 +98,19 @@ enum Source<'a> {
     Texture(&'a wgpu::TextureView),
     /// Media that is not decoded yet: a checker in this premultiplied linear color.
     Placeholder([f32; 4]),
+    /// A shape filling the layer's box, in a premultiplied linear color.
+    Shape([f32; 4], ShapeStyle),
+}
+
+/// The shape number `layer.wgsl` expects for each kind.
+fn shape_code(kind: ShapeKind) -> f32 {
+    match kind {
+        ShapeKind::Rectangle => 0.0,
+        ShapeKind::Ellipse => 1.0,
+        ShapeKind::Triangle => 2.0,
+        ShapeKind::Polygon => 3.0,
+        ShapeKind::Star => 4.0,
+    }
 }
 
 pub struct Renderer {
@@ -412,16 +425,22 @@ impl Renderer {
             Source::Solid(color) => (0.0, *color, &self.blank, 0.0),
             Source::Texture(view) => (1.0, [0.0; 4], *view, 0.0),
             Source::Placeholder(color) => (2.0, *color, &self.blank, 40.0),
+            Source::Shape(color, _) => (3.0, *color, &self.blank, 0.0),
+        };
+        let shape = match source {
+            Source::Shape(_, style) => [shape_code(style.kind), style.corner_radius, style.points as f32, 0.0],
+            _ => [0.0; 4],
         };
         let (origin, size) = rect;
         // Source pixels → composition pixels → output pixels → clip space (y up).
         let to_clip = Affine { a: 2.0 * scale / width, b: 0.0, c: 0.0, d: -2.0 * scale / height, tx: -1.0, ty: 1.0 };
         let matrix = Affine::translate(origin).then(world).then(to_clip);
-        let uniform: [f32; 16] = [
+        let uniform: [f32; 20] = [
             matrix.a, matrix.b, matrix.c, matrix.d, //
             matrix.tx, matrix.ty, size.x, size.y, //
             color[0], color[1], color[2], color[3], //
-            mode, cell, 0.0, 0.0,
+            mode, cell, 0.0, 0.0, //
+            shape[0], shape[1], shape[2], shape[3],
         ];
         let buffer = self.uniform(bytemuck::cast_slice(&uniform));
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -805,6 +824,9 @@ impl Renderer {
         let full = (Vec2::default(), layer.size);
         match &layer.content {
             LayerContent::Solid { color } => self.draw_source(encoder, targets, target, world, scale, &Source::Solid(linear(*color)), full),
+            LayerContent::Shape { style } => {
+                self.draw_source(encoder, targets, target, world, scale, &Source::Shape(linear(style.fill), *style), full);
+            }
             LayerContent::Text { .. } => {
                 if let Some((key, measured, pad)) = text_keys.get(&layer.id) {
                     let texture = &self.text_cache[key];

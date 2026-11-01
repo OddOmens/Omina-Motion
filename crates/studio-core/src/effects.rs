@@ -141,12 +141,12 @@ pub fn category_of(name: &str) -> Option<&'static EffectCategory> {
 }
 
 /// Whether effects in `category` are useful on a layer showing `content`. Audio has no picture
-/// at all. Text and solids are flat colours you set directly, so colour correction is pointless
-/// on them, and they have no background to key out.
+/// at all. Text, shapes and solids are flat colours you set directly, so colour correction is
+/// pointless on them, and they have no background to key out.
 pub fn suits(category: &EffectCategory, content: &LayerContent) -> bool {
     match content {
         LayerContent::Audio { .. } => false,
-        LayerContent::Text { .. } | LayerContent::Solid { .. } => !matches!(category.name, "Color Correction" | "Keying"),
+        LayerContent::Text { .. } | LayerContent::Shape { .. } | LayerContent::Solid { .. } => !matches!(category.name, "Color Correction" | "Keying"),
         LayerContent::Footage { .. } | LayerContent::Image { .. } | LayerContent::Composition { .. } | LayerContent::Adjustment => true,
     }
 }

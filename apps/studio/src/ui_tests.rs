@@ -323,7 +323,9 @@ fn new_composition_dialog_makes_a_custom_size_comp(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-n", cx));
     render(visual);
-    click_label(visual, "Vertical 9:16");
+    visual.update(|window, cx| window.click("comp-preset", cx));
+    render(visual);
+    click_label(visual, "Social Vertical 9:16 · 1080×1920 · 30 fps");
     render(visual);
     click_label(visual, "OK");
     render(visual);
@@ -413,13 +415,22 @@ fn the_new_composition_button_opens_the_dialog(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.click("new-comp", cx));
     render(visual);
-    click_label(visual, "Square 1:1");
+    visual.update(|window, cx| window.click("comp-preset", cx));
+    render(visual);
+    click_label(visual, "Social Square 1:1 · 1080×1080 · 30 fps");
+    render(visual);
+    // The background menu sets the new composition's background.
+    visual.update(|window, cx| window.click("comp-background", cx));
+    render(visual);
+    click_label(visual, "Midnight Blue");
     render(visual);
     click_label(visual, "OK");
     render(visual);
     visual.update(|_, cx| {
         let comp = workspace.read(cx).state.composition();
         assert_eq!((comp.width, comp.height), (1080, 1080));
+        assert_eq!(comp.frame_rate, studio_core::time::FrameRate::new(30, 1));
+        assert_eq!(comp.background.to_rgba_u32(), studio_core::model::Rgba::hex(0x0d1b2a).to_rgba_u32());
     });
 }
 
@@ -1397,4 +1408,106 @@ fn the_rail_switches_the_side_panel(cx: &mut TestAppContext) {
     visual.update(|window, cx| window.click("rail-media", cx));
     render(visual);
     assert!(visual.update(|window, _| window.try_find("effect:Gaussian Blur")).is_none(), "the Media panel replaced it");
+}
+
+// Shapes, Cut and the clipboard -----------------------------------------------------------------
+
+#[gpui_kit::test]
+fn holding_the_shape_button_opens_the_shape_menu(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let button = center_of(visual, "tool-shape");
+    visual.simulate_mouse_down(button, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::default());
+    visual.executor().advance_clock(crate::panels::toolbar::HOLD_FOR_MENU * 2);
+    visual.run_until_parked();
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.shape_menu, "held long enough, the menu opens"));
+    visual.simulate_mouse_up(button, gpui_kit::MouseButton::Left, gpui_kit::Modifiers::default());
+    render(visual);
+    visual.update(|window, cx| window.click(("shape-kind", 4usize), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ui = &workspace.read(cx).ui;
+        assert_eq!((ui.tool, ui.shape_kind, ui.shape_menu), (crate::workspace::Tool::Shape, studio_core::model::ShapeKind::Star, false));
+    });
+}
+
+#[gpui_kit::test]
+fn a_quick_click_on_the_shape_button_only_picks_the_tool(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("tool-shape", cx));
+    visual.executor().advance_clock(crate::panels::toolbar::HOLD_FOR_MENU * 2);
+    visual.run_until_parked();
+    render(visual);
+    visual.update(|_, cx| {
+        let ui = &workspace.read(cx).ui;
+        assert_eq!(ui.tool, crate::workspace::Tool::Shape);
+        assert!(!ui.shape_menu, "released before the hold time");
+    });
+}
+
+#[gpui_kit::test]
+fn dragging_in_the_viewer_with_the_shape_tool_draws_a_shape(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("q", cx));
+    let from = screen_point(&workspace, visual, Vec2::new(400.0, 300.0));
+    let to = screen_point(&workspace, visual, Vec2::new(800.0, 500.0));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+    let (size, content) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let layer = state.composition().layer(state.selected_layers[0]).unwrap();
+        (layer.size, layer.content.clone())
+    });
+    assert!(matches!(content, LayerContent::Shape { .. }));
+    assert!((size.x - 400.0).abs() < 4.0 && (size.y - 200.0).abs() < 4.0, "drawn 400 × 200: {size:?}");
+    // Its settings show in Properties: a rectangle has corners to round.
+    assert!(visual.update(|window, _| window.try_find("shape-kind")).is_some());
+}
+
+#[gpui_kit::test]
+fn the_cut_tool_splits_the_clicked_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.snapping = false));
+    visual.update(|window, cx| window.click("tool-cut", cx));
+    render(visual);
+    let count = layer_ids(&workspace, visual).len();
+    visual.update(|window, cx| window.click(("clip", TITLE.0 as usize), cx));
+    render(visual);
+    assert_eq!(layer_ids(&workspace, visual).len(), count + 1, "one clip became two");
+    let (_, _, out_frame) = layer_timing(&workspace, visual, TITLE);
+    assert!(out_frame < 168, "the title now ends where it was clicked: {out_frame}");
+}
+
+#[gpui_kit::test]
+fn cmd_c_cmd_v_and_cmd_d_copy_paste_and_duplicate(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    let count = layer_ids(&workspace, visual).len();
+    visual.update(|window, cx| window.press("cmd-d", cx));
+    render(visual);
+    assert_eq!(layer_ids(&workspace, visual).len(), count + 1, "duplicated");
+    visual.update(|window, cx| window.press("cmd-c", cx));
+    visual.update(|window, cx| window.press("cmd-v", cx));
+    render(visual);
+    assert_eq!(layer_ids(&workspace, visual).len(), count + 2, "pasted");
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(layer_ids(&workspace, visual).len(), count + 1, "the paste undoes on its own");
+}
+
+#[gpui_kit::test]
+fn an_expanded_folder_shows_as_open(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // Folders start expanded; collapsing one keeps its row and hides its contents.
+    let folder = studio_core::sample::ids::FOOTAGE_FOLDER;
+    assert!(visual.update(|window, _| window.try_find(("project-item", studio_core::sample::ids::A_CAM.0 as usize))).is_some());
+    visual.update(|window, cx| window.double_click(("project-item", folder.0 as usize), cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.collapsed_folders.contains(&folder)));
+    assert!(visual.update(|window, _| window.try_find(("project-item", studio_core::sample::ids::A_CAM.0 as usize))).is_none());
 }

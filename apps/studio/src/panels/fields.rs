@@ -12,7 +12,7 @@ use studio_core::model::Id;
 use studio_core::property::{PropertyPath, TransformProperty};
 
 use super::chrome::EmptyDragView;
-use crate::state::{EditorState, TextSetting};
+use crate::state::{EditorState, ShapeSetting, TextSetting};
 use crate::theme::{color, hsla};
 use crate::workspace::{EditTarget, Workspace};
 
@@ -22,6 +22,7 @@ pub enum FieldTarget {
     /// One component (0 = x or the only value, 1 = y) of a layer property.
     Property { layer: Id, path: PropertyPath, component: usize },
     Text { layer: Id, setting: TextSetting },
+    Shape { layer: Id, setting: ShapeSetting },
 }
 
 /// How a field's number is shown and how fast it scrubs.
@@ -60,6 +61,14 @@ impl FieldTarget {
                 };
                 Some((setting.get(style), FieldFormat { step, decimals, unit, rotation: false }))
             }
+            Self::Shape { layer, setting } => {
+                let style = state.shape_of(layer)?;
+                let (step, unit) = match setting {
+                    ShapeSetting::CornerRadius => (0.5, "px"),
+                    ShapeSetting::Points => (0.1, ""),
+                };
+                Some((setting.get(style), FieldFormat { step, decimals: 0, unit, rotation: false }))
+            }
         }
     }
 
@@ -67,6 +76,7 @@ impl FieldTarget {
         match self {
             Self::Property { layer, path, component } => state.set_property_component(layer, path, component, value),
             Self::Text { layer, setting } => state.set_text_setting(layer, setting, value),
+            Self::Shape { layer, setting } => state.set_shape_setting(layer, setting, value),
         }
     }
 

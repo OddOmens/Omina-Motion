@@ -49,6 +49,8 @@ pub struct TimelineUi {
     /// Bounds of the time column (navigator, ruler and tracks share its x range).
     pub(crate) graph: MeasuredBounds,
     drag_anchor: Option<DragAnchor>,
+    /// With the Cut tool, the clip under the pointer and the frame a click would cut it at.
+    pub(crate) cut_hover: Option<(Id, i64)>,
 }
 
 /// Drag kinds that move something inside the timeline rather than carrying data.

@@ -245,6 +245,69 @@ impl Default for TextStyle {
     }
 }
 
+/// The outline of a shape layer. Each fills the layer's box (`Layer::size`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ShapeKind {
+    Rectangle,
+    Ellipse,
+    Triangle,
+    /// A regular polygon with `ShapeStyle::points` sides.
+    Polygon,
+    /// A star with `ShapeStyle::points` points.
+    Star,
+}
+
+impl ShapeKind {
+    pub const ALL: [ShapeKind; 5] = [Self::Rectangle, Self::Ellipse, Self::Triangle, Self::Polygon, Self::Star];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rectangle => "Rectangle",
+            Self::Ellipse => "Ellipse",
+            Self::Triangle => "Triangle",
+            Self::Polygon => "Polygon",
+            Self::Star => "Star",
+        }
+    }
+
+    /// Whether the shape has corners that can be rounded (everything except the ellipse).
+    pub fn has_corners(self) -> bool {
+        self != Self::Ellipse
+    }
+
+    /// Whether the number of sides or points can be changed.
+    pub fn has_points(self) -> bool {
+        matches!(self, Self::Polygon | Self::Star)
+    }
+}
+
+/// How a shape layer is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ShapeStyle {
+    pub kind: ShapeKind,
+    pub fill: Rgba,
+    /// Radius of the rounded corners, in layer pixels. Ignored for ellipses.
+    pub corner_radius: f32,
+    /// Sides of a polygon, or points of a star (3 to `MAX_SHAPE_POINTS`).
+    pub points: u32,
+}
+
+/// The most sides or points a polygon or star can have.
+pub const MAX_SHAPE_POINTS: u32 = 64;
+
+impl ShapeStyle {
+    /// A shape of `kind` in the default fill, with square corners.
+    pub fn new(kind: ShapeKind) -> Self {
+        let points = if kind == ShapeKind::Star { 5 } else { 6 };
+        Self { kind, fill: Rgba::hex(0x8b5cf6), corner_radius: 0.0, points }
+    }
+
+    /// The largest corner radius that makes sense in a box of `size`: half its shorter side.
+    pub fn max_corner_radius(size: Vec2) -> f32 {
+        size.x.min(size.y) * 0.5
+    }
+}
+
 /// What a layer shows.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayerContent {
@@ -253,6 +316,7 @@ pub enum LayerContent {
     Audio { item: Id },
     Solid { color: Rgba },
     Text { text: String, style: TextStyle },
+    Shape { style: ShapeStyle },
     Adjustment,
     Composition { composition: Id },
 }

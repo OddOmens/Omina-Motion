@@ -195,8 +195,9 @@ fn to_comp(workspace: &Workspace, x: f32, y: f32) -> Vec2 {
     Vec2::new((x - frame.left) / scale, (y - frame.top) / scale)
 }
 
-/// Press in the viewer: the Type tool places a text layer; the Selection tool picks the
-/// layer under the pointer (Shift adds to the selection) and gets ready to move it.
+/// Press in the viewer: the Type tool places a text layer; the Shape tool starts drawing a
+/// shape; the Selection tool picks the layer under the pointer (Shift adds to the selection)
+/// and gets ready to move it.
 fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Workspace>) {
     let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
     let point = to_comp(workspace, x, y);
@@ -209,6 +210,14 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
             cx.defer_in(window, move |this, window, cx| {
                 this.begin_edit(EditTarget::SourceText(layer), String::new(), window, cx);
             });
+            cx.notify();
+        }
+        return;
+    }
+    if workspace.ui.tool == Tool::Shape {
+        let kind = workspace.ui.shape_kind;
+        if workspace.state.begin_shape_draw(kind, point).is_some() {
+            workspace.ui.tabs.insert(PanelId::Properties, 0);
             cx.notify();
         }
         return;
@@ -357,6 +366,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .overflow_hidden()
         .bg(hsla(color::PASTEBOARD))
         .when(workspace.ui.tool == Tool::Type, |viewer| viewer.cursor_text())
+        .when(workspace.ui.tool == Tool::Shape, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| press_viewer(this, event, window, cx)))
         .on_drag(ViewerDrag::Move, |_, _, _, cx| cx.new(|_| EmptyDragView))
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ViewerDrag>, _, cx| {

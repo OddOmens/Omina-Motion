@@ -10,6 +10,7 @@
 //! `history` holds the undo steps.
 
 mod clips;
+mod copy;
 mod history;
 mod keyframes;
 mod layer_time;
@@ -24,7 +25,7 @@ use studio_core::align::{AlignTarget, Alignment, Distribution, align_layers, dis
 use studio_core::animation::Vec2;
 use studio_core::edit::{self, CompositionSettings, ItemDeletion};
 use studio_core::model::{
-    BlendMode, Composition, Id, LayerContent, LayerSwitches, Project, TextAlign, TextStyle, TrackMatte,
+    BlendMode, Composition, Id, LayerContent, LayerSwitches, Project, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte,
 };
 use studio_core::playback::{playback_position, playback_start_frame};
 use studio_core::project_file::{self, EditorSettings, EditorView};
@@ -57,6 +58,31 @@ impl Switch {
             Self::Solo => &mut switches.solo,
             Self::Locked => &mut switches.locked,
             Self::EffectsEnabled => &mut switches.effects_enabled,
+        }
+    }
+}
+
+/// Numeric shape settings that the Properties panel edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShapeSetting {
+    CornerRadius,
+    /// Sides of a polygon, or points of a star.
+    Points,
+}
+
+impl ShapeSetting {
+    pub fn get(self, style: &ShapeStyle) -> f32 {
+        match self {
+            Self::CornerRadius => style.corner_radius,
+            Self::Points => style.points as f32,
+        }
+    }
+
+    /// Sets the value; `edit::edit_shape` then keeps it in range.
+    fn set(self, style: &mut ShapeStyle, value: f32) {
+        match self {
+            Self::CornerRadius => style.corner_radius = value,
+            Self::Points => style.points = value.round().clamp(0.0, u32::MAX as f32) as u32,
         }
     }
 }
@@ -144,6 +170,8 @@ pub struct EditorState {
     layer_time_drag: Option<layer_time::LayerTimeDrag>,
     viewer_drag: Option<viewer::ViewerDrag>,
     history: history::History,
+    /// Layers copied with Cmd+C, ready to paste.
+    clipboard: Vec<studio_core::model::Layer>,
     /// The project file being edited; `None` until the project is first saved.
     file: Option<PathBuf>,
 }
@@ -174,6 +202,7 @@ impl EditorState {
             snap_line: None,
             viewer_drag: None,
             history: history::History::new(&project),
+            clipboard: Vec::new(),
             file: None,
             project,
         }
@@ -497,6 +526,26 @@ impl EditorState {
 
     pub fn set_text_stroke(&mut self, layer: Id, stroke: Option<(studio_core::model::Rgba, f32)>) {
         edit::edit_text(self.composition_mut(), layer, |_, style| style.stroke = stroke);
+    }
+
+    pub fn shape_of(&self, layer: Id) -> Option<&ShapeStyle> {
+        match &self.composition().layer(layer)?.content {
+            LayerContent::Shape { style } => Some(style),
+            _ => None,
+        }
+    }
+
+    pub fn set_shape_setting(&mut self, layer: Id, setting: ShapeSetting, value: f32) {
+        edit::edit_shape(self.composition_mut(), layer, |style| setting.set(style, value));
+    }
+
+    pub fn set_shape_fill(&mut self, layer: Id, fill: studio_core::model::Rgba) {
+        edit::edit_shape(self.composition_mut(), layer, |style| style.fill = fill);
+    }
+
+    /// Changes which shape a shape layer draws, keeping its box, colour and corners.
+    pub fn set_shape_kind(&mut self, layer: Id, kind: ShapeKind) {
+        edit::edit_shape(self.composition_mut(), layer, |style| style.kind = kind);
     }
 
     pub fn text_of(&self, layer: Id) -> Option<(&str, &TextStyle)> {
@@ -927,6 +976,19 @@ mod tests {
         assert_eq!(plan.layers, 1);
         assert!(state.delete_items(&plan));
         assert!(state.selected_layers.is_empty());
+    }
+
+    #[test]
+    fn shape_settings_stay_in_range() {
+        let mut state = EditorState::new();
+        let layer = state.begin_shape_draw(ShapeKind::Polygon, studio_core::animation::Vec2::new(500.0, 500.0)).unwrap();
+        state.end_viewer_drag();
+        state.set_shape_setting(layer, ShapeSetting::CornerRadius, 10_000.0);
+        assert_eq!(state.shape_of(layer).unwrap().corner_radius, 150.0, "at most half the 300 px box");
+        state.set_shape_setting(layer, ShapeSetting::Points, 1.0);
+        assert_eq!(state.shape_of(layer).unwrap().points, 3);
+        state.set_shape_kind(layer, ShapeKind::Star);
+        assert_eq!(state.shape_of(layer).unwrap().kind, ShapeKind::Star);
     }
 
     #[test]

@@ -31,7 +31,7 @@ use super::{TimelineDrag, fraction, frame_at, zoom_around_playhead};
 use crate::panels::chrome::{EmptyDragView, icon_button};
 use crate::state::{KeyframeRef, LayerTimeEdit, Switch};
 use crate::theme::{color, hsla};
-use crate::workspace::{EffectDrag, ProjectItemDrag, Workspace};
+use crate::workspace::{EffectDrag, ProjectItemDrag, Tool, Workspace};
 
 /// Row heights: the main track is tallest, as in CapCut; sound tracks are shorter.
 const MAIN_HEIGHT: f32 = 58.0;
@@ -175,6 +175,7 @@ fn clip_colors(layer: &Layer) -> (u32, u32, bool) {
         LayerContent::Audio { .. } => (0x6ee7a8, 0x1f5c45, true),
         LayerContent::Image { .. } | LayerContent::Solid { .. } => (0xe0b93a, 0x8f7420, true),
         LayerContent::Text { .. } => (0xf472b6, 0x9d3a6f, true),
+        LayerContent::Shape { .. } => (0x22d3ee, 0x167a8a, true),
         LayerContent::Adjustment => (0xfb923c, 0x9a531c, true),
         LayerContent::Composition { .. } => (0x60a5fa, 0x2f5f9e, true),
     }
@@ -186,6 +187,7 @@ fn kind_icon(layer: &Layer) -> IconName {
         LayerContent::Audio { .. } => IconName::Music,
         LayerContent::Image { .. } => IconName::Image,
         LayerContent::Text { .. } => IconName::Type,
+        LayerContent::Shape { .. } => IconName::Shapes,
         LayerContent::Adjustment => IconName::Contrast,
         LayerContent::Composition { .. } => IconName::Clapperboard,
         LayerContent::Solid { .. } => IconName::Square,
@@ -378,6 +380,9 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     let graph_width = workspace.ui.timeline.graph.get().width.max(1.0);
     let clip_px = width * graph_width;
     let height = base_height(track) - 8.0;
+    let cutting = workspace.ui.tool == Tool::Cut;
+    // The frame under the pointer, for the Cut tool.
+    let pointer_frame = |this: &Workspace, x: gpui_kit::Pixels| frame_at(f32::from(x), this.ui.timeline.graph.get(), this.state.view_range).round() as i64;
 
     let mut inside: Vec<AnyElement> = Vec::new();
     let has_strip = matches!(layer.content, LayerContent::Footage { .. }) && layer.has_audio;
@@ -427,6 +432,12 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
             .test_support()
     };
 
+    // Where the Cut tool would cut this clip: a line across it under the pointer.
+    let (in_frame, out_frame) = (layer.in_frame, layer.out_frame);
+    let cut_line = workspace.ui.timeline.cut_hover.filter(|&(hovered, frame)| cutting && hovered == id && in_frame < frame && frame < out_frame).map(|(_, frame)| {
+        let along = (frame - in_frame) as f32 / (out_frame - in_frame) as f32;
+        div().absolute().top_0().bottom_0().left(relative(along)).w(px(1.5)).bg(hsla(0xffffff))
+    });
     let switches = layer.switches;
     let header = div()
         .h(px(CLIP_HEADER))
@@ -483,6 +494,14 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
             .cursor_grab()
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
+                // The Cut tool splits the clip where it is clicked, and does nothing else.
+                if this.ui.tool == Tool::Cut {
+                    let frame = pointer_frame(this, event.position.x);
+                    this.state.cut_layer_at(id, frame);
+                    this.ui.timeline.cut_hover = None;
+                    cx.notify();
+                    return;
+                }
                 this.state.select_layer(id, event.modifiers.shift || event.modifiers.platform);
                 this.anchor_drag(event);
                 // Alt-drag slips the source under the clip, as elsewhere in the timeline.
@@ -494,6 +513,22 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 cx.notify();
             }))
             .on_drag(TimelineDrag::Clip, |_, _, _, cx| cx.new(|_| EmptyDragView))
+            .when(cutting, |clip| {
+                clip.cursor(gpui_kit::CursorStyle::Crosshair)
+                    .on_mouse_move(cx.listener(move |this, event: &gpui_kit::MouseMoveEvent, _, cx| {
+                        let hover = Some((id, pointer_frame(this, event.position.x)));
+                        if this.ui.timeline.cut_hover != hover {
+                            this.ui.timeline.cut_hover = hover;
+                            cx.notify();
+                        }
+                    }))
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if !hovered && this.ui.timeline.cut_hover.is_some_and(|(layer, _)| layer == id) {
+                            this.ui.timeline.cut_hover = None;
+                            cx.notify();
+                        }
+                    }))
+            })
             // Effects dragged from the Effects panel are added to the clip they're dropped on.
             .drag_over::<EffectDrag>(|style, _, _, _| style.border_color(hsla(0xffffff)))
             .on_drop(cx.listener(move |this, drag: &EffectDrag, _, cx| {
@@ -502,8 +537,9 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
             }))
             .child(header)
             .children(inside)
-            .child(grip(LayerTimeEdit::TrimIn, cx).left_0())
-            .child(grip(LayerTimeEdit::TrimOut, cx).right_0())
+            .children(cut_line)
+            // Trim grips would catch clicks near the ends, so the Cut tool goes without them.
+            .when(!cutting, |clip| clip.child(grip(LayerTimeEdit::TrimIn, cx).left_0()).child(grip(LayerTimeEdit::TrimOut, cx).right_0()))
             .test_support()
             .into_any_element(),
     ];

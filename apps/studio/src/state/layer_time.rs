@@ -135,6 +135,20 @@ impl EditorState {
         report
     }
 
+    /// The Cut tool: splits one clip at `frame` (pulled to the playhead when snapping and close
+    /// to it), and selects the part after the cut. Returns whether it was split.
+    pub fn cut_layer_at(&mut self, layer: Id, frame: i64) -> bool {
+        let frame = if self.snapping && (frame - self.current_frame).abs() <= self.snap_threshold { self.current_frame } else { frame };
+        let comp = self.active_comp;
+        let report = cut::split_layers(&mut self.project, comp, &[layer], frame);
+        if report.created.is_empty() {
+            return false;
+        }
+        self.selected_layers = report.created;
+        self.selected_keyframes.clear();
+        true
+    }
+
     /// Deletes the selected layers and closes the gaps they leave. Returns how many were deleted.
     pub fn ripple_delete_selection(&mut self) -> usize {
         let comp = self.active_comp;
@@ -170,6 +184,21 @@ mod tests {
     fn title_keys(state: &EditorState) -> Vec<i64> {
         let title = state.composition().layers[0].id;
         state.composition().layer(title).unwrap().property(PropertyPath::Transform(TransformProperty::Opacity), 0).unwrap().keyframes
+    }
+
+    #[test]
+    fn the_cut_tool_splits_one_clip_where_clicked() {
+        let mut state = EditorState::new();
+        state.snapping = false;
+        let title = state.composition().layers[0].id;
+        let (in_frame, out_frame) = { let layer = state.composition().layer(title).unwrap(); (layer.in_frame, layer.out_frame) };
+        let count = state.composition().layers.len();
+        assert!(state.cut_layer_at(title, in_frame + 10));
+        assert_eq!(state.composition().layers.len(), count + 1, "only that clip was split");
+        assert_eq!(state.composition().layer(title).unwrap().out_frame, in_frame + 10);
+        let after = state.composition().layer(state.selected_layers[0]).unwrap();
+        assert_eq!((after.in_frame, after.out_frame), (in_frame + 10, out_frame));
+        assert!(!state.cut_layer_at(title, in_frame), "cutting at an end does nothing");
     }
 
     /// The colors clip (2 s, 48 frames at 24 fps) imported and placed on top at frame 0.

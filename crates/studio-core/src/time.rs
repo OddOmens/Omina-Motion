@@ -76,6 +76,26 @@ pub fn format_timecode(frame: i64, rate: FrameRate) -> String {
     format!("{sign}{hours}:{minutes:02}:{seconds:02}:{frames:02}")
 }
 
+/// Reads a duration or time typed as timecode, "H:MM:SS:FF" (leading parts may be left off, so
+/// "4:00" is four seconds), or as a plain number of seconds ("2.5"). Frames count in the rate's
+/// timecode base, as `format_timecode` shows them. Returns `None` for anything else or a
+/// negative time.
+pub fn parse_timecode(text: &str, rate: FrameRate) -> Option<i64> {
+    let text = text.trim();
+    if !text.contains(':') {
+        let seconds: f64 = text.trim_end_matches('s').trim().parse().ok()?;
+        return (0.0..1e9).contains(&seconds).then(|| rate.seconds_to_frames(seconds));
+    }
+    let parts: Vec<i64> = text.split(':').map(|part| part.trim().parse::<i64>().ok().filter(|n| *n >= 0)).collect::<Option<_>>()?;
+    if parts.len() > 4 {
+        return None;
+    }
+    let base = rate.timecode_base().max(1);
+    // From the right: frames, seconds, minutes, hours.
+    let scales = [1, base, base * 60, base * 3600];
+    parts.iter().rev().zip(scales).try_fold(0i64, |total, (part, scale)| total.checked_add(part.checked_mul(scale)?))
+}
+
 /// Picks a ruler label spacing (in frames) so labels are at least `min_spacing_px` apart.
 /// Sub-second steps always divide one second evenly so labels stay on whole seconds.
 pub fn ruler_tick_step(pixels_per_frame: f64, rate: FrameRate, min_spacing_px: f64) -> i64 {
@@ -90,6 +110,20 @@ pub fn ruler_tick_step(pixels_per_frame: f64, rate: FrameRate, min_spacing_px: f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timecode_reads_back_what_it_shows() {
+        let rate = FrameRate::new(30, 1);
+        assert_eq!(parse_timecode("0:00:04:00", rate), Some(120));
+        assert_eq!(parse_timecode("4:00", rate), Some(120));
+        assert_eq!(parse_timecode("1:02:03:04", rate), Some(((3600 + 120 + 3) * 30) + 4));
+        assert_eq!(parse_timecode("2.5", rate), Some(75));
+        let ntsc = FrameRate::new(30000, 1001);
+        assert_eq!(parse_timecode(&format_timecode(1234, ntsc), ntsc), Some(1234));
+        assert_eq!(parse_timecode("-1", rate), None);
+        assert_eq!(parse_timecode("1:2:3:4:5", rate), None);
+        assert_eq!(parse_timecode("soon", rate), None);
+    }
 
     const FPS_24: FrameRate = FrameRate::new(24, 1);
     const NTSC: FrameRate = FrameRate::new(30000, 1001);
