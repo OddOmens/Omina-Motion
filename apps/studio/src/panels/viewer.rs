@@ -97,19 +97,36 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
     }
 }
 
-/// Play, pause and frame-stepping controls under the viewer.
-fn transport(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+/// The bar under the viewer, in one row: magnification and frame size on the left, the play
+/// and frame-stepping controls in the middle, and the current timecode on the right.
+fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let playing = workspace.state.is_playing();
     let looping = workspace.state.loop_playback;
-    div()
-        .h(px(32.0))
-        .flex_none()
+    let composition = workspace.state.composition();
+    // Equal-width sides keep the controls centred under the picture.
+    let info = div()
+        .flex_1()
         .flex()
         .items_center()
-        .justify_center()
+        .gap_2()
+        .text_size(px(size::SMALL_TEXT))
+        .text_color(hsla(color::MUTED))
+        .child(format!("{:.0}%", scale * 100.0))
+        .child(format!("{} × {}", composition.width, composition.height));
+    let timecode = div().flex_1().flex().justify_end().child(
+        div()
+            .px_2()
+            .rounded(px(2.0))
+            .bg(hsla(color::INSET))
+            .text_size(px(size::SMALL_TEXT))
+            .text_color(hsla(color::VALUE))
+            .font_family("Menlo")
+            .child(format_timecode(workspace.state.current_frame, composition.frame_rate)),
+    );
+    let controls = div()
+        .flex()
+        .items_center()
         .gap_1()
-        .border_t_1()
-        .border_color(hsla(color::HAIRLINE))
         .child(icon_button("first-frame", IconName::SkipBack, "First Frame (Home)", false, cx.listener(|this, _, _, cx| {
             let start = this.state.work_area.start as i64;
             this.go_to(start, cx);
@@ -141,7 +158,18 @@ fn transport(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
         .child(icon_button("loop", IconName::Repeat, "Loop Playback", looping, cx.listener(|this, _, _, cx| {
             this.state.loop_playback = !this.state.loop_playback;
             cx.notify();
-        })))
+        })));
+    div()
+        .h(px(36.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .px_3()
+        .border_t_1()
+        .border_color(hsla(color::HAIRLINE))
+        .child(info)
+        .child(controls)
+        .child(timecode)
 }
 
 /// Viewer drags: moving the selection, or scaling from a corner handle.
@@ -288,7 +316,6 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
     }
 
     let composition = workspace.state.composition();
-    let frame = workspace.state.current_frame;
     let picture = workspace.render.image.clone().map(|image| img(ImageSource::Render(image)).absolute().size_full());
     let problem = match (&workspace.render.renderer, &workspace.render.last_error) {
         (Err(error), _) | (Ok(_), Some(error)) => Some(
@@ -344,30 +371,12 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .child(comp_frame)
         .test_support();
 
-    let footer = div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .text_size(px(size::SMALL_TEXT))
-        .child(div().text_color(hsla(color::MUTED)).child(format!("{:.0}%", scale * 100.0)))
-        .child(div().text_color(hsla(color::MUTED)).child(format!("{} × {}", composition.width, composition.height)))
-        .child(div().flex_1())
-        .child(
-            div()
-                .px_2()
-                .rounded(px(2.0))
-                .bg(hsla(color::INSET))
-                .text_color(hsla(color::VALUE))
-                .font_family("Menlo")
-                .child(format_timecode(frame, composition.frame_rate)),
-        );
-
     let title = format!("Composition: {}", composition.name);
     panel(
         PanelId::Composition,
         &[title.as_str()],
-        Some(footer.into_any_element()),
-        div().size_full().flex().flex_col().child(viewer).child(transport(workspace, cx)),
+        None,
+        div().size_full().flex().flex_col().child(viewer).child(transport(workspace, scale, cx)),
         workspace,
         cx,
     )

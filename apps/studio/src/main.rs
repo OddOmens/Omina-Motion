@@ -8,7 +8,6 @@ mod project_files;
 mod sound;
 mod state;
 mod theme;
-mod timeline_rows;
 #[cfg(test)]
 mod ui_tests;
 mod workspace;

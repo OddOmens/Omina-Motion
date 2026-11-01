@@ -183,6 +183,26 @@ pub fn property_row(
         .map(|component| value_field(FieldTarget::Property { layer, path, component }, workspace, cx))
         .collect::<Vec<_>>();
 
+    // Previous / next keyframe of this property, as in After Effects' keyframe navigator.
+    let jump = |forward: bool, cx: &mut Context<Workspace>| {
+        div()
+            .id(ElementId::Name(format!("{}:{key}", if forward { "next-keyframe" } else { "previous-keyframe" }).into()))
+            .size(px(18.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.0))
+            .hover(|style| style.bg(hsla(color::HOVER)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.state.jump_to_keyframe(layer, path, forward);
+                cx.notify();
+            }))
+            .child(Icon::new(if forward { IconName::ChevronRight } else { IconName::ChevronLeft }).size(px(12.0)).text_color(hsla(color::MUTED)))
+            .test_support()
+    };
+    let previous = animated.then(|| jump(false, cx));
+    let next = animated.then(|| jump(true, cx));
     let keyframe_button = animated.then(|| {
         div()
             .id(ElementId::Name(format!("keyframe:{key}").into()))
@@ -210,7 +230,9 @@ pub fn property_row(
         .child(div().w(px(18.0)).flex_none().children(extra))
         .child(div().flex().gap_3().children(fields))
         .child(div().flex_1())
+        .children(previous)
         .children(keyframe_button)
+        .children(next)
         .into_any_element()
 }
 

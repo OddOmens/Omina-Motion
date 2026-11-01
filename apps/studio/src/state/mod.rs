@@ -39,19 +39,14 @@ pub use viewer::ScaleHandle;
 /// The view range never shrinks below this many frames, so zooming in stops at a readable level.
 pub const MIN_VIEW_FRAMES: f64 = 10.0;
 
-/// Which layer switch a timeline toggle controls.
+/// Which layer switch a toggle controls (on clips, and in the Properties panel).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch {
     Visible,
     Audio,
     Solo,
     Locked,
-    Shy,
-    BestQuality,
     EffectsEnabled,
-    FrameBlending,
-    MotionBlur,
-    Adjustment,
 }
 
 impl Switch {
@@ -61,12 +56,7 @@ impl Switch {
             Self::Audio => &mut switches.audio,
             Self::Solo => &mut switches.solo,
             Self::Locked => &mut switches.locked,
-            Self::Shy => &mut switches.shy,
-            Self::BestQuality => &mut switches.best_quality,
             Self::EffectsEnabled => &mut switches.effects_enabled,
-            Self::FrameBlending => &mut switches.frame_blending,
-            Self::MotionBlur => &mut switches.motion_blur,
-            Self::Adjustment => &mut switches.adjustment,
         }
     }
 }
@@ -134,7 +124,7 @@ pub struct EditorState {
     pub loop_playback: bool,
     pub selected_layers: Vec<Id>,
     pub selected_keyframes: Vec<KeyframeRef>,
-    /// Expanded timeline rows, by row key (see `timeline_rows`).
+    /// Panel sections the user opened or closed, by key (effects in Effect Controls).
     pub expanded_rows: HashSet<String>,
     pub align_target: AlignTarget,
     /// When on, editing one scale component changes the other proportionally.
@@ -391,6 +381,7 @@ impl EditorState {
     }
 
     /// Adds a project item as a layer and selects it.
+    #[cfg(test)]
     pub fn add_layer_from_item(&mut self, item: Id, stack_index: usize, in_frame: i64) {
         if let Some(layer) = edit::add_layer_from_item(&mut self.project, self.active_comp, item, stack_index, in_frame)
         {
@@ -399,11 +390,11 @@ impl EditorState {
         }
     }
 
-    /// Adds a catalog effect to a layer, twirls the layer open to show it, and selects the layer.
+    /// Adds a catalog effect to a layer (if it suits the layer) and selects the layer.
     pub fn add_effect(&mut self, layer: Id, name: &str) {
-        if edit::add_effect(&mut self.project, self.active_comp, layer, name).is_some() {
-            self.expanded_rows.insert(crate::timeline_rows::layer_key(layer));
-            self.expanded_rows.insert(crate::timeline_rows::effects_key(layer));
+        // The layer is selected so its new effect shows in Effect Controls; a selection it is
+        // already part of is kept, so one effect can go onto several clips.
+        if edit::add_effect(&mut self.project, self.active_comp, layer, name).is_some() && !self.selected_layers.contains(&layer) {
             self.selected_layers = vec![layer];
         }
     }

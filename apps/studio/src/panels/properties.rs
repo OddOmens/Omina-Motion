@@ -10,14 +10,14 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::{
     AnyElement, App, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, px, rgba,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px, rgba,
 };
-use studio_core::model::{Id, Layer, LayerContent, Rgba, TextAlign, TextStyle};
+use studio_core::model::{BlendMode, Id, Layer, LayerContent, Rgba, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 
 use super::chrome::{divider, hint, icon_button, panel, section};
 use super::fields::{FieldTarget, property_row, value_field};
-use crate::state::TextSetting;
+use crate::state::{Switch, TextSetting};
 use crate::theme::{color, hsla};
 use crate::workspace::{EditTarget, PanelId, Workspace};
 
@@ -86,6 +86,60 @@ fn choice_menu<T: Clone + 'static>(
             }))
         })
     })
+}
+
+/// A labeled control in the Layer section.
+fn labeled_row(label: &'static str, control: impl IntoElement) -> Div {
+    div()
+        .h(px(30.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().w(px(96.0)).flex_none().text_color(hsla(color::MUTED)).child(label))
+        .child(div().flex_1().min_w_0().child(control))
+}
+
+/// How the layer combines with what is below it: blend mode, track matte (the layer above it,
+/// so not offered on the top layer), parent, and the solo and effects switches.
+fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let target = cx.weak_entity();
+    let composition = workspace.state.composition();
+    let mut rows = div().child(section("Layer", None));
+    if layer.content.has_picture() {
+        let modes = BlendMode::ALL.iter().map(|&mode| (mode.label().to_owned(), mode == layer.blend_mode, mode)).collect();
+        rows = rows.child(labeled_row("Blend Mode", choice_menu("layer-blend", layer.blend_mode.label().to_owned(), modes, move |this, mode| this.state.set_blend_mode(id, mode), target.clone())));
+        let is_top = composition.layers.first().map(|top| top.id) == Some(id);
+        if !is_top || layer.track_matte != TrackMatte::None {
+            let mattes = TrackMatte::ALL.iter().map(|&matte| (matte.label().to_owned(), matte == layer.track_matte, matte)).collect();
+            rows = rows.child(labeled_row("Track Matte", choice_menu("layer-matte", layer.track_matte.label().to_owned(), mattes, move |this, matte| this.state.set_track_matte(id, matte), target.clone())));
+        }
+        // Only layers that can be the parent: not this one, and none of its children (a loop).
+        let mut parents: Vec<(String, bool, Option<Id>)> = vec![("None".to_owned(), layer.parent.is_none(), None)];
+        parents.extend(
+            composition
+                .layers
+                .iter()
+                .filter(|candidate| studio_core::edit::can_parent(composition, id, candidate.id))
+                .map(|candidate| (candidate.name.clone(), layer.parent == Some(candidate.id), Some(candidate.id))),
+        );
+        let parent_name = layer.parent.and_then(|parent| composition.layer(parent)).map_or("None".to_owned(), |parent| parent.name.clone());
+        rows = rows.child(labeled_row("Parent", choice_menu("layer-parent", parent_name, parents, move |this, parent| this.state.set_parent(id, parent), target)));
+    }
+    let switch = |id_name: &'static str, label: &'static str, on: bool, which: Switch, cx: &mut Context<Workspace>| {
+        Checkbox::new(id_name).label(label).checked(on).on_click(cx.listener(move |this, _, _, cx| {
+            this.state.toggle_switch(id, which);
+            cx.notify();
+        }))
+    };
+    rows.child(
+        div()
+            .flex()
+            .gap_4()
+            .py_1()
+            .child(switch("layer-solo", "Solo", layer.switches.solo, Switch::Solo, cx))
+            .when(layer.content.has_picture(), |row| row.child(switch("layer-effects", "Effects", layer.switches.effects_enabled, Switch::EffectsEnabled, cx))),
+    )
 }
 
 fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -282,6 +336,8 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .px_2p5()
         .pb_3()
         .children(mass_edit_note)
+        .child(layer_section(layer, workspace, cx))
+        .child(divider())
         .child(transform)
         .children(text)
         .into_any_element()

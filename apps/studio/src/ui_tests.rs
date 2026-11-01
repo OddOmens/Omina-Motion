@@ -14,7 +14,6 @@ use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
 
 use crate::panels::fields::FieldTarget;
 use crate::state::KeyframeRef;
-use crate::timeline_rows::layer_key;
 use crate::workspace::Workspace;
 
 const TITLE: Id = Id(100);
@@ -36,9 +35,6 @@ fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) 
         Root::new(view, window, cx)
     });
     visual.simulate_resize(size(px(1600.0), px(960.0)));
-    // Most tests drive the Layers view; Tracks view tests switch with `show_tracks`.
-    let view = workspace.clone().expect("workspace was built");
-    visual.update(|_, cx| view.update(cx, |ws, _| ws.ui.timeline.view = crate::panels::timeline::TimelineView::Layers));
     // Measured bounds settle over two frames.
     for _ in 0..3 {
         visual.update(|window, cx| window.render_frame(cx));
@@ -140,17 +136,9 @@ fn the_stopwatch_turns_animation_on(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn delete_removes_selected_keyframes_then_layers(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    visual.update(|_, cx| {
-        workspace.update(cx, |ws, _| {
-            ws.state.expanded_rows.insert(layer_key(TITLE));
-            ws.state.expanded_rows.insert(format!("{}/transform", layer_key(TITLE)));
-        })
-    });
-    render(visual);
-
-    // Click the opacity keyframe at frame 36 in the timeline, then press Delete.
-    visual.update(|window, cx| window.click(ElementId::Name("kf:layer:100:transform:Opacity:36".into()), cx));
+    let (workspace, visual) = open_title_keyframes(cx);
+    // Click the opacity keyframe at frame 36 under the title clip, then press Delete.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("clip-kf:{}:{OPACITY:?}:36", TITLE.0).into()), cx));
     render(visual);
     visual.update(|_, cx| {
         let state = &workspace.read(cx).state;
@@ -160,27 +148,10 @@ fn delete_removes_selected_keyframes_then_layers(cx: &mut TestAppContext) {
     render(visual);
     let keys = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().property(OPACITY, 0).unwrap().keyframes);
     assert_eq!(keys, vec![24, 156, 168]);
-
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.select_layer(TITLE, false); cx.notify(); }));
     visual.update(|window, cx| window.press("backspace", cx));
     render(visual);
     visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layer(TITLE).is_none(), "the layer is deleted next"));
-}
-
-#[gpui_kit::test]
-fn dragging_a_keyframe_moves_it_in_time(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    visual.update(|_, cx| {
-        workspace.update(cx, |ws, _| {
-            ws.state.expanded_rows.insert(layer_key(TITLE));
-            ws.state.expanded_rows.insert(format!("{}/transform", layer_key(TITLE)));
-        })
-    });
-    render(visual);
-    let from = center_of(visual, ElementId::Name("kf:layer:100:transform:Opacity:156".into()));
-    visual.update(|window, cx| window.drag(from, point(from.x - px(40.0), from.y), cx));
-    render(visual);
-    let keys = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().property(OPACITY, 0).unwrap().keyframes);
-    assert!(keys.len() == 4 && !keys.contains(&156) && keys[2] < 156, "the keyframe moved earlier: {keys:?}");
 }
 
 #[gpui_kit::test]
@@ -396,48 +367,13 @@ fn align_buttons_move_the_selection(cx: &mut TestAppContext) {
 }
 
 /// Twirls the title open to show its transform properties in the timeline.
-fn expand_title(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) {
-    visual.update(|_, cx| {
-        workspace.update(cx, |ws, _| {
-            ws.state.expanded_rows.insert(layer_key(TITLE));
-            ws.state.expanded_rows.insert(format!("{}/transform", layer_key(TITLE)));
-        })
-    });
-    render(visual);
-}
 
 #[gpui_kit::test]
-fn dragging_a_box_selects_the_keyframes_inside_it(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    expand_title(&workspace, visual);
-    // From just left of the Position keyframe at 24 down past the Opacity keyframe at 36.
-    let position_24 = center_of(visual, ElementId::Name("kf:layer:100:transform:Position:24".into()));
-    let opacity_36 = center_of(visual, ElementId::Name("kf:layer:100:transform:Opacity:36".into()));
-    let from = point(position_24.x - px(8.0), position_24.y - px(6.0));
-    let to = point(opacity_36.x + px(8.0), opacity_36.y + px(6.0));
-    visual.update(|window, cx| window.drag(from, to, cx));
-    render(visual);
-    visual.update(|_, cx| {
-        let mut picked: Vec<(String, i64)> =
-            workspace.read(cx).state.selected_keyframes.iter().map(|key| (format!("{:?}", key.path), key.frame)).collect();
-        picked.sort();
-        assert_eq!(
-            picked,
-            vec![
-                ("Transform(Opacity)".into(), 24),
-                ("Transform(Opacity)".into(), 36),
-                ("Transform(Position)".into(), 24),
-            ],
-            "the box covers Position 24 and Opacity 24–36, but not Position 48"
-        );
-    });
-}
-
-#[gpui_kit::test]
-fn clicking_a_property_name_selects_its_keyframes_and_f9_eases_them(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    expand_title(&workspace, visual);
-    visual.update(|window, cx| window.click(ElementId::Name("prop-name:layer:100:transform:Opacity".into()), cx));
+fn pressing_a_keyframe_row_then_f9_eases_every_segment(cx: &mut TestAppContext) {
+    let (workspace, visual) = open_title_keyframes(cx);
+    let row = ElementId::Name(format!("clip-prop:{}:{OPACITY:?}", TITLE.0).into());
+    let bounds = bounds_of(visual, row.clone());
+    visual.update(|window, cx| window.click_with_options(row, gpui_kit::test::ClickOptions::new().with_offset(point(bounds.size.width - px(30.0), px(6.0))), cx));
     render(visual);
     visual.update(|_, cx| assert_eq!(workspace.read(cx).state.selected_keyframes.len(), 4));
     visual.update(|window, cx| window.press("f9", cx));
@@ -502,8 +438,7 @@ fn frame_time_during_playback(cx: &mut TestAppContext) {
                 if let Some(layer) = selected {
                     ws.state.select_layer(layer, false);
                 }
-                ws.state.expanded_rows.insert(layer_key(TITLE));
-                ws.state.expanded_rows.insert(format!("{}/transform", layer_key(TITLE)));
+                ws.ui.timeline.expanded_clips.insert(TITLE);
                 cx.notify();
             })
         });
@@ -537,16 +472,18 @@ fn frame_time_during_playback(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_mode_column_menu_sets_the_blend_mode(cx: &mut TestAppContext) {
+fn the_properties_panel_sets_blend_mode_and_parent(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
-    visual.update(|window, cx| window.click(("mode", TITLE.0 as usize), cx));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.select_layer(TITLE, false); cx.notify(); }));
+    render(visual);
+    visual.update(|window, cx| window.click("layer-blend", cx));
     render(visual);
     click_label(visual, "Multiply");
     render(visual);
-    visual.update(|_, cx| {
-        let ws = workspace.read(cx);
-        assert_eq!(ws.state.composition().layer(TITLE).unwrap().blend_mode, studio_core::model::BlendMode::Multiply);
-    });
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().layer(TITLE).unwrap().blend_mode, studio_core::model::BlendMode::Multiply));
+    visual.update(|window, cx| window.click("layer-solo", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layer(TITLE).unwrap().switches.solo));
 }
 
 #[gpui_kit::test]
@@ -848,7 +785,6 @@ fn quitting_during_an_export_asks_first(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
-
 #[gpui_kit::test]
 fn shortcuts_still_work_after_a_dialog_closes_with_ok(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
@@ -866,22 +802,6 @@ fn layer_timing(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, l
         let layer = workspace.read(cx).state.composition().layer(layer).unwrap();
         (layer.start_frame, layer.in_frame, layer.out_frame)
     })
-}
-
-#[gpui_kit::test]
-fn dragging_a_bar_end_trims_and_undoes_in_one_step(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    let before = layer_timing(&workspace, visual, TITLE);
-    let grip = center_of(visual, ElementId::Name(format!("trim-out:{}", TITLE.0).into()));
-    visual.update(|window, cx| window.drag(grip, point(grip.x - px(60.0), grip.y), cx));
-    render(visual);
-    let trimmed = layer_timing(&workspace, visual, TITLE);
-    assert!(trimmed.2 < before.2, "the out point moved earlier: {before:?} → {trimmed:?}");
-    assert_eq!((trimmed.0, trimmed.1), (before.0, before.1), "only the out point changes");
-    // Keyframes past the new out point are kept, as in After Effects, so extending it back restores them.
-    visual.update(|window, cx| window.press("cmd-z", cx));
-    render(visual);
-    assert_eq!(layer_timing(&workspace, visual, TITLE), before);
 }
 
 #[gpui_kit::test]
@@ -920,7 +840,7 @@ fn alt_dragging_a_clip_slips_its_source(cx: &mut TestAppContext) {
         clip
     }));
     render(visual);
-    let bar = center_of(visual, ElementId::Name(format!("bar:{}", clip.0).into()));
+    let bar = center_of(visual, ("clip", clip.0 as usize));
     visual.update(|window, cx| {
         window.change_modifiers(gpui_kit::Modifiers { alt: true, ..Default::default() }, cx);
         window.drag(bar, point(bar.x + px(40.0), bar.y), cx);
@@ -995,7 +915,7 @@ fn pixels_per_frame(workspace: &Entity<Workspace>, visual: &mut VisualTestContex
 
 /// Drags the title's bar `frames` to the right, holding it there; returns the release point.
 fn hold_title_drag(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, frames: f32) -> Point<Pixels> {
-    let bar = center_of(visual, ElementId::Name(format!("bar:{}", TITLE.0).into()));
+    let bar = center_of(visual, ("clip", TITLE.0 as usize));
     let to = point(bar.x + px(frames * pixels_per_frame(workspace, visual)), bar.y);
     visual.update(|window, cx| {
         // Hover first, as a real pointer would, then press and move in steps without releasing.
@@ -1063,22 +983,11 @@ fn ok_on_unchanged_composition_settings_keeps_the_exact_length(cx: &mut TestAppC
     visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().duration_frames, 123));
 }
 
-#[gpui_kit::test]
-fn the_parent_column_is_visible_at_the_default_layout(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    let outline = visual.update(|_, cx| workspace.read(cx).ui.timeline.outline_width);
-    assert!(outline >= 762.0, "every outline column fits, Parent & Link included ({outline} px)");
-}
+// Tracks ---------------------------------------------------------------------------------------
 
-// Tracks view ---------------------------------------------------------------------------------
-
-fn show_tracks(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) {
+fn tall_window(visual: &mut VisualTestContext) {
     // A tall window, so every track of the sample project is on screen without scrolling.
     visual.simulate_resize(size(px(1600.0), px(1500.0)));
-    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
-        ws.ui.timeline.view = crate::panels::timeline::TimelineView::Tracks;
-        cx.notify();
-    }));
     render(visual);
 }
 
@@ -1092,19 +1001,6 @@ fn main_clip(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> I
 }
 
 #[gpui_kit::test]
-fn the_header_switches_between_layers_and_tracks(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    visual.update(|window, cx| window.click("timeline-view-tracks", cx));
-    render(visual);
-    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.timeline.view, crate::panels::timeline::TimelineView::Tracks));
-    // The title is drawn as a clip (finding it fails the test if it isn't there).
-    center_of(visual, ("clip", TITLE.0 as usize));
-    visual.update(|window, cx| window.click("timeline-view-layers", cx));
-    render(visual);
-    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.timeline.view, crate::panels::timeline::TimelineView::Layers));
-}
-
-#[gpui_kit::test]
 fn dragging_a_clip_onto_the_main_track_puts_two_clips_on_one_line(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     let solid = main_clip(&workspace, visual);
@@ -1114,7 +1010,7 @@ fn dragging_a_clip_onto_the_main_track_puts_two_clips_on_one_line(cx: &mut TestA
         ws.state.composition_mut_for_test().layer_mut(solid).unwrap().out_frame = 24;
         cx.notify();
     }));
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     let title = center_of(visual, ("clip", TITLE.0 as usize));
     let main = center_of(visual, ("clip", solid.0 as usize));
     // Straight down onto the main track's row, keeping the title's time.
@@ -1136,7 +1032,7 @@ fn project_items_drop_onto_the_track_under_the_pointer(cx: &mut TestAppContext) 
         ws.state.composition_mut_for_test().layer_mut(solid).unwrap().out_frame = 24;
         cx.notify();
     }));
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     // Drop the gray solid item onto the main track, past the existing clip.
     let item = center_of(visual, ("project-item", studio_core::sample::ids::GRAY_SOLID.0 as usize));
     let main = center_of(visual, ("clip", solid.0 as usize));
@@ -1151,7 +1047,7 @@ fn project_items_drop_onto_the_track_under_the_pointer(cx: &mut TestAppContext) 
 #[gpui_kit::test]
 fn clip_grips_trim_in_the_tracks_view(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     let (_, _, before) = layer_timing(&workspace, visual, TITLE);
     let grip = center_of(visual, ("clip-trim-out", TITLE.0 as usize));
     visual.update(|window, cx| window.drag(grip, point(grip.x - px(40.0), grip.y), cx));
@@ -1163,7 +1059,7 @@ fn clip_grips_trim_in_the_tracks_view(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn clip_header_toggles_and_the_magnet_work(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     visual.update(|window, cx| window.click("magnetic", cx));
     render(visual);
     visual.update(|_, cx| assert!(!workspace.read(cx).state.magnetic_main_track));
@@ -1179,7 +1075,7 @@ fn clip_header_toggles_and_the_magnet_work(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn expanding_a_clip_shows_its_keyframes_which_drag_in_time(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     visual.update(|window, cx| window.click(("clip-expand", TITLE.0 as usize), cx));
     render(visual);
     // The title's opacity has keyframes at 24, 36, 156 and 168.
@@ -1203,7 +1099,7 @@ fn the_export_button_opens_the_export_dialog(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_tracks_toolbar_plays_and_zooms(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     visual.update(|window, cx| window.click("tracks-play", cx));
     visual.update(|_, cx| assert!(workspace.read(cx).state.is_playing()));
     visual.update(|window, cx| window.click("tracks-play", cx));
@@ -1247,7 +1143,7 @@ fn files_dropped_on_the_project_panel_are_imported(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn files_dropped_on_a_track_become_clips_there_one_after_another(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     // Drop two copies' worth (the same clip twice) onto the title's track, past its end.
     let title_end = center_of(visual, ("clip-trim-out", TITLE.0 as usize));
     let at = point(title_end.x + px(20.0), title_end.y);
@@ -1260,16 +1156,6 @@ fn files_dropped_on_a_track_become_clips_there_one_after_another(cx: &mut TestAp
     let (first, second) = if clips[0].1 < clips[1].1 { (clips[0], clips[1]) } else { (clips[1], clips[0]) };
     assert_eq!(second.1, first.2, "the second starts where the first ends");
     assert_eq!(first.0, second.0, "on the same track");
-}
-
-#[gpui_kit::test]
-fn files_dropped_on_the_layers_timeline_become_layers(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
-    let bar = center_of(visual, ElementId::Name(format!("bar:{}", TITLE.0).into()));
-    drop_files(visual, vec![fixture("colors.mp4")], bar);
-    let after = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
-    assert_eq!(after, before + 1);
 }
 
 #[gpui_kit::test]
@@ -1304,7 +1190,7 @@ fn save_as(visual: &mut VisualTestContext, folder: &std::path::Path, name: &str)
 fn a_saved_project_reopens_with_the_editor_as_it_was(cx: &mut TestAppContext) {
     let folder = scratch_folder("remember");
     let (workspace, visual) = open(cx);
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.ui.timeline.expanded_clips.insert(TITLE);
         ws.state.snapping = false;
@@ -1314,7 +1200,6 @@ fn a_saved_project_reopens_with_the_editor_as_it_was(cx: &mut TestAppContext) {
     let path = save_as(visual, &folder, "Remembered.studio");
     // Change everything, then open the file again.
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
-        ws.ui.timeline.view = crate::panels::timeline::TimelineView::Layers;
         ws.ui.timeline.expanded_clips.clear();
         ws.state.snapping = true;
         ws.state.set_view_range(studio_core::time::FrameRange::new(0.0, 240.0));
@@ -1324,7 +1209,6 @@ fn a_saved_project_reopens_with_the_editor_as_it_was(cx: &mut TestAppContext) {
     render(visual);
     visual.update(|_, cx| {
         let ws = workspace.read(cx);
-        assert_eq!(ws.ui.timeline.view, crate::panels::timeline::TimelineView::Tracks);
         assert!(ws.ui.timeline.expanded_clips.contains(&TITLE));
         assert!(!ws.state.snapping);
         assert_eq!(ws.state.view_range, studio_core::time::FrameRange::new(24.0, 120.0));
@@ -1392,7 +1276,7 @@ fn bounds_of(visual: &mut VisualTestContext, id: impl Into<ElementId>) -> gpui_k
 /// The Tracks view with the title clip opened to its keyframe rows.
 fn open_title_keyframes(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
     let (workspace, visual) = open(cx);
-    show_tracks(&workspace, visual);
+    tall_window(visual);
     visual.update(|window, cx| window.click(("clip-expand", TITLE.0 as usize), cx));
     render(visual);
     (workspace, visual)
@@ -1451,4 +1335,66 @@ fn double_clicking_a_keyframe_opens_the_graph_editor(cx: &mut TestAppContext) {
         assert!(ws.ui.graph_editor.is_some());
         assert!(ws.state.selected_keyframes.iter().any(|key| key.frame == 36));
     });
+}
+
+// Effects panel ---------------------------------------------------------------------------------
+
+#[gpui_kit::test]
+fn dragging_an_effect_onto_a_clip_adds_it(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    let from = center_of(visual, "effect:Gaussian Blur");
+    let to = center_of(visual, ("clip", TITLE.0 as usize));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+    let effects = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.len());
+    assert_eq!(effects, 1, "the blur was added to the title");
+}
+
+#[gpui_kit::test]
+fn the_plus_button_adds_an_effect_to_the_selected_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    // With nothing selected there is nothing to apply to, so there is no + button.
+    assert!(visual.update(|window, _| window.try_find("effect-apply:Sharpen")).is_none());
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.select_layer(TITLE, false); cx.notify(); }));
+    render(visual);
+    visual.update(|window, cx| window.click("effect-apply:Sharpen", cx));
+    render(visual);
+    let names = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.iter().map(|e| e.name.clone()).collect::<Vec<_>>());
+    assert_eq!(names, vec!["Sharpen"]);
+}
+
+#[gpui_kit::test]
+fn only_effects_that_suit_the_selected_clip_are_listed(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    let listed = |visual: &mut VisualTestContext, name: &str| visual.update(|window, _| window.try_find(ElementId::Name(format!("effect:{name}").into())).is_some());
+    render(visual);
+    assert!(listed(visual, "Exposure") && listed(visual, "Gaussian Blur"), "everything shows with nothing selected");
+    assert!(!listed(visual, "Stroke"), "effects the renderer can't draw are never listed");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.select_layer(TITLE, false); cx.notify(); }));
+    render(visual);
+    assert!(!listed(visual, "Exposure"), "no colour correction for text");
+    assert!(listed(visual, "Gaussian Blur"));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.add_layer_from_item(studio_core::sample::ids::MUSIC, 0, 0);
+        cx.notify();
+    }));
+    render(visual);
+    assert!(!listed(visual, "Gaussian Blur"), "nothing for audio");
+}
+
+#[gpui_kit::test]
+fn the_rail_switches_the_side_panel(cx: &mut TestAppContext) {
+    let (_workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("effect:Gaussian Blur")).is_some());
+    visual.update(|window, cx| window.click("rail-media", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("effect:Gaussian Blur")).is_none(), "the Media panel replaced it");
 }

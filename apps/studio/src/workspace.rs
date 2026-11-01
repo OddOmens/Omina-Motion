@@ -129,6 +129,15 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
     ]
 }
 
+/// What the panel beside the rail shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeftPanel {
+    /// The project's media and compositions.
+    Media,
+    /// Effects & Presets, to drag onto clips.
+    Effects,
+}
+
 /// Panels that can hold focus; the focused one gets a blue outline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PanelId {
@@ -178,12 +187,14 @@ pub struct EditingField {
 /// UI-only state that is not part of the project or the editing model.
 pub struct UiState {
     pub active_panel: PanelId,
+    /// What the panel beside the rail shows.
+    pub left_panel: LeftPanel,
     pub tool: Tool,
     /// Active tab index for panels with tabs.
     pub tabs: HashMap<PanelId, usize>,
     pub collapsed_folders: HashSet<Id>,
-    pub open_effect_categories: HashSet<&'static str>,
-    pub hide_shy_layers: bool,
+    /// Effect categories the user folded away (all are open to begin with).
+    pub closed_effect_categories: HashSet<&'static str>,
     pub viewer_bounds: panels::chrome::MeasuredBounds,
     /// Window-space bounds of the composition frame inside the viewer.
     pub frame_bounds: panels::chrome::MeasuredBounds,
@@ -361,11 +372,11 @@ impl Workspace {
             state: EditorState::new(),
             ui: UiState {
                 active_panel: PanelId::Timeline,
+                left_panel: LeftPanel::Media,
                 tool: Tool::Selection,
                 tabs: HashMap::new(),
                 collapsed_folders: HashSet::new(),
-                open_effect_categories: HashSet::new(),
-                hide_shy_layers: false,
+                closed_effect_categories: HashSet::new(),
                 viewer_bounds: Default::default(),
                 frame_bounds: Default::default(),
                 viewer_anchor: None,
@@ -595,9 +606,13 @@ impl Render for Workspace {
                                 h_resizable("workspace-top")
                                     .child(
                                         resizable_panel()
-                                            .size(px(290.0))
-                                            .size_range(px(200.0)..px(700.0))
-                                            .child(cached(&panels.project)),
+                                            .size(px(300.0))
+                                            .size_range(px(220.0)..px(700.0))
+                                            // Media or Effects, picked on the rail.
+                                            .child(match self.ui.left_panel {
+                                                LeftPanel::Media => cached(&panels.project),
+                                                LeftPanel::Effects => cached(&panels.effects),
+                                            }),
                                     )
                                     .child(resizable_panel().child(cached(&panels.viewer))),
                             ),
@@ -608,8 +623,7 @@ impl Render for Workspace {
             .child(
                 resizable_panel().size(px(430.0)).size_range(px(300.0)..px(800.0)).child(
                     v_resizable("workspace-utilities")
-                        .child(resizable_panel().size(px(470.0)).child(cached(&panels.properties)))
-                        .child(resizable_panel().size(px(300.0)).child(cached(&panels.effects)))
+                        .child(resizable_panel().size(px(620.0)).child(cached(&panels.properties)))
                         .child(resizable_panel().child(cached(&panels.align))),
                 ),
             );

@@ -92,9 +92,14 @@ fn keep_matte_pairs(composition: &Composition, mut index: usize) -> usize {
 }
 
 /// Adds the catalog effect `name`, with all its parameters at their defaults, to a layer.
-/// Returns `None` for unknown effects or layers.
+/// Returns `None` for unknown effects or layers, and for effects that do nothing on that layer.
 pub fn add_effect(project: &mut Project, comp_id: Id, layer_id: Id, name: &str) -> Option<Id> {
     let definition = crate::effects::find(name)?;
+    // Refuse effects that would do nothing on this kind of layer (see `effects::suits`).
+    let content = &project.composition(comp_id)?.layer(layer_id)?.content;
+    if !crate::effects::suits_layer(name, content) {
+        return None;
+    }
     let id = project.allocate_id();
     let layer = project.composition_mut(comp_id)?.layer_mut(layer_id)?;
     layer.effects.push(crate::effects::instantiate(definition, id));

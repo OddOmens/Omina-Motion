@@ -6,8 +6,8 @@
 //!
 //! Clips drag in time and between tracks (a clip that would overlap another gets a new track),
 //! their ends trim, Alt-drag slips the source, keyframes drag in time, and project items drop
-//! straight onto a track. The ruler, navigator, snapping and zoom are shared with the Layers
-//! view; this view has its own transport bar above them.
+//! straight onto a track. Above them are a transport bar, the navigator and the ruler (see
+//! the parent module).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -27,11 +27,11 @@ use studio_core::time::{FrameRange, format_timecode};
 use studio_core::tracks::{self, MAIN_TRACK};
 use studio_media::{PeakCache, Peaks, Thumbnailer};
 
-use super::{TimelineDrag, fraction, frame_at, view_switch, zoom_around_playhead};
+use super::{TimelineDrag, fraction, frame_at, zoom_around_playhead};
 use crate::panels::chrome::{EmptyDragView, icon_button};
 use crate::state::{KeyframeRef, LayerTimeEdit, Switch};
 use crate::theme::{color, hsla};
-use crate::workspace::{ProjectItemDrag, Workspace};
+use crate::workspace::{EffectDrag, ProjectItemDrag, Workspace};
 
 /// Row heights: the main track is tallest, as in CapCut; sound tracks are shorter.
 const MAIN_HEIGHT: f32 = 58.0;
@@ -218,7 +218,6 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
         .child(div().flex_1())
         .child(div().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)))
         .child(div().flex_1())
-        .child(view_switch(workspace.ui.timeline.view, cx))
         .child(icon_button("snapping", IconName::Magnet, "Snapping (S)", state.snapping, cx.listener(|this, _, _, cx| {
             this.state.snapping = !this.state.snapping;
             cx.notify();
@@ -495,6 +494,12 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 cx.notify();
             }))
             .on_drag(TimelineDrag::Clip, |_, _, _, cx| cx.new(|_| EmptyDragView))
+            // Effects dragged from the Effects panel are added to the clip they're dropped on.
+            .drag_over::<EffectDrag>(|style, _, _, _| style.border_color(hsla(0xffffff)))
+            .on_drop(cx.listener(move |this, drag: &EffectDrag, _, cx| {
+                this.state.add_effect(id, &drag.name);
+                cx.notify();
+            }))
             .child(header)
             .children(inside)
             .child(grip(LayerTimeEdit::TrimIn, cx).left_0())

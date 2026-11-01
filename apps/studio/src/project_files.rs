@@ -11,7 +11,6 @@ use gpui_kit::{Context, PromptButton, PromptLevel, Window, WindowBounds};
 use studio_core::project_file::{EXTENSION, EditorSettings};
 
 use crate::app_settings::{self, WindowPlacement, write_atomically};
-use crate::panels::timeline::TimelineView;
 use crate::workspace::Workspace;
 
 /// How often unsaved work is copied to the recovery file (in the app; tests call it directly).
@@ -47,16 +46,15 @@ fn starting_folder(current: Option<&Path>) -> PathBuf {
 }
 
 impl Workspace {
-    /// How the editor is set up: the state's settings plus the timeline view and its open clips.
+    /// How the editor is set up: the state's settings plus the timeline's open clips.
     pub fn editor_settings(&self) -> EditorSettings {
         let mut open_clips: Vec<_> = self.ui.timeline.expanded_clips.iter().copied().collect();
         open_clips.sort();
-        EditorSettings { tracks_view: self.ui.timeline.view == TimelineView::Tracks, open_clips, ..self.state.editor_settings() }
+        EditorSettings { open_clips, ..self.state.editor_settings() }
     }
 
     /// Restores the window's part of saved settings (the state restores its own on opening).
     fn apply_settings(&mut self, settings: &EditorSettings) {
-        self.ui.timeline.view = if settings.tracks_view { TimelineView::Tracks } else { TimelineView::Layers };
         self.ui.timeline.expanded_clips = settings.open_clips.iter().copied().collect();
     }
 

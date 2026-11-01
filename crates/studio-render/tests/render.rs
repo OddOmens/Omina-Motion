@@ -187,6 +187,73 @@ fn every_rendered_effect_runs_on_the_gpu() {
     }
 }
 
+/// Values worth trying for an effect parameter: its default, then points across its range,
+/// so effects that do nothing at their defaults (a 0% wipe, say) are still exercised.
+fn trial_values(property: &studio_core::model::EffectProperty) -> Vec<f32> {
+    let default = property.value.value_at(0.0);
+    let (min, max) = (property.info.min.max(-200.0), property.info.max.min(200.0));
+    vec![default, min + (max - min) * 0.3, min + (max - min) * 0.7]
+}
+
+#[test]
+fn every_rendered_effect_changes_the_picture() {
+    let mut renderer = Renderer::new().expect("a GPU is available");
+    // A two-tone layer, so effects that only move or mix colours have something to show.
+    let mut base = solid(2, 0x3366cc, Vec2::new(60.0, 60.0), Vec2::new(50.0, 50.0));
+    base.content = LayerContent::Text { text: "Ab".into(), style: TextStyle { font_size: 40.0, line_height: 48.0, fill: Some(Rgba::hex(0xff9933)), ..TextStyle::default() } };
+    let plain = renderer.render(&project(vec![base.clone(), full(3, 0x204060)]), Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
+    let mut idle = Vec::new();
+    for definition in effects::CATEGORIES.iter().flat_map(|category| category.effects) {
+        if !studio_render::effects::is_rendered(definition.name) {
+            continue;
+        }
+        let template = effects::instantiate(definition, Id(9));
+        let changed = (0..3).any(|trial| {
+            let mut effect = template.clone();
+            for property in &mut effect.properties {
+                property.value = Animated::constant(trial_values(property)[trial]);
+            }
+            let mut layer = base.clone();
+            layer.effects.push(effect);
+            let frame = renderer.render(&project(vec![layer, full(3, 0x204060)]), Id(1), 3, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
+            frame.bgra != plain.bgra
+        });
+        if !changed {
+            idle.push(definition.name);
+        }
+    }
+    assert!(idle.is_empty(), "these effects left the picture unchanged: {idle:?}");
+}
+
+/// Each effect must keep a 1080p frame well inside real time on this machine's GPU.
+#[test]
+fn every_rendered_effect_is_fast_at_1080p() {
+    let mut renderer = Renderer::new().expect("a GPU is available");
+    let mut slow = Vec::new();
+    for definition in effects::CATEGORIES.iter().flat_map(|category| category.effects) {
+        if !studio_render::effects::is_rendered(definition.name) {
+            continue;
+        }
+        let mut layer = solid(2, 0x3366cc, Vec2::new(1600.0, 900.0), Vec2::new(960.0, 540.0));
+        layer.effects.push(effects::instantiate(definition, Id(9)));
+        let mut scene = project(vec![layer, solid(3, 0x204060, Vec2::new(1920.0, 1080.0), Vec2::new(960.0, 540.0))]);
+        let composition = &mut scene.compositions[0];
+        (composition.width, composition.height) = (1920, 1080);
+        // The first frame compiles pipelines; time the ones after it.
+        renderer.render(&scene, Id(1), 0, 1920, 1080, &studio_core::media::NoVideo).unwrap();
+        let start = std::time::Instant::now();
+        for frame in 1..6 {
+            renderer.render(&scene, Id(1), frame, 1920, 1080, &studio_core::media::NoVideo).unwrap();
+        }
+        let each = start.elapsed().as_secs_f64() * 1000.0 / 5.0;
+        println!("{:<24} {each:6.1} ms", definition.name);
+        if each > 40.0 {
+            slow.push((definition.name, each));
+        }
+    }
+    assert!(slow.is_empty(), "too slow for playback at 1080p: {slow:?}");
+}
+
 #[test]
 fn text_draws_glyphs_in_its_fill_color_and_reports_its_size() {
     let style = TextStyle { font_family: "Helvetica".into(), font_size: 40.0, line_height: 48.0, fill: Some(Rgba::hex(0xffff00)), ..TextStyle::default() };

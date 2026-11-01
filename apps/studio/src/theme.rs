@@ -24,7 +24,6 @@ pub mod color {
     /// Selection, focus and active controls: a violet, as in the motion tools this is styled on.
     pub const ACCENT: u32 = 0x8b5cf6;
     pub const VALUE: u32 = 0xa78bfa;
-    pub const KEYFRAME: u32 = 0xc4b5fd;
     /// The guide line showing where a timeline drag snapped.
     pub const SNAP: u32 = 0xd4f25c;
     /// The bright lime used for the one call to action on screen (Export).
@@ -65,7 +64,8 @@ pub fn apply(cx: &mut App) {
     theme.colors.border = hsla(color::HAIRLINE);
     theme.colors.muted_foreground = hsla(color::MUTED);
     theme.colors.primary = hsla(color::ACCENT);
-    theme.colors.ring = hsla(color::ACCENT);
+    // A quiet focus ring on text fields, not a bright one.
+    theme.colors.ring = hsla(0x3a3a42);
     theme.colors.selection = gpui_kit::rgba(0x8b5cf655).into();
     theme.colors.slider_bar = hsla(color::ACCENT);
     theme.colors.progress_bar = hsla(color::ACCENT);

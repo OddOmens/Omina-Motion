@@ -18,7 +18,7 @@ use crate::workspace::{PanelId, Workspace};
 
 /// A panel's frame: a header with its tab(s) and menu, the body, and an optional footer.
 /// With several tabs, clicking one switches the panel to it (see `UiState::tab`).
-/// Pressing anywhere inside focuses the panel, which draws the blue outline.
+/// Pressing anywhere inside makes it the active panel (which decides what Delete acts on).
 pub fn panel(
     id: PanelId,
     tabs: &[&str],
@@ -27,7 +27,6 @@ pub fn panel(
     workspace: &Workspace,
     cx: &mut Context<Workspace>,
 ) -> Div {
-    let is_active = workspace.ui.active_panel == id;
     let active_tab = workspace.ui.tab(id);
     let clickable = tabs.len() > 1;
     let header = div()
@@ -68,7 +67,7 @@ pub fn panel(
         .rounded(px(size::PANEL_RADIUS))
         .bg(hsla(color::PANEL))
         .border_1()
-        .border_color(hsla(if is_active { color::ACCENT } else { color::PANEL }))
+        .border_color(hsla(color::PANEL))
         .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
             if this.ui.active_panel != id {
                 this.ui.active_panel = id;

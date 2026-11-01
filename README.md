@@ -27,9 +27,9 @@ Inside `apps/studio/src`:
 
 - `state/`: every editing action (playback, selection, keyframes, viewer drags, undo, opening and saving),
   unit-tested without a window. `state/history.rs` is undo and redo.
-- `timeline_rows.rs`: the flat row list both halves of the Layers view render.
-- `panels/timeline/tracks.rs`: the timeline's Tracks view (CapCut style): one row per track, several clips
-  per row, thumbnails and waveforms.
+- `panels/timeline/tracks.rs`: the timeline's tracks (CapCut style): one row per track, several clips
+  per row, thumbnails and waveforms, and each clip's keyframe rows when it is opened.
+- `panels/toolbar.rs`: the top bar and the rail on the left, which picks the side panel (Media or Effects).
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout.
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).
 - `project_files.rs`: Save, Save As, Open, asking about unsaved changes, reopening the last project, and the
@@ -91,7 +91,8 @@ cargo run -p studio-export --release --example export -- project.studio out.mp4 
   components (use plain elements, as the timeline does) and never query the OS during render.
 - Every visible control either works or is shown disabled. Nothing is decorative.
 - Rendering works in 16-bit float linear light with premultiplied alpha. Effects not drawn by the
-  GPU yet are listed in `studio-render/src/effects.rs` and shown as "coming soon" in the UI.
+  GPU yet are listed in `studio-render/src/effects.rs` and left out of the UI. Effects that would do nothing
+  on a kind of layer (colour correction on text, anything on audio) are decided in `studio_core::effects::suits`.
 - `unsafe` is forbidden workspace-wide, with one audited exception: `studio-media/src/hardware.rs`, which
   calls FFmpeg's hardware-decoding API directly. Every unsafe block there explains why it is sound.
 - Proxies live in the system cache folder (macOS: `~/Library/Caches/Studio/Proxies`) and are named from the

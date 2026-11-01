@@ -41,9 +41,7 @@ pub struct EditorSettings {
     pub snapping: bool,
     pub magnetic_main_track: bool,
     pub loop_playback: bool,
-    /// Whether the timeline showed tracks (CapCut style) rather than layers.
-    pub tracks_view: bool,
-    /// Rows opened in the Layers view (layers, property groups).
+    /// Panel sections closed or opened (effects in Effect Controls).
     pub expanded_rows: Vec<String>,
     /// Clips opened in the Tracks view to show their keyframes.
     pub open_clips: Vec<Id>,
@@ -56,7 +54,6 @@ impl Default for EditorSettings {
             snapping: true,
             magnetic_main_track: true,
             loop_playback: true,
-            tracks_view: true,
             expanded_rows: Vec::new(),
             open_clips: Vec::new(),
         }
@@ -308,7 +305,7 @@ mod tests {
         let mut project = sample_project();
         // Cover effects, keyframes, text and parenting: the sample already has all of these.
         let title = project.compositions[0].layers[0].id;
-        edit::add_effect(&mut project, ids::MAIN_COMP, title, "Exposure").unwrap();
+        edit::add_effect(&mut project, ids::MAIN_COMP, title, "Gaussian Blur").unwrap();
         let text = to_text(&project, view()).unwrap();
         let (opened, opened_view) = from_text(&text).unwrap();
         assert_eq!(opened, project);
@@ -414,7 +411,6 @@ mod tests {
             snapping: false,
             magnetic_main_track: false,
             loop_playback: false,
-            tracks_view: false,
             expanded_rows: vec!["layer:100".into()],
             open_clips: vec![Id(100), Id(424242)],
         };

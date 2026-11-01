@@ -1,6 +1,6 @@
 //! Maps catalog effects to GPU passes in `shaders/effect.wgsl`, converting their
 //! parameters from composition pixels to output pixels. Effects that are not
-//! implemented on the GPU yet return `None`, and the UI shows them as unavailable.
+//! implemented on the GPU yet return `None`, and the UI leaves them out.
 
 use studio_core::model::Effect;
 

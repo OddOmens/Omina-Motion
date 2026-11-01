@@ -3,7 +3,7 @@
 //! keyframeable controls. Rendering the effects is the render engine's job.
 
 use crate::animation::Animated;
-use crate::model::{Effect, EffectProperty, Id};
+use crate::model::{Effect, EffectProperty, Id, LayerContent};
 use crate::property::PropertyInfo;
 
 pub struct EffectDefinition {
@@ -135,6 +135,27 @@ pub fn find(name: &str) -> Option<&'static EffectDefinition> {
     CATEGORIES.iter().flat_map(|category| category.effects).find(|effect| effect.name == name)
 }
 
+/// The category an effect belongs to.
+pub fn category_of(name: &str) -> Option<&'static EffectCategory> {
+    CATEGORIES.iter().find(|category| category.effects.iter().any(|effect| effect.name == name))
+}
+
+/// Whether effects in `category` are useful on a layer showing `content`. Audio has no picture
+/// at all. Text and solids are flat colours you set directly, so colour correction is pointless
+/// on them, and they have no background to key out.
+pub fn suits(category: &EffectCategory, content: &LayerContent) -> bool {
+    match content {
+        LayerContent::Audio { .. } => false,
+        LayerContent::Text { .. } | LayerContent::Solid { .. } => !matches!(category.name, "Color Correction" | "Keying"),
+        LayerContent::Footage { .. } | LayerContent::Image { .. } | LayerContent::Composition { .. } | LayerContent::Adjustment => true,
+    }
+}
+
+/// Whether the effect called `name` is useful on a layer showing `content` (see `suits`).
+pub fn suits_layer(name: &str, content: &LayerContent) -> bool {
+    category_of(name).is_some_and(|category| suits(category, content))
+}
+
 /// A new effect instance with every parameter at its default value.
 pub fn instantiate(definition: &EffectDefinition, id: Id) -> Effect {
     Effect {
@@ -164,6 +185,16 @@ mod tests {
                 assert!(info.step > 0.0);
             }
         }
+    }
+
+    #[test]
+    fn effects_are_offered_only_where_they_change_something() {
+        let text = LayerContent::Text { text: "Hi".into(), style: Default::default() };
+        assert!(!suits_layer("Exposure", &text), "colour correction on text");
+        assert!(suits_layer("Gaussian Blur", &text));
+        assert!(!suits_layer("Gaussian Blur", &LayerContent::Audio { item: Id(1) }));
+        assert!(suits_layer("Exposure", &LayerContent::Footage { item: Id(1) }));
+        assert!(!suits_layer("No Such Effect", &LayerContent::Adjustment));
     }
 
     #[test]
