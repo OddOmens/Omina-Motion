@@ -27,7 +27,7 @@ use studio_core::model::{
     BlendMode, Composition, Id, LayerContent, LayerSwitches, Project, TextAlign, TextStyle, TrackMatte,
 };
 use studio_core::playback::{playback_position, playback_start_frame};
-use studio_core::project_file::{self, EditorView};
+use studio_core::project_file::{self, EditorSettings, EditorView};
 use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
 use studio_core::sample::{ids, sample_project};
 use studio_core::time::FrameRange;
@@ -535,11 +535,21 @@ impl EditorState {
 
     /// Adds image and video files to the project. Files that are neither readable images nor
     /// decodable video are skipped and returned.
+    #[cfg(test)]
     pub fn import_files(&mut self, paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
-        let mut skipped = Vec::new();
-        for path in paths {
+        self.import_paths(paths).1
+    }
+
+    /// Adds files to the project, as links to where they are on disk (nothing is copied).
+    /// Folders bring in the media inside them. Returns the new items, in order, and the files
+    /// that are not media Studio can read.
+    pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>) -> (Vec<Id>, Vec<std::path::PathBuf>) {
+        let (mut imported, mut skipped) = (Vec::new(), Vec::new());
+        for path in expand_folders(paths) {
+            let before = self.project.items.len();
             if let Ok((width, height)) = image::image_dimensions(&path) {
                 self.selected_item = Some(edit::import_image(&mut self.project, path, Vec2::new(width as f32, height as f32)));
+                imported.extend(self.selected_item);
                 continue;
             }
             if let Ok(info) = studio_media::probe(&path) {
@@ -556,8 +566,11 @@ impl EditorState {
             } else {
                 skipped.push(path);
             }
+            if self.project.items.len() > before {
+                imported.extend(self.selected_item);
+            }
         }
-        skipped
+        (imported, skipped)
     }
 
     // Alignment --------------------------------------------------------------
@@ -615,6 +628,32 @@ impl EditorState {
         self.clear_selection();
         self.selected_item = Some(id);
     }
+}
+
+/// The files to import for `paths`: files as they are, and for folders the files inside them
+/// (and their subfolders), sorted by name, skipping hidden ones. At most 1,000 files, so
+/// dropping a huge folder by mistake can't stall the editor.
+fn expand_folders(paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+    const LIMIT: usize = 1000;
+    let mut files = Vec::new();
+    let mut pending: std::collections::VecDeque<std::path::PathBuf> = paths.into();
+    while let Some(path) = pending.pop_front() {
+        if files.len() >= LIMIT {
+            break;
+        }
+        if !path.is_dir() {
+            files.push(path);
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&path) else { continue };
+        let mut inside: Vec<std::path::PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| !path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')))
+            .collect();
+        inside.sort();
+        pending.extend(inside);
+    }
+    files
 }
 
 /// Undo and redo.
@@ -701,9 +740,30 @@ impl EditorState {
     }
 
     /// The project as file text, including where the editor is.
+    #[cfg(test)]
     pub fn project_text(&self) -> Result<String, String> {
+        self.project_text_with(&self.editor_settings())
+    }
+
+    /// The project as file text, with `settings` for how the editor was set up.
+    pub fn project_text_with(&self, settings: &EditorSettings) -> Result<String, String> {
         let view = EditorView { active_composition: self.active_comp, current_frame: self.current_frame, work_area: self.work_area };
-        project_file::to_text(&self.project, view)
+        project_file::to_text_with(&self.project, view, settings)
+    }
+
+    /// How the editor is set up, as far as this state knows (the window adds the timeline view
+    /// and its open clips).
+    pub fn editor_settings(&self) -> EditorSettings {
+        let mut expanded_rows: Vec<String> = self.expanded_rows.iter().cloned().collect();
+        expanded_rows.sort();
+        EditorSettings {
+            view_range: Some(self.view_range),
+            snapping: self.snapping,
+            magnetic_main_track: self.magnetic_main_track,
+            loop_playback: self.loop_playback,
+            expanded_rows,
+            ..EditorSettings::default()
+        }
     }
 
     /// Notes that the project was written to `path`.
@@ -718,10 +778,18 @@ impl EditorState {
         self.history.mark_saved(&self.project);
     }
 
-    /// Replaces the project with one read from `path`. Returns the media files that could not
-    /// be found, either where they were or next to the project file.
-    pub fn open_project(&mut self, text: &str, path: PathBuf) -> Result<Vec<PathBuf>, String> {
-        let (mut project, view) = project_file::from_text(text)?;
+    /// After restoring a recovery copy: the work belongs to `file` (or is untitled), and is
+    /// unsaved there.
+    pub fn mark_restored_unsaved(&mut self, file: Option<PathBuf>) {
+        self.file = file;
+        self.history.mark_saved_mid_change();
+    }
+
+    /// Replaces the project with one read from `path`, set up as it was saved. Returns the
+    /// media files that could not be found (either where they were or next to the project
+    /// file), and the saved settings, for the window to restore its part (the timeline view).
+    pub fn open_project(&mut self, text: &str, path: PathBuf) -> Result<(Vec<PathBuf>, EditorSettings), String> {
+        let (mut project, view, settings) = project_file::from_text_with(text)?;
         let folder = path.parent().unwrap_or(Path::new("."));
         let missing = project_file::relink_missing_media(&mut project, folder, Path::exists);
         self.end_keyframe_drag();
@@ -731,10 +799,14 @@ impl EditorState {
         self.open_composition(view.active_composition);
         self.current_frame = view.current_frame;
         self.work_area = view.work_area;
-        self.expanded_rows.clear();
+        self.expanded_rows = settings.expanded_rows.iter().cloned().collect();
+        if let Some(range) = settings.view_range {
+            self.set_view_range(range);
+        }
+        (self.snapping, self.magnetic_main_track, self.loop_playback) = (settings.snapping, settings.magnetic_main_track, settings.loop_playback);
         self.history = history::History::new(&self.project);
         self.file = Some(path);
-        Ok(missing)
+        Ok((missing, settings))
     }
 }
 
@@ -1071,7 +1143,7 @@ mod tests {
         assert_eq!(state.document_name(), "Promo");
 
         let mut reopened = EditorState::new();
-        let missing = reopened.open_project(&std::fs::read_to_string(&path).unwrap(), path.clone()).unwrap();
+        let (missing, _) = reopened.open_project(&std::fs::read_to_string(&path).unwrap(), path.clone()).unwrap();
         assert!(missing.is_empty(), "the sample's media has no files to miss");
         assert_eq!(reopened.project, state.project);
         assert_eq!((reopened.current_frame, reopened.file()), (77, Some(path.as_path())));

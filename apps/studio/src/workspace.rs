@@ -335,6 +335,21 @@ impl Workspace {
             })
             .detach();
         }
+        // Pick up where the last session left off, and keep a recovery copy of unsaved work.
+        // (Not in headless tests, which start fresh and must not touch real settings.)
+        #[cfg(not(test))]
+        {
+            cx.defer_in(window, |this, window, cx| this.restore_session(window, cx));
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(crate::project_files::RECOVERY_INTERVAL).await;
+                    if this.update(cx, |this, _| this.keep_recovery_copy()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         // Headless tests stay silent so they never depend on (or use) a sound device.
         #[cfg(not(test))]
         let sound = Sound::new();
@@ -493,19 +508,23 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = chosen.await else { return };
-            this.update_in(cx, |this, window, cx| {
-                let skipped = this.state.import_files(paths);
-                this.request_proxies();
-                if !skipped.is_empty() {
-                    let names: Vec<String> = skipped.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
-                    let message = format!("Not imported: {}. These are not images or video that can be decoded.", names.join(", "));
-                    window.push_notification(message.as_str(), cx);
-                }
-                cx.notify();
-            })
-            .ok();
+            this.update_in(cx, |this, window, cx| this.import_paths(paths, window, cx)).ok();
         })
         .detach();
+    }
+
+    /// Imports files (from the Import dialog, or dropped from the Finder) and returns the new
+    /// items. Media is linked where it is on disk, and proxies start building.
+    pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Vec<Id> {
+        let (imported, skipped) = self.state.import_paths(paths);
+        self.request_proxies();
+        if !skipped.is_empty() {
+            let names: Vec<String> = skipped.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+            let message = format!("Not imported: {}. These are not images, video or sound that can be read.", names.join(", "));
+            window.push_notification(message.as_str(), cx);
+        }
+        cx.notify();
+        imported
     }
 
     /// Delete key. In the Project panel it asks before deleting the selected item (and the layers
@@ -682,7 +701,15 @@ impl Render for Workspace {
             // The clock renders first so the panels it refreshes see the new playhead this frame.
             .child(panels.clock.clone())
             .child(div().h(px(crate::theme::size::TOOLBAR_HEIGHT)).flex_none().child(cached(&panels.toolbar)))
-            .child(div().flex_1().min_h_0().p(gutter).child(workspace))
+            // The tool rail on the left, then the panels.
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(panels::toolbar::rail(self, cx))
+                    .child(div().flex_1().min_w_0().pr(gutter).pb(gutter).child(workspace)),
+            )
     }
 }
 

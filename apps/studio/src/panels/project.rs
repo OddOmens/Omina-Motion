@@ -207,12 +207,18 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         &["Project"],
         Some(footer.into_any_element()),
         div()
+            .id("project-drop")
             .size_full()
             .flex()
             .flex_col()
+            // Files dragged in from the Finder are imported (linked where they are on disk).
+            .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, _| style.bg(hsla(color::HOVER)))
+            .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                this.import_paths(paths.paths().to_vec(), window, cx);
+            }))
             .child(preview)
             .child(column_header)
-            .child(div().id("project-items").flex_1().min_h_0().overflow_y_scroll().children(rows)),
+            .child(div().id("project-items").flex_1().min_h_0().overflow_y_scroll().children(rows).test_support()),
         workspace,
         cx,
     )

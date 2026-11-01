@@ -106,7 +106,7 @@ pub struct TimelineUi {
     /// While a project item is dragged over the Tracks view: the track and frame it would land at.
     track_drop: Option<(i32, i64)>,
     /// Clips opened in the Tracks view to show their keyframe rows.
-    expanded_clips: std::collections::HashSet<Id>,
+    pub(crate) expanded_clips: std::collections::HashSet<Id>,
     pub outline_width: f32,
     /// Bounds of the rows content (it scrolls, so its top moves with the scroll position).
     rows: MeasuredBounds,
@@ -1018,6 +1018,20 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
             if let Some(preview) = this.ui.timeline.drop_preview.take() {
                 let frame = preview.frame.unwrap_or(this.state.current_frame);
                 this.state.add_layer_from_item(drag.item, preview.insert_index, frame);
+            }
+            cx.notify();
+        }))
+        // Files dragged in from the Finder: imported, then added as layers where they are dropped.
+        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<gpui_kit::ExternalPaths>, _, cx| {
+            let bounds = to_rect(event.bounds);
+            this.preview_drop(false, f32::from(event.event.position.x), f32::from(event.event.position.y), bounds);
+            cx.notify();
+        }))
+        .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+            let Some(preview) = this.ui.timeline.drop_preview.take() else { return };
+            let frame = preview.frame.unwrap_or(this.state.current_frame);
+            for item in this.import_paths(paths.paths().to_vec(), window, cx).into_iter().rev() {
+                this.state.add_layer_from_item(item, preview.insert_index, frame);
             }
             cx.notify();
         }))

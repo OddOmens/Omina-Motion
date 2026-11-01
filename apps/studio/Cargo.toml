@@ -13,6 +13,9 @@ studio-media = { path = "../../crates/studio-media" }
 studio-export = { path = "../../crates/studio-export" }
 # Wakes the UI thread when a background decoder has a frame ready.
 async-channel = "2"
+# Studio's own settings file (last project, window placement).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 gpui-kit.workspace = true
 # The same image library GPUI uses, for handing it rendered frames and reading image sizes.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

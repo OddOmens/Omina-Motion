@@ -1,5 +1,6 @@
 //! The `.studio` project file: the project as JSON, plus where the editor was (open
-//! composition, playhead, work area). Text keeps files readable and lets them diff cleanly
+//! composition, playhead, work area) and how it was set up (timeline view and zoom, open
+//! rows, snapping and so on), so a project reopens exactly as it was left. Text keeps files readable and lets them diff cleanly
 //! in version control. This module only converts to and from text; the app reads and
 //! writes the file.
 //!
@@ -30,11 +31,44 @@ pub struct EditorView {
     pub work_area: FrameRange,
 }
 
+/// How the editor was set up for this project. Files from before these were saved, or with
+/// some missing, get the defaults for what is missing.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorSettings {
+    /// The timeline's zoom: the frames it showed. `None` shows the whole composition.
+    pub view_range: Option<FrameRange>,
+    pub snapping: bool,
+    pub magnetic_main_track: bool,
+    pub loop_playback: bool,
+    /// Whether the timeline showed tracks (CapCut style) rather than layers.
+    pub tracks_view: bool,
+    /// Rows opened in the Layers view (layers, property groups).
+    pub expanded_rows: Vec<String>,
+    /// Clips opened in the Tracks view to show their keyframes.
+    pub open_clips: Vec<Id>,
+}
+
+impl Default for EditorSettings {
+    fn default() -> Self {
+        Self {
+            view_range: None,
+            snapping: true,
+            magnetic_main_track: true,
+            loop_playback: true,
+            tracks_view: true,
+            expanded_rows: Vec::new(),
+            open_clips: Vec::new(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct FileOut<'a> {
     format: &'static str,
     version: u32,
     view: EditorView,
+    settings: &'a EditorSettings,
     project: &'a Project,
 }
 
@@ -49,13 +83,21 @@ struct Header {
 #[derive(Deserialize)]
 struct FileIn {
     view: EditorView,
+    #[serde(default)]
+    settings: EditorSettings,
     project: Project,
 }
 
-/// Writes a project as file text. Fails only if the result could not be read back, which is
-/// checked here so a save never produces a file that will not open.
+/// Writes a project as file text, with default editor settings.
 pub fn to_text(project: &Project, view: EditorView) -> Result<String, String> {
-    let file = FileOut { format: FORMAT, version: FORMAT_VERSION, view, project };
+    to_text_with(project, view, &EditorSettings::default())
+}
+
+/// Writes a project and how the editor was set up as file text. Fails only if the result
+/// could not be read back, which is checked here so a save never produces a file that will
+/// not open.
+pub fn to_text_with(project: &Project, view: EditorView, settings: &EditorSettings) -> Result<String, String> {
+    let file = FileOut { format: FORMAT, version: FORMAT_VERSION, view, settings, project };
     let text = serde_json::to_string_pretty(&file).map_err(|error| format!("The project could not be saved: {error}"))?;
     from_text(&text).map_err(|error| format!("The project could not be saved, because it would not open again: {error}"))?;
     Ok(text)
@@ -63,6 +105,11 @@ pub fn to_text(project: &Project, view: EditorView) -> Result<String, String> {
 
 /// Reads file text into a checked project and editor view.
 pub fn from_text(text: &str) -> Result<(Project, EditorView), String> {
+    from_text_with(text).map(|(project, view, _)| (project, view))
+}
+
+/// Reads file text into a checked project, editor view and editor settings.
+pub fn from_text_with(text: &str) -> Result<(Project, EditorView, EditorSettings), String> {
     let header: Header = serde_json::from_str(text).map_err(|error| {
         // A file cut short (an interrupted copy, a full disk) is a damaged project, not some other file.
         if error.is_eof() { "The project file is damaged: it ends too early.".to_owned() } else { "This is not a Studio project file.".to_owned() }
@@ -78,7 +125,7 @@ pub fn from_text(text: &str) -> Result<(Project, EditorView), String> {
         return Err("The project file is damaged: it holds a number too large to use.".into());
     }
     let file: FileIn = serde_json::from_value(value).map_err(|error| format!("The project file is damaged: {error}"))?;
-    let FileIn { mut project, mut view } = file;
+    let FileIn { mut project, mut view, mut settings } = file;
     restore_effect_info(&mut project);
     fill_missing_start_frames(&mut project);
     fill_missing_tracks(&mut project);
@@ -94,7 +141,15 @@ pub fn from_text(text: &str) -> Result<(Project, EditorView), String> {
     view.current_frame = view.current_frame.clamp(0, duration - 1);
     let work_area = if view.work_area.start.is_finite() && view.work_area.end.is_finite() { view.work_area } else { FrameRange::new(0.0, duration as f64) };
     view.work_area = work_area.clamped(duration as f64, 1.0);
-    Ok((project, view))
+    // A zoom that doesn't fit the composition falls back to showing all of it.
+    settings.view_range = settings
+        .view_range
+        .filter(|range| range.start.is_finite() && range.end.is_finite() && range.end > range.start)
+        .map(|range| range.clamped(duration as f64, 1.0));
+    // Clips opened for keyframes must still exist.
+    let layers: std::collections::HashSet<Id> = project.compositions.iter().flat_map(|comp| &comp.layers).map(|layer| layer.id).collect();
+    settings.open_clips.retain(|id| layers.contains(id));
+    Ok((project, view, settings))
 }
 
 /// Ids are kept far below the top of their range, so new ones can always be allocated.
@@ -350,6 +405,25 @@ mod tests {
         let (opened, _) = from_text(&file.to_string()).unwrap();
         let tracks: Vec<i32> = opened.compositions[0].layers.iter().map(|layer| layer.track).collect();
         assert_eq!(tracks, vec![5, 4, 3, 2, 1, 0], "stacking order is kept exactly");
+    }
+
+    #[test]
+    fn editor_settings_are_saved_and_older_files_get_defaults() {
+        let settings = EditorSettings {
+            view_range: Some(FrameRange::new(24.0, 96.0)),
+            snapping: false,
+            magnetic_main_track: false,
+            loop_playback: false,
+            tracks_view: false,
+            expanded_rows: vec!["layer:100".into()],
+            open_clips: vec![Id(100), Id(424242)],
+        };
+        let text = to_text_with(&sample_project(), view(), &settings).unwrap();
+        let (_, _, opened) = from_text_with(&text).unwrap();
+        assert_eq!(opened, EditorSettings { open_clips: vec![Id(100)], ..settings }, "a clip that no longer exists is dropped");
+        // A file without settings (from before they were saved) opens with the defaults.
+        let (_, _, defaults) = from_text_with(&to_text(&sample_project(), view()).unwrap().replace("\"settings\"", "\"unused\"")).unwrap();
+        assert_eq!(defaults, EditorSettings::default());
     }
 
     #[test]

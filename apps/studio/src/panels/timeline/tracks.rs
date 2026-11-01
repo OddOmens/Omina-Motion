@@ -310,6 +310,26 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
             }
             cx.notify();
         }))
+        // Files dragged in from the Finder: imported, then placed one after another on the track.
+        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<gpui_kit::ExternalPaths>, _, cx| {
+            let (x, y) = (f32::from(event.event.position.x), f32::from(event.event.position.y));
+            let inside = Bounds::contains(&event.bounds, &event.event.position);
+            this.ui.timeline.track_drop = inside.then(|| {
+                let graph = this.ui.timeline.graph.get();
+                (track_at(this, y), frame_at(x, graph, this.state.view_range).round().max(0.0) as i64)
+            });
+            cx.notify();
+        }))
+        .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+            let Some((track, mut frame)) = this.ui.timeline.track_drop.take() else { return };
+            for item in this.import_paths(paths.paths().to_vec(), window, cx) {
+                this.state.add_clip_on_track(item, track, frame);
+                if let Some(added) = this.state.selected_layers.first().and_then(|id| this.state.composition().layer(*id)) {
+                    frame = added.out_frame;
+                }
+            }
+            cx.notify();
+        }))
         .children(rows)
         .child(work_line(work_start))
         .child(work_line(work_end))

@@ -1168,3 +1168,171 @@ fn the_tracks_toolbar_plays_and_zooms(cx: &mut TestAppContext) {
     let fit = visual.update(|_, cx| workspace.read(cx).state.view_range.len());
     assert!(zoomed < fit && fit == 240.0, "zoomed {zoomed}, fit {fit}");
 }
+
+// Files dragged in from the Finder ---------------------------------------------------------------
+
+/// Drags `paths` from outside the window and drops them at `at`, as the Finder does.
+fn drop_files(visual: &mut VisualTestContext, paths: Vec<std::path::PathBuf>, at: Point<Pixels>) {
+    use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput};
+    visual.update(|window, cx| {
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position: at, paths: ExternalPaths(paths.into()) }), cx);
+        window.render_frame(cx);
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Pending { position: point(at.x + px(1.0), at.y) }), cx);
+        window.render_frame(cx);
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position: point(at.x + px(1.0), at.y) }), cx);
+    });
+    render(visual);
+}
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures").join(name)
+}
+
+#[gpui_kit::test]
+fn files_dropped_on_the_project_panel_are_imported(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let before = visual.update(|_, cx| workspace.read(cx).state.project.items.len());
+    let at = center_of(visual, "project-items");
+    drop_files(visual, vec![fixture("tone.wav"), fixture("colors.mp4")], at);
+    let items = visual.update(|_, cx| workspace.read(cx).state.project.items.iter().map(|item| item.name.clone()).collect::<Vec<_>>());
+    assert_eq!(items.len(), before + 2, "both files were imported: {items:?}");
+    assert!(items.iter().any(|name| name == "colors.mp4") && items.iter().any(|name| name == "tone.wav"));
+}
+
+#[gpui_kit::test]
+fn files_dropped_on_a_track_become_clips_there_one_after_another(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    show_tracks(&workspace, visual);
+    // Drop two copies' worth (the same clip twice) onto the title's track, past its end.
+    let title_end = center_of(visual, ("clip-trim-out", TITLE.0 as usize));
+    let at = point(title_end.x + px(20.0), title_end.y);
+    drop_files(visual, vec![fixture("colors.mp4"), fixture("colors.mp4")], at);
+    let clips: Vec<(i32, i64, i64)> = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().layers.iter().filter(|layer| layer.name == "colors.mp4").map(|layer| (layer.track, layer.in_frame, layer.out_frame)).collect()
+    });
+    assert_eq!(clips.len(), 2, "two clips: {clips:?}");
+    let (first, second) = if clips[0].1 < clips[1].1 { (clips[0], clips[1]) } else { (clips[1], clips[0]) };
+    assert_eq!(second.1, first.2, "the second starts where the first ends");
+    assert_eq!(first.0, second.0, "on the same track");
+}
+
+#[gpui_kit::test]
+fn files_dropped_on_the_layers_timeline_become_layers(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    let bar = center_of(visual, ElementId::Name(format!("bar:{}", TITLE.0).into()));
+    drop_files(visual, vec![fixture("colors.mp4")], bar);
+    let after = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    assert_eq!(after, before + 1);
+}
+
+#[gpui_kit::test]
+fn dropping_a_folder_imports_the_media_inside_it(cx: &mut TestAppContext) {
+    let folder = scratch_folder("drop-folder");
+    std::fs::copy(fixture("tone.wav"), folder.join("a.wav")).unwrap();
+    std::fs::copy(fixture("colors.mp4"), folder.join("b.mp4")).unwrap();
+    std::fs::write(folder.join(".hidden"), "not media").unwrap();
+    let (workspace, visual) = open(cx);
+    let before = visual.update(|_, cx| workspace.read(cx).state.project.items.len());
+    let at = center_of(visual, "project-items");
+    drop_files(visual, vec![folder.clone()], at);
+    let after = visual.update(|_, cx| workspace.read(cx).state.project.items.len());
+    assert_eq!(after, before + 2);
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+// Remembering projects and sessions --------------------------------------------------------------
+
+/// Saves the open project as `name` in `folder` through the Save dialog.
+fn save_as(visual: &mut VisualTestContext, folder: &std::path::Path, name: &str) -> std::path::PathBuf {
+    visual.update(|window, cx| window.press("cmd-shift-s", cx));
+    visual.run_until_parked();
+    let path = folder.join(name);
+    visual.simulate_new_path_selection(|_| Some(path.clone()));
+    visual.run_until_parked();
+    render(visual);
+    path
+}
+
+#[gpui_kit::test]
+fn a_saved_project_reopens_with_the_editor_as_it_was(cx: &mut TestAppContext) {
+    let folder = scratch_folder("remember");
+    let (workspace, visual) = open(cx);
+    show_tracks(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.timeline.expanded_clips.insert(TITLE);
+        ws.state.snapping = false;
+        ws.state.set_view_range(studio_core::time::FrameRange::new(24.0, 120.0));
+        cx.notify();
+    }));
+    let path = save_as(visual, &folder, "Remembered.studio");
+    // Change everything, then open the file again.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.timeline.view = crate::panels::timeline::TimelineView::Layers;
+        ws.ui.timeline.expanded_clips.clear();
+        ws.state.snapping = true;
+        ws.state.set_view_range(studio_core::time::FrameRange::new(0.0, 240.0));
+        cx.notify();
+    }));
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.open_file(path.clone(), window, cx)));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.ui.timeline.view, crate::panels::timeline::TimelineView::Tracks);
+        assert!(ws.ui.timeline.expanded_clips.contains(&TITLE));
+        assert!(!ws.state.snapping);
+        assert_eq!(ws.state.view_range, studio_core::time::FrameRange::new(24.0, 120.0));
+    });
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
+fn launching_reopens_the_last_project(cx: &mut TestAppContext) {
+    let folder = scratch_folder("last-project");
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    let path = save_as(visual, &folder, "Last.studio");
+    // A fresh start: the sample project, then the session is restored.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+        ws.state = crate::state::EditorState::new();
+        ws.restore_session(window, cx);
+    }));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.file(), Some(path.as_path())));
+    assert_eq!(title_value(&workspace, visual, ROTATION, 0), PropertyValue::Scalar(33.0), "the saved edit is back");
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
+fn unsaved_work_is_recovered_after_studio_closes_without_saving(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy());
+    assert!(crate::app_settings::recovery_path().exists(), "unsaved work was copied");
+    // As if Studio closed and started again.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+        ws.state = crate::state::EditorState::new();
+        ws.restore_session(window, cx);
+    }));
+    visual.run_until_parked();
+    assert!(visual.has_pending_prompt(), "it offers the work back");
+    visual.simulate_prompt_answer("Restore");
+    visual.run_until_parked();
+    render(visual);
+    assert_eq!(title_value(&workspace, visual, ROTATION, 0), PropertyValue::Scalar(33.0));
+    assert!(has_unsaved_changes(&workspace, visual), "restored work is still unsaved");
+    visual.update(|_, cx| assert!(workspace.read(cx).state.file().is_none(), "it was untitled, and still is"));
+}
+
+#[gpui_kit::test]
+fn discarding_recovered_work_removes_the_copy(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy());
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.restore_session(window, cx)));
+    visual.run_until_parked();
+    visual.simulate_prompt_answer("Discard");
+    visual.run_until_parked();
+    assert!(!crate::app_settings::recovery_path().exists());
+}

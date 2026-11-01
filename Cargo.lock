@@ -6781,6 +6781,8 @@ dependencies = [
  "async-channel",
  "gpui-kit",
  "image",
+ "serde",
+ "serde_json",
  "studio-core",
  "studio-export",
  "studio-media",
