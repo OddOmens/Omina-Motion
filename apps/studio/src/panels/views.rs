@@ -19,6 +19,8 @@ pub enum PanelKind {
     Effects,
     Libraries,
     Align,
+    Templates,
+    Captions,
 }
 
 /// A panel view: renders one panel from the shared workspace state.
@@ -62,6 +64,8 @@ impl Render for PanelView {
                     PanelKind::Effects => effects::render(workspace, cx).into_any_element(),
                     PanelKind::Libraries => libraries::render(workspace, cx).into_any_element(),
                     PanelKind::Align => align::render(workspace, cx).into_any_element(),
+                    PanelKind::Templates => templates::render(workspace, cx).into_any_element(),
+                    PanelKind::Captions => captions::render(workspace, cx).into_any_element(),
                 }
             })
             .unwrap_or_else(|_| div().into_any_element())

@@ -344,6 +344,8 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .child(rail_button("rail-media", IconName::Folder, "Media", side == LeftPanel::Media, show(LeftPanel::Media), cx))
         .child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx))
         .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
+        .child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", side == LeftPanel::Templates, show(LeftPanel::Templates), cx))
+        .child(rail_button("rail-captions", IconName::Captions, "Captions", side == LeftPanel::Captions, show(LeftPanel::Captions), cx))
         .child(separator())
         .child(group_button(0, workspace, cx))
         .child(group_button(1, workspace, cx))

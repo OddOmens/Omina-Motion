@@ -15,6 +15,7 @@ pub mod libraries;
 pub mod project;
 pub mod properties;
 pub mod settings;
+pub mod templates;
 pub mod timeline;
 pub mod toolbar;
 pub mod viewer;

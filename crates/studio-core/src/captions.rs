@@ -75,6 +75,29 @@ impl Default for CaptionStyle {
     }
 }
 
+/// Ready-made caption looks, by name: the styles social video uses most.
+pub fn presets() -> Vec<(&'static str, CaptionStyle)> {
+    let base = CaptionStyle::default();
+    let text = |family: &str, weight: u16, size: f32, fill: u32, stroke: Option<(u32, f32)>| TextStyle {
+        font_family: family.into(),
+        font_weight: weight,
+        font_size: size,
+        line_height: size * 1.2,
+        fill: Some(Rgba::hex(fill)),
+        stroke: stroke.map(|(color, width)| (Rgba::hex(color), width)),
+        ..TextStyle::default()
+    };
+    vec![
+        ("Bold Pop", CaptionStyle { text: text("Avenir Next", 800, 80.0, 0xffffff, Some((0x000000, 7.0))), highlight: Rgba::hex(0xfacc15), animation: CaptionAnimation::Pop, words_per_phrase: 3, uppercase: true, background: None }),
+        ("Karaoke", CaptionStyle { text: text("Helvetica Neue", 800, 72.0, 0xffffff, Some((0x000000, 6.0))), highlight: Rgba::hex(0x22c55e), animation: CaptionAnimation::Highlight, words_per_phrase: 4, uppercase: true, background: None }),
+        ("One Word", CaptionStyle { text: text("Impact", 400, 110.0, 0xffffff, Some((0x000000, 8.0))), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::Pop, words_per_phrase: 1, uppercase: true, background: None }),
+        ("Boxed", CaptionStyle { text: text("Avenir Next", 700, 60.0, 0x111111, None), highlight: Rgba::hex(0x7c3aed), animation: CaptionAnimation::Highlight, words_per_phrase: 4, uppercase: false, background: Some(Rgba::hex(0xffffff)) }),
+        ("Word by Word", CaptionStyle { text: text("Futura", 700, 70.0, 0xffffff, Some((0x000000, 5.0))), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::WordByWord, words_per_phrase: 5, uppercase: false, background: None }),
+        ("Subtitle", CaptionStyle { text: text("Helvetica Neue", 500, 48.0, 0xffffff, None), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::Fade, words_per_phrase: 8, uppercase: false, background: Some(Rgba::hex(0x000000).with_alpha(0.65)) }),
+        ("Studio Default", base),
+    ]
+}
+
 /// What a caption layer shows at one frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CaptionFrame {

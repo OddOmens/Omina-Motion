@@ -83,6 +83,35 @@ impl ViewerRender {
     }
 }
 
+impl ViewerRender {
+    /// A small picture of a template, for the Templates panel: built into a scratch project and
+    /// rendered `seconds` in, `width` × `height` pixels. Drawn twice, as the app does, so text
+    /// boxes fit their measured words.
+    pub fn template_picture(&mut self, template: &studio_core::templates::Template, format: studio_core::templates::Format, seconds: f64, width: u32, height: u32) -> Option<Arc<RenderImage>> {
+        let renderer = self.renderer.as_mut().ok()?;
+        let mut project = studio_core::model::Project::new(Vec::new(), Vec::new());
+        let comp = studio_core::templates::build(&mut project, template, format)?;
+        let frame = (seconds * 30.0) as i64;
+        let measured = renderer.render(&project, comp, frame, width, height, &studio_core::media::NoVideo).ok()?;
+        for (layer, size) in measured.text_sizes {
+            studio_core::edit::set_text_box(project.composition_mut(comp)?, layer, size);
+        }
+        let picture = renderer.render(&project, comp, frame, width, height, &studio_core::media::NoVideo).ok()?;
+        // Straight-alpha pixels over a dark gray, so see-through templates still read.
+        let bgra: Vec<u8> = picture
+            .bgra
+            .chunks(4)
+            .flat_map(|pixel| {
+                let a = f32::from(pixel[3]) / 255.0;
+                let over = |c: u8| (f32::from(c) * a + 52.0 * (1.0 - a)) as u8;
+                [over(pixel[0]), over(pixel[1]), over(pixel[2]), 255]
+            })
+            .collect();
+        let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, bgra)?;
+        Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+    }
+}
+
 /// Renders the frame for the viewer at `width` × `height` device pixels and swaps it on screen.
 fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut Window, cx: &mut Context<Workspace>) {
     let Ok(renderer) = workspace.render.renderer.as_mut() else { return };

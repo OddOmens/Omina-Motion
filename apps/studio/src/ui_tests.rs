@@ -2402,3 +2402,50 @@ fn the_preview_plays_and_pauses_sound(cx: &mut TestAppContext) {
     render(visual);
     assert!(visual.update(|_, cx| workspace.read(cx).ui.preview.playing.is_none()), "and again pauses it");
 }
+
+#[gpui_kit::test]
+fn a_template_click_adds_and_opens_it_in_the_chosen_shape(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("rail-templates", cx));
+    render(visual);
+    // 4:5, then the first template.
+    visual.update(|window, cx| window.click(("template-format", 1_usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("template", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let composition = state.composition();
+        assert_eq!((composition.width, composition.height), (1080, 1350));
+        assert!(composition.name.starts_with(studio_core::templates::TEMPLATES[0].name));
+        assert_eq!(state.selected_item, Some(composition.id), "it is opened and selected");
+    });
+    // Its picture was made for the card.
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.template_pictures.contains_key(&(0, studio_core::templates::Format::Portrait))));
+}
+
+#[gpui_kit::test]
+fn the_captions_panel_lists_clips_with_sound_and_restyles_captions(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let captions = add_test_captions(&workspace, visual);
+    visual.update(|window, cx| window.click("rail-captions", cx));
+    render(visual);
+    // The sample project's score is a clip with sound.
+    let has_clip = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().layers.iter().find(|layer| state.caption_source(layer.id).is_some()).map(|layer| layer.id)
+    });
+    if let Some(clip) = has_clip {
+        assert!(visual.update(|window, _| window.try_find(("caption-clip", clip.0 as usize))).is_some());
+    }
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(captions, false);
+        cx.notify();
+    }));
+    render(visual);
+    // "One Word" is the third look.
+    visual.update(|window, cx| window.click(("caption-look", 2_usize), cx));
+    render(visual);
+    let per_phrase = visual.update(|_, cx| workspace.read(cx).state.caption_style(captions).unwrap().words_per_phrase);
+    assert_eq!(per_phrase, 1);
+}

@@ -52,7 +52,11 @@ Inside `apps/studio/src`:
 - `panels/libraries.rs`, `state/library.rs`, `library_store.rs`: Libraries (brands holding shared colors and
   text styles, linked wherever they are used; the model and syncing are in `studio-core/src/library.rs`).
   They are stored in Studio's settings folder as `libraries.json`, with backups in `Library Backups`.
-- `panels/captions.rs`, `state/captions.rs`: Generate Captions (download the model, transcribe in the
+- `panels/templates.rs`: the Templates panel. The 100 templates (20 animated layouts, each in 16:9, 4:5 and
+  9:16) are in `studio-core/src/templates/`; `catalog.rs` holds their words, colors and fonts.
+  `TEMPLATE_SHEET=/path.png cargo test -p studio-render --test render template_sheet -- --ignored` renders
+  them all into one picture to check.
+- `panels/captions.rs`, `state/captions.rs`: the Captions panel and Generate Captions (download the model, transcribe in the
   background) and caption layers; their timing and animations are in `studio-core/src/captions.rs`.
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout.

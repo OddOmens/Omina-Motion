@@ -888,3 +888,48 @@ fn text_set_on_a_path_follows_it() {
     assert!(lit(&down, 50..66, 10..70) > 40, "letters right of the line");
     assert_eq!(lit(&down, 0..45, 0..100), 0, "nothing left of it");
 }
+
+/// Renders every template in one format at `TEMPLATE_SECONDS` (default 4) into a contact sheet
+/// at `TEMPLATE_SHEET` (a PNG), ten across. `TEMPLATE_FORMAT` is wide, portrait or vertical.
+/// Run with `TEMPLATE_SHEET=/path/sheet.png cargo test -p studio-render --test render template_sheet -- --ignored`.
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn template_sheet() {
+    use studio_core::templates::{Format, TEMPLATES, build};
+    let path = std::env::var("TEMPLATE_SHEET").expect("set TEMPLATE_SHEET to the PNG to write");
+    let format = match std::env::var("TEMPLATE_FORMAT").as_deref() {
+        Ok("portrait") => Format::Portrait,
+        Ok("vertical") => Format::Vertical,
+        _ => Format::Wide,
+    };
+    let seconds: f64 = std::env::var("TEMPLATE_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(4.0);
+    let (cell_w, cell_h) = match format {
+        Format::Wide => (320u32, 180u32),
+        Format::Portrait => (216, 270),
+        Format::Vertical => (180, 320),
+    };
+    let columns = 10u32;
+    let rows = (TEMPLATES.len() as u32).div_ceil(columns);
+    let mut sheet = image::RgbaImage::from_pixel(cell_w * columns, cell_h * rows, image::Rgba([40, 40, 40, 255]));
+    let mut renderer = Renderer::new().unwrap();
+    for (index, template) in TEMPLATES.iter().enumerate() {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        let comp = build(&mut project, template, format).unwrap();
+        let frame = (seconds * 30.0) as i64;
+        // Twice: the first render measures the text, as the app does, so boxes fit their words.
+        let first = renderer.render(&project, comp, frame, cell_w * 2, cell_h * 2, &studio_core::media::NoVideo).unwrap();
+        for (layer, size) in first.text_sizes {
+            studio_core::edit::set_text_box(project.composition_mut(comp).unwrap(), layer, size);
+        }
+        let picture = renderer.render(&project, comp, frame, cell_w, cell_h, &studio_core::media::NoVideo).unwrap();
+        let (x0, y0) = ((index as u32 % columns) * cell_w, (index as u32 / columns) * cell_h);
+        for (i, pixel) in picture.bgra.chunks(4).enumerate() {
+            let (x, y) = (i as u32 % cell_w, i as u32 / cell_w);
+            // Transparent parts over a mid gray, so they read as see-through.
+            let a = f32::from(pixel[3]) / 255.0;
+            let over = |c: u8| (f32::from(c) * a + 60.0 * (1.0 - a)) as u8;
+            sheet.put_pixel(x0 + x, y0 + y, image::Rgba([over(pixel[2]), over(pixel[1]), over(pixel[0]), 255]));
+        }
+    }
+    sheet.save(path).unwrap();
+}

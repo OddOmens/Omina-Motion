@@ -20,6 +20,7 @@ pub mod playback;
 pub mod project_file;
 pub mod property;
 pub mod sample;
+pub mod templates;
 pub mod snap;
 pub mod time;
 pub mod tracks;

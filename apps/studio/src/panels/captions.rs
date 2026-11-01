@@ -2,6 +2,9 @@
 //! recognition runs on this computer with Whisper (see `studio_captions`); the first time,
 //! its model (about 150 MB) is downloaded, after asking. The work runs on a background thread,
 //! with progress and Cancel in the top bar, and ends in a caption layer above the clip.
+//!
+//! The Captions panel (on the rail) lists the clips with sound in the open composition, each
+//! with a button to caption it, and ready-made caption looks to apply to a caption layer.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,12 +15,14 @@ use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::Sizable as _;
-use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, div, px};
-use studio_core::model::Id;
+use gpui_kit::component::{Disableable as _, Icon};
+use gpui_kit::assets::IconName;
+use gpui_kit::{Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px, rgb};
+use studio_core::model::{Id, LayerContent};
 
 use crate::state::HeardWord;
-use crate::theme::{color, hsla};
-use crate::workspace::Workspace;
+use crate::theme::{color, hsla, size};
+use crate::workspace::{PanelId, Workspace};
 
 /// A captioning job running in the background.
 pub struct CaptionJob {
@@ -190,4 +195,105 @@ pub fn status(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl
                 cx.notify();
             }))),
     )
+}
+
+fn heading(text: &'static str) -> gpui_kit::Div {
+    div().pt_2().pb_1().text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(text)
+}
+
+/// The Captions panel: clips to caption, and caption looks.
+pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let state = &workspace.state;
+    let busy = workspace.ui.caption_job.is_some();
+    let clips: Vec<(Id, String)> = state.composition().layers.iter().filter(|layer| state.caption_source(layer.id).is_some()).map(|layer| (layer.id, layer.name.clone())).collect();
+    let rows = clips.iter().map(|(id, name)| {
+        let id = *id;
+        div()
+            .h(px(36.0))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(6.0))
+            .bg(hsla(color::INSET))
+            .child(Icon::new(IconName::AudioLines).size(px(14.0)).text_color(hsla(color::MUTED)))
+            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+            .child(
+                Button::new(("caption-clip", id.0 as usize))
+                    .small()
+                    .primary()
+                    .label("Caption")
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| generate(this, id, window, cx))),
+            )
+    });
+    // Looks apply to the selected caption layers.
+    let selected: Vec<Id> = state.selected_layers.iter().copied().filter(|&layer| matches!(state.composition().layer(layer).map(|layer| &layer.content), Some(LayerContent::Captions { .. }))).collect();
+    let can_style = !selected.is_empty();
+    let looks = studio_core::captions::presets().into_iter().enumerate().map(|(index, (name, style))| {
+        let fill = style.text.fill.map_or(0xffffff, |fill| fill.to_rgba_u32() >> 8);
+        let highlight = style.highlight.to_rgba_u32() >> 8;
+        let sample = if style.uppercase { "YOUR WORDS" } else { "Your words" };
+        let (first, second) = sample.split_at(5);
+        let box_color = style.background.map(|color| color.to_rgba_u32() >> 8);
+        let (selected, look) = (selected.clone(), style.clone());
+        div()
+            .id(("caption-look", index))
+            .w(px(128.0))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .cursor_pointer()
+            .when(!can_style, |card| card.opacity(0.5))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                for &layer in &selected {
+                    let look = look.clone();
+                    this.state.edit_captions(layer, |current| *current = look);
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .h(px(64.0))
+                    .rounded(px(6.0))
+                    .bg(hsla(color::PASTEBOARD))
+                    .border_1()
+                    .border_color(hsla(color::HAIRLINE))
+                    .hover(|card| card.border_color(hsla(color::ACCENT)))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px_1p5()
+                            .rounded(px(4.0))
+                            .when_some(box_color, |words, color| words.bg(rgb(color)))
+                            .flex()
+                            .font_family(style.text.font_family.clone())
+                            .font_weight(gpui_kit::FontWeight(f32::from(style.text.font_weight)))
+                            .text_size(px(15.0))
+                            .child(div().text_color(rgb(fill)).child(first.to_owned()))
+                            .child(div().text_color(rgb(highlight)).child(second.to_owned())),
+                    ),
+            )
+            .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).child(name))
+            .child(div().text_size(px(10.0)).text_color(hsla(color::MUTED)).child(style.animation.name()))
+            .test_support()
+    });
+    let body = div()
+        .id("captions-list")
+        .size_full()
+        .overflow_y_scroll()
+        .p_2()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Captions are made on this computer from the speech in a clip, as a caption layer above it. Each word is timed, so the words can light up as they are spoken."))
+        .child(heading("Clips with sound"))
+        .when(clips.is_empty(), |list| list.child(super::chrome::hint("Add a clip with speech (video or audio) to the timeline to caption it.")))
+        .children(rows)
+        .child(heading("Looks"))
+        .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(if can_style { "Click a look to apply it to the selected captions." } else { "Select a caption layer, then click a look to restyle it." }))
+        .child(div().pt_1().flex().flex_wrap().gap_2().children(looks));
+    super::chrome::panel(PanelId::Captions, &["Captions"], None, body, workspace, cx)
 }

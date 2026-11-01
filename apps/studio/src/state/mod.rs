@@ -583,6 +583,16 @@ impl EditorState {
         self.selected_item = Some(studio_core::folders::add_folder(&mut self.project, &format!("Folder {}", count + 1), None));
     }
 
+    /// Adds template `index` (of `studio_core::templates::TEMPLATES`) in `format` as a new
+    /// composition, opens it and selects it in the Project panel.
+    pub fn add_template(&mut self, index: usize, format: studio_core::templates::Format) -> Option<Id> {
+        let template = studio_core::templates::TEMPLATES.get(index)?;
+        let comp = studio_core::templates::build(&mut self.project, template, format)?;
+        self.open_composition(comp);
+        self.selected_item = Some(comp);
+        Some(comp)
+    }
+
     /// Starts a new, empty project: one 1920 × 1080, 30 fps, 10-second composition, and the
     /// folders new projects start with. It has no file until it is saved.
     pub fn new_project(&mut self, folders: &[String]) {

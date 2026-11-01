@@ -2,6 +2,7 @@
 //! and in-place value editing, and lays out the panels like After Effects.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::component::input::{InputEvent, InputState};
@@ -182,6 +183,10 @@ pub enum LeftPanel {
     Effects,
     /// Brands' shared colors and text styles.
     Libraries,
+    /// Ready-made animated compositions.
+    Templates,
+    /// Making captions from speech, and caption looks.
+    Captions,
 }
 
 /// Panels that can hold focus; the focused one gets a blue outline.
@@ -196,6 +201,8 @@ pub enum PanelId {
     Effects,
     Libraries,
     Align,
+    Templates,
+    Captions,
 }
 
 /// The editing tools on the rail.
@@ -307,6 +314,10 @@ pub struct UiState {
     pub graph_editor: Option<gpui_kit::Point<gpui_kit::Pixels>>,
     /// Font families offered in the Text section, looked up once at startup.
     pub font_families: Vec<&'static str>,
+    /// The Templates panel's chosen shape and category, and the pictures made of templates.
+    pub template_format: studio_core::templates::Format,
+    pub template_category: Option<studio_core::templates::Category>,
+    pub template_pictures: HashMap<(usize, studio_core::templates::Format), Arc<gpui_kit::RenderImage>>,
     /// The Project panel's preview of the selected item.
     pub preview: panels::project::Preview,
     /// Where the preview box is on screen, for scrubbing.
@@ -362,6 +373,8 @@ struct Panels {
     effects: Entity<PanelView>,
     libraries: Entity<PanelView>,
     align: Entity<PanelView>,
+    templates: Entity<PanelView>,
+    captions: Entity<PanelView>,
     clock: Entity<PlaybackClock>,
 }
 
@@ -373,9 +386,10 @@ impl Panels {
             (view(PanelKind::Toolbar), view(PanelKind::Project), view(PanelKind::Viewer), view(PanelKind::Timeline));
         let (properties, effects, align) = (view(PanelKind::Properties), view(PanelKind::Effects), view(PanelKind::Align));
         let libraries = view(PanelKind::Libraries);
+        let (templates, captions) = (view(PanelKind::Templates), view(PanelKind::Captions));
         let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id()];
         let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed, project.entity_id()));
-        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, clock }
+        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, templates, captions, clock }
     }
 }
 
@@ -383,9 +397,9 @@ impl Panels {
 impl Workspace {
     /// How many times each panel has rendered, in `PanelKind` order: toolbar, project, viewer,
     /// timeline, properties, effects, libraries, align.
-    pub fn panel_render_counts(&self, cx: &App) -> [usize; 8] {
+    pub fn panel_render_counts(&self, cx: &App) -> [usize; 10] {
         let p = &self.panels;
-        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align].map(|view| view.read(cx).renders)
+        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions].map(|view| view.read(cx).renders)
     }
 }
 
@@ -538,6 +552,9 @@ impl Workspace {
                 font_families: panels::properties::installed_font_families(cx),
                 project_columns: crate::app_settings::load().project_columns,
                 preview: Default::default(),
+                template_format: studio_core::templates::Format::Vertical,
+                template_category: None,
+                template_pictures: HashMap::new(),
                 preview_bounds: Default::default(),
                 timeline: timeline_ui,
                 window_title: String::new(),
@@ -811,6 +828,10 @@ impl Render for Workspace {
             self.ui.preview.item = self.state.selected_item;
             self.ui.preview.seconds = 0.0;
         }
+        // The Templates panel's pictures are made here, a few per frame, as it needs them.
+        if self.ui.left_panel == LeftPanel::Templates {
+            panels::templates::make_pictures(self, window, cx);
+        }
         let picking = self.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
         let dragging = cx.has_active_drag() || picking;
         self.state.record_history(dragging);
@@ -848,6 +869,8 @@ impl Render for Workspace {
                                                 LeftPanel::Media => cached(&panels.project),
                                                 LeftPanel::Effects => cached(&panels.effects),
                                                 LeftPanel::Libraries => cached(&panels.libraries),
+                                                LeftPanel::Templates => cached(&panels.templates),
+                                                LeftPanel::Captions => cached(&panels.captions),
                                             }),
                                     )
                                     .child(resizable_panel().child(cached(&panels.viewer))),

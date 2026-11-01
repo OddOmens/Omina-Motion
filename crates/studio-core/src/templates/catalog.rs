@@ -1,0 +1,123 @@
+//! The 100 templates: five for each layout, each with its own words, colors and font.
+//! Words are short on purpose, so they fit the narrow formats; line breaks are written in.
+
+use super::{Category, Layout, Palette, Template};
+
+/// The palettes templates use.
+const MIDNIGHT: Palette = Palette { background: 0x0b1020, background_2: 0x1b2350, accent: 0x7c5cff, text: 0xffffff, muted: 0xa5acc9, on_accent: 0xffffff };
+const SUNSET: Palette = Palette { background: 0x2a0f1e, background_2: 0x5b1a2e, accent: 0xff7a45, text: 0xffffff, muted: 0xf2c4b5, on_accent: 0x1a0a10 };
+const LIME: Palette = Palette { background: 0x0d0d0d, background_2: 0x1f1f1f, accent: 0xd4f25c, text: 0xffffff, muted: 0xa3a3a3, on_accent: 0x111111 };
+const CREAM: Palette = Palette { background: 0xf6efe6, background_2: 0xe9dccb, accent: 0xc2410c, text: 0x1c1917, muted: 0x6b5e53, on_accent: 0xffffff };
+const OCEAN: Palette = Palette { background: 0x03263b, background_2: 0x0b5a7a, accent: 0x2dd4bf, text: 0xffffff, muted: 0x9fd3e0, on_accent: 0x042f2e };
+const BLUSH: Palette = Palette { background: 0xfdf2f8, background_2: 0xfbcfe8, accent: 0xdb2777, text: 0x3b0a24, muted: 0x9d5a7b, on_accent: 0xffffff };
+const FOREST: Palette = Palette { background: 0x0f1f17, background_2: 0x1f3d2c, accent: 0x86efac, text: 0xf0fdf4, muted: 0xa7c4b3, on_accent: 0x052e16 };
+const MONO: Palette = Palette { background: 0xffffff, background_2: 0xe5e5e5, accent: 0x111111, text: 0x111111, muted: 0x6b6b6b, on_accent: 0xffffff };
+const ELECTRIC: Palette = Palette { background: 0x1e1b4b, background_2: 0x4c1d95, accent: 0xfacc15, text: 0xffffff, muted: 0xc4b5fd, on_accent: 0x1e1b4b };
+const CORAL: Palette = Palette { background: 0xfff1ec, background_2: 0xffd8c9, accent: 0xff5a36, text: 0x2b1a14, muted: 0x8a6152, on_accent: 0xffffff };
+const GOLD: Palette = Palette { background: 0x111111, background_2: 0x2b2416, accent: 0xe8b44a, text: 0xfff8e7, muted: 0xbfa77a, on_accent: 0x111111 };
+const SKY: Palette = Palette { background: 0xeff6ff, background_2: 0xbfdbfe, accent: 0x2563eb, text: 0x0f172a, muted: 0x475569, on_accent: 0xffffff };
+const RED: Palette = Palette { background: 0x1a0505, background_2: 0x450a0a, accent: 0xef4444, text: 0xffffff, muted: 0xfca5a5, on_accent: 0xffffff };
+
+/// Every template, grouped by layout.
+pub static TEMPLATES: [Template; 100] = [
+    Template { name: "Launch Day", category: Category::Marketing, layout: Layout::Headline, copy: &["INTRODUCING", "Meet the\nNew Standard", "Built for teams that move fast", "Learn More"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Big Idea", category: Category::Brand, layout: Layout::Headline, copy: &["OUR MISSION", "Make Every\nDay Count", "Simple tools for busy people", "Join Us"], palette: CREAM, font: ("Georgia", 700), seconds: 12.0 },
+    Template { name: "Webinar Invite", category: Category::Events, layout: Layout::Headline, copy: &["FREE WEBINAR", "Grow Your\nAudience", "Live Thursday · 12 PM", "Save My Seat"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "App Promo", category: Category::Product, layout: Layout::Headline, copy: &["NOW ON iOS", "Your Day,\nOrganized", "Download free today", "Get the App"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Course Launch", category: Category::Education, layout: Layout::Headline, copy: &["ENROLL NOW", "Learn Video\nin 30 Days", "Step-by-step lessons", "Start Learning"], palette: OCEAN, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Flash Deal", category: Category::Sales, layout: Layout::SplitPromo, copy: &["Weekend\nDeal", "Today only", "$29", "Shop Now"], palette: CORAL, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Menu Special", category: Category::Product, layout: Layout::SplitPromo, copy: &["Taco\nTuesday", "Two tacos + a drink", "$9", "Order Now"], palette: SUNSET, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Membership", category: Category::Marketing, layout: Layout::SplitPromo, copy: &["Go\nPremium", "Everything unlocked", "$5/mo", "Upgrade"], palette: MIDNIGHT, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Class Pass", category: Category::Education, layout: Layout::SplitPromo, copy: &["Yoga\nClass", "Beginners welcome", "$15", "Book a Spot"], palette: FOREST, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Bundle Offer", category: Category::Sales, layout: Layout::SplitPromo, copy: &["Bundle\n& Save", "3 for the price of 2", "-33%", "Grab It"], palette: LIME, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "3 Reasons", category: Category::Marketing, layout: Layout::List, copy: &["3 Reasons to\nSwitch", "Saves 5 hours a week", "Works with your tools", "Free for 30 days", "Try It Free"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "What's in My Bag", category: Category::Ugc, layout: Layout::List, copy: &["What's in\nMy Bag", "Mini camera", "Ring light", "Lav mic", "Shop My Picks"], palette: BLUSH, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Morning Routine", category: Category::Social, layout: Layout::List, copy: &["My 6 AM\nRoutine", "Water first", "10 minute stretch", "Plan the day", "Follow Along"], palette: CREAM, font: ("Futura", 700), seconds: 12.0 },
+    Template { name: "Top Tools", category: Category::Education, layout: Layout::List, copy: &["Top 3 Tools\nfor Creators", "Studio for editing", "Notes for planning", "A good mic", "Save This"], palette: ELECTRIC, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Why Choose Us", category: Category::Brand, layout: Layout::List, copy: &["Why People\nChoose Us", "Same-day delivery", "Real human support", "Lifetime warranty", "Learn More"], palette: MONO, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "Founder Quote", category: Category::Brand, layout: Layout::Quote, copy: &["We build what\nwe wish existed.", "Alex Rivera", "Founder, Northwind"], palette: GOLD, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Podcast Quote", category: Category::Podcast, layout: Layout::Quote, copy: &["Consistency beats\nintensity every time.", "Jordan Lee", "The Growth Show, Ep. 42"], palette: MIDNIGHT, font: ("Didot", 700), seconds: 10.0 },
+    Template { name: "Daily Motivation", category: Category::Social, layout: Layout::Quote, copy: &["Start before\nyou're ready.", "Daily Reminder", "@yourhandle"], palette: LIME, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Customer Love", category: Category::Testimonials, layout: Layout::Quote, copy: &["Honestly the best\npurchase this year.", "Sam K.", "Verified Buyer"], palette: BLUSH, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Book Quote", category: Category::Education, layout: Layout::Quote, copy: &["Small habits make\nbig changes.", "Chapter 3", "Lessons in Habits"], palette: CREAM, font: ("Baskerville", 700), seconds: 10.0 },
+    Template { name: "Product Drop", category: Category::Product, layout: Layout::Countdown, copy: &["DROPPING IN", "NOW LIVE", "Link in bio"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "New Episode", category: Category::Podcast, layout: Layout::Countdown, copy: &["NEW EPISODE IN", "OUT NOW", "Listen everywhere"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Sale Countdown", category: Category::Sales, layout: Layout::Countdown, copy: &["SALE STARTS IN", "40% OFF", "Everything, this weekend"], palette: CORAL, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Going Live", category: Category::Events, layout: Layout::Countdown, copy: &["WE GO LIVE IN", "LET'S GO", "Join the stream"], palette: OCEAN, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Big Reveal", category: Category::Social, layout: Layout::Countdown, copy: &["THE RESULTS", "WE DID IT", "Thank you all"], palette: LIME, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Interview Name", category: Category::Ugc, layout: Layout::LowerThird, copy: &["Maya Chen", "Product Designer"], palette: MIDNIGHT, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Creator Intro", category: Category::Ugc, layout: Layout::LowerThird, copy: &["@yourhandle", "Daily tips & tutorials"], palette: LIME, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Expert Title", category: Category::Education, layout: Layout::LowerThird, copy: &["Dr. Sarah Patel", "Nutrition Scientist"], palette: SKY, font: ("Helvetica Neue", 700), seconds: 10.0 },
+    Template { name: "Host Name", category: Category::Podcast, layout: Layout::LowerThird, copy: &["Chris Morgan", "Host, The Morning Mix"], palette: GOLD, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Customer Story", category: Category::Testimonials, layout: Layout::LowerThird, copy: &["Jamie R.", "Customer since 2021"], palette: CORAL, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Five Stars", category: Category::Testimonials, layout: Layout::Review, copy: &["Changed how I\nwork every day.", "Priya S.", "Studio Pro"], palette: MIDNIGHT, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Skincare Review", category: Category::Testimonials, layout: Layout::Review, copy: &["My skin has never\nlooked better!", "Hannah M.", "Glow Serum"], palette: BLUSH, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Restaurant Review", category: Category::Testimonials, layout: Layout::Review, copy: &["The best ramen\nin town. Period.", "Marcus T.", "Noodle House"], palette: SUNSET, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "App Review", category: Category::Product, layout: Layout::Review, copy: &["Simple, fast,\nand beautiful.", "App Store Review", "Focus Timer"], palette: SKY, font: ("Helvetica Neue", 700), seconds: 10.0 },
+    Template { name: "Service Review", category: Category::Brand, layout: Layout::Review, copy: &["Showed up on time\nand did it right.", "Local Guide", "Bright Home Cleaning"], palette: FOREST, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Half Off", category: Category::Sales, layout: Layout::SaleBurst, copy: &["50%", "OFF", "Everything must go", "CODE: HALF50"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Black Friday", category: Category::Sales, layout: Layout::SaleBurst, copy: &["70%", "OFF", "Black Friday starts now", "CODE: BF70"], palette: GOLD, font: ("Impact", 400), seconds: 12.0 },
+    Template { name: "Free Shipping", category: Category::Sales, layout: Layout::SaleBurst, copy: &["FREE", "SHIPPING", "On orders over $50", "NO CODE NEEDED"], palette: SKY, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Buy One Get One", category: Category::Sales, layout: Layout::SaleBurst, copy: &["2 FOR 1", "TODAY", "Buy one, get one free", "CODE: BOGO"], palette: CORAL, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Summer Sale", category: Category::Marketing, layout: Layout::SaleBurst, copy: &["30%", "OFF", "The summer collection", "CODE: SUN30"], palette: OCEAN, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "POV Hook", category: Category::Ugc, layout: Layout::Hook, copy: &["POV: you finally\nfound the one", "Wait for it…"], palette: MONO, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Stop Scrolling", category: Category::Social, layout: Layout::Hook, copy: &["Stop scrolling if\nyou edit videos", "This changes everything"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Unboxing", category: Category::Ugc, layout: Layout::Hook, copy: &["Unboxing the\nviral gadget", "Is it worth it?"], palette: BLUSH, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Did You Know", category: Category::Education, layout: Layout::Hook, copy: &["Did you know\nthis trick?", "Watch till the end"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Storytime", category: Category::Ugc, layout: Layout::Hook, copy: &["Storytime: how I\nquit my 9 to 5", "Part 1"], palette: CREAM, font: ("Georgia", 700), seconds: 12.0 },
+    Template { name: "New Sneaker", category: Category::Product, layout: Layout::ProductCard, copy: &["Air Runner", "$129", "Lightweight · Breathable", "Shop Now"], palette: CORAL, font: ("Futura", 700), seconds: 12.0 },
+    Template { name: "Coffee Launch", category: Category::Product, layout: Layout::ProductCard, copy: &["Cold Brew", "$4.50", "Smooth · Bold · Fresh", "Order Today"], palette: CREAM, font: ("Georgia", 700), seconds: 12.0 },
+    Template { name: "Tech Gadget", category: Category::Product, layout: Layout::ProductCard, copy: &["Pocket Cam", "$249", "4K · Stabilized · Tiny", "Pre-order"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Beauty Product", category: Category::Product, layout: Layout::ProductCard, copy: &["Glow Serum", "$38", "Vitamin C · Vegan", "Add to Cart"], palette: BLUSH, font: ("Avenir Next", 700), seconds: 12.0 },
+    Template { name: "Menu Item", category: Category::Marketing, layout: Layout::ProductCard, copy: &["Smash Burger", "$12", "Double patty · House sauce", "Order Now"], palette: SUNSET, font: ("Arial Rounded MT Bold", 700), seconds: 12.0 },
+    Template { name: "Save the Date", category: Category::Events, layout: Layout::Event, copy: &["SAVE THE DATE", "Summer Gala", "JUNE 21", "Grand Hall, Austin"], palette: GOLD, font: ("Didot", 700), seconds: 12.0 },
+    Template { name: "Workshop", category: Category::Events, layout: Layout::Event, copy: &["LIVE WORKSHOP", "Editing 101", "MAR 14 · 6 PM", "Online · Free"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "Grand Opening", category: Category::Events, layout: Layout::Event, copy: &["GRAND OPENING", "Our New Store", "SAT · 10 AM", "123 Main Street"], palette: CORAL, font: ("Futura", 700), seconds: 12.0 },
+    Template { name: "Concert", category: Category::Events, layout: Layout::Event, copy: &["LIVE MUSIC", "The Night Shift", "FRI · 9 PM", "The Blue Room"], palette: ELECTRIC, font: ("Impact", 400), seconds: 12.0 },
+    Template { name: "Pop-Up Market", category: Category::Events, layout: Layout::Event, copy: &["POP-UP MARKET", "Makers Fair", "MAY 4–5", "Riverside Park"], palette: FOREST, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Growth Stat", category: Category::Marketing, layout: Layout::BigStat, copy: &["3×", "more engagement", "Based on 2,000 posts"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Happy Customers", category: Category::Brand, layout: Layout::BigStat, copy: &["10K+", "happy customers", "And counting"], palette: CREAM, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Time Saved", category: Category::Product, layout: Layout::BigStat, copy: &["5 hrs", "saved every week", "Average across our users"], palette: LIME, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Fun Fact", category: Category::Education, layout: Layout::BigStat, copy: &["70%", "watch with the sound off", "Add captions to every video"], palette: SKY, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Milestone", category: Category::Social, layout: Layout::BigStat, copy: &["100K", "followers. Thank you!", "You made this happen"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Glow Up", category: Category::Ugc, layout: Layout::BeforeAfter, copy: &["BEFORE", "AFTER", "The glow up is real"], palette: BLUSH, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Room Refresh", category: Category::Marketing, layout: Layout::BeforeAfter, copy: &["BEFORE", "AFTER", "Same room, new life"], palette: CREAM, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Fitness Progress", category: Category::Ugc, layout: Layout::BeforeAfter, copy: &["DAY 1", "DAY 90", "Consistency wins"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Photo Edit", category: Category::Education, layout: Layout::BeforeAfter, copy: &["RAW", "EDITED", "One-click color grade"], palette: MIDNIGHT, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Deep Clean", category: Category::Brand, layout: Layout::BeforeAfter, copy: &["BEFORE", "AFTER", "Book your deep clean"], palette: OCEAN, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "How It Works", category: Category::Product, layout: Layout::Steps, copy: &["How It Works", "Pick a plan", "Set it up", "Enjoy"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 14.0 },
+    Template { name: "Recipe Steps", category: Category::Education, layout: Layout::Steps, copy: &["3-Step Pasta", "Boil the pasta", "Toss in sauce", "Top with basil"], palette: SUNSET, font: ("Georgia", 700), seconds: 14.0 },
+    Template { name: "Get Started", category: Category::Marketing, layout: Layout::Steps, copy: &["Get Started", "Make an account", "Invite your team", "Launch"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 14.0 },
+    Template { name: "Editing Tips", category: Category::Education, layout: Layout::Steps, copy: &["Edit Faster", "Cut on the beat", "Use J-cuts", "Add captions"], palette: ELECTRIC, font: ("Futura", 700), seconds: 14.0 },
+    Template { name: "Skincare Routine", category: Category::Ugc, layout: Layout::Steps, copy: &["My Routine", "Cleanse", "Serum", "Moisturize"], palette: BLUSH, font: ("Avenir Next", 700), seconds: 14.0 },
+    Template { name: "New Feature", category: Category::Product, layout: Layout::Announcement, copy: &["NEW", "Dark Mode\nIs Here", "Update the app today"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "We're Hiring", category: Category::Brand, layout: Layout::Announcement, copy: &["HIRING", "Join Our\nTeam", "Designers & editors"], palette: LIME, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Back in Stock", category: Category::Sales, layout: Layout::Announcement, copy: &["BACK", "Back in\nStock", "Sizes going fast"], palette: CORAL, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Collab Tease", category: Category::Social, layout: Layout::Announcement, copy: &["SOON", "Big News\nComing", "Turn on notifications"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Holiday Hours", category: Category::Brand, layout: Layout::Announcement, copy: &["OPEN", "Holiday\nHours", "Dec 24: 9 AM – 2 PM"], palette: FOREST, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Episode Promo", category: Category::Podcast, layout: Layout::Podcast, copy: &["THE GROWTH SHOW", "Building in\nPublic", "with Taylor Brooks"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 15.0 },
+    Template { name: "Interview Clip", category: Category::Podcast, layout: Layout::Podcast, copy: &["CREATOR TALKS", "How I Hit\n1M Views", "with Dani Ruiz"], palette: LIME, font: ("Helvetica Neue", 800), seconds: 15.0 },
+    Template { name: "Story Podcast", category: Category::Podcast, layout: Layout::Podcast, copy: &["COLD CASES", "The Missing\nLetter", "Episode 12"], palette: RED, font: ("Georgia", 700), seconds: 15.0 },
+    Template { name: "Business Podcast", category: Category::Podcast, layout: Layout::Podcast, copy: &["SMALL BIZ HOUR", "Pricing Your\nFirst Product", "with Omar Haddad"], palette: GOLD, font: ("Futura", 700), seconds: 15.0 },
+    Template { name: "Wellness Podcast", category: Category::Podcast, layout: Layout::Podcast, copy: &["SLOW MORNINGS", "Rest Is\nProductive", "with Lena Fox"], palette: FOREST, font: ("Avenir Next", 700), seconds: 15.0 },
+    Template { name: "Logo Reveal", category: Category::Brand, layout: Layout::BrandIntro, copy: &["NORTHWIND", "Made to move"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Florist Intro", category: Category::Brand, layout: Layout::BrandIntro, copy: &["Bloom Studio", "Flowers for every day"], palette: BLUSH, font: ("Didot", 700), seconds: 10.0 },
+    Template { name: "Agency Intro", category: Category::Brand, layout: Layout::BrandIntro, copy: &["PIXEL & CO", "Design that sells"], palette: LIME, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Cafe Intro", category: Category::Brand, layout: Layout::BrandIntro, copy: &["Corner Cafe", "Coffee · Pastries · Friends"], palette: CREAM, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Gym Intro", category: Category::Brand, layout: Layout::BrandIntro, copy: &["IRON CLUB", "Stronger every day"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Weekend Recap", category: Category::Ugc, layout: Layout::Collage, copy: &["Weekend\nRecap", "Best moments"], palette: CREAM, font: ("Futura", 700), seconds: 12.0 },
+    Template { name: "Travel Diary", category: Category::Social, layout: Layout::Collage, copy: &["Lisbon\nDiaries", "5 days, 100 photos"], palette: OCEAN, font: ("Georgia", 700), seconds: 12.0 },
+    Template { name: "Collection Drop", category: Category::Product, layout: Layout::Collage, copy: &["Fall\nCollection", "Now available online"], palette: GOLD, font: ("Didot", 700), seconds: 12.0 },
+    Template { name: "Night Highlights", category: Category::Events, layout: Layout::Collage, copy: &["Night\nHighlights", "Thanks for coming!"], palette: ELECTRIC, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Portfolio", category: Category::Marketing, layout: Layout::Collage, copy: &["Selected\nWork", "2024–2025"], palette: MONO, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "Sale Marquee", category: Category::Sales, layout: Layout::Marquee, copy: &["SALE", "Up to 60% off"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "New Drop Marquee", category: Category::Product, layout: Layout::Marquee, copy: &["NEW DROP", "Available now"], palette: LIME, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Open Now", category: Category::Brand, layout: Layout::Marquee, copy: &["OPEN NOW", "Come say hi"], palette: CORAL, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Link in Bio", category: Category::Social, layout: Layout::Marquee, copy: &["LINK IN BIO", "Tap to shop"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Live Now", category: Category::Events, layout: Layout::Marquee, copy: &["LIVE NOW", "Join the stream"], palette: MIDNIGHT, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Follow for More", category: Category::Social, layout: Layout::EndCard, copy: &["Follow for\nMore", "@yourhandle", "Follow"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Subscribe", category: Category::Marketing, layout: Layout::EndCard, copy: &["New Videos\nEvery Week", "@yourchannel", "Subscribe"], palette: RED, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Shop the Look", category: Category::Ugc, layout: Layout::EndCard, copy: &["Shop This\nLook", "@yourstore", "Shop Now"], palette: BLUSH, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Thanks for Watching", category: Category::Social, layout: Layout::EndCard, copy: &["Thanks for\nWatching!", "@yourhandle", "Like & Share"], palette: CREAM, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Book a Call", category: Category::Brand, layout: Layout::EndCard, copy: &["Ready to\nGrow?", "yourwebsite.com", "Book a Call"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 10.0 },
+];
