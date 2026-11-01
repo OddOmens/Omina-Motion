@@ -36,6 +36,9 @@ fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) 
         Root::new(view, window, cx)
     });
     visual.simulate_resize(size(px(1600.0), px(960.0)));
+    // Most tests drive the Layers view; Tracks view tests switch with `show_tracks`.
+    let view = workspace.clone().expect("workspace was built");
+    visual.update(|_, cx| view.update(cx, |ws, _| ws.ui.timeline.view = crate::panels::timeline::TimelineView::Layers));
     // Measured bounds settle over two frames.
     for _ in 0..3 {
         visual.update(|window, cx| window.render_frame(cx));
@@ -1020,4 +1023,107 @@ fn the_parent_column_is_visible_at_the_default_layout(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     let outline = visual.update(|_, cx| workspace.read(cx).ui.timeline.outline_width);
     assert!(outline >= 762.0, "every outline column fits, Parent & Link included ({outline} px)");
+}
+
+// Tracks view ---------------------------------------------------------------------------------
+
+fn show_tracks(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) {
+    // A tall window, so every track of the sample project is on screen without scrolling.
+    visual.simulate_resize(size(px(1600.0), px(1500.0)));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.timeline.view = crate::panels::timeline::TimelineView::Tracks;
+        cx.notify();
+    }));
+    render(visual);
+}
+
+fn track_of(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, layer: Id) -> i32 {
+    visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().track)
+}
+
+/// The background solid, alone on the main track in the sample project.
+fn main_clip(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> Id {
+    visual.update(|_, cx| workspace.read(cx).state.composition().layers.iter().find(|l| l.track == studio_core::tracks::MAIN_TRACK).unwrap().id)
+}
+
+#[gpui_kit::test]
+fn the_header_switches_between_layers_and_tracks(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("timeline-view-tracks", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.timeline.view, crate::panels::timeline::TimelineView::Tracks));
+    // The title is drawn as a clip (finding it fails the test if it isn't there).
+    center_of(visual, ("clip", TITLE.0 as usize));
+    visual.update(|window, cx| window.click("timeline-view-layers", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.timeline.view, crate::panels::timeline::TimelineView::Layers));
+}
+
+#[gpui_kit::test]
+fn dragging_a_clip_onto_the_main_track_puts_two_clips_on_one_line(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let solid = main_clip(&workspace, visual);
+    // Make room on the main track: the solid ends at frame 24, so the title (24–168) fits after it.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.magnetic_main_track = false;
+        ws.state.composition_mut_for_test().layer_mut(solid).unwrap().out_frame = 24;
+        cx.notify();
+    }));
+    show_tracks(&workspace, visual);
+    let title = center_of(visual, ("clip", TITLE.0 as usize));
+    let main = center_of(visual, ("clip", solid.0 as usize));
+    // Straight down onto the main track's row, keeping the title's time.
+    visual.update(|window, cx| window.drag(title, point(title.x, main.y), cx));
+    render(visual);
+    assert_eq!(track_of(&workspace, visual, TITLE), studio_core::tracks::MAIN_TRACK);
+    assert_eq!(track_of(&workspace, visual, solid), studio_core::tracks::MAIN_TRACK, "both on one line");
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_ne!(track_of(&workspace, visual, TITLE), studio_core::tracks::MAIN_TRACK, "one undo puts it back");
+}
+
+#[gpui_kit::test]
+fn project_items_drop_onto_the_track_under_the_pointer(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let solid = main_clip(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.magnetic_main_track = false;
+        ws.state.composition_mut_for_test().layer_mut(solid).unwrap().out_frame = 24;
+        cx.notify();
+    }));
+    show_tracks(&workspace, visual);
+    // Drop the gray solid item onto the main track, past the existing clip.
+    let item = center_of(visual, ("project-item", studio_core::sample::ids::GRAY_SOLID.0 as usize));
+    let main = center_of(visual, ("clip", solid.0 as usize));
+    let target = point(main.x + px(200.0), main.y);
+    visual.update(|window, cx| window.drag(item, target, cx));
+    render(visual);
+    let added = visual.update(|_, cx| workspace.read(cx).state.selected_layers[0]);
+    assert_ne!(added, solid);
+    assert_eq!(track_of(&workspace, visual, added), studio_core::tracks::MAIN_TRACK, "it landed on the main track");
+}
+
+#[gpui_kit::test]
+fn clip_grips_trim_in_the_tracks_view(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    show_tracks(&workspace, visual);
+    let (_, _, before) = layer_timing(&workspace, visual, TITLE);
+    let grip = center_of(visual, ("clip-trim-out", TITLE.0 as usize));
+    visual.update(|window, cx| window.drag(grip, point(grip.x - px(40.0), grip.y), cx));
+    render(visual);
+    let (_, _, after) = layer_timing(&workspace, visual, TITLE);
+    assert!(after < before, "the out point moved earlier: {before} → {after}");
+}
+
+#[gpui_kit::test]
+fn track_header_toggles_work(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    show_tracks(&workspace, visual);
+    visual.update(|window, cx| window.click("magnetic", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(!workspace.read(cx).state.magnetic_main_track));
+    let title_track = track_of(&workspace, visual, TITLE);
+    visual.update(|window, cx| window.click(ElementId::NamedInteger("track-lock".into(), title_track as i64 as u64), cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layer(TITLE).unwrap().switches.locked));
 }

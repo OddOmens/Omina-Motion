@@ -27,7 +27,9 @@ Inside `apps/studio/src`:
 
 - `state/`: every editing action (playback, selection, keyframes, viewer drags, undo, opening and saving),
   unit-tested without a window. `state/history.rs` is undo and redo.
-- `timeline_rows.rs`: the flat row list both halves of the timeline render.
+- `timeline_rows.rs`: the flat row list both halves of the Layers view render.
+- `panels/timeline/tracks.rs`: the timeline's Tracks view (CapCut style): one row per track, several clips
+  per row, thumbnails and waveforms.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout.
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).
 - `project_files.rs`: Save, Save As, Open, and asking about unsaved changes before quitting or opening.
@@ -68,6 +70,10 @@ cargo run -p studio-export --release --example export -- project.studio out.mp4 
   footage or audio at a moment must go through `start_frame` (see `studio-core/src/trim.rs`).
 - Track mattes pair a layer with the one directly above it, so anything that inserts or reorders layers must
   keep those pairs together (see how `studio-core/src/cut.rs` splits a layer with its matte).
+- Every layer is on a track (`studio-core/src/tracks.rs`): 0 is the main track, picture tracks count up, sound
+  tracks down, and clips on one track never overlap. The layer list stays the render order, kept sorted by
+  track by `tracks::normalize`; call it after anything that adds, removes or re-tracks layers. With the
+  magnetic main track on, the editor packs track 0 after each edit (in `record_history`).
 - Playback position comes from a clock, never from counting screen refreshes: the time actually heard
   from the sound card while playing (so picture follows sound), or the wall clock when there is no sound
   device. The sound card's callback never blocks: it only copies from a lock-free queue.

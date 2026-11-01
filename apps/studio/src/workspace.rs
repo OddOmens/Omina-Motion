@@ -281,6 +281,7 @@ impl Workspace {
                 .unwrap_or(true)
         });
         let render = panels::viewer::ViewerRender::new();
+        let timeline_ui = panels::timeline::TimelineUi::default();
         let panels = Panels::new(cx);
         // Background decoders signal here when a frame is ready; redraw only the viewer.
         let (frame_ready, frames_ready) = async_channel::bounded::<()>(1);
@@ -313,6 +314,27 @@ impl Workspace {
             }
         })
         .detach();
+        // Thumbnails and waveforms decoded in the background redraw the timeline as they arrive.
+        // (Headless tests leave this out: their scheduler refuses wake-ups from other threads.)
+        #[cfg(not(test))]
+        {
+            let (media_ready, media_arrived) = async_channel::bounded::<()>(1);
+            let (thumbnail_ready, peaks_ready) = (media_ready.clone(), media_ready);
+            let ui = &timeline_ui;
+            ui.media.thumbnails.set_on_ready(move || {
+                let _ = thumbnail_ready.try_send(());
+            });
+            ui.media.peaks.set_on_ready(move || {
+                let _ = peaks_ready.try_send(());
+            });
+            let timeline = panels.timeline.entity_id();
+            cx.spawn(async move |_, cx| {
+                while media_arrived.recv().await.is_ok() {
+                    cx.update(|cx| cx.notify(timeline));
+                }
+            })
+            .detach();
+        }
         // Headless tests stay silent so they never depend on (or use) a sound device.
         #[cfg(not(test))]
         let sound = Sound::new();
@@ -334,7 +356,7 @@ impl Workspace {
                 editing: None,
                 flow_curve: studio_core::animation::EASING_PRESETS[0].1,
                 font_families: panels::properties::installed_font_families(cx),
-                timeline: Default::default(),
+                timeline: timeline_ui,
                 window_title: String::new(),
                 export_choice: Default::default(),
                 export_job: None,
@@ -642,6 +664,7 @@ impl Render for Workspace {
                 this.state.end_keyframe_drag();
                 this.state.end_viewer_drag();
                 this.state.end_layer_time_drag();
+                this.state.end_clip_drag();
                 this.state.clear_snap_line();
                 this.ui.field_anchor = None;
                 this.ui.viewer_anchor = None;

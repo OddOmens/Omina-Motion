@@ -6,6 +6,11 @@
 //! Positions in the time graph are fractions of the visible frame range, so the
 //! graph needs no pixel bookkeeping. Pointer math (scrubbing, dropping) uses the
 //! time column's bounds from the previous frame.
+//!
+//! The panel has two views of the same composition: Layers (above) and Tracks (see
+//! `tracks`), CapCut style, where each row is a track holding several clips.
+
+mod tracks;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
@@ -84,8 +89,22 @@ struct DragAnchor {
     split_width: f32,
 }
 
+/// Which of the timeline's two views is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimelineView {
+    /// One row per layer, with switches, modes and keyframes, as in After Effects.
+    Layers,
+    /// One row per track, each holding several clips, as in CapCut and Premiere.
+    Tracks,
+}
+
 /// Timeline UI state kept between frames.
 pub struct TimelineUi {
+    pub view: TimelineView,
+    /// Thumbnails and waveforms for the Tracks view.
+    pub(crate) media: tracks::TrackMedia,
+    /// While a project item is dragged over the Tracks view: the track and frame it would land at.
+    track_drop: Option<(i32, i64)>,
     pub outline_width: f32,
     /// Bounds of the rows content (it scrolls, so its top moves with the scroll position).
     rows: MeasuredBounds,
@@ -101,6 +120,9 @@ pub struct TimelineUi {
 impl Default for TimelineUi {
     fn default() -> Self {
         Self {
+            view: TimelineView::Tracks,
+            media: tracks::TrackMedia::default(),
+            track_drop: None,
             // Wide enough to show every column, Parent & Link included.
             outline_width: columns::FULL,
             graph: MeasuredBounds::default(),
@@ -129,6 +151,8 @@ enum TimelineDrag {
     Marquee,
     /// Moving a layer's bar (and its keyframes) in time.
     LayerBar,
+    /// Moving a clip in the Tracks view, in time and between tracks.
+    Clip,
 }
 
 /// Fraction of the visible range at which `frame` sits (0 = left edge, 1 = right edge).
@@ -216,6 +240,10 @@ impl Workspace {
                 self.ui.timeline.marquee = Some(((anchor.pointer_x, anchor.pointer_y), (x, y)));
             }
             TimelineDrag::LayerBar => self.state.drag_layer_time(ruler_delta.round() as i64),
+            TimelineDrag::Clip => {
+                let track = tracks::track_at(self.state.composition(), self.ui.timeline.rows.get().top, y);
+                self.state.drag_clip(ruler_delta.round() as i64, track);
+            }
             TimelineDrag::Splitter => {
                 let max = (anchor.split_width - MIN_GRAPH).max(MIN_OUTLINE);
                 self.ui.timeline.outline_width = (anchor.outline_width + x - anchor.pointer_x).clamp(MIN_OUTLINE, max);
@@ -913,6 +941,8 @@ fn controls(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
                 .child(div().text_size(px(10.0)).text_color(hsla(color::MUTED)).child(format!("{:05} ({})", state.current_frame, rate.label()))),
         )
         .child(div().flex_1())
+        // The two views: Layers (After Effects) and Tracks (CapCut).
+        .child(view_switch(workspace.ui.timeline.view, cx))
         .child(icon_button("snapping", IconName::Magnet, "Snapping (S)", state.snapping, cx.listener(|this, _, _, cx| {
             this.state.snapping = !this.state.snapping;
             cx.notify();
@@ -923,9 +953,11 @@ fn controls(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         })))
 }
 
-pub fn render(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let ui = &workspace.ui.timeline;
-    let outline_width = ui.outline_width;
+    let show_tracks = ui.view == TimelineView::Tracks;
+    // The left column: the layer outline, or the narrower track headers.
+    let outline_width = if show_tracks { tracks::HEADER_WIDTH } else { ui.outline_width };
     let rows = workspace.timeline_rows();
     let playhead = fraction(workspace.state.current_frame as f64, workspace.state.view_range);
     let drop_preview = ui.drop_preview.filter(|_| cx.has_active_drag());
@@ -1033,6 +1065,21 @@ pub fn render(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Work
         )
         .children(indicator);
 
+    // The Tracks view's rows instead, sharing the same bands, ruler and scroll.
+    let rows_content = if show_tracks {
+        div()
+            .id("timeline-rows-content")
+            .relative()
+            .min_h_full()
+            .flex()
+            .child(ui.rows.probe())
+            .child(div().w(px(outline_width)).flex_none().overflow_hidden().child(tracks::headers(workspace, cx)))
+            .child(gap())
+            .child(tracks::rows(workspace, window, cx))
+    } else {
+        rows_content
+    };
+
     let body = div()
         .id("timeline-body")
         .relative()
@@ -1044,21 +1091,24 @@ pub fn render(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Work
             this.apply_timeline_drag(drag, f32::from(event.event.position.x), f32::from(event.event.position.y));
             cx.notify();
         }))
+        // In the Tracks view the track headers are too narrow for the controls, so they get a
+        // full-width bar of their own above the navigator, as CapCut's toolbar is.
+        .children(show_tracks.then(|| band(CONTROLS_BAND).child(div().flex_1().min_w_0().child(controls(workspace, cx)))))
         .child(
             band(CONTROLS_BAND)
-                .child(div().w(px(outline_width)).flex_none().overflow_hidden().child(controls(workspace, cx)))
+                .child(div().w(px(outline_width)).flex_none().overflow_hidden().children((!show_tracks).then(|| controls(workspace, cx))))
                 .child(gap())
                 .child(div().flex_1().min_w_0().child(navigator(workspace, cx))),
         )
         .child(
             band(RULER_BAND)
-                .child(div().w(px(outline_width)).flex_none().overflow_hidden().child(outline_header()))
+                .child(div().w(px(outline_width)).flex_none().overflow_hidden().children((!show_tracks).then(outline_header)))
                 .child(gap())
                 .child(div().flex_1().min_w_0().child(ruler(workspace, cx))),
         )
         .child(div().id("timeline-rows").flex_1().min_h_0().overflow_y_scroll().child(rows_content))
-        // The splitter spans every band so the outline and graph resize together.
-        .child(
+        // The splitter spans every band so the outline and graph resize together (Layers view).
+        .children((!show_tracks).then(|| {
             div()
                 .id("timeline-splitter")
                 .absolute()
@@ -1070,8 +1120,8 @@ pub fn render(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Work
                 .bg(hsla(color::BACKGROUND))
                 .hover(|style| style.bg(hsla(color::ACCENT)))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, _| this.anchor_drag(event)))
-                .on_drag(TimelineDrag::Splitter, |_, _, _, cx| cx.new(|_| EmptyDragView)),
-        );
+                .on_drag(TimelineDrag::Splitter, |_, _, _, cx| cx.new(|_| EmptyDragView))
+        }));
 
     let open_menu = ui.open_menu.as_ref().map(|open| deferred(anchored().position(open.position).child(open.menu.clone())).with_priority(1));
     let body = body.children(open_menu);
@@ -1098,6 +1148,36 @@ pub fn render(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Work
 
     let comp_name = workspace.state.composition().name.clone();
     panel(PanelId::Timeline, &[comp_name.as_str()], Some(footer.into_any_element()), body, workspace, cx)
+}
+
+/// The Layers / Tracks switch in the timeline header.
+fn view_switch(current: TimelineView, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let option = |view: TimelineView, id: &'static str, label: &'static str, cx: &mut Context<Workspace>| {
+        let on = current == view;
+        div()
+            .id(id)
+            .px_2()
+            .py_0p5()
+            .rounded(px(3.0))
+            .text_size(px(size::SMALL_TEXT))
+            .text_color(hsla(if on { color::TEXT } else { color::MUTED }))
+            .when(on, |option| option.bg(hsla(color::ROW_SELECTED)))
+            .hover(|style| style.text_color(hsla(color::TEXT)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.ui.timeline.view = view;
+                cx.notify();
+            }))
+            .child(label)
+            .test_support()
+    };
+    div()
+        .flex()
+        .gap_0p5()
+        .p_0p5()
+        .rounded(px(4.0))
+        .bg(hsla(color::INSET))
+        .child(option(TimelineView::Layers, "timeline-view-layers", "Layers", cx))
+        .child(option(TimelineView::Tracks, "timeline-view-tracks", "Tracks", cx))
 }
 
 /// Zooms the visible range by `factor`, centered on the playhead.

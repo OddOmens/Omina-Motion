@@ -55,6 +55,12 @@ pub enum Switch {
 }
 
 impl Switch {
+    /// Whether this switch is on.
+    pub fn get(self, switches: &LayerSwitches) -> bool {
+        let mut copy = *switches;
+        *self.slot(&mut copy)
+    }
+
     fn slot(self, switches: &mut LayerSwitches) -> &mut bool {
         match self {
             Self::Visible => &mut switches.visible,
@@ -191,6 +197,12 @@ impl EditorState {
 
     pub fn composition(&self) -> &Composition {
         self.project.composition(self.active_comp).expect("the active composition exists")
+    }
+
+    /// Direct access for UI tests that need to set up a particular composition.
+    #[cfg(test)]
+    pub fn composition_mut_for_test(&mut self) -> &mut Composition {
+        self.composition_mut()
     }
 
     fn composition_mut(&mut self) -> &mut Composition {

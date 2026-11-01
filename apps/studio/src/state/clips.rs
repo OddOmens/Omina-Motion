@@ -79,6 +79,28 @@ impl EditorState {
         self.select_layer(layer, false);
     }
 
+    /// Whether every clip on `track` has `switch` on (false for an empty track).
+    pub fn track_switch(&self, track: i32, switch: super::Switch) -> bool {
+        let mut clips = self.composition().layers.iter().filter(|layer| layer.track == track).peekable();
+        clips.peek().is_some() && clips.all(|layer| switch.get(&layer.switches))
+    }
+
+    /// The track header's toggles (hide, mute, lock): turns `switch` off for every clip on
+    /// `track` if all have it on, otherwise on for all of them.
+    pub fn toggle_track_switch(&mut self, track: i32, switch: super::Switch) {
+        let on = !self.track_switch(track, switch);
+        for layer in self.composition_mut().layers.iter_mut().filter(|layer| layer.track == track) {
+            *switch.slot(&mut layer.switches) = on;
+        }
+        // Locked clips can't stay selected (see `select_layer`).
+        if switch == super::Switch::Locked && on {
+            let composition = self.composition();
+            let locked: Vec<Id> = composition.layers.iter().filter(|layer| layer.track == track).map(|layer| layer.id).collect();
+            self.selected_layers.retain(|id| !locked.contains(id));
+            self.selected_keyframes.retain(|key| !locked.contains(&key.layer));
+        }
+    }
+
     /// Keeps the main track packed if it is magnetic. Run after edits, outside drags.
     pub(super) fn apply_magnetism(&mut self) {
         if self.magnetic_main_track {
@@ -141,6 +163,20 @@ mod tests {
         state.delete_selection();
         state.record_history(false);
         assert_eq!(timing(&state, title).1, 0, "the title slid up to frame 0");
+    }
+
+    #[test]
+    fn track_toggles_switch_every_clip_on_the_track() {
+        let mut state = EditorState::new();
+        let title = state.composition().layers[0].id;
+        let track = timing(&state, title).0;
+        assert!(state.track_switch(track, super::super::Switch::Visible));
+        state.select_layer(title, false);
+        state.toggle_track_switch(track, super::super::Switch::Visible);
+        assert!(!state.composition().layer(title).unwrap().switches.visible);
+        state.toggle_track_switch(track, super::super::Switch::Locked);
+        assert!(state.composition().layer(title).unwrap().switches.locked);
+        assert!(state.selected_layers.is_empty(), "locking a track lets go of its clips");
     }
 
     #[test]
