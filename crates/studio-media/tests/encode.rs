@@ -18,7 +18,11 @@ fn solid(width: u32, height: u32, bgra: [u8; 4]) -> Vec<u8> {
 
 /// Writes one second at 24 fps: red for half a second, then blue, with a 440 Hz tone.
 fn write_movie(path: &Path, format: MovieFormat, width: u32, height: u32) {
-    let settings = MovieSettings { format, width, height, frame_rate: FrameRate::new(24, 1), audio_rate: Some(48_000) };
+    write_movie_with(path, MovieSettings::new(format, width, height, FrameRate::new(24, 1), Some(48_000)));
+}
+
+fn write_movie_with(path: &Path, settings: MovieSettings) {
+    let (width, height) = (settings.width, settings.height);
     let mut writer = MovieWriter::create(path, settings).unwrap();
     let (red, blue) = (solid(width, height, [0, 0, 255, 255]), solid(width, height, [255, 0, 0, 255]));
     let tone: Vec<f32> = (0..48_000).flat_map(|i| {
@@ -69,6 +73,35 @@ fn writes_h264_with_aac_sound() {
     let path = scratch("out.mp4");
     write_movie(&path, MovieFormat::H264, 64, 36);
     check_movie(&path, "h264");
+}
+
+#[test]
+fn every_prores_flavor_writes_and_proxy_is_smallest() {
+    let size = |format: MovieFormat, name: &str| {
+        let path = scratch(name);
+        write_movie(&path, format, 64, 36);
+        check_movie(&path, "prores");
+        std::fs::metadata(&path).unwrap().len()
+    };
+    let proxy = size(MovieFormat::ProResProxy, "proxy.mov");
+    size(MovieFormat::ProResLt, "lt.mov");
+    size(MovieFormat::ProRes422, "422.mov");
+    let hq = size(MovieFormat::ProRes422Hq, "hq.mov");
+    assert!(proxy < hq, "proxy {proxy} vs hq {hq}");
+}
+
+#[test]
+fn h264_quality_and_bitrate_change_the_file_size() {
+    use studio_media::{EncodeSpeed, VideoQuality};
+    let size = |quality: VideoQuality, name: &str| {
+        let path = scratch(name);
+        let settings = MovieSettings { quality, speed: EncodeSpeed::Fast, audio_kbps: 128, ..MovieSettings::new(MovieFormat::H264, 640, 360, FrameRate::new(24, 1), Some(48_000)) };
+        write_movie_with(&path, settings);
+        std::fs::metadata(&path).unwrap().len()
+    };
+    let draft = size(VideoQuality::Draft, "draft.mp4");
+    let fixed = size(VideoQuality::Bitrate(8000), "8mbps.mp4");
+    assert!(draft < fixed, "draft {draft} vs 8 Mbps {fixed}");
 }
 
 #[test]

@@ -19,12 +19,13 @@ fn main() {
     gpui_kit::application().with_assets(assets::StudioAssets).run(|cx: &mut App| {
         // Must run before any component is used.
         gpui_kit::init(cx);
-        theme::apply(cx);
+        let settings = app_settings::load();
+        theme::apply(settings.theme, settings.accent, cx);
         workspace::bind_keys(cx);
         cx.set_menus(workspace::menus());
 
         // Where the window was last time, or centered at a comfortable size.
-        let window_bounds = match app_settings::load().window {
+        let window_bounds = match settings.window {
             Some(placement) => {
                 let bounds = Bounds::new(point(px(placement.x), px(placement.y)), size(px(placement.width.max(1100.0)), px(placement.height.max(680.0))));
                 if placement.maximized { WindowBounds::Maximized(bounds) } else { WindowBounds::Windowed(bounds) }

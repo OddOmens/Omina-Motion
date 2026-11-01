@@ -238,4 +238,7 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .child(separator())
         .child(rail_button("rail-import", IconName::FileInput, "Import", false, |this, window, cx| this.import(window, cx), cx))
         .child(rail_button("rail-new-comp", IconName::Clapperboard, "New Comp", false, |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
+        // Settings sit at the bottom, apart from the tools.
+        .child(div().flex_1())
+        .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, cx))
 }

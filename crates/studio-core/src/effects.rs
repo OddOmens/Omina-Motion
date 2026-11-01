@@ -67,6 +67,7 @@ pub const CATEGORIES: &[EffectCategory] = &[
                 ],
             },
             EffectDefinition { name: "Tint", parameters: &[(param("Amount to Tint", "%", 0.5, PERCENT.0, PERCENT.1, 1), 100.0)] },
+            EffectDefinition { name: "Black & White", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0), (param("Contrast", "%", 0.5, -100.0, 100.0, 0), 20.0)] },
             EffectDefinition {
                 name: "Vibrance",
                 parameters: &[(param("Vibrance", "", 0.5, -100.0, 100.0, 0), 0.0), (param("Saturation", "", 0.5, -100.0, 100.0, 0), 0.0)],
@@ -119,6 +120,27 @@ pub const CATEGORIES: &[EffectCategory] = &[
             EffectDefinition { name: "Drop Shadow", parameters: &[(param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 0), 50.0), (param("Direction", "°", 0.5, -3600.0, 3600.0, 1), 135.0), (param("Distance", "", 0.5, 0.0, 4000.0, 1), 5.0), (param("Softness", "", 0.5, 0.0, 250.0, 1), 0.0)] },
             EffectDefinition { name: "Mosaic", parameters: &[(param("Horizontal Blocks", "", 0.2, 1.0, 4000.0, 0), 10.0), (param("Vertical Blocks", "", 0.2, 1.0, 4000.0, 0), 10.0)] },
             EffectDefinition { name: "Posterize", parameters: &[(param("Level", "", 0.1, 2.0, 255.0, 0), 6.0)] },
+            EffectDefinition { name: "Invert", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
+            EffectDefinition { name: "Vignette", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 60.0), (param("Size", "%", 0.5, PERCENT.0, PERCENT.1, 0), 60.0), (param("Softness", "%", 0.5, 1.0, PERCENT.1, 0), 50.0)] },
+            EffectDefinition { name: "Letterbox", parameters: &[(param("Aspect Ratio", ":1", 0.01, 0.5, 4.0, 2), 2.39), (param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
+            EffectDefinition { name: "Light Leak", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 60.0), (param("Hue", "°", 0.5, 0.0, 360.0, 0), 25.0), (param("Speed", "", 0.01, 0.0, 10.0, 2), 0.3)] },
+            EffectDefinition { name: "Strobe", parameters: &[(param("Flashes per Second", "", 0.05, 0.1, 30.0, 1), 4.0), (param("Flash Length", "%", 0.5, 1.0, PERCENT.1, 0), 30.0), (param("Brightness", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
+        ],
+    },
+    EffectCategory {
+        name: "Motion",
+        effects: &[
+            EffectDefinition { name: "Wiggle", parameters: &[(param("Amount", "px", 0.5, 0.0, 2000.0, 1), 20.0), (param("Wiggles per Second", "", 0.05, 0.0, 60.0, 1), 3.0), (param("Seed", "", 0.1, 0.0, 1000.0, 0), 1.0)] },
+            EffectDefinition { name: "Camera Shake", parameters: &[(param("Amount", "px", 0.5, 0.0, 2000.0, 1), 12.0), (param("Shakes per Second", "", 0.05, 0.0, 60.0, 1), 8.0), (param("Rotation", "°", 0.05, 0.0, 45.0, 1), 1.5), (param("Zoom", "%", 0.1, 0.0, 50.0, 1), 4.0)] },
+        ],
+    },
+    EffectCategory {
+        name: "Retro & Glitch",
+        effects: &[
+            EffectDefinition { name: "Glitch", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 50.0), (param("Block Size", "px", 0.5, 2.0, 500.0, 0), 40.0), (param("Changes per Second", "", 0.05, 0.0, 60.0, 1), 10.0)] },
+            EffectDefinition { name: "RGB Split", parameters: &[(param("Distance", "px", 0.1, 0.0, 500.0, 1), 8.0), (param("Angle", "°", 0.5, -3600.0, 3600.0, 1), 0.0)] },
+            EffectDefinition { name: "VHS", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 60.0), (param("Noise", "%", 0.5, PERCENT.0, PERCENT.1, 0), 30.0)] },
+            EffectDefinition { name: "Scanlines", parameters: &[(param("Line Spacing", "px", 0.1, 1.0, 100.0, 1), 4.0), (param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 0), 40.0), (param("Scroll Speed", "", 0.05, -100.0, 100.0, 1), 0.0)] },
         ],
     },
     EffectCategory {

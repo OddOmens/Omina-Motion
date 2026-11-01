@@ -26,15 +26,22 @@ use crate::yuv::{Plane, YuvLayout, bgra_to_yuv};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MovieFormat {
     H264,
+    /// Apple ProRes 422 Proxy, LT, standard and HQ: the same 10-bit 4:2:2 picture at rising data rates.
+    ProResProxy,
+    ProResLt,
+    ProRes422,
     ProRes422Hq,
 }
 
 impl MovieFormat {
-    pub const ALL: [Self; 2] = [Self::H264, Self::ProRes422Hq];
+    pub const ALL: [Self; 5] = [Self::H264, Self::ProRes422Hq, Self::ProRes422, Self::ProResLt, Self::ProResProxy];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::H264 => "H.264 (MP4)",
+            Self::ProResProxy => "ProRes 422 Proxy (MOV)",
+            Self::ProResLt => "ProRes 422 LT (MOV)",
+            Self::ProRes422 => "ProRes 422 (MOV)",
             Self::ProRes422Hq => "ProRes 422 HQ (MOV)",
         }
     }
@@ -43,7 +50,23 @@ impl MovieFormat {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::H264 => "mp4",
-            Self::ProRes422Hq => "mov",
+            _ => "mov",
+        }
+    }
+
+    /// Whether it is a ProRes flavor (which has no quality or speed setting: each flavor is a
+    /// fixed data rate, and its sound is uncompressed).
+    pub const fn is_prores(self) -> bool {
+        !matches!(self, Self::H264)
+    }
+
+    /// `prores_ks`'s profile number for a ProRes flavor.
+    const fn prores_profile(self) -> &'static str {
+        match self {
+            Self::ProResProxy => "0",
+            Self::ProResLt => "1",
+            Self::ProRes422 => "2",
+            _ => "3",
         }
     }
 
@@ -52,16 +75,90 @@ impl MovieFormat {
     }
 
     fn layout(self) -> YuvLayout {
-        match self {
-            Self::H264 => YuvLayout::Yuv420p8,
-            Self::ProRes422Hq => YuvLayout::Yuv422p10,
-        }
+        if self.is_prores() { YuvLayout::Yuv422p10 } else { YuvLayout::Yuv420p8 }
     }
 
     fn pixel(self) -> Pixel {
+        if self.is_prores() { Pixel::YUV422P10LE } else { Pixel::YUV420P }
+    }
+}
+
+/// How much picture detail H.264 keeps, against file size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoQuality {
+    /// Small files for quick reviews.
+    Draft,
+    /// Good for streaming and social posts.
+    Good,
+    /// Close to the source; the default.
+    High,
+    /// Visually lossless, for masters and further editing.
+    Maximum,
+    /// A fixed data rate, in kilobits per second (for platforms with a bitrate spec).
+    Bitrate(u32),
+}
+
+impl VideoQuality {
+    pub const PRESETS: [Self; 4] = [Self::Draft, Self::Good, Self::High, Self::Maximum];
+
+    pub fn label(self) -> String {
         match self {
-            Self::H264 => Pixel::YUV420P,
-            Self::ProRes422Hq => Pixel::YUV422P10LE,
+            Self::Draft => "Draft".into(),
+            Self::Good => "Good".into(),
+            Self::High => "High".into(),
+            Self::Maximum => "Maximum".into(),
+            Self::Bitrate(kbps) => format!("{} Mbps", f64::from(kbps) / 1000.0),
+        }
+    }
+
+    /// x264's constant-quality number (lower is better).
+    fn crf(self) -> Option<&'static str> {
+        match self {
+            Self::Draft => Some("28"),
+            Self::Good => Some("23"),
+            Self::High => Some("18"),
+            Self::Maximum => Some("14"),
+            Self::Bitrate(_) => None,
+        }
+    }
+
+    /// Bits per pixel for encoders without a constant-quality mode (the hardware one).
+    fn bits_per_pixel(self) -> f64 {
+        match self {
+            Self::Draft => 0.05,
+            Self::Good => 0.1,
+            Self::High => 0.15,
+            Self::Maximum => 0.3,
+            Self::Bitrate(_) => 0.15,
+        }
+    }
+}
+
+/// How long H.264 spends finding a smaller file at the same quality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncodeSpeed {
+    Fast,
+    Balanced,
+    /// Slower, for a smaller file.
+    Small,
+}
+
+impl EncodeSpeed {
+    pub const ALL: [Self; 3] = [Self::Fast, Self::Balanced, Self::Small];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Fast => "Faster export",
+            Self::Balanced => "Balanced",
+            Self::Small => "Smaller file",
+        }
+    }
+
+    const fn preset(self) -> &'static str {
+        match self {
+            Self::Fast => "veryfast",
+            Self::Balanced => "medium",
+            Self::Small => "slow",
         }
     }
 }
@@ -77,6 +174,19 @@ pub struct MovieSettings {
     pub frame_rate: FrameRate,
     /// The sound's sample rate, or `None` for a movie without sound.
     pub audio_rate: Option<u32>,
+    /// H.264 only.
+    pub quality: VideoQuality,
+    /// H.264 only.
+    pub speed: EncodeSpeed,
+    /// AAC sound (H.264 movies), in kilobits per second. ProRes sound is uncompressed.
+    pub audio_kbps: u32,
+}
+
+impl MovieSettings {
+    /// A movie at high quality, balanced speed and 320 kbps sound; change what you need.
+    pub fn new(format: MovieFormat, width: u32, height: u32, frame_rate: FrameRate, audio_rate: Option<u32>) -> Self {
+        Self { format, width, height, frame_rate, audio_rate, quality: VideoQuality::High, speed: EncodeSpeed::Balanced, audio_kbps: 320 }
+    }
 }
 
 /// One encoded stream: its encoder, where it goes in the file, and its time units.
@@ -128,7 +238,7 @@ impl MovieWriter {
 
         let video = open_video(&mut output, settings, size, global_header)?;
         let audio = match settings.audio_rate {
-            Some(rate) => Some(open_audio(&mut output, settings.format, rate, global_header)?),
+            Some(rate) => Some(open_audio(&mut output, settings.format, rate, settings.audio_kbps, global_header)?),
             None => None,
         };
 
@@ -231,8 +341,11 @@ fn open_video(
             let mut options = ffmpeg::Dictionary::new();
             match encoder::find_by_name("libx264") {
                 Some(codec) => {
-                    options.set("crf", "18");
-                    options.set("preset", "medium");
+                    // A fixed bitrate is set on the encoder below; otherwise constant quality.
+                    if let Some(crf) = settings.quality.crf() {
+                        options.set("crf", crf);
+                    }
+                    options.set("preset", settings.speed.preset());
                     options.set("profile", "high");
                     (codec, options)
                 }
@@ -244,10 +357,10 @@ fn open_video(
                 }
             }
         }
-        MovieFormat::ProRes422Hq => {
+        _ => {
             let codec = encoder::find_by_name("prores_ks").ok_or_else(|| MediaError("this FFmpeg has no ProRes encoder".into()))?;
             let mut options = ffmpeg::Dictionary::new();
-            options.set("profile", "3"); // 422 HQ
+            options.set("profile", settings.format.prores_profile());
             options.set("vendor", "apl0"); // Marks the file as Apple-compatible ProRes.
             (codec, options)
         }
@@ -269,9 +382,13 @@ fn open_video(
     video.set_color_range(color::Range::MPEG);
     video.set_color_primaries(color::Primaries::BT709);
     video.set_color_transfer_characteristic(color::TransferCharacteristic::BT709);
-    if codec.name() == "h264_videotoolbox" {
-        // The hardware encoder has no constant-quality mode here; ~0.15 bits per pixel is a high quality bitrate.
-        let bits = f64::from(width) * f64::from(height) * rate.fps() * 0.15;
+    if let VideoQuality::Bitrate(kbps) = settings.quality
+        && !settings.format.is_prores()
+    {
+        video.set_bit_rate(kbps as usize * 1000);
+    } else if codec.name() == "h264_videotoolbox" {
+        // The hardware encoder has no constant-quality mode here, so the quality picks a bitrate.
+        let bits = f64::from(width) * f64::from(height) * rate.fps() * settings.quality.bits_per_pixel();
         video.set_bit_rate(bits as usize);
     }
     if global_header {
@@ -284,10 +401,11 @@ fn open_video(
     Ok(Track { encoder, stream: index, encoder_time_base: time_base, stream_time_base: time_base, next_pts: 0 })
 }
 
-fn open_audio(output: &mut ffmpeg::format::context::Output, format: MovieFormat, rate: u32, global_header: bool) -> Result<AudioTrack, MediaError> {
-    let (name, sample, store) = match format {
-        MovieFormat::H264 => ("aac", ffmpeg::format::Sample::F32(SampleLayout::Planar), SampleStore::PlanarFloat),
-        MovieFormat::ProRes422Hq => ("pcm_s24le", ffmpeg::format::Sample::I32(SampleLayout::Packed), SampleStore::Packed24),
+fn open_audio(output: &mut ffmpeg::format::context::Output, format: MovieFormat, rate: u32, kbps: u32, global_header: bool) -> Result<AudioTrack, MediaError> {
+    let (name, sample, store) = if format.is_prores() {
+        ("pcm_s24le", ffmpeg::format::Sample::I32(SampleLayout::Packed), SampleStore::Packed24)
+    } else {
+        ("aac", ffmpeg::format::Sample::F32(SampleLayout::Planar), SampleStore::PlanarFloat)
     };
     let codec = encoder::find_by_name(name).ok_or_else(|| MediaError(format!("this FFmpeg has no {name} encoder")))?;
     let mut stream = output.add_stream(codec)?;
@@ -300,7 +418,7 @@ fn open_audio(output: &mut ffmpeg::format::context::Output, format: MovieFormat,
     audio.set_format(sample);
     audio.set_time_base(time_base);
     if matches!(store, SampleStore::PlanarFloat) {
-        audio.set_bit_rate(320_000);
+        audio.set_bit_rate(kbps.clamp(64, 512) as usize * 1000);
     }
     if global_header {
         audio.set_flags(codec::Flags::GLOBAL_HEADER);

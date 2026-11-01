@@ -39,6 +39,7 @@ actions!(studio, [
     Copy,
     Paste,
     Duplicate,
+    OpenSettings,
     CompositionSettings,
     NewComposition,
     Import,
@@ -84,6 +85,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, Some(NOT_TYPING)),
         KeyBinding::new("cmd-d", Duplicate, Some(NOT_TYPING)),
         KeyBinding::new("cmd-k", CompositionSettings, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-,", OpenSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-n", NewComposition, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-i", Import, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-z", Undo, Some(KEY_CONTEXT)),
@@ -114,7 +116,7 @@ pub fn bind_keys(cx: &mut App) {
 pub fn menus() -> Vec<gpui_kit::Menu> {
     use gpui_kit::{Menu, MenuItem};
     vec![
-        Menu::new("Studio").items([MenuItem::action("Quit Studio", Quit)]),
+        Menu::new("Studio").items([MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit Studio", Quit)]),
         Menu::new("File").items([
             MenuItem::action("Open…", Open),
             MenuItem::action("Save", Save),
@@ -206,6 +208,8 @@ pub enum EditTarget {
 pub struct EditingField {
     pub target: EditTarget,
     pub input: Entity<InputState>,
+    /// Shown over the layer in the viewer (a double-click there) rather than in its panel.
+    pub in_viewer: bool,
     _events: Subscription,
 }
 
@@ -224,6 +228,8 @@ pub struct UiState {
     /// Active tab index for panels with tabs.
     pub tabs: HashMap<PanelId, usize>,
     pub collapsed_folders: HashSet<Id>,
+    /// Panels in the right column collapsed to their header.
+    pub collapsed_panels: HashSet<PanelId>,
     /// Library brands the user folded away (all are open to begin with).
     pub closed_brands: HashSet<studio_core::model::LinkId>,
     /// Effect categories the user folded away (all are open to begin with).
@@ -248,6 +254,8 @@ pub struct UiState {
     /// The Export dialog's choices, and the export running now, if any.
     pub export_choice: panels::export::ExportChoice,
     pub export_job: Option<panels::export::ExportJob>,
+    /// While an effect is dragged over the viewer, the layer it would be dropped on.
+    pub effect_drop_layer: Option<Id>,
     /// The color picker, while it is open.
     pub color_picker: Option<panels::color_picker::Picker>,
     /// Keeps the open dialog's field links alive (Composition Settings' locked aspect ratio).
@@ -433,6 +441,7 @@ impl Workspace {
                 collapsed_folders: HashSet::new(),
                 closed_effect_categories: HashSet::new(),
                 closed_brands: HashSet::new(),
+                collapsed_panels: HashSet::new(),
                 viewer_bounds: Default::default(),
                 frame_bounds: Default::default(),
                 viewer_anchor: None,
@@ -447,6 +456,7 @@ impl Workspace {
                 export_job: None,
                 dialog_subscriptions: Vec::new(),
                 color_picker: None,
+                effect_drop_layer: None,
                 quit_after_export: false,
             },
             focus,
@@ -540,7 +550,7 @@ impl Workspace {
                 this.commit_edit(window, cx);
             }
         });
-        self.ui.editing = Some(EditingField { target, input, _events: events });
+        self.ui.editing = Some(EditingField { target, input, in_viewer: false, _events: events });
         cx.notify();
     }
 
@@ -692,11 +702,7 @@ impl Render for Workspace {
                 ),
             )
             .child(
-                resizable_panel().size(px(430.0)).size_range(px(300.0)..px(800.0)).child(
-                    v_resizable("workspace-utilities")
-                        .child(resizable_panel().size(px(620.0)).child(cached(&panels.properties)))
-                        .child(resizable_panel().child(cached(&panels.align))),
-                ),
+                resizable_panel().size(px(430.0)).size_range(px(300.0)..px(800.0)).child(self.utility_column(window, cx)),
             );
 
         div()
@@ -739,6 +745,7 @@ impl Render for Workspace {
                 this.ui.tool = Tool::Cut;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| panels::settings::open(this, window, cx)))
             .on_action(cx.listener(|this, _: &Copy, _, cx| {
                 this.state.copy_selection();
                 cx.notify();
@@ -798,6 +805,7 @@ impl Render for Workspace {
                 this.ui.field_anchor = None;
                 this.ui.viewer_anchor = None;
                 this.ui.shape_press = false;
+                this.ui.effect_drop_layer = None;
                 if let Some(picker) = this.ui.color_picker.as_mut() {
                     picker.pressed = false;
                 }
@@ -825,6 +833,33 @@ impl Render for Workspace {
                     .child(div().flex_1().min_w_0().pr(gutter).pb(gutter).child(workspace)),
             )
             .children(panels::color_picker::popover(self, cx))
+    }
+}
+
+/// Height of the Align panel when Properties is open above it.
+const ALIGN_HEIGHT: f32 = 230.0;
+
+impl Workspace {
+    /// The right column: Properties above Align. Either can be collapsed to its header (its
+    /// chevron); whichever is open fills the space the other leaves.
+    fn utility_column(&self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let collapsed = |id| self.ui.collapsed_panels.contains(&id);
+        let header_only = px(crate::theme::size::PANEL_HEADER_HEIGHT + 2.0);
+        let (properties, align) = (collapsed(PanelId::Properties), collapsed(PanelId::Align));
+        let properties_box = div().min_h_0().map(|panel| if properties { panel.flex_none().h(header_only) } else { panel.flex_1() });
+        let align_box = div().min_h_0().map(|panel| match (properties, align) {
+            (_, true) => panel.flex_none().h(header_only),
+            (true, false) => panel.flex_1(),
+            (false, false) => panel.flex_none().h(px(ALIGN_HEIGHT)),
+        });
+        div()
+            .id("workspace-utilities")
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(crate::theme::size::GUTTER))
+            .child(properties_box.child(cached(&self.panels.properties)))
+            .child(align_box.child(cached(&self.panels.align)))
     }
 }
 

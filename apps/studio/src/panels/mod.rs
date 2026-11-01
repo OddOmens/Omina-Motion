@@ -12,6 +12,7 @@ pub mod graph_editor;
 pub mod libraries;
 pub mod project;
 pub mod properties;
+pub mod settings;
 pub mod timeline;
 pub mod toolbar;
 pub mod viewer;

@@ -1,5 +1,6 @@
 //! Exporting the open composition to a movie (File ▸ Export…, ⌘M). The dialog picks the
-//! format, the frames and whether to include sound; then a background thread renders and
+//! format (H.264 or a ProRes flavor), for H.264 its quality and encoding speed, the output
+//! size, the frames, and the sound; then a background thread renders and
 //! encodes a snapshot of the project, so editing can carry on meanwhile. Progress and a
 //! Cancel button show in the toolbar.
 
@@ -14,29 +15,60 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::radio::Radio;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{Disableable as _, Sizable as _};
-use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui_kit::{Context, IntoElement, ParentElement, Styled, WeakEntity, Window, div, prelude::FluentBuilder as _, px};
 use studio_core::audio::composition_audio;
 use studio_core::time::format_timecode as timecode;
 use studio_export::{ExportRequest, Outcome};
-use studio_media::MovieFormat;
+use studio_media::{EncodeSpeed, MovieFormat, VideoQuality};
 
 use crate::theme::{color, hsla};
 use crate::workspace::Workspace;
 
 /// The choices in the Export dialog. Kept between exports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExportChoice {
     pub format: MovieFormat,
     /// Export only the work area, rather than the whole composition.
     pub work_area_only: bool,
     pub include_audio: bool,
+    /// The movie's size as a fraction of the composition's.
+    pub scale: f32,
+    pub quality: VideoQuality,
+    pub speed: EncodeSpeed,
+    pub audio_kbps: u32,
 }
 
 impl Default for ExportChoice {
     fn default() -> Self {
-        Self { format: MovieFormat::H264, work_area_only: true, include_audio: true }
+        Self { format: MovieFormat::H264, work_area_only: true, include_audio: true, scale: 1.0, quality: VideoQuality::High, speed: EncodeSpeed::Balanced, audio_kbps: 320 }
     }
+}
+
+/// Output sizes offered, as fractions of the composition.
+const SCALES: [(f32, &str); 4] = [(1.0, "Full size"), (0.75, "Three quarters"), (0.5, "Half"), (0.25, "Quarter")];
+/// Fixed bitrates offered for H.264, in kilobits per second, with what they suit.
+const BITRATES: [(u32, &str); 4] = [(8_000, "social 1080p"), (16_000, "YouTube 1080p"), (35_000, "YouTube 4K"), (50_000, "broadcast")];
+/// AAC sound bitrates offered, in kilobits per second.
+const AUDIO_BITRATES: [u32; 4] = [128, 192, 256, 320];
+
+/// A dropdown in the Export dialog whose choices set the workspace's export choice.
+fn choice_menu<T: Clone + 'static>(id: &'static str, label: String, choices: Vec<(String, bool, T)>, set: fn(&mut ExportChoice, T), target: WeakEntity<Workspace>) -> impl IntoElement {
+    let choices = std::rc::Rc::new(choices);
+    Button::new(id).outline().small().label(label).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+        choices.iter().fold(menu, |menu, (label, checked, value)| {
+            let (target, value) = (target.clone(), value.clone());
+            menu.item(PopupMenuItem::new(label.clone()).checked(*checked).on_click(move |_, _, cx| {
+                target
+                    .update(cx, |this, cx| {
+                        set(&mut this.ui.export_choice, value.clone());
+                        cx.notify();
+                    })
+                    .ok();
+            }))
+        })
+    })
 }
 
 /// An export running in the background.
@@ -89,25 +121,44 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                 }).ok();
             }
         };
-        let formats = MovieFormat::ALL.iter().enumerate().map(|(index, &format)| {
-            let target = target.clone();
-            Radio::new(("export-format", index)).label(format.label()).checked(choice.format == format).on_click(move |_, _, cx| {
-                target.update(cx, |this, cx| {
-                    this.ui.export_choice.format = format;
-                    cx.notify();
-                }).ok();
-            })
-        });
+        let formats = MovieFormat::ALL.iter().map(|&format| (format.label().to_owned(), choice.format == format, format)).collect();
+        let format_menu = choice_menu("export-format", choice.format.label().to_owned(), formats, |c, format| c.format = format, target.clone());
+        let mut qualities: Vec<(String, bool, VideoQuality)> = VideoQuality::PRESETS.iter().map(|&quality| (quality.label(), choice.quality == quality, quality)).collect();
+        qualities.extend(BITRATES.iter().map(|&(kbps, suits)| (format!("{} ({suits})", VideoQuality::Bitrate(kbps).label()), choice.quality == VideoQuality::Bitrate(kbps), VideoQuality::Bitrate(kbps))));
+        let quality_menu = choice_menu("export-quality", choice.quality.label(), qualities, |c, quality| c.quality = quality, target.clone());
+        let speeds = EncodeSpeed::ALL.iter().map(|&speed| (speed.label().to_owned(), choice.speed == speed, speed)).collect();
+        let speed_menu = choice_menu("export-speed", choice.speed.label().to_owned(), speeds, |c, speed| c.speed = speed, target.clone());
+        let size_label = |scale: f32, name: &str| {
+            let request = ExportRequest { scale, ..ExportRequest::new(comp.id, 0..1, choice.format, PathBuf::new()) };
+            let (width, height) = request.output_size(comp.width, comp.height);
+            format!("{name} ({width} × {height})")
+        };
+        let current_size = SCALES.iter().find(|(scale, _)| *scale == choice.scale).map_or("Full size", |(_, name)| name);
+        let sizes = SCALES.iter().map(|&(scale, name)| (size_label(scale, name), choice.scale == scale, scale)).collect();
+        let size_menu = choice_menu("export-size", size_label(choice.scale, current_size), sizes, |c, scale| c.scale = scale, target.clone());
+        let audio_rates = AUDIO_BITRATES.iter().map(|&kbps| (format!("{kbps} kbps"), choice.audio_kbps == kbps, kbps)).collect();
+        let audio_menu = choice_menu("export-audio-bitrate", format!("{} kbps", choice.audio_kbps), audio_rates, |c, kbps| c.audio_kbps = kbps, target.clone());
+        let h264 = !choice.format.is_prores();
+        let labeled = |label: &'static str, control: gpui_kit::AnyElement| div().flex().items_center().gap_3().child(div().w(px(70.0)).text_color(hsla(color::MUTED)).child(label)).child(control);
         let start = target.clone();
         dialog
             .title(format!("Export “{}”", comp.name))
-            .w(px(440.0))
+            .w(px(480.0))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(section("Format", div().flex().flex_col().gap_1().children(formats)))
+                    .child(section(
+                        "Video",
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(labeled("Format", format_menu.into_any_element()))
+                            .when(h264, |video| video.child(labeled("Quality", quality_menu.into_any_element())).child(labeled("Speed", speed_menu.into_any_element())))
+                            .child(labeled("Size", size_menu.into_any_element())),
+                    ))
                     .child(section(
                         "Frames",
                         div()
@@ -124,7 +175,9 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                             .checked(has_audio && choice.include_audio)
                             .disabled(!has_audio)
                             .on_click(set(|c, checked| c.include_audio = checked)),
-                    )),
+                    ))
+                    // AAC's bitrate; ProRes movies carry uncompressed sound.
+                    .when(h264 && has_audio && choice.include_audio, |column| column.child(labeled("Bitrate", audio_menu.into_any_element()))),
             )
             .footer(
                 DialogFooter::new()
@@ -176,7 +229,14 @@ pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: 
     } else {
         0..state.composition().duration_frames
     };
-    let request = ExportRequest { composition: state.active_comp, frames, format: choice.format, include_audio: choice.include_audio, path };
+    let request = ExportRequest {
+        include_audio: choice.include_audio,
+        scale: choice.scale,
+        quality: choice.quality,
+        speed: choice.speed,
+        audio_kbps: choice.audio_kbps,
+        ..ExportRequest::new(state.active_comp, frames, choice.format, path)
+    };
     let project = state.project.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let file_name = request.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());

@@ -30,6 +30,8 @@ pub fn panel(
 ) -> Div {
     let active_tab = workspace.ui.tab(id);
     let clickable = tabs.len() > 1;
+    let collapsible = matches!(id, PanelId::Properties | PanelId::Align);
+    let collapsed = collapsible && workspace.ui.collapsed_panels.contains(&id);
     let header = div()
         .h(px(size::PANEL_HEADER_HEIGHT))
         .flex_none()
@@ -58,7 +60,29 @@ pub fn panel(
                 .child(SharedString::from(title.to_string()))
                 .test_support()
         }))
-        .child(div().flex_1());
+        .child(div().flex_1())
+        // Panels in the right column fold away to their header.
+        .when(collapsible, |header| {
+            header.child(
+                div()
+                    .id(ElementId::Name(format!("collapse:{id:?}").into()))
+                    .size(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .text_color(hsla(color::MUTED))
+                    .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.ui.collapsed_panels.remove(&id) {
+                            this.ui.collapsed_panels.insert(id);
+                        }
+                        cx.notify();
+                    }))
+                    .child(Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).size(px(14.0)))
+                    .test_support(),
+            )
+        });
 
     div()
         .size_full()
@@ -76,8 +100,8 @@ pub fn panel(
             }
         }))
         .when(!tabs.is_empty(), |panel| panel.child(header))
-        .child(div().flex_1().min_h_0().relative().child(body))
-        .children(footer.map(|footer| {
+        .when(!collapsed, |panel| panel.child(div().flex_1().min_h_0().relative().child(body)))
+        .children(footer.filter(|_| !collapsed).map(|footer| {
             div()
                 .h(px(size::PANEL_FOOTER_HEIGHT))
                 .flex_none()

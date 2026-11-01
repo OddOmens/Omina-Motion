@@ -660,3 +660,36 @@ fn shape_sheet() {
     let rgba: Vec<u8> = frame.bgra.chunks(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
     image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8).unwrap();
 }
+
+/// Saves the newer effects, each on a gradient card with text, to `EFFECT_SHEET` as a PNG.
+/// Run with `EFFECT_SHEET=/path/effects.png cargo test -p studio-render --test render effect_sheet -- --ignored`.
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn effect_sheet() {
+    let path = std::env::var("EFFECT_SHEET").expect("set EFFECT_SHEET to the PNG to write");
+    let names = ["Black & White", "Invert", "Vignette", "Letterbox", "Light Leak", "Strobe", "Wiggle", "Camera Shake", "Glitch", "RGB Split", "VHS", "Scanlines"];
+    let (cell, columns) = (240u32, 4u32);
+    let rows = (names.len() as u32).div_ceil(columns);
+    let mut sheet = vec![0u8; (cell * columns * cell * rows * 4) as usize];
+    let mut renderer = Renderer::new().unwrap();
+    for (index, name) in names.iter().enumerate() {
+        let mut card = solid(2, 0, Vec2::new(cell as f32, cell as f32 * 0.75), Vec2::new(cell as f32 / 2.0, cell as f32 / 2.0));
+        card.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Linear { start: Rgba::hex(0xf97316), end: Rgba::hex(0x3b82f6), angle: 30.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) } };
+        card.effects.push(effects::instantiate(effects::find(name).unwrap(), Id(9)));
+        let mut text = solid(4, 0, Vec2::new(150.0, 60.0), Vec2::new(cell as f32 / 2.0, cell as f32 / 2.0));
+        text.content = LayerContent::Text { text: "Sale".into(), style: TextStyle { font_size: 52.0, line_height: 60.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() } };
+        text.effects.push(effects::instantiate(effects::find(name).unwrap(), Id(10)));
+        let mut scene = project(vec![text, card, full(3, 0x202024)]);
+        (scene.compositions[0].width, scene.compositions[0].height) = (cell, cell);
+        let frame = renderer.render(&scene, Id(1), 5, cell, cell, &studio_core::media::NoVideo).unwrap();
+        let (ox, oy) = ((index as u32 % columns) * cell, (index as u32 / columns) * cell);
+        for y in 0..cell {
+            for x in 0..cell {
+                let from = ((y * cell + x) * 4) as usize;
+                let to = (((oy + y) * cell * columns + ox + x) * 4) as usize;
+                sheet[to..to + 4].copy_from_slice(&[frame.bgra[from + 2], frame.bgra[from + 1], frame.bgra[from], 255]);
+            }
+        }
+    }
+    image::save_buffer(path, &sheet, cell * columns, cell * rows, image::ColorType::Rgba8).unwrap();
+}

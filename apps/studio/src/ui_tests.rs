@@ -25,7 +25,7 @@ const OPACITY: PropertyPath = PropertyPath::Transform(TransformProperty::Opacity
 fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        crate::theme::apply(cx);
+        crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx);
         crate::workspace::bind_keys(cx);
     });
     let mut workspace = None;
@@ -735,8 +735,17 @@ fn exporting_writes_the_chosen_format_in_the_background(cx: &mut TestAppContext)
     let folder = scratch_folder("export");
     let (workspace, visual) = open(cx);
     open_export_dialog(&workspace, visual);
+    visual.update(|window, cx| window.click("export-format", cx));
+    render(visual);
     click_label(visual, "ProRes 422 HQ (MOV)");
     render(visual);
+    // ProRes has no quality setting: that menu goes away.
+    assert!(visual.update(|window, _| window.try_find("export-quality")).is_none());
+    visual.update(|window, cx| window.click("export-size", cx));
+    render(visual);
+    click_label(visual, "Half (960 × 540)");
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.export_choice.scale, 0.5));
     click_label(visual, "Export…");
     visual.run_until_parked();
     assert!(visual.did_prompt_for_new_path());
@@ -750,7 +759,7 @@ fn exporting_writes_the_chosen_format_in_the_background(cx: &mut TestAppContext)
 
     let movie = folder.join("Main Comp.mov");
     let info = studio_media::probe(&movie).unwrap();
-    assert_eq!((info.codec.as_str(), info.width, info.height, info.frame_count), ("prores", 1920, 1080, 12));
+    assert_eq!((info.codec.as_str(), info.width, info.height, info.frame_count), ("prores", 960, 540, 12), "half size, as chosen");
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
@@ -1883,4 +1892,90 @@ fn a_long_composition_name_does_not_move_the_timeline_transport(cx: &mut TestApp
     }));
     render(visual);
     assert_eq!(center_of(visual, "tracks-play"), play);
+}
+
+// Anchor grid layout, text editing in the viewer, effect drops, panels and settings -------------
+
+#[gpui_kit::test]
+fn the_anchor_grid_is_three_by_three(cx: &mut TestAppContext) {
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    add_shape(&workspace, visual, ShapeKind::Rectangle);
+    let at = |visual: &mut VisualTestContext, index: usize| center_of(visual, ("anchor-grid", index));
+    let (first, third, fourth) = (at(visual, 0), at(visual, 2), at(visual, 3));
+    assert_eq!(first.y, third.y, "a row runs across");
+    assert!(third.x > first.x);
+    assert_eq!(first.x, fourth.x, "the next row starts under the first");
+    assert!(fourth.y > first.y);
+}
+
+#[gpui_kit::test]
+fn double_clicking_text_in_the_viewer_edits_it_there(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // The title starts at frame 24.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_current_frame(40); cx.notify(); }));
+    render(visual);
+    // The title is centered in the frame.
+    let at = screen_point(&workspace, visual, Vec2::new(960.0, 540.0));
+    visual.update(|window, cx| window.click_with_options("viewer", gpui_kit::test::ClickOptions::new().with_count(2).with_offset(point(at.x - window.find("viewer").bounds().origin.x, at.y - window.find("viewer").bounds().origin.y)), cx));
+    visual.run_until_parked();
+    render(visual);
+    let editing = visual.update(|_, cx| workspace.read(cx).ui.editing.as_ref().map(|editing| (editing.target, editing.in_viewer)));
+    assert_eq!(editing, Some((crate::workspace::EditTarget::SourceText(TITLE), true)));
+    visual.update(|window, cx| window.press("cmd-a", cx));
+    visual.update(|window, cx| window.input("SALE", cx));
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().0.to_owned()), "SALE");
+}
+
+#[gpui_kit::test]
+fn an_effect_dropped_on_the_viewer_goes_on_the_layer_under_it(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // The title starts at frame 24.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_current_frame(40); cx.notify(); }));
+    render(visual);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    let from = center_of(visual, "effect:Gaussian Blur");
+    let to = screen_point(&workspace, visual, Vec2::new(960.0, 540.0));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+    let names = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.iter().map(|e| e.name.clone()).collect::<Vec<_>>());
+    assert_eq!(names, vec!["Gaussian Blur"], "the title, on top in the middle, took it");
+}
+
+#[gpui_kit::test]
+fn right_column_panels_collapse_to_their_headers(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let align_top = center_of(visual, "collapse:Align").y;
+    visual.update(|window, cx| window.click("collapse:Properties", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.collapsed_panels.contains(&crate::workspace::PanelId::Properties)));
+    assert!(center_of(visual, "collapse:Align").y < align_top, "Align moved up into the space");
+    visual.update(|window, cx| window.click("collapse:Properties", cx));
+    render(visual);
+    assert_eq!(center_of(visual, "collapse:Align").y, align_top, "and back");
+}
+
+#[gpui_kit::test]
+fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("theme", crate::theme::ThemeName::Light as usize), cx));
+    visual.update(|window, cx| window.click(("accent", crate::theme::Accent::Green as usize), cx));
+    render(visual);
+    assert_eq!(crate::theme::themed(crate::theme::color::ACCENT), crate::theme::Accent::Green.value());
+    assert_ne!(crate::theme::themed(crate::theme::color::PANEL), crate::theme::color::PANEL, "light panels");
+    let saved = crate::app_settings::load();
+    assert_eq!((saved.theme, saved.accent), (crate::theme::ThemeName::Light, crate::theme::Accent::Green));
+    // Clearing the (test) proxy folder removes what is in it.
+    let folder = visual.update(|_, cx| workspace.read(cx).render.proxies.cache_folder().to_path_buf());
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("old-proxy.mov"), vec![0u8; 1000]).unwrap();
+    visual.update(|window, cx| window.click("cache-clear", cx));
+    render(visual);
+    assert!(!folder.join("old-proxy.mov").exists());
+    visual.update(|_, cx| crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx));
 }

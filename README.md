@@ -42,7 +42,10 @@ Inside `apps/studio/src`:
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).
 - `project_files.rs`: Save, Save As, Open, asking about unsaved changes, reopening the last project, and the
   recovery copy of unsaved work.
-- `app_settings.rs`: what Studio remembers between runs (last project, window placement, recovery copy).
+- `app_settings.rs`: what Studio remembers between runs (last project, window placement, recovery copy, theme,
+  accent color, proxy cache limit). `panels/settings.rs` is the Settings dialog (Cmd+,).
+- `theme.rs`: the palettes. Panels name colors by `theme::color` constants and `theme::hsla` swaps in the
+  active theme's (Dark, Black, Light) and accent's color, so new panels follow the theme for free.
 - `panels/graph_editor.rs`: the Easings popover: easing families (In / Out / Both) and a curve editor.
 - `panels/`: one module per panel. `panels/views.rs` wraps each panel in a cached GPUI view.
 - `assets.rs`: the bundled Lucide icons. Add any new `IconName` here; a test fails if one is missing.

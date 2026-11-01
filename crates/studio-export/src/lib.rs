@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use studio_core::audio::composition_audio;
 use studio_core::model::{Id, Project};
-use studio_media::{CHANNELS, ExactFrames, MixRange, Mixer, MovieFormat, MovieSettings, MovieWriter};
+use studio_media::{CHANNELS, EncodeSpeed, ExactFrames, MixRange, Mixer, MovieFormat, MovieSettings, MovieWriter, VideoQuality};
 use studio_render::Renderer;
 
 /// Sample rate of exported sound: the video standard.
@@ -27,6 +27,29 @@ pub struct ExportRequest {
     /// Adds a sound track when the composition has audible layers.
     pub include_audio: bool,
     pub path: PathBuf,
+    /// The movie's size as a fraction of the composition's (1 for full size).
+    pub scale: f32,
+    /// H.264 only.
+    pub quality: VideoQuality,
+    /// H.264 only.
+    pub speed: EncodeSpeed,
+    /// AAC sound bitrate (H.264 movies), in kilobits per second.
+    pub audio_kbps: u32,
+}
+
+impl ExportRequest {
+    /// A full-size, high-quality export of `frames` with sound.
+    pub fn new(composition: Id, frames: Range<i64>, format: MovieFormat, path: PathBuf) -> Self {
+        Self { composition, frames, format, include_audio: true, path, scale: 1.0, quality: VideoQuality::High, speed: EncodeSpeed::Balanced, audio_kbps: 320 }
+    }
+
+    /// The movie's picture size for a composition of `width` × `height`: scaled, at least 16
+    /// pixels a side, and even (both codecs need even sizes).
+    pub fn output_size(&self, width: u32, height: u32) -> (u32, u32) {
+        let scale = if self.scale.is_finite() { self.scale.clamp(0.05, 1.0) } else { 1.0 };
+        let side = |value: u32| (((value as f32 * scale).round() as u32).max(16) + 1) & !1;
+        (side(width), side(height))
+    }
 }
 
 /// How far an export has got, in frames.
@@ -60,12 +83,12 @@ pub fn export(
     }
     let clips = if request.include_audio { composition_audio(project, composition) } else { Vec::new() };
     let rate = composition.frame_rate;
+    let (width, height) = request.output_size(composition.width, composition.height);
     let settings = MovieSettings {
-        format: request.format,
-        width: composition.width,
-        height: composition.height,
-        frame_rate: rate,
-        audio_rate: (!clips.is_empty()).then_some(AUDIO_RATE),
+        quality: request.quality,
+        speed: request.speed,
+        audio_kbps: request.audio_kbps,
+        ..MovieSettings::new(request.format, width, height, rate, (!clips.is_empty()).then_some(AUDIO_RATE))
     };
 
     let mut renderer = Renderer::new().map_err(|error| format!("The GPU could not be used: {error}"))?;
@@ -90,7 +113,7 @@ pub fn export(
                 return Ok(Outcome::Cancelled);
             }
             let picture = renderer
-                .render(project, request.composition, frame, composition.width, composition.height, &video)
+                .render(project, request.composition, frame, width, height, &video)
                 .map_err(|error| format!("Frame {frame} could not be rendered: {error}"))?;
             // A source frame that could not be decoded would show the previous one instead: stop.
             if let Some((path, error)) = video.errors().into_iter().next() {

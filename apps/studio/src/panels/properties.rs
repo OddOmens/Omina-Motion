@@ -169,26 +169,34 @@ fn anchor_grid(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>
     let anchor = layer.transform.as_ref().map(|transform| transform.anchor_point.value_at(frame));
     let size = layer.size;
     let at = |(fx, fy): (f32, f32)| anchor.is_some_and(|a| (a.x - size.x * fx).abs() < 0.5 && (a.y - size.y * fy).abs() < 0.5);
-    let grid = div().w(px(56.0)).p(px(2.0)).flex().flex_wrap().rounded(px(5.0)).border_1().border_color(hsla(color::HAIRLINE)).children(
-        crate::state::ANCHOR_POINTS.into_iter().enumerate().map(|(index, fraction)| {
-            let lit = at(fraction);
-            div()
-                .id(("anchor-grid", index))
-                .size(px(16.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(3.0))
-                .cursor_pointer()
-                .hover(|style| style.bg(hsla(color::HOVER)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.state.set_anchor_fraction(id, fraction);
-                    cx.notify();
-                }))
-                .child(div().size(px(if lit { 7.0 } else { 5.0 })).rounded_full().bg(hsla(if lit { color::ACCENT } else { color::MUTED })))
-                .test_support()
-        }),
-    );
+    let cell = |index: usize, fraction: (f32, f32), cx: &mut Context<Workspace>| {
+        let lit = at(fraction);
+        div()
+            .id(("anchor-grid", index))
+            .size(px(16.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(hsla(color::HOVER)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.state.set_anchor_fraction(id, fraction);
+                cx.notify();
+            }))
+            .child(div().size(px(if lit { 7.0 } else { 5.0 })).rounded_full().bg(hsla(if lit { color::ACCENT } else { color::MUTED })))
+            .test_support()
+    };
+    // Three rows of three, top to bottom, as the points sit on the layer's box.
+    let mut grid = div().flex_none().flex().flex_col().gap(px(1.0)).p(px(2.0)).rounded(px(5.0)).border_1().border_color(hsla(color::HAIRLINE));
+    for row in 0..3 {
+        let mut line = div().flex().gap(px(1.0));
+        for column in 0..3 {
+            let index = row * 3 + column;
+            line = line.child(cell(index, crate::state::ANCHOR_POINTS[index], cx));
+        }
+        grid = grid.child(line);
+    }
     div()
         .flex()
         .items_center()
@@ -196,7 +204,7 @@ fn anchor_grid(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>
         .py_1()
         .pl(px(28.0))
         .child(grid)
-        .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Move the anchor point to a corner, edge or the center. Drag it in the viewer to put it anywhere."))
+        .child(div().flex_1().min_w_0().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Pick a corner, an edge or the center, or drag the anchor in the viewer to put it anywhere."))
 }
 
 /// A labeled row with an icon and a text-setting field, as in the character grid.
@@ -254,7 +262,7 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
     let weight_choices = FONT_WEIGHTS.iter().map(|(value, name)| ((*name).to_owned(), *value == weight, *value)).collect();
     let current_family = style.font_family.clone();
 
-    let source_text = if let Some(editing) = workspace.ui.editing.as_ref().filter(|e| e.target == EditTarget::SourceText(id)) {
+    let source_text = if let Some(editing) = workspace.ui.editing.as_ref().filter(|e| e.target == EditTarget::SourceText(id) && !e.in_viewer) {
         div().flex_1().child(Input::new(&editing.input).small()).into_any_element()
     } else {
         let current = text.to_owned();

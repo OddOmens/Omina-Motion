@@ -60,6 +60,18 @@ pub fn passes(effect: &Effect, frame: f64, scale: f32) -> Option<Vec<Pass>> {
         "Linear Wipe" => shader(20, &[v(0), v(1), px(2)]),
         "Radial Wipe" => shader(21, &[v(0), v(1), v(2)]),
         "Block Dissolve" => shader(22, &[v(0), px(1)]),
+        "Black & White" => shader(40, &[v(0), v(1)]),
+        "Invert" => shader(41, &[v(0)]),
+        "Vignette" => shader(42, &[v(0), v(1), v(2)]),
+        "Letterbox" => shader(43, &[v(0), v(1)]),
+        "Light Leak" => shader(44, &[v(0), v(1), v(2)]),
+        "Strobe" => shader(45, &[v(0), v(1), v(2)]),
+        "Wiggle" => shader(46, &[px(0), v(1), v(2)]),
+        "Camera Shake" => shader(47, &[px(0), v(1), v(2), v(3)]),
+        "Glitch" => shader(48, &[v(0), px(1), v(2)]),
+        "RGB Split" => shader(49, &[px(0), v(1)]),
+        "VHS" => shader(50, &[v(0), v(1)]),
+        "Scanlines" => shader(51, &[px(0), v(1), v(2)]),
         "Glow" => Pass::Glow { threshold: v(0) / 100.0, sigma: px(1) * 0.5, intensity: v(2) },
         "Drop Shadow" => {
             // Direction is measured clockwise from straight up, as in After Effects.

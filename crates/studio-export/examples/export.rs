@@ -37,7 +37,7 @@ fn main() {
         Some("mp4") => MovieFormat::H264,
         _ => fail("the output must end in .mp4 (H.264) or .mov (ProRes 422 HQ)"),
     };
-    let request = ExportRequest { composition, frames, format, include_audio: !args.iter().any(|a| a == "--no-audio"), path };
+    let request = ExportRequest { include_audio: !args.iter().any(|a| a == "--no-audio"), ..ExportRequest::new(composition, frames, format, path) };
 
     let started = Instant::now();
     let mut last_report = Instant::now();

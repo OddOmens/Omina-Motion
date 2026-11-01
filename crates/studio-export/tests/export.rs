@@ -43,7 +43,7 @@ fn project() -> (Project, Id) {
 }
 
 fn request(comp: Id, path: PathBuf, format: MovieFormat) -> ExportRequest {
-    ExportRequest { composition: comp, frames: 0..48, format, include_audio: true, path }
+    ExportRequest::new(comp, 0..48, format, path)
 }
 
 fn color_at(path: &Path, index: i64) -> &'static str {
@@ -103,6 +103,24 @@ fn exports_just_the_work_area() {
     export(&project, &request, &mut |_| {}, &|| false).unwrap();
     assert_eq!(probe(&path).unwrap().frame_count, 24);
     assert_eq!(color_at(&path, 0), "blue", "starts at the work area");
+}
+
+#[test]
+fn a_half_size_export_has_half_the_pixels() {
+    let (project, comp) = project();
+    let path = scratch("half.mp4");
+    let full = probe(&{
+        let full = scratch("full-size.mp4");
+        export(&project, &request(comp, full.clone(), MovieFormat::H264), &mut |_| {}, &|| false).unwrap();
+        full
+    })
+    .unwrap();
+    let request = ExportRequest { scale: 0.5, ..request(comp, path.clone(), MovieFormat::H264) };
+    export(&project, &request, &mut |_| {}, &|| false).unwrap();
+    let half = probe(&path).unwrap();
+    assert_eq!((half.width, half.height), (request.output_size(full.width, full.height)));
+    assert!(half.width < full.width);
+    assert_eq!(color_at(&path, 0), "red", "the picture is the same, smaller");
 }
 
 #[test]

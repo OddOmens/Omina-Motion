@@ -299,6 +299,117 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let shadow = textureSampleLevel(aux, linear_sampler, uv, 0.0);
             return c + shadow * (1.0 - c.a);
         }
+        // Black & White: p0.x amount (%), p0.y contrast (%), mixing toward a contrast-adjusted gray.
+        case 40u: {
+            let gray = clamp((dot(rgb, LUMA) - 0.5) * (1.0 + u.p0.y / 100.0) + 0.5, 0.0, 1.0);
+            return with_alpha(mix(rgb, vec3(gray), u.p0.x / 100.0), c.a);
+        }
+        // Invert: p0.x amount (%).
+        case 41u: { return with_alpha(mix(rgb, vec3(1.0) - rgb, u.p0.x / 100.0), c.a); }
+        // Vignette: p0.x amount (%), p0.y size (% of the frame clear in the middle), p0.z softness (%).
+        case 42u: {
+            let offset = (uv - center) * vec2(size.x / max(size.y, 1.0), 1.0);
+            let radius = u.p0.y / 100.0 * 0.75;
+            let soft = max(u.p0.z / 100.0, 0.01) * 0.75;
+            let shade = smoothstep(radius, radius + soft, length(offset)) * u.p0.x / 100.0;
+            return vec4(c.rgb * (1.0 - shade), c.a);
+        }
+        // Letterbox: p0.x the picture's aspect ratio (width / height), p0.y bar opacity (%). Black
+        // bars cover the top and bottom (or the sides, for ratios narrower than the frame).
+        case 43u: {
+            let frame = size.x / max(size.y, 1.0);
+            let ratio = max(u.p0.x, 0.1);
+            var bar = 0.0;
+            if (ratio > frame) {
+                let keep = frame / ratio * 0.5;
+                bar = step(keep, abs(uv.y - 0.5));
+            } else {
+                let keep = ratio / frame * 0.5;
+                bar = step(keep, abs(uv.x - 0.5));
+            }
+            let a = bar * u.p0.y / 100.0;
+            return c * (1.0 - a) + vec4(0.0, 0.0, 0.0, a);
+        }
+        // Light Leak: p0.x amount (%), p0.y hue (deg), p0.z drift speed. Warm light drifting across
+        // the frame, added to the layer (light, not coverage).
+        case 44u: {
+            let t = u.info.z * u.p0.z;
+            let spot = vec2(0.25 + 0.5 * value_noise(vec2(t, 3.0)), 0.3 + 0.4 * value_noise(vec2(7.0, t)));
+            let offset = (uv - spot) * vec2(size.x / max(size.y, 1.0), 1.0);
+            let glow = exp(-dot(offset, offset) * 3.0) * (0.6 + 0.4 * fbm(uv * 3.0 + t)) * u.p0.x / 100.0;
+            let tint = hsl_to_rgb(vec3(fract(u.p0.y / 360.0), 0.9, 0.6));
+            return vec4(c.rgb + tint * glow * c.a, c.a);
+        }
+        // Strobe: p0.x flashes per second, p0.y flash length (% of each cycle), p0.z brightness (%).
+        case 45u: {
+            let phase = fract(u.info.z * u.p0.x);
+            let on = step(phase, u.p0.y / 100.0) * u.p0.z / 100.0;
+            return vec4(mix(c.rgb, vec3(c.a), on), c.a);
+        }
+        // Wiggle: p0.x amount (px), p0.y wiggles per second, p0.z seed. The layer drifts smoothly
+        // around its place, like After Effects' wiggle() on position.
+        case 46u: {
+            let t = u.info.z * u.p0.y + u.p0.z * 17.0;
+            let drift = (vec2(value_noise(vec2(t, 1.3)), value_noise(vec2(5.7, t))) - 0.5) * 2.0 * u.p0.x;
+            return sample(uv - drift / size);
+        }
+        // Camera Shake: p0.x amount (px), p0.y shakes per second, p0.z rotation (deg), p0.w zoom (%).
+        // Shakes, turns and zooms in a little, so the frame's edges stay hidden.
+        case 47u: {
+            let t = u.info.z * u.p0.y;
+            let shake = (vec2(fbm(vec2(t, 2.0)), fbm(vec2(9.0, t))) - 0.5) * 2.0 * u.p0.x;
+            let turn = radians((fbm(vec2(t, 13.0)) - 0.5) * 2.0 * u.p0.z);
+            let zoom = 1.0 + u.p0.w / 100.0;
+            var p = (pixel - size * 0.5 - shake) / zoom;
+            p = vec2(p.x * cos(turn) - p.y * sin(turn), p.x * sin(turn) + p.y * cos(turn));
+            return sample((p + size * 0.5) / size);
+        }
+        // Glitch: p0.x amount (%), p0.y block size (px), p0.z changes per second. Bands of the
+        // picture jump sideways with their colors pulled apart, changing in steps.
+        case 48u: {
+            let amount = u.p0.x / 100.0;
+            let step_time = floor(u.info.z * u.p0.z);
+            let band = floor(pixel.y / max(u.p0.y, 1.0));
+            let pick = hash(vec2(band, step_time));
+            let hit = step(1.0 - amount * 0.6, pick);
+            let shift = (hash(vec2(band + 3.1, step_time)) - 0.5) * 0.25 * amount * hit;
+            let split = 0.01 * amount * (0.5 + hit);
+            let r = sample(uv + vec2(shift + split, 0.0));
+            let g = sample(uv + vec2(shift, 0.0));
+            let b = sample(uv + vec2(shift - split, 0.0));
+            return vec4(r.r, g.g, b.b, max(max(r.a, g.a), b.a));
+        }
+        // RGB Split: p0.x distance (px), p0.y angle (deg). Red one way, blue the other.
+        case 49u: {
+            let a = radians(u.p0.y);
+            let offset = vec2(cos(a), sin(a)) * u.p0.x / size;
+            let r = sample(uv + offset);
+            let b = sample(uv - offset);
+            return vec4(r.r, c.g, b.b, max(max(r.a, c.a), b.a));
+        }
+        // VHS: p0.x amount (%), p0.y noise (%). Wobbling lines, bleeding color, soft detail and
+        // tape noise.
+        case 50u: {
+            let amount = u.p0.x / 100.0;
+            let t = u.info.z;
+            let wobble = (value_noise(vec2(pixel.y * 0.05, t * 6.0)) - 0.5) * 0.006 * amount;
+            let bleed = 0.004 * amount;
+            let r = sample(uv + vec2(wobble + bleed, 0.0));
+            let g = sample(uv + vec2(wobble, 0.0));
+            let b = sample(uv + vec2(wobble - bleed, 0.0));
+            var color = vec3(r.r, g.g, b.b);
+            let a = max(max(r.a, g.a), b.a);
+            let noise = (hash(pixel + fract(t) * 97.0) - 0.5) * u.p0.y / 100.0 * 0.3 * a;
+            color = mix(color, vec3(dot(color, LUMA)), 0.25 * amount) + noise;
+            return vec4(max(color, vec3(0.0)), a);
+        }
+        // Scanlines: p0.x line spacing (px), p0.y opacity (%), p0.z scroll speed (lines per second).
+        case 51u: {
+            let spacing = max(u.p0.x, 1.0);
+            let line = fract((pixel.y + u.info.z * u.p0.z * spacing) / spacing);
+            let dark = step(0.5, line) * u.p0.y / 100.0;
+            return vec4(c.rgb * (1.0 - dark), c.a);
+        }
         default: { return c; }
     }
 }

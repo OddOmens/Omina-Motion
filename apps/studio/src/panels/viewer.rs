@@ -13,6 +13,7 @@ use gpui_kit::{
 use std::sync::Arc;
 
 use studio_core::animation::Vec2;
+use studio_core::model::Id;
 use studio_core::time::format_timecode;
 use studio_core::transform::layer_corners;
 use studio_media::{FrameServer, ProxyManager};
@@ -21,7 +22,7 @@ use studio_render::Renderer;
 use super::chrome::{EmptyDragView, icon_button, panel};
 use crate::state::ScaleHandle;
 use crate::theme::{color, hsla, size};
-use crate::workspace::{EditTarget, PanelId, Tool, Workspace};
+use crate::workspace::{EditTarget, EffectDrag, PanelId, Tool, Workspace};
 
 /// Space kept between the composition frame and the viewer edge.
 const FIT_PADDING: f32 = 24.0;
@@ -46,7 +47,11 @@ const PREVIEW_DECODE_WIDTH: u32 = 1920;
 
 impl ViewerRender {
     pub fn new() -> Self {
-        let proxies = Arc::new(ProxyManager::new(studio_media::default_cache_folder()));
+        // Headless tests keep their proxies apart, so clearing the cache in a test never touches real ones.
+        let folder = if cfg!(test) { std::env::temp_dir().join(format!("studio-proxies-test-{}", std::process::id())) } else { studio_media::default_cache_folder() };
+        let proxies = Arc::new(ProxyManager::new(folder));
+        #[cfg(not(test))]
+        proxies.set_cache_limit(crate::app_settings::load().proxy_cache_limit_gb.map(|gb| u64::from(gb) << 30));
         Self {
             renderer: Renderer::new().map_err(|error| error.to_string()),
             media: FrameServer::new(PREVIEW_DECODE_WIDTH, Some(proxies.clone())),
@@ -225,6 +230,21 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         }
         return;
     }
+    // Double-clicking a text layer edits its text right there, over the layer.
+    if event.click_count >= 2
+        && let Some(layer) = workspace.state.layer_at(point).filter(|&layer| workspace.state.text_of(layer).is_some())
+    {
+        let text = workspace.state.text_of(layer).map(|(text, _)| text.to_owned()).unwrap_or_default();
+        workspace.state.select_layer(layer, false);
+        cx.defer_in(window, move |this, window, cx| {
+            this.begin_edit(EditTarget::SourceText(layer), text, window, cx);
+            if let Some(editing) = this.ui.editing.as_mut() {
+                editing.in_viewer = true;
+            }
+            cx.notify();
+        });
+        return;
+    }
     let additive = event.modifiers.shift || event.modifiers.platform;
     match workspace.state.layer_at(point) {
         Some(layer) if !workspace.state.selected_layers.contains(&layer) || additive => workspace.state.select_layer(layer, additive),
@@ -234,6 +254,64 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
     }
     workspace.state.begin_move();
     cx.notify();
+}
+
+/// A bright outline around the layer an effect being dragged over the viewer would go on.
+fn effect_drop_highlight(workspace: &Workspace) -> Option<AnyElement> {
+    let layer = workspace.ui.effect_drop_layer?;
+    let composition = workspace.state.composition();
+    let corners = layer_corners(composition, layer, workspace.state.current_frame as f64)?;
+    let (width, height) = (composition.width as f32, composition.height as f32);
+    let outline = corners.map(|v| (v.x / width, v.y / height));
+    Some(
+        canvas(|_, _, _| (), move |bounds, _, window, _| {
+            let at = |(fx, fy): (f32, f32)| point(bounds.origin.x + bounds.size.width * fx, bounds.origin.y + bounds.size.height * fy);
+            let mut path = PathBuilder::stroke(px(3.0));
+            path.move_to(at(outline[0]));
+            for corner in &outline[1..] {
+                path.line_to(at(*corner));
+            }
+            path.line_to(at(outline[0]));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, hsla(color::HIGHLIGHT));
+            }
+        })
+        .absolute()
+        .size_full()
+        .into_any_element(),
+    )
+}
+
+/// The layer an effect dropped at `position` (window coordinates) would go on: the topmost one
+/// under the pointer that the effect suits.
+fn effect_target(workspace: &Workspace, effect: &str, position: gpui_kit::Point<gpui_kit::Pixels>) -> Option<Id> {
+    let point = to_comp(workspace, f32::from(position.x), f32::from(position.y));
+    let layer = workspace.state.layer_at(point)?;
+    let content = &workspace.state.composition().layer(layer)?.content;
+    studio_core::effects::suits_layer(effect, content).then_some(layer)
+}
+
+/// The text field for a text layer being edited in the viewer (after a double-click), laid over
+/// the layer's bounds. Enter or clicking elsewhere commits it.
+fn text_editor_overlay(workspace: &Workspace) -> Option<AnyElement> {
+    let editing = workspace.ui.editing.as_ref().filter(|editing| editing.in_viewer)?;
+    let EditTarget::SourceText(layer) = editing.target else { return None };
+    let composition = workspace.state.composition();
+    let bounds = studio_core::align::layer_bounds(composition, layer, workspace.state.current_frame)?;
+    let (width, height) = (composition.width as f32, composition.height as f32);
+    let (left, top) = (bounds.min.x / width, (bounds.min.y + bounds.max.y) * 0.5 / height);
+    let span = ((bounds.max.x - bounds.min.x) / width).max(0.0);
+    Some(
+        div()
+            .absolute()
+            .left(relative(left.clamp(0.0, 0.9)))
+            .top(relative(top.clamp(0.0, 0.95)))
+            .mt(px(-16.0))
+            .w(relative(span.clamp(0.1, 1.0)))
+            .min_w(px(160.0))
+            .child(gpui_kit::component::input::Input::new(&editing.input))
+            .into_any_element(),
+    )
 }
 
 /// The selection outline (the layer's real, possibly rotated rectangle), anchor point and
@@ -382,7 +460,9 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 .text_color(hsla(color::TEXT))
                 .child("Proxy")
         }))
-        .children(selection_overlay(workspace, cx));
+        .children(selection_overlay(workspace, cx))
+        .children(text_editor_overlay(workspace))
+        .children(effect_drop_highlight(workspace));
 
     let viewer = div()
         .id("viewer")
@@ -398,6 +478,25 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .when(workspace.ui.tool == Tool::Shape, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| press_viewer(this, event, window, cx)))
         .on_drag(ViewerDrag::Move, |_, _, _, cx| cx.new(|_| EmptyDragView))
+        // An effect dragged over the picture lights up the layer it would go on (one it suits).
+        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<EffectDrag>, _, cx| {
+            let position = event.event.position;
+            let target = event.bounds.contains(&position).then(|| effect_target(this, &event.drag(cx).name, position)).flatten();
+            if this.ui.effect_drop_layer != target {
+                this.ui.effect_drop_layer = target;
+                cx.notify();
+            }
+        }))
+        // The target is found again where the mouse is released: the highlight is cleared by
+        // the window's mouse-up handler, which runs before this.
+        .on_drop(cx.listener(|this, drag: &EffectDrag, window, cx| {
+            this.ui.effect_drop_layer = None;
+            if let Some(layer) = effect_target(this, &drag.name, window.mouse_position()) {
+                this.state.add_effect(layer, &drag.name);
+                this.ui.tabs.insert(PanelId::Properties, 1);
+            }
+            cx.notify();
+        }))
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ViewerDrag>, _, cx| {
             let Some((x, y)) = this.ui.viewer_anchor else { return };
             let scale = viewer_scale(this).max(f32::EPSILON);

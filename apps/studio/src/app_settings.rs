@@ -27,6 +27,10 @@ pub struct AppSettings {
     pub window: Option<WindowPlacement>,
     /// For the recovery copy: the project file it is unsaved work on, if it had one.
     pub recovery_of: Option<PathBuf>,
+    pub theme: crate::theme::ThemeName,
+    pub accent: crate::theme::Accent,
+    /// The most disk space proxies may take, in gigabytes; `None` for no limit.
+    pub proxy_cache_limit_gb: Option<u32>,
 }
 
 /// Studio's settings folder.

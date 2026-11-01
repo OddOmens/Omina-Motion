@@ -10,6 +10,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use ffmpeg_next as ffmpeg;
@@ -190,11 +191,60 @@ struct Shared {
     work: Condvar,
     on_change: Mutex<Option<ChangeCallback>>,
     cache: PathBuf,
+    /// The most the cache may hold, in bytes (`u64::MAX` for no limit).
+    limit: AtomicU64,
+}
+
+/// The proxy files in `folder`, with their sizes and when they were last written.
+fn cache_files(folder: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+    let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok().filter(|metadata| metadata.is_file())?;
+            Some((entry.path(), metadata.len(), metadata.modified().unwrap_or(std::time::UNIX_EPOCH)))
+        })
+        .collect()
+}
+
+/// How many bytes the proxies in `folder` take up.
+pub fn cache_size(folder: &Path) -> u64 {
+    cache_files(folder).iter().map(|(_, size, _)| size).sum()
+}
+
+/// Deletes the oldest proxies in `folder` until it holds at most `limit` bytes, never touching
+/// those in `keep` (in use, or being written). Returns how many bytes were freed.
+pub fn trim_cache(folder: &Path, limit: u64, keep: &[PathBuf]) -> u64 {
+    let mut files = cache_files(folder);
+    let mut total: u64 = files.iter().map(|(_, size, _)| size).sum();
+    files.sort_by_key(|(_, _, modified)| *modified);
+    let mut freed = 0;
+    for (path, size, _) in files {
+        if total <= limit {
+            break;
+        }
+        if keep.contains(&path) || std::fs::remove_file(&path).is_err() {
+            continue;
+        }
+        total -= size;
+        freed += size;
+    }
+    freed
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, Queue> {
         self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Keeps the cache within its limit, sparing the proxies this session uses.
+    fn trim(&self) {
+        let limit = self.limit.load(Ordering::Relaxed);
+        if limit == u64::MAX {
+            return;
+        }
+        let in_use: Vec<PathBuf> = self.lock().status.keys().map(|source| proxy_path(&self.cache, source)).collect();
+        trim_cache(&self.cache, limit, &in_use);
     }
 
     fn changed(&self) {
@@ -212,7 +262,7 @@ pub struct ProxyManager {
 impl ProxyManager {
     /// Keeps proxies in `cache` (created if missing).
     pub fn new(cache: PathBuf) -> Self {
-        let shared = Arc::new(Shared { queue: Mutex::default(), work: Condvar::new(), on_change: Mutex::new(None), cache });
+        let shared = Arc::new(Shared { queue: Mutex::default(), work: Condvar::new(), on_change: Mutex::new(None), cache, limit: AtomicU64::new(u64::MAX) });
         let worker = shared.clone();
         if let Err(error) = std::thread::Builder::new().name("proxies".into()).spawn(move || build_loop(&worker)) {
             eprintln!("could not start the proxy builder: {error}");
@@ -245,6 +295,33 @@ impl ProxyManager {
 
     pub fn status(&self, source: &Path) -> Option<ProxyStatus> {
         self.shared.lock().status.get(source).cloned()
+    }
+
+    /// The folder proxies are kept in.
+    pub fn cache_folder(&self) -> &Path {
+        &self.shared.cache
+    }
+
+    /// Sets the most the cache may hold, in bytes (`None` for no limit), and trims it now. Proxies
+    /// in use this session are kept even if that leaves it over the limit.
+    pub fn set_cache_limit(&self, limit: Option<u64>) {
+        self.shared.limit.store(limit.unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.shared.trim();
+    }
+
+    /// Deletes every proxy not being built right now. Clips play from their original files
+    /// until their proxies are asked for again (when a project is next opened, or media imported).
+    /// Returns how many bytes were freed.
+    pub fn clear_cache(&self) -> u64 {
+        let building: Vec<PathBuf> = {
+            let mut queue = self.shared.lock();
+            let building = queue.status.iter().filter(|(_, status)| matches!(status, ProxyStatus::Building(_))).map(|(source, _)| proxy_path(&self.shared.cache, source)).collect();
+            queue.status.retain(|_, status| matches!(status, ProxyStatus::Building(_) | ProxyStatus::Queued));
+            building
+        };
+        let freed = trim_cache(&self.shared.cache, 0, &building);
+        self.shared.changed();
+        freed
     }
 
     /// The finished proxy for `source`, if there is one.
@@ -299,9 +376,35 @@ fn build_loop(shared: &Shared) {
         };
         let cancelled = || shared.lock().shutting_down;
         match build_proxy(&source, &output, PROXY_WIDTH, &progress, &cancelled) {
-            Ok(true) => set_status(ProxyStatus::Ready(output)),
+            Ok(true) => {
+                set_status(ProxyStatus::Ready(output));
+                shared.trim();
+            }
             Ok(false) => return,
             Err(error) => set_status(ProxyStatus::Failed(error.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn the_cache_trims_oldest_first_and_spares_files_in_use() {
+        let folder = std::env::temp_dir().join(format!("studio-proxy-trim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = |name: &str, bytes: usize| {
+            let path = folder.join(name);
+            std::fs::write(&path, vec![0u8; bytes]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            path
+        };
+        let (old, in_use, newest) = (file("old.mov", 100), file("in-use.mov", 100), file("new.mov", 100));
+        assert_eq!(cache_size(&folder), 300);
+        assert_eq!(trim_cache(&folder, 150, std::slice::from_ref(&in_use)), 200, "the oldest unused went first, then the next");
+        assert!(!old.exists() && in_use.exists() && !newest.exists());
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }
