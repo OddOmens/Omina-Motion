@@ -45,8 +45,10 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .children(super::export::status(workspace, cx))
 }
 
+/// A short line between groups of rail buttons. The panel hairline is too faint against the
+/// rail's darker background, so it uses the muted text color, softened.
 fn separator() -> gpui_kit::Div {
-    div().h(px(1.0)).w(px(30.0)).my_1p5().bg(hsla(color::HAIRLINE))
+    div().flex_none().h(px(1.0)).w(px(32.0)).my_1p5().bg(hsla(color::MUTED).opacity(0.45))
 }
 
 /// How long the Shape button must be held to open the shape menu.
