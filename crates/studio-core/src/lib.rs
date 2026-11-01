@@ -12,6 +12,7 @@ pub mod cut;
 pub mod edit;
 pub mod media;
 pub mod effects;
+pub mod folders;
 pub mod library;
 pub mod model;
 pub mod path;

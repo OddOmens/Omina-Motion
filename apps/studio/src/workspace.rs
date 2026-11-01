@@ -53,6 +53,7 @@ actions!(studio, [
     Precompose,
     CompositionSettings,
     NewComposition,
+    NewProject,
     Import,
     Undo,
     Redo,
@@ -110,6 +111,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-k", CompositionSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-,", OpenSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-n", NewComposition, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-alt-n", NewProject, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-i", Import, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-z", Undo, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-shift-z", Redo, Some(KEY_CONTEXT)),
@@ -141,6 +143,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
     vec![
         Menu::new("Studio").items([MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit Studio", Quit)]),
         Menu::new("File").items([
+            MenuItem::action("New Project", NewProject),
             MenuItem::action("Open…", Open),
             MenuItem::action("Save", Save),
             MenuItem::action("Save As…", SaveAs),
@@ -304,6 +307,12 @@ pub struct UiState {
     pub graph_editor: Option<gpui_kit::Point<gpui_kit::Pixels>>,
     /// Font families offered in the Text section, looked up once at startup.
     pub font_families: Vec<&'static str>,
+    /// The Project panel's preview of the selected item.
+    pub preview: panels::project::Preview,
+    /// Where the preview box is on screen, for scrubbing.
+    pub preview_bounds: panels::chrome::MeasuredBounds,
+    /// Which columns the Project panel shows (from Settings).
+    pub project_columns: crate::app_settings::ProjectColumns,
     pub timeline: panels::timeline::TimelineUi,
     /// The window title last set, so it is only changed when it needs to be.
     pub window_title: String,
@@ -365,7 +374,7 @@ impl Panels {
         let (properties, effects, align) = (view(PanelKind::Properties), view(PanelKind::Effects), view(PanelKind::Align));
         let libraries = view(PanelKind::Libraries);
         let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id()];
-        let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed));
+        let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed, project.entity_id()));
         Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, clock }
     }
 }
@@ -413,10 +422,15 @@ impl Workspace {
             let _ = frame_ready.try_send(());
         });
         let viewer = panels.viewer.entity_id();
-        // The loop ends when the frame server (which holds the sender) is dropped.
+        let project_panel = panels.project.entity_id();
+        // The loop ends when the frame server (which holds the sender) is dropped. The Project
+        // panel's preview shows frames from it too.
         cx.spawn(async move |_, cx| {
             while frames_ready.recv().await.is_ok() {
-                cx.update(|cx| cx.notify(viewer));
+                cx.update(|cx| {
+                    cx.notify(viewer);
+                    cx.notify(project_panel);
+                });
             }
         })
         .detach();
@@ -454,10 +468,14 @@ impl Workspace {
             ui.media.peaks.set_on_ready(move || {
                 let _ = peaks_ready.try_send(());
             });
-            let timeline = panels.timeline.entity_id();
+            let (timeline, project_panel) = (panels.timeline.entity_id(), panels.project.entity_id());
+            // Waveforms show in the Project panel's preview too.
             cx.spawn(async move |_, cx| {
                 while media_arrived.recv().await.is_ok() {
-                    cx.update(|cx| cx.notify(timeline));
+                    cx.update(|cx| {
+                        cx.notify(timeline);
+                        cx.notify(project_panel);
+                    });
                 }
             })
             .detach();
@@ -518,6 +536,9 @@ impl Workspace {
                 flow_curve: studio_core::animation::EASING_PRESETS[0].1,
                 graph_editor: None,
                 font_families: panels::properties::installed_font_families(cx),
+                project_columns: crate::app_settings::load().project_columns,
+                preview: Default::default(),
+                preview_bounds: Default::default(),
                 timeline: timeline_ui,
                 window_title: String::new(),
                 export_choice: Default::default(),
@@ -583,6 +604,49 @@ impl Workspace {
         self.state.toggle_playback(Instant::now());
         self.sound.sync(&mut self.state);
         cx.notify();
+    }
+
+    /// Plays or pauses the Project panel's preview of the selected item: video (with its sound)
+    /// or sound. The composition stops playing first.
+    pub fn toggle_preview(&mut self) {
+        if self.ui.preview.playing.is_some() {
+            self.stop_preview();
+            return;
+        }
+        let Some(item) = self.state.selected_item.and_then(|id| self.state.project.item(id)).cloned() else { return };
+        let (Some(path), Some(length)) = (item.path.clone(), item.duration_seconds) else { return };
+        if self.state.is_playing() {
+            self.state.toggle_playback(Instant::now());
+            self.sound.sync(&mut self.state);
+        }
+        // From the start again once it has played to the end.
+        if self.ui.preview.seconds >= length - 0.05 {
+            self.ui.preview.seconds = 0.0;
+        }
+        let from = self.ui.preview.seconds;
+        if item.has_audio {
+            self.sound.play_preview(&path, from, length);
+        }
+        self.ui.preview.playing = Some((Instant::now(), from));
+    }
+
+    pub fn stop_preview(&mut self) {
+        self.sound.stop_preview();
+        self.ui.preview.playing = None;
+    }
+
+    /// Moves the playing preview on to now: by the sound heard, or by the clock for video with
+    /// no sound. Returns whether it is still playing.
+    pub fn tick_preview(&mut self) -> bool {
+        let Some((started, from)) = self.ui.preview.playing else { return false };
+        let length = self.ui.preview.item.and_then(|id| self.state.project.item(id)).and_then(|item| item.duration_seconds).unwrap_or(0.0);
+        let elapsed = self.sound.preview_heard().unwrap_or_else(|| started.elapsed()).as_secs_f64();
+        self.ui.preview.seconds = (from + elapsed).min(length);
+        if self.ui.preview.seconds >= length {
+            self.stop_preview();
+            return false;
+        }
+        true
     }
 
     /// Advances the playhead for one display frame. With sound, it follows the time actually
@@ -655,6 +719,10 @@ impl Workspace {
 
     /// Starts building a proxy for every footage item that does not have one yet.
     pub fn request_proxies(&self) {
+        // Proxies can be turned off in Settings, to save disk space.
+        if !crate::app_settings::load().build_proxies {
+            return;
+        }
         for item in &self.state.project.items {
             if let (studio_core::model::ProjectItemKind::Footage, Some(path)) = (item.kind, &item.path) {
                 self.render.proxies.request(path);
@@ -737,6 +805,12 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Every edit redraws the workspace, so this is where edits become undo steps, and where
         // manual stops (moving the playhead) and changes such as muting a layer reach the sound.
+        // A different item selected in the Project panel starts its preview from the beginning.
+        if self.ui.preview.item != self.state.selected_item {
+            self.stop_preview();
+            self.ui.preview.item = self.state.selected_item;
+            self.ui.preview.seconds = 0.0;
+        }
         let picking = self.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
         let dragging = cx.has_active_drag() || picking;
         self.state.record_history(dragging);
@@ -921,6 +995,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.quit(window, cx)))
+            .on_action(cx.listener(|this, _: &NewProject, window, cx| this.new_project(window, cx)))
             .on_action(cx.listener(|this, _: &NewComposition, window, cx| {
                 panels::composition_settings::open(this, true, window, cx);
             }))

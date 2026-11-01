@@ -66,7 +66,8 @@ const PREVIEW_DECODE_WIDTH: u32 = 1920;
 impl ViewerRender {
     pub fn new() -> Self {
         // Headless tests keep their proxies apart, so clearing the cache in a test never touches real ones.
-        let folder = if cfg!(test) { std::env::temp_dir().join(format!("studio-proxies-test-{}", std::process::id())) } else { studio_media::default_cache_folder() };
+        // Headless tests get a cache folder of their own (see `cache_root`).
+        let folder = crate::app_settings::cache_root().join("Proxies");
         let proxies = Arc::new(ProxyManager::new(folder));
         #[cfg(not(test))]
         proxies.set_cache_limit(crate::app_settings::load().proxy_cache_limit_gb.map(|gb| u64::from(gb) << 30));
@@ -86,10 +87,12 @@ impl ViewerRender {
 fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut Window, cx: &mut Context<Workspace>) {
     let Ok(renderer) = workspace.render.renderer.as_mut() else { return };
     let state = &workspace.state;
-    // While playing, decoders work ahead of the playhead.
-    workspace.render.media.set_playing(state.is_playing());
+    // While playing (the composition, or a preview in the Project panel), decoders work ahead.
+    workspace.render.media.set_playing(state.is_playing() || workspace.ui.preview.playing.is_some());
     // Let go of footage the open composition no longer uses (deleted layers, other
     // compositions), so its decoder threads stop and its frames are freed.
+    // The footage previewed in the Project panel is kept too.
+    let previewed = workspace.ui.preview.item.and_then(|item| state.project.item(item)).and_then(|item| item.path.as_deref());
     let footage: std::collections::HashSet<&std::path::Path> = state
         .composition()
         .layers
@@ -98,6 +101,7 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
             studio_core::model::LayerContent::Footage { item } => state.project.item(item)?.path.as_deref(),
             _ => None,
         })
+        .chain(previewed)
         .collect();
     workspace.render.media.release_unused(|path| footage.contains(path));
     let started = std::time::Instant::now();

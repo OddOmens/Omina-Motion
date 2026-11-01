@@ -222,6 +222,8 @@ pub struct EditorState {
     pub shape_size_linked: bool,
     /// Whether anchor points snap to their layer's corners, edge middles and center in the viewer.
     pub viewer_snapping: bool,
+    /// Which folder imported files go into, by kind (from Settings).
+    pub import_folders: crate::app_settings::ImportFolders,
     /// The pen path being drawn with the Pen tool, in composition pixels, until it is finished.
     pub pen: Option<studio_core::path::ShapePath>,
     playback: Option<PlaybackClock>,
@@ -269,6 +271,8 @@ impl EditorState {
             scale_linked: true,
             shape_size_linked: false,
             viewer_snapping: true,
+            // Tests import into the top level unless they say otherwise.
+            import_folders: if cfg!(test) { crate::app_settings::ImportFolders { video: None, image: None, audio: None } } else { crate::app_settings::load().import_folders },
             pen: None,
             playback: None,
             keyframe_drag: None,
@@ -575,22 +579,42 @@ impl EditorState {
 
     /// Adds a project folder and selects it.
     pub fn new_folder(&mut self) {
-        let id = self.project.allocate_id();
         let count = self.project.items.iter().filter(|item| item.kind == studio_core::model::ProjectItemKind::Folder).count();
-        self.project.items.push(studio_core::model::ProjectItem {
-            id,
-            name: format!("Folder {}", count + 1),
-            kind: studio_core::model::ProjectItemKind::Folder,
-            label: studio_core::model::LabelColor::None,
-            parent: None,
-            size: None,
-            duration_seconds: None,
-            frame_rate: None,
-            has_audio: false,
-            color: None,
-        path: None,
-        });
-        self.selected_item = Some(id);
+        self.selected_item = Some(studio_core::folders::add_folder(&mut self.project, &format!("Folder {}", count + 1), None));
+    }
+
+    /// Starts a new, empty project: one 1920 × 1080, 30 fps, 10-second composition, and the
+    /// folders new projects start with. It has no file until it is saved.
+    pub fn new_project(&mut self, folders: &[String]) {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        let settings = edit::CompositionSettings {
+            name: "Main Comp".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: studio_core::time::FrameRate::new(30, 1),
+            duration_frames: 300,
+            background: studio_core::model::Rgba::TRANSPARENT,
+        };
+        let Ok(comp) = edit::new_composition(&mut project, &settings) else { return };
+        studio_core::folders::add_default_folders(&mut project, folders);
+        self.end_keyframe_drag();
+        self.end_viewer_drag();
+        self.end_layer_time_drag();
+        self.project = project;
+        self.open_composition(comp);
+        self.selected_item = Some(comp);
+        self.current_frame = 0;
+        self.work_area = FrameRange::new(0.0, 300.0);
+        self.set_view_range(FrameRange::new(0.0, 300.0));
+        self.history = history::History::new(&self.project);
+        self.file = None;
+    }
+
+    /// Adds the folders new projects start with to the project as it is, as a starting point
+    /// (not an undoable edit, and not a change to save).
+    pub fn add_default_folders(&mut self, folders: &[String]) {
+        studio_core::folders::add_default_folders(&mut self.project, folders);
+        self.history = history::History::new(&self.project);
     }
 
     // Text -------------------------------------------------------------------
@@ -815,13 +839,22 @@ impl EditorState {
     /// Adds files to the project, as links to where they are on disk (nothing is copied).
     /// Folders bring in the media inside them. Returns the new items, in order, and the files
     /// that are not media Studio can read.
+    /// Selects a just-imported item and puts it in `folder` (by name), if one is set.
+    fn file_import(&mut self, item: Id, folder: Option<String>) {
+        if let Some(folder) = folder {
+            studio_core::folders::file_into(&mut self.project, item, &folder);
+        }
+        self.selected_item = Some(item);
+    }
+
     pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>) -> (Vec<Id>, Vec<std::path::PathBuf>) {
         let (mut imported, mut skipped) = (Vec::new(), Vec::new());
         for path in expand_folders(paths) {
             let before = self.project.items.len();
             if let Ok((width, height)) = image::image_dimensions(&path) {
-                self.selected_item = Some(edit::import_image(&mut self.project, path, Vec2::new(width as f32, height as f32)));
-                imported.extend(self.selected_item);
+                let item = edit::import_image(&mut self.project, path, Vec2::new(width as f32, height as f32));
+                self.file_import(item, self.import_folders.image.clone());
+                imported.push(item);
                 continue;
             }
             if let Ok(info) = studio_media::probe(&path) {
@@ -831,10 +864,12 @@ impl EditorState {
                     frame_rate: info.frame_rate,
                     has_audio: info.has_audio,
                 };
-                self.selected_item = Some(edit::import_footage(&mut self.project, path, &footage));
+                let item = edit::import_footage(&mut self.project, path, &footage);
+                self.file_import(item, self.import_folders.video.clone());
             } else if let Ok(info) = studio_media::probe_audio(&path) {
                 // No picture, but sound: music, voice-over and other audio files.
-                self.selected_item = Some(edit::import_audio(&mut self.project, path, info.duration_seconds));
+                let item = edit::import_audio(&mut self.project, path, info.duration_seconds);
+                self.file_import(item, self.import_folders.audio.clone());
             } else {
                 skipped.push(path);
             }

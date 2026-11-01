@@ -60,7 +60,10 @@ Inside `apps/studio/src`:
 - `project_files.rs`: Save, Save As, Open, asking about unsaved changes, reopening the last project, and the
   recovery copy of unsaved work.
 - `app_settings.rs`: what Studio remembers between runs (last project, window placement, recovery copy, theme,
-  accent color, proxy cache limit). `panels/settings.rs` is the Settings dialog (Cmd+,).
+  accent color, Project panel columns, default folders and import sorting, cache folder, proxy settings).
+  `panels/settings.rs` is the Settings dialog (Cmd+,), with sections in a menu on its left.
+- `panels/project.rs`: the Project panel, with a preview that shows images and plays video and sound;
+  `studio-core/src/folders.rs` adds default folders and sorts imports into them.
 - `theme.rs`: the palettes. Panels name colors by `theme::color` constants and `theme::hsla` swaps in the
   active theme's (Dark, Black, Light) and accent's color, so new panels follow the theme for free.
 - `panels/graph_editor.rs`: the Easings popover: easing families (In / Out / Both) and a curve editor.

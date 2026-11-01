@@ -53,18 +53,39 @@ pub struct Sound {
     /// `None` plays no sound; playback then runs on the wall clock.
     output: Option<AudioOutput>,
     playing: Option<Playing>,
+    /// A file playing in the Project panel's preview, apart from the composition.
+    preview: Option<AudioPlayer>,
 }
 
 impl Sound {
     /// Sound through the default output device, opened in the background right away.
     pub fn new() -> Self {
-        Self { output: Some(AudioOutput::new()), playing: None }
+        Self { output: Some(AudioOutput::new()), playing: None, preview: None }
     }
 
     /// No sound at all, for headless tests.
     #[cfg(test)]
     pub fn silent() -> Self {
-        Self { output: None, playing: None }
+        Self { output: None, playing: None, preview: None }
+    }
+
+    /// Plays `path`'s sound from `from_seconds` to its end (`length` seconds in all), for the
+    /// Project panel's preview. Stops any earlier preview.
+    pub fn play_preview(&mut self, path: &std::path::Path, from_seconds: f64, length: f64) {
+        self.preview = None;
+        let Some(output) = self.output.as_ref() else { return };
+        let clip = AudioClip { layer: Id(0), path: path.to_path_buf(), offset_seconds: 0.0, start_seconds: 0.0, end_seconds: length, gain: 1.0, fade_in: 0.0, fade_out: 0.0 };
+        let timeline = AudioTimeline { clips: vec![clip], start_seconds: from_seconds, range_seconds: (0.0, length), looping: false };
+        self.preview = Some(output.play(timeline));
+    }
+
+    pub fn stop_preview(&mut self) {
+        self.preview = None; // Dropping the player stops the sound.
+    }
+
+    /// How long the preview's sound has been heard, while one plays.
+    pub fn preview_heard(&self) -> Option<Duration> {
+        self.preview.as_ref().filter(|player| player.error().is_none()).map(AudioPlayer::heard)
     }
 
     /// Brings the sound in line with `state`. Call it whenever playback may have started,
@@ -75,6 +96,8 @@ impl Sound {
             self.playing = None; // Dropping the player stops the sound.
             return None;
         };
+        // The composition playing takes over from a preview.
+        self.preview = None;
         let output = self.output.as_ref()?;
         let mut session = Session::of(state, started_at, start_frame);
         if let Some(playing) = &self.playing

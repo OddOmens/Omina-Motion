@@ -1974,6 +1974,9 @@ fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppCont
     let folder = visual.update(|_, cx| workspace.read(cx).render.proxies.cache_folder().to_path_buf());
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("old-proxy.mov"), vec![0u8; 1000]).unwrap();
+    // The cache has its own section in the menu on the left.
+    visual.update(|window, cx| window.click(("settings-section", 3_usize), cx));
+    render(visual);
     visual.update(|window, cx| window.click("cache-clear", cx));
     render(visual);
     assert!(!folder.join("old-proxy.mov").exists());
@@ -2331,4 +2334,71 @@ fn the_eyedropper_picks_a_color_from_the_viewer(cx: &mut TestAppContext) {
     assert_eq!(sampling, Some(false), "the eyedropper turns off after a pick, leaving the picker open");
     let fill = visual.update(|_, cx| workspace.read(cx).state.shape_paint(layer, crate::state::PaintSlot::Fill));
     assert_ne!(fill, Some(studio_core::model::Paint::Solid(Rgba::hex(0x8b5cf6))), "the fill took the sampled color: {fill:?}");
+}
+
+#[gpui_kit::test]
+fn a_folders_arrow_closes_and_opens_it_with_one_click(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let folder = visual.update(|_, cx| workspace.read(cx).state.project.items.iter().find(|item| item.kind == studio_core::model::ProjectItemKind::Folder).unwrap().id);
+    let shown = |visual: &mut VisualTestContext| visual.update(|_, cx| !workspace.read(cx).ui.collapsed_folders.contains(&folder));
+    assert!(shown(visual));
+    visual.update(|window, cx| window.click(("folder-twirl", folder.0 as usize), cx));
+    render(visual);
+    assert!(!shown(visual), "one click closes it");
+    visual.update(|window, cx| window.click(("folder-twirl", folder.0 as usize), cx));
+    render(visual);
+    assert!(shown(visual), "and opens it again");
+}
+
+#[gpui_kit::test]
+fn settings_choose_the_project_panels_columns(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("settings-section", 1_usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("column-type", cx));
+    visual.update(|window, cx| window.click("column-duration", cx));
+    render(visual);
+    let columns = visual.update(|_, cx| workspace.read(cx).ui.project_columns);
+    assert!(!columns.kind && columns.duration, "{columns:?}");
+    assert_eq!(crate::app_settings::load().project_columns, columns, "remembered");
+}
+
+#[gpui_kit::test]
+fn a_new_project_starts_with_the_default_folders_and_imports_are_sorted_into_them(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.new_project(&["Footage".to_owned(), "Music".to_owned()]);
+        ws.state.import_folders = crate::app_settings::ImportFolders { video: Some("Footage".into()), image: Some("Images".into()), audio: Some("Music".into()) };
+        let tone = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/tone.m4a");
+        ws.state.import_files(vec![tone]);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|_, cx| {
+        let project = &workspace.read(cx).state.project;
+        let music = studio_core::folders::top_folder(project, "Music").expect("a default folder");
+        assert!(studio_core::folders::top_folder(project, "Footage").is_some());
+        let tone = project.items.iter().find(|item| item.kind == studio_core::model::ProjectItemKind::Audio).unwrap();
+        assert_eq!(tone.parent, Some(music), "sound goes into Music");
+        assert_eq!(project.compositions.len(), 1);
+    });
+}
+
+#[gpui_kit::test]
+fn the_preview_plays_and_pauses_sound(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let tone = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/tone.m4a");
+        ws.state.import_files(vec![tone]);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("project-preview", cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.preview.playing.is_some()), "clicking the preview plays it");
+    visual.update(|window, cx| window.click("project-preview", cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.preview.playing.is_none()), "and again pauses it");
 }

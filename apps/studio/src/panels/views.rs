@@ -73,11 +73,13 @@ impl Render for PanelView {
 pub struct PlaybackClock {
     workspace: WeakEntity<Workspace>,
     timed: Vec<EntityId>,
+    /// The Project panel, refreshed while its preview plays.
+    project: EntityId,
 }
 
 impl PlaybackClock {
-    pub fn new(workspace: WeakEntity<Workspace>, timed: Vec<EntityId>) -> Self {
-        Self { workspace, timed }
+    pub fn new(workspace: WeakEntity<Workspace>, timed: Vec<EntityId>, project: EntityId) -> Self {
+        Self { workspace, timed, project }
     }
 }
 
@@ -95,7 +97,14 @@ impl Render for PlaybackClock {
                 app.notify(panel);
             }
         }
-        if playing {
+        // The Project panel's preview plays on the same clock.
+        let (was_previewing, previewing) =
+            self.workspace.update(cx, |workspace, _| (workspace.ui.preview.playing.is_some(), workspace.tick_preview())).unwrap_or((false, false));
+        if was_previewing {
+            let app: &mut gpui_kit::App = cx;
+            app.notify(self.project);
+        }
+        if playing || previewing {
             window.request_animation_frame();
         }
         div().size_0()

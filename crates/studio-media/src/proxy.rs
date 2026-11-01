@@ -144,6 +144,11 @@ fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32
 
 /// Where proxies are kept: the platform's cache folder, under `Studio/Proxies`.
 pub fn default_cache_folder() -> PathBuf {
+    default_cache_root().join("Proxies")
+}
+
+/// The platform's cache folder for Studio, which holds the proxies and other rebuildable files.
+pub fn default_cache_root() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let base = if cfg!(target_os = "macos") {
         home.map(|home| home.join("Library/Caches"))
@@ -152,7 +157,7 @@ pub fn default_cache_folder() -> PathBuf {
     } else {
         std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| home.map(|home| home.join(".cache")))
     };
-    base.unwrap_or_else(std::env::temp_dir).join("Studio/Proxies")
+    base.unwrap_or_else(std::env::temp_dir).join("Studio")
 }
 
 /// The proxy file for `source`: named from its path, size and modification time, so editing the
@@ -190,7 +195,8 @@ struct Shared {
     queue: Mutex<Queue>,
     work: Condvar,
     on_change: Mutex<Option<ChangeCallback>>,
-    cache: PathBuf,
+    /// The folder proxies are kept in; it can be changed while Studio runs.
+    cache: Mutex<PathBuf>,
     /// The most the cache may hold, in bytes (`u64::MAX` for no limit).
     limit: AtomicU64,
 }
@@ -243,8 +249,13 @@ impl Shared {
         if limit == u64::MAX {
             return;
         }
-        let in_use: Vec<PathBuf> = self.lock().status.keys().map(|source| proxy_path(&self.cache, source)).collect();
-        trim_cache(&self.cache, limit, &in_use);
+        let cache = self.folder();
+        let in_use: Vec<PathBuf> = self.lock().status.keys().map(|source| proxy_path(&cache, source)).collect();
+        trim_cache(&cache, limit, &in_use);
+    }
+
+    fn folder(&self) -> PathBuf {
+        self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     fn changed(&self) {
@@ -262,7 +273,7 @@ pub struct ProxyManager {
 impl ProxyManager {
     /// Keeps proxies in `cache` (created if missing).
     pub fn new(cache: PathBuf) -> Self {
-        let shared = Arc::new(Shared { queue: Mutex::default(), work: Condvar::new(), on_change: Mutex::new(None), cache, limit: AtomicU64::new(u64::MAX) });
+        let shared = Arc::new(Shared { queue: Mutex::default(), work: Condvar::new(), on_change: Mutex::new(None), cache: Mutex::new(cache), limit: AtomicU64::new(u64::MAX) });
         let worker = shared.clone();
         if let Err(error) = std::thread::Builder::new().name("proxies".into()).spawn(move || build_loop(&worker)) {
             eprintln!("could not start the proxy builder: {error}");
@@ -281,7 +292,7 @@ impl ProxyManager {
         if queue.status.contains_key(source) {
             return;
         }
-        let existing = proxy_path(&self.shared.cache, source);
+        let existing = proxy_path(&self.shared.folder(), source);
         if existing.exists() {
             queue.status.insert(source.to_owned(), ProxyStatus::Ready(existing));
         } else {
@@ -298,8 +309,16 @@ impl ProxyManager {
     }
 
     /// The folder proxies are kept in.
-    pub fn cache_folder(&self) -> &Path {
-        &self.shared.cache
+    pub fn cache_folder(&self) -> PathBuf {
+        self.shared.folder()
+    }
+
+    /// Keeps proxies in `folder` from now on. Proxies already made elsewhere are forgotten (and
+    /// left where they are); footage asks for its proxy again with `request`.
+    pub fn set_cache_folder(&self, folder: PathBuf) {
+        *self.shared.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = folder;
+        self.shared.lock().status.retain(|_, status| matches!(status, ProxyStatus::Building(_) | ProxyStatus::Queued));
+        self.shared.changed();
     }
 
     /// Sets the most the cache may hold, in bytes (`None` for no limit), and trims it now. Proxies
@@ -313,13 +332,14 @@ impl ProxyManager {
     /// until their proxies are asked for again (when a project is next opened, or media imported).
     /// Returns how many bytes were freed.
     pub fn clear_cache(&self) -> u64 {
+        let cache = self.shared.folder();
         let building: Vec<PathBuf> = {
             let mut queue = self.shared.lock();
-            let building = queue.status.iter().filter(|(_, status)| matches!(status, ProxyStatus::Building(_))).map(|(source, _)| proxy_path(&self.shared.cache, source)).collect();
+            let building = queue.status.iter().filter(|(_, status)| matches!(status, ProxyStatus::Building(_))).map(|(source, _)| proxy_path(&cache, source)).collect();
             queue.status.retain(|_, status| matches!(status, ProxyStatus::Building(_) | ProxyStatus::Queued));
             building
         };
-        let freed = trim_cache(&self.shared.cache, 0, &building);
+        let freed = trim_cache(&cache, 0, &building);
         self.shared.changed();
         freed
     }
@@ -354,13 +374,14 @@ fn build_loop(shared: &Shared) {
                 queue = shared.work.wait(queue).unwrap_or_else(|p| p.into_inner());
             }
         };
-        let output = proxy_path(&shared.cache, &source);
+        let cache = shared.folder();
+        let output = proxy_path(&cache, &source);
         let set_status = |status: ProxyStatus| {
             shared.lock().status.insert(source.clone(), status);
             shared.changed();
         };
         set_status(ProxyStatus::Building(0.0));
-        if let Err(error) = std::fs::create_dir_all(&shared.cache) {
+        if let Err(error) = std::fs::create_dir_all(&cache) {
             set_status(ProxyStatus::Failed(format!("could not create the proxy folder: {error}")));
             continue;
         }

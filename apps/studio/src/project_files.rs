@@ -62,6 +62,8 @@ impl Workspace {
     /// reopens the project that was open last.
     pub fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let settings = app_settings::load();
+        // The untitled project Studio starts with has the folders new projects start with.
+        self.state.add_default_folders(&settings.default_folders);
         let recovery = app_settings::recovery_path();
         if let Ok(text) = std::fs::read_to_string(&recovery) {
             let name = settings.recovery_of.as_deref().and_then(|path| path.file_stem()).map_or_else(|| "Untitled".to_owned(), |name| name.to_string_lossy().into_owned());
@@ -204,6 +206,15 @@ impl Workspace {
                 false
             }
         }
+    }
+
+    /// Starts a new, empty project, after offering to save unsaved changes.
+    pub fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.unless_cancelled(window, cx, Box::new(|this, _, cx| {
+            this.state.new_project(&app_settings::load().default_folders);
+            app_settings::update(|app| app.last_project = None);
+            cx.notify();
+        }));
     }
 
     /// Asks for a project file and opens it, after offering to save unsaved changes.

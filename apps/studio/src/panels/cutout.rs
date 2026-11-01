@@ -190,14 +190,19 @@ fn run(request: &Request, report: &Mutex<Report>, cancelled: &dyn Fn() -> bool) 
     Ok(())
 }
 
+/// Where background-removal masks are kept: `Cutouts`, beside the proxies in Studio's cache.
+pub fn cutouts_folder(workspace: &Workspace) -> PathBuf {
+    let proxies = workspace.render.proxies.cache_folder();
+    proxies.parent().map_or_else(|| proxies.join("Cutouts"), |root| root.join("Cutouts"))
+}
+
 /// A new folder for one job's masks, under Studio's cache. Each job writes its own folder, so a
 /// job that was cancelled (or overtaken by a newer click) can never overwrite newer masks.
 fn new_mask_folder(workspace: &Workspace, layer: Id) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (layer.0, std::time::SystemTime::now(), std::process::id()).hash(&mut hasher);
-    let cache = workspace.render.proxies.cache_folder();
-    cache.parent().unwrap_or(cache).join("Cutouts").join(format!("{:016x}", hasher.finish()))
+    cutouts_folder(workspace).join(format!("{:016x}", hasher.finish()))
 }
 
 /// Makes the mask for the clicked frame of `layer` (after a click), or follows the subject

@@ -19,7 +19,7 @@ pub struct WindowPlacement {
     pub maximized: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
     /// The project open when Studio last quit (or was last saved or opened).
@@ -31,6 +31,75 @@ pub struct AppSettings {
     pub accent: crate::theme::Accent,
     /// The most disk space proxies may take, in gigabytes; `None` for no limit.
     pub proxy_cache_limit_gb: Option<u32>,
+    /// Where Studio keeps what it can rebuild (proxies, background-removal masks); `None` for
+    /// the platform's cache folder.
+    pub cache_folder: Option<PathBuf>,
+    /// Whether imported footage gets a proxy built in the background.
+    pub build_proxies: bool,
+    /// Which columns the Project panel shows.
+    pub project_columns: ProjectColumns,
+    /// Folders every new project starts with.
+    pub default_folders: Vec<String>,
+    /// Which folder imported files go into, by kind (`None` leaves them at the top).
+    pub import_folders: ImportFolders,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            last_project: None,
+            window: None,
+            recovery_of: None,
+            theme: Default::default(),
+            accent: Default::default(),
+            proxy_cache_limit_gb: None,
+            cache_folder: None,
+            build_proxies: true,
+            project_columns: ProjectColumns::default(),
+            default_folders: ["Footage", "Images", "Music", "Sound Effects", "Voice Over"].map(String::from).to_vec(),
+            import_folders: ImportFolders::default(),
+        }
+    }
+}
+
+/// The Project panel's optional columns (the name is always shown).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectColumns {
+    pub label: bool,
+    pub kind: bool,
+    pub duration: bool,
+    pub dimensions: bool,
+    pub frame_rate: bool,
+}
+
+impl Default for ProjectColumns {
+    fn default() -> Self {
+        Self { label: true, kind: true, duration: false, dimensions: false, frame_rate: false }
+    }
+}
+
+/// The folder each kind of imported file is put in, by name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImportFolders {
+    pub video: Option<String>,
+    pub image: Option<String>,
+    pub audio: Option<String>,
+}
+
+impl Default for ImportFolders {
+    fn default() -> Self {
+        Self { video: Some("Footage".into()), image: Some("Images".into()), audio: Some("Music".into()) }
+    }
+}
+
+/// The folder Studio keeps its caches in: the one chosen in Settings, or the platform's.
+pub fn cache_root() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("studio-cache-test-{}", std::process::id()));
+    }
+    load().cache_folder.unwrap_or_else(studio_media::default_cache_root)
 }
 
 /// Studio's settings folder.
