@@ -21,6 +21,7 @@ struct LayerUniform {
     // y corner radius in source pixels, z sides or points, w a star's inner radius (fraction).
     shape: vec4<f32>,
     // The shape's box within the drawn rectangle (which is larger by the stroke): origin, size.
+    // For textures, the part of the texture drawn (uv origin, size).
     shape_box: vec4<f32>,
     // Fill and stroke paints: two premultiplied linear colors each (one for a solid).
     fill_a: vec4<f32>,
@@ -66,7 +67,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // Textures hold premultiplied colors, sRGB encoded; the sRGB format linearizes on
         // sampling, so filtering already happened on premultiplied values.
         // Drawn at the opacity in the color's alpha (1 for ordinary textures; less for fades).
-        return textureSample(source, source_sampler, in.uv) * u.color.a;
+        // `shape_box` picks the part of the texture drawn: all of it (0, 0, 1, 1), or a slice
+        // (one letter of text set along a path).
+        return textureSample(source, source_sampler, u.shape_box.xy + in.uv * u.shape_box.zw) * u.color.a;
     }
     if (mode == 2u) {
         // Media that is not decoded yet: a checker in the layer's label color.

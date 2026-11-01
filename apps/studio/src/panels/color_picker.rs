@@ -72,6 +72,8 @@ pub struct Picker {
     alpha_bar: MeasuredBounds,
     /// While the square or a slider is pressed, so the press and the drag after it are one undo step.
     pub pressed: bool,
+    /// The eyedropper is on: the next click in the viewer picks the color there.
+    pub sampling: bool,
     _events: [Subscription; 2],
 }
 
@@ -191,6 +193,7 @@ pub fn open(workspace: &mut Workspace, target: ColorTarget, at: Point<Pixels>, w
         hue_bar: MeasuredBounds::default(),
         alpha_bar: MeasuredBounds::default(),
         pressed: false,
+        sampling: false,
         _events: [hex_events, opacity_events],
     });
     cx.notify();
@@ -210,6 +213,14 @@ fn apply(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Worksp
 fn show_in_fields(hex: &Entity<InputState>, opacity: &Entity<InputState>, color: Rgba, window: &mut Window, cx: &mut Context<Workspace>) {
     hex.update(cx, |input, cx| input.set_value(color.to_hex().trim_start_matches('#').to_owned(), window, cx));
     opacity.update(cx, |input, cx| input.set_value(format!("{}", (color.a * 100.0).round()), window, cx));
+}
+
+/// Uses a color picked with the eyedropper and turns the eyedropper off.
+pub fn sampled(workspace: &mut Workspace, color: Rgba, window: &mut Window, cx: &mut Context<Workspace>) {
+    if let Some(picker) = workspace.ui.color_picker.as_mut() {
+        picker.sampling = false;
+    }
+    choose(workspace, color, window, cx);
 }
 
 /// Uses `color` as it is (a library color keeps its link) and moves the controls to it.
@@ -458,7 +469,21 @@ fn custom_tab(workspace: &Workspace, picker: &Picker, cx: &mut Context<Workspace
         .gap_1p5()
         .child(div().h(px(28.0)).px_2().flex().items_center().rounded(px(6.0)).border_1().border_color(hsla(color::HAIRLINE)).text_color(hsla(color::MUTED)).child("Hex"))
         .child(div().flex_1().child(Input::new(&picker.hex).small().prefix(div().text_color(hsla(color::MUTED)).child("#"))))
-        .child(div().w(px(64.0)).child(Input::new(&picker.opacity).small().suffix(div().text_color(hsla(color::MUTED)).child("%"))));
+        .child(div().w(px(64.0)).child(Input::new(&picker.opacity).small().suffix(div().text_color(hsla(color::MUTED)).child("%"))))
+        // The eyedropper: click it, then click anywhere in the viewer's picture.
+        .child(
+            Button::new("picker-eyedropper")
+                .icon(Icon::new(IconName::Pipette))
+                .small()
+                .tooltip("Pick a color from the viewer")
+                .map(|button| if picker.sampling { button.primary() } else { button.ghost() })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(picker) = this.ui.color_picker.as_mut() {
+                        picker.sampling = !picker.sampling;
+                    }
+                    cx.notify();
+                })),
+        );
 
     // Colors already in the project, then common ones to fill out a short row.
     let mut used = workspace.state.project_colors();
@@ -616,7 +641,11 @@ pub fn popover(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<imp
         .text_size(px(size::TEXT))
         .text_color(hsla(color::TEXT))
         // Clicking anywhere else closes it.
+        // While the eyedropper is on, it stays open for the click in the viewer.
         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            if this.ui.color_picker.as_ref().is_some_and(|picker| picker.sampling) {
+                return;
+            }
             this.ui.color_picker = None;
             cx.notify();
         }))

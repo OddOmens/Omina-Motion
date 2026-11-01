@@ -54,6 +54,129 @@ fn separator() -> gpui_kit::Div {
 /// How long the Shape button must be held to open the shape menu.
 pub const HOLD_FOR_MENU: Duration = Duration::from_millis(350);
 
+/// A tool on the rail: the tool, its icon, its name and its key.
+type RailTool = (Tool, IconName, &'static str, &'static str);
+
+/// Tools that share one rail button. A click picks the tool the button shows (the one last
+/// picked from the group); holding it, or right-clicking, opens a menu of the whole group.
+pub struct ToolGroup {
+    id: &'static str,
+    tools: &'static [RailTool],
+}
+
+pub const TOOL_GROUPS: [ToolGroup; 3] = [
+    ToolGroup { id: "tool-group-select", tools: &[(Tool::Selection, IconName::MousePointer2, "Select", "V"), (Tool::TrackSelect, IconName::ChevronsRight, "Track Select", "A")] },
+    ToolGroup {
+        id: "tool-group-edit",
+        tools: &[
+            (Tool::Cut, IconName::Scissors, "Cut", "C"),
+            (Tool::Ripple, IconName::ArrowRightToLine, "Ripple", "B"),
+            (Tool::Roll, IconName::Columns2, "Roll", "N"),
+            (Tool::Slip, IconName::ArrowLeftRight, "Slip", "Y"),
+            (Tool::Slide, IconName::MoveHorizontal, "Slide", "U"),
+        ],
+    },
+    ToolGroup { id: "tool-group-view", tools: &[(Tool::Hand, IconName::Hand, "Hand", "H"), (Tool::Zoom, IconName::ZoomIn, "Zoom", "Z")] },
+];
+
+/// What each group does, for its menu's heading.
+const GROUP_TITLES: [&str; 3] = ["Selecting", "Editing clips", "Looking around"];
+
+/// A group's button: the current tool if it is one of the group's, else the one last picked.
+fn group_button(index: usize, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let group = &TOOL_GROUPS[index];
+    let current = workspace.ui.tool;
+    let shown = group.tools.iter().find(|tool| tool.0 == current).or_else(|| workspace.ui.group_tools.get(&index).and_then(|picked| group.tools.iter().find(|tool| tool.0 == *picked))).unwrap_or(&group.tools[0]);
+    let (tool, icon, label, _) = *shown;
+    let active = group.tools.iter().any(|tool| tool.0 == current);
+    let corner = div().absolute().right(px(4.0)).bottom(px(4.0)).w(px(4.0)).h(px(1.0)).bg(hsla(color::MUTED));
+    let corner_up = div().absolute().right(px(4.0)).bottom(px(4.0)).w(px(1.0)).h(px(4.0)).bg(hsla(color::MUTED));
+    div()
+        .relative()
+        .child(
+            rail_button_look(group.id, icon, label, active)
+                .relative()
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
+                    this.set_tool(tool);
+                    this.ui.tool_press = Some(index);
+                    cx.notify();
+                    // Still held after a moment: open the group's menu.
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(HOLD_FOR_MENU).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.ui.tool_press == Some(index) {
+                                this.ui.tool_menu = Some(index);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.ui.tool_press = None))
+                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
+                    this.ui.tool_menu = Some(index);
+                    cx.notify();
+                }))
+                .child(corner)
+                .child(corner_up)
+                .test_support(),
+        )
+        .when(workspace.ui.tool_menu == Some(index), |button| button.child(group_menu(index, current, cx)))
+}
+
+/// The menu beside a group's button: each of its tools, with its key.
+fn group_menu(index: usize, current: Tool, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let rows = TOOL_GROUPS[index].tools.iter().map(|&(tool, icon, label, key)| {
+        div()
+            .id(gpui_kit::ElementId::Name(format!("tool-{label}").to_lowercase().replace(' ', "-").into()))
+            .h(px(30.0))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .rounded(px(6.0))
+            .when(tool == current, |row| row.bg(hsla(color::ROW_SELECTED)))
+            .hover(|style| style.bg(hsla(color::HOVER)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_tool(tool);
+                this.ui.group_tools.insert(index, tool);
+                this.ui.tool_menu = None;
+                cx.notify();
+            }))
+            .child(Icon::new(icon).size(px(15.0)).text_color(hsla(color::MUTED)))
+            .child(div().flex_1().child(label))
+            .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(key))
+            .test_support()
+    });
+    deferred(
+        div()
+            .id("tool-menu")
+            .absolute()
+            .left(px(RAIL_WIDTH - 6.0))
+            .top_0()
+            .w(px(190.0))
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .rounded(px(10.0))
+            .bg(hsla(color::POPOVER))
+            .border_1()
+            .border_color(hsla(color::HAIRLINE))
+            .shadow_lg()
+            .text_size(px(size::TEXT))
+            .text_color(hsla(color::TEXT))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.ui.tool_menu = None;
+                cx.notify();
+            }))
+            .child(div().px_2().py_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(GROUP_TITLES[index]))
+            .children(rows)
+            .test_support(),
+    )
+    .with_priority(2)
+}
+
 /// The rail icon for each shape.
 pub fn shape_icon(kind: ShapeKind) -> IconName {
     match kind {
@@ -222,11 +345,13 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx))
         .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
         .child(separator())
-        .child(rail_button("tool-selection", IconName::MousePointer2, "Select", tool == Tool::Selection, pick(Tool::Selection), cx))
-        .child(rail_button("tool-cut", IconName::Scissors, "Cut", tool == Tool::Cut, pick(Tool::Cut), cx))
+        .child(group_button(0, workspace, cx))
+        .child(group_button(1, workspace, cx))
         .child(rail_button("tool-type", IconName::Type, "Text", tool == Tool::Type, pick(Tool::Type), cx))
         .child(shape_button(workspace, cx))
         .child(rail_button("tool-pen", IconName::PenTool, "Pen", tool == Tool::Pen, pick(Tool::Pen), cx))
+        .child(rail_button("tool-rotate", IconName::RotateCw, "Rotate", tool == Tool::Rotate, pick(Tool::Rotate), cx))
+        .child(group_button(2, workspace, cx))
         // At the bottom: getting work in and out (new composition ⌘N, import ⌘I, export ⌘M),
         // and Settings last.
         .child(div().flex_1())

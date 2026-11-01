@@ -24,6 +24,7 @@ use studio_core::media::VideoFrame;
 use studio_core::model::{Id, Layer, LayerContent};
 use studio_core::property::PropertyPath;
 use studio_core::time::{FrameRange, format_timecode};
+use studio_core::trim_tools::End;
 use studio_core::tracks::{self, MAIN_TRACK};
 use studio_media::{PeakCache, Peaks, Thumbnailer};
 
@@ -410,6 +411,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     let clip_px = width * graph_width;
     let height = base_height(track) - 8.0;
     let cutting = workspace.ui.tool == Tool::Cut;
+    let body_tool = matches!(workspace.ui.tool, Tool::Slip | Tool::Slide | Tool::TrackSelect);
     let held = state.clip_drag_target().is_some_and(|(layer, _)| layer == id) || state.slipping_layer() == Some(id);
     // The frame under the pointer, for the Cut tool.
     let pointer_frame = |this: &Workspace, x: gpui_kit::Pixels| frame_at(f32::from(x), this.ui.timeline.graph.get(), this.state.view_range).round() as i64;
@@ -455,6 +457,13 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 cx.stop_propagation();
                 this.state.select_layer(id, event.modifiers.shift || event.modifiers.platform);
                 this.anchor_drag(event);
+                // The Ripple and Roll tools change what dragging an end does.
+                let end = if edit == LayerTimeEdit::TrimIn { End::In } else { End::Out };
+                let edit = match this.ui.tool {
+                    Tool::Ripple => LayerTimeEdit::Ripple(end),
+                    Tool::Roll => LayerTimeEdit::Roll(end),
+                    _ => edit,
+                };
                 this.state.begin_layer_time_drag(id, edit);
                 cx.notify();
             }))
@@ -558,13 +567,30 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                     cx.notify();
                     return;
                 }
+                // Track Select Forward picks this clip and everything after it (Shift: on this
+                // track only), and dragging moves them all.
+                if this.ui.tool == Tool::TrackSelect {
+                    this.anchor_drag(event);
+                    this.state.begin_track_select_forward(id, event.modifiers.shift);
+                    cx.notify();
+                    return;
+                }
                 this.state.select_layer(id, event.modifiers.shift || event.modifiers.platform);
                 this.anchor_drag(event);
-                // Alt-drag slips the source under the clip, as elsewhere in the timeline.
-                if event.modifiers.alt && this.state.can_slip(id) {
-                    this.state.begin_layer_time_drag(id, LayerTimeEdit::Slip);
-                } else {
-                    this.state.begin_clip_drag(id);
+                match this.ui.tool {
+                    // The Slip and Slide tools drag the clip's body; Ripple and Roll only its ends.
+                    Tool::Slip => {
+                        if this.state.can_slip(id) {
+                            this.state.begin_layer_time_drag(id, LayerTimeEdit::Slip);
+                        }
+                    }
+                    Tool::Slide => this.state.begin_layer_time_drag(id, LayerTimeEdit::Slide),
+                    Tool::Ripple | Tool::Roll => {}
+                    // Alt-drag slips the source under the clip, as elsewhere in the timeline.
+                    _ if event.modifiers.alt && this.state.can_slip(id) => {
+                        this.state.begin_layer_time_drag(id, LayerTimeEdit::Slip);
+                    }
+                    _ => this.state.begin_clip_drag(id),
                 }
                 cx.notify();
             }))
@@ -596,7 +622,8 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
             .children(fades.into_iter().flatten())
             .children(cut_line)
             // Trim grips would catch clicks near the ends, so the Cut tool goes without them.
-            .when(!cutting, |clip| clip.child(grip(LayerTimeEdit::TrimIn, cx).left_0()).child(grip(LayerTimeEdit::TrimOut, cx).right_0()))
+            // So do the body-dragging tools (Slip, Slide, Track Select).
+            .when(!cutting && !body_tool, |clip| clip.child(grip(LayerTimeEdit::TrimIn, cx).left_0()).child(grip(LayerTimeEdit::TrimOut, cx).right_0()))
             .test_support()
             .into_any_element(),
     ];

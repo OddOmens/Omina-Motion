@@ -120,6 +120,32 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
     }
 }
 
+/// The magnification menu: Fit, or a fixed zoom. It shows the zoom in use.
+fn zoom_menu(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+    let current = workspace.ui.viewer_zoom;
+    let label = match current {
+        None => format!("Fit ({}%)", (scale * 100.0).round()),
+        Some(_) => zoom_label(current),
+    };
+    let target = cx.weak_entity();
+    Button::new("viewer-zoom").ghost().xsmall().label(label).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+        std::iter::once(None).chain(ZOOM_LEVELS.iter().copied().filter(|&level| level >= 0.125).map(Some)).fold(menu, |menu, zoom| {
+            let target = target.clone();
+            menu.item(PopupMenuItem::new(zoom_label(zoom)).checked(zoom == current).on_click(move |_, _, cx| {
+                target
+                    .update(cx, |this, cx| {
+                        set_zoom(this, zoom);
+                        cx.notify();
+                    })
+                    .ok();
+            }))
+        })
+    })
+}
+
 /// The bar under the viewer (the panel's footer), in one row: magnification and frame size on the left, the play
 /// and frame-stepping controls in the middle, and the current timecode on the right.
 fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
@@ -134,7 +160,7 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         .gap_2()
         .text_size(px(size::SMALL_TEXT))
         .text_color(hsla(color::MUTED))
-        .child(format!("{:.0}%", scale * 100.0))
+        .child(zoom_menu(workspace, scale, cx))
         .child(format!("{} × {}", composition.width, composition.height))
         .child(icon_button("viewer-snapping", IconName::Magnet, "Snap anchor points to corners, edges and center", workspace.state.viewer_snapping, cx.listener(|this, _, _, cx| {
             this.state.viewer_snapping = !this.state.viewer_snapping;
@@ -206,13 +232,50 @@ enum ViewerDrag {
     PathPoint,
 }
 
-/// Screen pixels per composition pixel at the current Fit magnification.
-fn viewer_scale(workspace: &Workspace) -> f32 {
+/// Screen points per composition pixel that fit the whole frame in the viewer.
+fn fit_scale(workspace: &Workspace) -> f32 {
     let composition = workspace.state.composition();
     let bounds = workspace.ui.viewer_bounds.get();
     ((bounds.width - FIT_PADDING * 2.0) / composition.width as f32)
         .min((bounds.height - FIT_PADDING * 2.0) / composition.height as f32)
         .max(0.0)
+}
+
+/// Screen points per composition pixel: the chosen magnification, or Fit.
+fn viewer_scale(workspace: &Workspace) -> f32 {
+    workspace.ui.viewer_zoom.unwrap_or_else(|| fit_scale(workspace))
+}
+
+/// The magnifications the Zoom tool steps through and the menu offers.
+const ZOOM_LEVELS: [f32; 10] = [0.0625, 0.125, 0.25, 0.33, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+
+/// Zooms the viewer in (or out) one step, keeping the composition point `at` under the pointer.
+fn zoom_at(workspace: &mut Workspace, at: Vec2, zoom_in: bool) {
+    let current = viewer_scale(workspace);
+    let next = if zoom_in {
+        ZOOM_LEVELS.iter().copied().find(|&level| level > current * 1.01)
+    } else {
+        ZOOM_LEVELS.iter().rev().copied().find(|&level| level < current * 0.99)
+    };
+    let Some(next) = next else { return };
+    // The point stays put on screen: the frame's corner moves by how much farther (or nearer)
+    // the point now is from it, less the half of the growth that centering already gives.
+    let composition = workspace.state.composition();
+    let half = Vec2::new(composition.width as f32 * 0.5, composition.height as f32 * 0.5);
+    let shift = (at - half) * (current - next);
+    let (x, y) = workspace.ui.viewer_pan;
+    workspace.ui.viewer_pan = (x + shift.x, y + shift.y);
+    workspace.ui.viewer_zoom = Some(next);
+}
+
+/// Sets the magnification from the menu (`None` for Fit), centering the frame.
+fn set_zoom(workspace: &mut Workspace, zoom: Option<f32>) {
+    workspace.ui.viewer_zoom = zoom;
+    workspace.ui.viewer_pan = (0.0, 0.0);
+}
+
+fn zoom_label(zoom: Option<f32>) -> String {
+    zoom.map_or_else(|| "Fit".to_owned(), |zoom| format!("{}%", (zoom * 100.0).round()))
 }
 
 /// The layer whose subject is being picked for background removal, while it is still the one
@@ -245,6 +308,25 @@ fn cutout_clicks_overlay(workspace: &Workspace) -> Vec<AnyElement> {
                 .into_any_element()
         })
         .collect()
+}
+
+/// The color of the rendered frame at composition point `point`, as shown (transparent areas
+/// keep their transparency).
+fn color_at(workspace: &Workspace, point: Vec2) -> Option<studio_core::model::Rgba> {
+    let image = workspace.render.image.as_ref()?;
+    let size = image.size(0);
+    let (width, height) = (size.width.0.max(0) as usize, size.height.0.max(0) as usize);
+    let composition = workspace.state.composition();
+    let (fx, fy) = (point.x / composition.width as f32, point.y / composition.height as f32);
+    if !(0.0..1.0).contains(&fx) || !(0.0..1.0).contains(&fy) {
+        return None;
+    }
+    let (x, y) = ((fx * width as f32) as usize, (fy * height as f32) as usize);
+    let bytes = image.as_bytes(0)?;
+    let pixel = bytes.get((y * width + x) * 4..(y * width + x) * 4 + 4)?;
+    // The frame is stored blue, green, red, alpha.
+    let rgb = (u32::from(pixel[2]) << 16) | (u32::from(pixel[1]) << 8) | u32::from(pixel[0]);
+    Some(studio_core::model::Rgba::hex(rgb).with_alpha(f32::from(pixel[3]) / 255.0))
 }
 
 /// How near (in screen points) a Pen click must be to the path's first point to close it.
@@ -359,6 +441,14 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
     let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
     let point = to_comp(workspace, x, y);
     workspace.ui.viewer_anchor = Some((x, y));
+    // The color picker's eyedropper takes the color under the pointer.
+    if workspace.ui.color_picker.as_ref().is_some_and(|picker| picker.sampling) {
+        if let Some(color) = color_at(workspace, point) {
+            super::color_picker::sampled(workspace, color, window, cx);
+        }
+        cx.notify();
+        return;
+    }
     // Picking a subject to cut out: clicks mark what to keep (Option: what to leave out), and
     // each one updates the mask.
     if let Some(layer) = picking_layer(workspace) {
@@ -379,6 +469,31 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
             cx.notify();
         }
         return;
+    }
+    match workspace.ui.tool {
+        // The Hand drags the picture around; the Zoom tool zooms in where clicked (Option: out).
+        Tool::Hand => {
+            workspace.ui.pan_start = workspace.ui.viewer_pan;
+            cx.notify();
+            return;
+        }
+        Tool::Zoom => {
+            zoom_at(workspace, point, !event.modifiers.alt);
+            cx.notify();
+            return;
+        }
+        // The Rotate tool turns the layer under the pointer (or the selection, if it is part of it).
+        Tool::Rotate => {
+            match workspace.state.layer_at(point) {
+                Some(layer) if !workspace.state.selected_layers.contains(&layer) => workspace.state.select_layer(layer, event.modifiers.shift),
+                None if workspace.state.selected_layers.is_empty() => return,
+                _ => {}
+            }
+            workspace.state.begin_rotate(point);
+            cx.notify();
+            return;
+        }
+        _ => {}
     }
     if workspace.ui.tool == Tool::Pen {
         // A double-click ends the path as an open line; a click on its first point closes it.
@@ -613,7 +728,10 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
     let scale = viewer_scale(workspace);
     let (comp_width, comp_height) = (workspace.state.composition().width as f32, workspace.state.composition().height as f32);
     let density = if workspace.state.is_playing() { window.scale_factor().min(1.0) } else { window.scale_factor() };
-    let (pixels_wide, pixels_high) = ((comp_width * scale * density).round() as u32, (comp_height * scale * density).round() as u32);
+    // Zoomed in past 100%, the frame is rendered at full size and shown larger, as in After
+    // Effects: rendering more pixels than the composition has would add nothing but time.
+    let render_scale = scale.min(1.0);
+    let (pixels_wide, pixels_high) = ((comp_width * render_scale * density).round() as u32, (comp_height * render_scale * density).round() as u32);
     if pixels_wide > 0 && pixels_high > 0 {
         render_frame(workspace, pixels_wide, pixels_high, window, cx);
     }
@@ -628,8 +746,12 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
     };
 
     // A checkerboard under the picture shows where the composition is transparent.
+    let (pan_x, pan_y) = workspace.ui.viewer_pan;
     let comp_frame = div()
         .relative()
+        .flex_none()
+        .left(px(pan_x))
+        .top(px(pan_y))
         .w(px(composition.width as f32 * scale))
         .h(px(composition.height as f32 * scale))
         // Only the grid is clipped to the frame: selection handles may reach past its edges.
@@ -667,6 +789,10 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .bg(hsla(color::PASTEBOARD))
         .when(workspace.ui.tool == Tool::Type, |viewer| viewer.cursor_text())
         .when(matches!(workspace.ui.tool, Tool::Shape | Tool::Pen) || picking_layer(workspace).is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
+        .when(workspace.ui.tool == Tool::Hand, |viewer| viewer.cursor_grab())
+        .when(workspace.ui.color_picker.as_ref().is_some_and(|picker| picker.sampling), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
+        .when(workspace.ui.tool == Tool::Zoom, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
+        .when(workspace.ui.tool == Tool::Rotate, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| press_viewer(this, event, window, cx)))
         .on_drag(ViewerDrag::Move, |_, _, _, cx| cx.new(|_| EmptyDragView))
         // An effect dragged over the picture lights up the layer it would go on (one it suits).
@@ -690,6 +816,13 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         }))
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ViewerDrag>, _, cx| {
             let Some((x, y)) = this.ui.viewer_anchor else { return };
+            if this.ui.tool == Tool::Hand {
+                let position = event.event.position;
+                let (start_x, start_y) = this.ui.pan_start;
+                this.ui.viewer_pan = (start_x + f32::from(position.x) - x, start_y + f32::from(position.y) - y);
+                cx.notify();
+                return;
+            }
             let scale = viewer_scale(this).max(f32::EPSILON);
             let position = event.event.position;
             let delta = Vec2::new((f32::from(position.x) - x) / scale, (f32::from(position.y) - y) / scale);

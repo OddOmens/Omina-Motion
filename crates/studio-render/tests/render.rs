@@ -27,6 +27,7 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         track_matte: TrackMatte::None,
         mask: None,
         cutout: None,
+        text_path: None,
         parent: None,
         switches: LayerSwitches::default(),
         transform: Some(Transform::centered(size, position)),
@@ -857,4 +858,33 @@ fn a_cut_out_shows_only_what_its_mask_keeps_or_only_what_it_removes() {
     let removed = cut(true);
     assert!(close(pixel(&removed, 20, 50), [0, 0, 0]) && close(pixel(&removed, 80, 50), [255, 0, 0]), "or the other way round");
     std::fs::remove_dir_all(&folder).ok();
+}
+
+#[test]
+fn text_set_on_a_path_follows_it() {
+    use studio_core::model::TextPath;
+    use studio_core::path::{PathPoint, ShapePath};
+    // A straight path, hidden (it still carries the text), from `from` to `to`.
+    let along = |from: (f32, f32), to: (f32, f32)| {
+        let mut path = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
+        path.switches.visible = false;
+        let points = vec![PathPoint::corner(Vec2::new(from.0, from.1)), PathPoint::corner(Vec2::new(to.0, to.1))];
+        path.content = LayerContent::Shape { style: ShapeStyle::new(ShapeKind::Path), path: Some(ShapePath { points, closed: false }) };
+        let style = TextStyle { font_family: "Helvetica".into(), font_size: 20.0, line_height: 24.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() };
+        let mut text = solid(3, 0, Vec2::new(60.0, 24.0), Vec2::new(50.0, 50.0));
+        text.content = LayerContent::Text { text: "HHHH".into(), style };
+        text.text_path = Some(TextPath { layer: Id(2), start: 0.0 });
+        render(&project(vec![path, text]))
+    };
+    let lit = |frame: &studio_render::RenderedFrame, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
+        ys.flat_map(|y| xs.clone().map(move |x| (x, y))).filter(|&(x, y)| pixel(frame, x, y)[0] > 128).count()
+    };
+    // Across the middle (the path runs y = 50, from x = 10): letters stand on it, above it.
+    let flat = along((0.0, 0.5), (1.0, 0.5));
+    assert!(lit(&flat, 10..70, 34..50) > 40, "letters above the line");
+    assert_eq!(lit(&flat, 0..100, 55..100), 0, "nothing below it");
+    // Down the middle (x = 50, from y = 10): the letters turn to run down it, their tops to the right.
+    let down = along((0.5, 0.0), (0.5, 1.0));
+    assert!(lit(&down, 50..66, 10..70) > 40, "letters right of the line");
+    assert_eq!(lit(&down, 0..45, 0..100), 0, "nothing left of it");
 }

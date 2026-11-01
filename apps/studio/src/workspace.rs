@@ -38,6 +38,14 @@ actions!(studio, [
     CutTool,
     PenTool,
     FinishPath,
+    HandTool,
+    ZoomTool,
+    RotateTool,
+    RippleTool,
+    RollTool,
+    SlipTool,
+    SlideTool,
+    TrackSelectTool,
     Copy,
     Paste,
     Duplicate,
@@ -84,6 +92,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("q", ShapeTool, Some(NOT_TYPING)),
         KeyBinding::new("c", CutTool, Some(NOT_TYPING)),
         KeyBinding::new("g", PenTool, Some(NOT_TYPING)),
+        // The rest of the tools, on After Effects' and Premiere's keys.
+        KeyBinding::new("h", HandTool, Some(NOT_TYPING)),
+        KeyBinding::new("z", ZoomTool, Some(NOT_TYPING)),
+        KeyBinding::new("w", RotateTool, Some(NOT_TYPING)),
+        KeyBinding::new("b", RippleTool, Some(NOT_TYPING)),
+        KeyBinding::new("n", RollTool, Some(NOT_TYPING)),
+        KeyBinding::new("y", SlipTool, Some(NOT_TYPING)),
+        KeyBinding::new("u", SlideTool, Some(NOT_TYPING)),
+        KeyBinding::new("a", TrackSelectTool, Some(NOT_TYPING)),
         KeyBinding::new("enter", FinishPath, Some(NOT_TYPING)),
         // Outside text fields, so copying and pasting text in a field still works.
         KeyBinding::new("cmd-c", Copy, Some(NOT_TYPING)),
@@ -190,6 +207,22 @@ pub enum Tool {
     Cut,
     /// Click (or drag, for curves) point by point in the viewer to draw a custom shape.
     Pen,
+    /// Drag the viewer to look around a zoomed-in picture.
+    Hand,
+    /// Click the viewer to zoom in there; Option-click to zoom out.
+    Zoom,
+    /// Drag in the viewer to turn the selected layers about their anchor points.
+    Rotate,
+    /// Drag a clip's end to trim it, moving later clips on its track with it.
+    Ripple,
+    /// Drag the cut between two touching clips to move it.
+    Roll,
+    /// Drag a clip to change which part of its source plays.
+    Slip,
+    /// Drag a clip between its neighbors, which stretch to meet it.
+    Slide,
+    /// Click a clip to pick it and everything after it, then drag them together.
+    TrackSelect,
 }
 
 /// Drag payloads. GPUI routes drops by type, so each kind of drag has its own type.
@@ -234,6 +267,12 @@ pub struct UiState {
     pub shape_kind: studio_core::model::ShapeKind,
     /// Whether the rail's shape menu is open (press and hold the Shape button).
     pub shape_menu: bool,
+    /// Which rail tool group's menu is open (an index into `toolbar::TOOL_GROUPS`).
+    pub tool_menu: Option<usize>,
+    /// The tool group button being held, to open its menu after a moment.
+    pub tool_press: Option<usize>,
+    /// The tool each group's button last picked, which it shows and picks on a click.
+    pub group_tools: HashMap<usize, Tool>,
     /// Whether the Shape button is held down, so a long press can open the menu.
     pub shape_press: bool,
     /// Active tab index for panels with tabs.
@@ -250,6 +289,12 @@ pub struct UiState {
     pub frame_bounds: panels::chrome::MeasuredBounds,
     /// Pointer position where the current viewer drag started.
     pub viewer_anchor: Option<(f32, f32)>,
+    /// The viewer's magnification (screen points per composition pixel); `None` fits the frame.
+    pub viewer_zoom: Option<f32>,
+    /// How far the frame is moved from the middle of the viewer, in screen points (Hand tool).
+    pub viewer_pan: (f32, f32),
+    /// The pan when a Hand drag began.
+    pub pan_start: (f32, f32),
     /// Pointer x and starting value of the field being scrubbed.
     pub field_anchor: Option<(f32, f32)>,
     pub editing: Option<EditingField>,
@@ -453,6 +498,9 @@ impl Workspace {
                 tool: Tool::Selection,
                 shape_kind: studio_core::model::ShapeKind::Rectangle,
                 shape_menu: false,
+                tool_menu: None,
+                tool_press: None,
+                group_tools: HashMap::new(),
                 shape_press: false,
                 tabs: HashMap::new(),
                 collapsed_folders: HashSet::new(),
@@ -462,6 +510,9 @@ impl Workspace {
                 viewer_bounds: Default::default(),
                 frame_bounds: Default::default(),
                 viewer_anchor: None,
+                viewer_zoom: None,
+                viewer_pan: (0.0, 0.0),
+                pan_start: (0.0, 0.0),
                 field_anchor: None,
                 editing: None,
                 flow_curve: studio_core::animation::EASING_PRESETS[0].1,
@@ -779,6 +830,38 @@ impl Render for Workspace {
                 this.set_tool(Tool::Pen);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &HandTool, _, cx| {
+                this.set_tool(Tool::Hand);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ZoomTool, _, cx| {
+                this.set_tool(Tool::Zoom);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &RotateTool, _, cx| {
+                this.set_tool(Tool::Rotate);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &RippleTool, _, cx| {
+                this.set_tool(Tool::Ripple);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &RollTool, _, cx| {
+                this.set_tool(Tool::Roll);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SlipTool, _, cx| {
+                this.set_tool(Tool::Slip);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SlideTool, _, cx| {
+                this.set_tool(Tool::Slide);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &TrackSelectTool, _, cx| {
+                this.set_tool(Tool::TrackSelect);
+                cx.notify();
+            }))
             // Enter ends a pen path as an open line (a path closes by clicking its first point).
             .on_action(cx.listener(|this, _: &FinishPath, _, cx| {
                 if this.state.finish_pen(false).is_some() {
@@ -851,6 +934,7 @@ impl Render for Workspace {
                 this.ui.field_anchor = None;
                 this.ui.viewer_anchor = None;
                 this.ui.shape_press = false;
+                this.ui.tool_press = None;
                 this.ui.effect_drop_layer = None;
                 if let Some(picker) = this.ui.color_picker.as_mut() {
                     picker.pressed = false;

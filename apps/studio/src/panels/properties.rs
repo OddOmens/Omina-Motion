@@ -13,7 +13,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px,
 };
 use studio_core::captions::{CaptionAnimation, CaptionStyle, CaptionWord};
-use studio_core::model::{BlendMode, Id, Layer, LayerContent, LayerMask, MaskMode, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
+use studio_core::model::{BlendMode, Id, Layer, LayerContent, LayerMask, MaskMode, TextPath, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 
 use super::chrome::{divider, hint, icon_button, panel, section};
@@ -553,6 +553,30 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
                 .child(align_button("align-text-center", IconName::TextAlignCenter, "Center Text", TextAlign::Center, cx))
                 .child(align_button("align-text-right", IconName::TextAlignEnd, "Right Align Text", TextAlign::Right, cx)),
         )
+        .child(text_path_rows(layer, workspace, cx))
+}
+
+/// Path: set the text along one of the composition's pen paths, and where along it it starts.
+fn text_path_rows(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let composition = workspace.state.composition();
+    let start = layer.text_path.map_or(0.0, |on| on.start);
+    let mut choices: Vec<(String, bool, Option<Id>)> = vec![("None".to_owned(), layer.text_path.is_none(), None)];
+    choices.extend(
+        composition
+            .layers
+            .iter()
+            .filter(|candidate| studio_core::edit::can_set_text_on(composition, id, candidate.id))
+            .map(|candidate| (candidate.name.clone(), layer.text_path.is_some_and(|on| on.layer == candidate.id), Some(candidate.id))),
+    );
+    let current = layer.text_path.and_then(|on| composition.layer(on.layer)).map_or("None".to_owned(), |path| path.name.clone());
+    let menu = choice_menu("text-path", current, choices, move |this, chosen: Option<Id>| this.state.set_text_path(id, chosen.map(|layer| TextPath { layer, start })), cx.weak_entity());
+    let rows = div().child(labeled_row("On Path", menu));
+    if layer.text_path.is_none() {
+        let has_paths = composition.layers.iter().any(|candidate| studio_core::edit::can_set_text_on(composition, id, candidate.id));
+        return rows.when(!has_paths, |rows| rows.child(hint("Draw a path with the Pen tool to set this text along it.")));
+    }
+    rows.child(labeled_row("Start", value_field(FieldTarget::TextPathStart { layer: id }, workspace, cx)))
 }
 
 /// One of a shape's paints (fill or stroke): on or off, solid or gradient, its colors (each

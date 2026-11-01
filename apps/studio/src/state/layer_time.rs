@@ -6,6 +6,7 @@
 use studio_core::cut::{self, SplitReport};
 use studio_core::model::Id;
 use studio_core::trim;
+use studio_core::trim_tools::{self, End};
 
 use super::EditorState;
 use super::snap::SnapExclusions;
@@ -21,6 +22,14 @@ pub enum LayerTimeEdit {
     TrimOut,
     /// The source moves under fixed in and out points.
     Slip,
+    /// One end trims and later clips on the track follow (the Ripple tool).
+    Ripple(End),
+    /// The cut between this clip and the one touching it at that end moves (the Roll tool).
+    Roll(End),
+    /// The clip moves between its neighbors, which stretch to meet it (the Slide tool).
+    Slide,
+    /// The clips Track Select Forward picked move together.
+    Group,
 }
 
 /// A layer bar being dragged: which layer and edit, and its timing when the drag began.
@@ -47,10 +56,24 @@ impl EditorState {
             in_frame: found.in_frame,
             out_frame: found.out_frame,
         });
+        // Edits that change several clips are applied afresh to the timing at the start.
+        self.layer_time_base = matches!(edit, LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group).then(|| self.composition().clone());
+    }
+
+    /// Picks `layer` and every clip starting at or after it (on its track only, with
+    /// `one_track`) and gets ready to move them together, as Premiere's Track Select Forward does.
+    pub fn begin_track_select_forward(&mut self, layer: Id, one_track: bool) {
+        let picked = trim_tools::select_forward(self.composition(), layer, one_track);
+        self.clear_selection();
+        for &id in &picked {
+            self.select_layer(id, true);
+        }
+        self.begin_layer_time_drag(layer, LayerTimeEdit::Group);
     }
 
     pub fn end_layer_time_drag(&mut self) {
         let finished = self.layer_time_drag.take();
+        self.layer_time_base = None;
         self.clear_snap_line();
         // A layer moved onto a busy part of its track moves up to a track of its own.
         if let Some(drag) = finished.filter(|drag| drag.edit == LayerTimeEdit::Move) {
@@ -63,6 +86,10 @@ impl EditorState {
     pub fn drag_layer_time(&mut self, delta: i64) {
         let Some(drag) = self.layer_time_drag else { return };
         let comp = self.active_comp;
+        if let Some(base) = self.layer_time_base.clone() {
+            self.apply_multi_clip_edit(drag, base, delta);
+            return;
+        }
         let own = Some(drag.layer);
         let (edges, exclude) = match drag.edit {
             LayerTimeEdit::Move => {
@@ -71,6 +98,8 @@ impl EditorState {
             LayerTimeEdit::TrimIn => (vec![drag.in_frame], SnapExclusions { layer_edges: own, ..Default::default() }),
             LayerTimeEdit::TrimOut => (vec![drag.out_frame], SnapExclusions { layer_edges: own, ..Default::default() }),
             // The source's ends may line up with the clip's own in and out points.
+            // Applied from the starting timing above, without snapping.
+            LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group => (Vec::new(), SnapExclusions::default()),
             LayerTimeEdit::Slip => {
                 let end = self.source_span(drag.layer).map_or(drag.start_frame, |(start, end)| end - start + drag.start_frame);
                 (vec![drag.start_frame, end], SnapExclusions::default())
@@ -88,6 +117,31 @@ impl EditorState {
             LayerTimeEdit::Slip => {
                 trim::slip_to(&mut self.project, comp, drag.layer, drag.start_frame + delta);
             }
+            LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group => {}
+        }
+    }
+
+    /// Applies a drag `delta` frames long of an edit that changes several clips: the timing is
+    /// put back as it was when the drag began, then the whole edit is made on it.
+    fn apply_multi_clip_edit(&mut self, drag: LayerTimeDrag, base: studio_core::model::Composition, delta: i64) {
+        let comp = self.active_comp;
+        *self.composition_mut() = base;
+        let edge = |end: End| if end == End::In { drag.in_frame } else { drag.out_frame };
+        match drag.edit {
+            LayerTimeEdit::Ripple(end) => {
+                trim_tools::ripple_trim(&mut self.project, comp, drag.layer, end, edge(end) + delta);
+            }
+            LayerTimeEdit::Roll(end) => {
+                trim_tools::roll(&mut self.project, comp, drag.layer, end, edge(end) + delta);
+            }
+            LayerTimeEdit::Slide => {
+                trim_tools::slide(&mut self.project, comp, drag.layer, delta);
+            }
+            LayerTimeEdit::Group => {
+                let picked = self.selected_layers.clone();
+                trim_tools::move_group(self.composition_mut(), &picked, delta);
+            }
+            _ => {}
         }
     }
 
@@ -279,5 +333,26 @@ mod tests {
         assert!(state.trim_selected_out_to_playhead());
         let layer = state.composition().layer(title).unwrap();
         assert_eq!((layer.in_frame, layer.out_frame), (60, 91), "frame 90 is the last one shown");
+    }
+
+    #[test]
+    fn a_ripple_drag_applies_afresh_as_the_pointer_moves() {
+        let mut state = EditorState::new();
+        // The title (24–168) with the logo moved onto its track right after it.
+        let comp = state.composition_mut();
+        let (title, logo) = (comp.layers[0].id, comp.layers[2].id);
+        let track = comp.layer(title).unwrap().track;
+        let logo_layer = comp.layer_mut(logo).unwrap();
+        logo_layer.shift_in_time(168 - logo_layer.in_frame);
+        logo_layer.track = track;
+        let logo_in = |state: &EditorState| state.composition().layer(logo).unwrap().in_frame;
+        state.begin_layer_time_drag(title, LayerTimeEdit::Ripple(End::Out));
+        state.drag_layer_time(-20);
+        assert_eq!(logo_in(&state), 148);
+        // Back the other way: measured from the start, not added to the last step.
+        state.drag_layer_time(-10);
+        assert_eq!(logo_in(&state), 158);
+        state.end_layer_time_drag();
+        assert_eq!(state.composition().layer(title).unwrap().out_frame, 158);
     }
 }

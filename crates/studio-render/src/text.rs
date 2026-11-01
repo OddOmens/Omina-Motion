@@ -75,6 +75,15 @@ impl TextRenderer {
         self.layout(text, style, 1.0).1
     }
 
+    /// Where each letter of the text's first line sits, in source pixels: its left edge and its
+    /// width (the space it takes, so the letters tile the line), and how far down the line its
+    /// baseline is. For setting text along a path.
+    pub fn letters(&mut self, text: &str, style: &TextStyle) -> (Vec<(f32, f32)>, f32) {
+        let (buffer, _) = self.layout(text, style, 1.0);
+        let Some(run) = buffer.layout_runs().next() else { return (Vec::new(), 0.0) };
+        (run.glyphs.iter().map(|glyph| (glyph.x, glyph.w)).collect(), run.line_y)
+    }
+
     /// Rasterizes the text at `scale` output pixels per source pixel.
     /// Draws `text` at `scale`, never larger than `max_size` pixels on a side (the GPU's
     /// texture limit); very large text is drawn at a lower scale and stretched.

@@ -615,6 +615,9 @@ pub struct Layer {
     /// Background removal, for footage and image layers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cutout: Option<Cutout>,
+    /// For a text layer: the pen path its letters follow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_path: Option<TextPath>,
     pub parent: Option<Id>,
     pub switches: LayerSwitches,
     /// `None` for layers without a picture, such as audio.
@@ -624,6 +627,16 @@ pub struct Layer {
     /// Volume and fades, for layers with sound.
     #[serde(default)]
     pub audio: LayerAudio,
+}
+
+/// Text set along a pen path: each letter sits on the path, turned to follow it. The path is
+/// another layer's (a pen shape in the same composition), where it is on screen; the text
+/// layer's own position and rotation are not used, but its scale sets the letters' size.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TextPath {
+    pub layer: Id,
+    /// How far along the path the text starts, in composition pixels.
+    pub start: f32,
 }
 
 /// A layer used as a mask: where it draws, the masked layer is shown (or hidden).

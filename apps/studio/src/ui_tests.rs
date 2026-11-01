@@ -1478,7 +1478,7 @@ fn the_cut_tool_splits_the_clicked_clip(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     tall_window(visual);
     visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.snapping = false));
-    visual.update(|window, cx| window.click("tool-cut", cx));
+    visual.update(|window, cx| window.click("tool-group-edit", cx));
     render(visual);
     let count = layer_ids(&workspace, visual).len();
     visual.update(|window, cx| window.click(("clip", TITLE.0 as usize), cx));
@@ -2263,4 +2263,72 @@ fn picking_a_subject_places_clicks_on_the_picture_and_asks_before_downloading(cx
     let clicks = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().cutout.clone().unwrap().clicks);
     assert_eq!(clicks.iter().map(|click| click.keep).collect::<Vec<_>>(), vec![true, false]);
     assert!((clicks[0].at.x - 0.25).abs() < 0.01 && (clicks[0].at.y - 0.25).abs() < 0.01, "{clicks:?}");
+}
+
+#[gpui_kit::test]
+fn a_tool_group_menu_picks_a_tool_that_its_button_then_shows(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let button = center_of(visual, "tool-group-edit");
+    visual.update(|window, cx| window.pointer_down(button, MouseButton::Right, cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.tool_menu), Some(1), "right-click opens the group's menu");
+    visual.update(|window, cx| window.click("tool-ripple", cx));
+    render(visual);
+    let tool = visual.update(|_, cx| workspace.read(cx).ui.tool);
+    assert_eq!(tool, crate::workspace::Tool::Ripple);
+    // The button now shows Ripple; picking another tool and clicking it again goes back to Ripple.
+    visual.update(|window, cx| window.press("v", cx));
+    visual.update(|window, cx| window.click("tool-group-edit", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.tool), crate::workspace::Tool::Ripple);
+}
+
+#[gpui_kit::test]
+fn the_zoom_tool_zooms_where_clicked_and_the_hand_pans(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("z", cx));
+    render(visual);
+    let target = Vec2::new(1400.0, 300.0);
+    let at = screen_point(&workspace, visual, target);
+    click_at(visual, at);
+    let zoom = visual.update(|_, cx| workspace.read(cx).ui.viewer_zoom);
+    assert!(zoom.is_some(), "zoomed in from Fit");
+    // The clicked point stays under the pointer.
+    let after = screen_point(&workspace, visual, target);
+    assert!((f32::from(after.x) - f32::from(at.x)).abs() < 2.0 && (f32::from(after.y) - f32::from(at.y)).abs() < 2.0, "{at:?} → {after:?}");
+    // The Hand drags the picture along.
+    visual.update(|window, cx| window.press("h", cx));
+    let to = point(at.x + px(40.0), at.y + px(10.0));
+    visual.update(|window, cx| window.drag(at, to, cx));
+    render(visual);
+    let moved = screen_point(&workspace, visual, target);
+    assert!((f32::from(moved.x) - f32::from(to.x)).abs() < 2.0, "{moved:?} follows the pointer to {to:?}");
+}
+
+#[gpui_kit::test]
+fn the_eyedropper_picks_a_color_from_the_viewer(cx: &mut TestAppContext) {
+    use studio_core::model::Rgba;
+    let (workspace, visual) = open(cx);
+    // A shape layer to recolor; open its fill's picker and turn on the eyedropper.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let layer = ws.state.begin_shape_draw(studio_core::model::ShapeKind::Rectangle, Vec2::new(300.0, 300.0)).unwrap();
+        ws.state.end_viewer_drag();
+        ws.state.select_layer(layer, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("shape-fill-color:0", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("picker-eyedropper", cx));
+    render(visual);
+    // The sample project's background solid is dark gray at the bottom right.
+    let at = screen_point(&workspace, visual, Vec2::new(1800.0, 1000.0));
+    click_at(visual, at);
+    let (layer, sampling) = visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        (ws.state.selected_layers[0], ws.ui.color_picker.as_ref().map(|picker| picker.sampling))
+    });
+    assert_eq!(sampling, Some(false), "the eyedropper turns off after a pick, leaving the picker open");
+    let fill = visual.update(|_, cx| workspace.read(cx).state.shape_paint(layer, crate::state::PaintSlot::Fill));
+    assert_ne!(fill, Some(studio_core::model::Paint::Solid(Rgba::hex(0x8b5cf6))), "the fill took the sampled color: {fill:?}");
 }

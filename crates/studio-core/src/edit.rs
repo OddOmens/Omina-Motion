@@ -53,6 +53,7 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         track_matte: TrackMatte::None,
         mask: None,
         cutout: None,
+        text_path: None,
         parent: None,
         switches: LayerSwitches { visible: has_picture, audio: item.has_audio, ..LayerSwitches::default() },
         transform: has_picture.then(|| Transform::centered(size, composition.size() * 0.5)),
@@ -111,6 +112,7 @@ pub fn separate_audio(project: &mut Project, comp_id: Id, layer_id: Id) -> Optio
         track_matte: TrackMatte::None,
         mask: None,
         cutout: None,
+        text_path: None,
         switches: LayerSwitches { visible: false, audio: video.switches.audio, ..LayerSwitches::default() },
         ..video.clone()
     };
@@ -182,6 +184,9 @@ pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str) ->
         if layer.mask.is_some_and(|mask| moving.contains(&mask.layer)) {
             layer.mask = None;
         }
+        if layer.text_path.is_some_and(|on| moving.contains(&on.layer)) {
+            layer.text_path = None;
+        }
     }
     for layer in &mut moved {
         if layer.parent.is_some_and(|p| !moving.contains(&p)) {
@@ -189,6 +194,9 @@ pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str) ->
         }
         if layer.mask.is_some_and(|mask| !moving.contains(&mask.layer)) {
             layer.mask = None;
+        }
+        if layer.text_path.is_some_and(|on| !moving.contains(&on.layer)) {
+            layer.text_path = None;
         }
     }
     let inner = project.composition_mut(inner_id)?;
@@ -248,6 +256,9 @@ pub fn delete_layers(composition: &mut Composition, ids: &[Id]) -> usize {
         }
         if layer.mask.is_some_and(|mask| ids.contains(&mask.layer)) {
             layer.mask = None;
+        }
+        if layer.text_path.is_some_and(|on| ids.contains(&on.layer)) {
+            layer.text_path = None;
         }
     }
     // Tracks left empty go away.
@@ -496,6 +507,27 @@ pub fn set_path_closed(composition: &mut Composition, layer_id: Id, closed: bool
     true
 }
 
+/// Whether `path_layer` can carry `text_layer`'s text: a pen path in the same composition, and
+/// a text layer to set along it.
+pub fn can_set_text_on(composition: &Composition, text_layer: Id, path_layer: Id) -> bool {
+    let text = composition.layer(text_layer).is_some_and(|layer| matches!(layer.content, LayerContent::Text { .. }));
+    let path = composition.layer(path_layer).is_some_and(|layer| matches!(layer.content, LayerContent::Shape { path: Some(_), .. }));
+    text && path && text_layer != path_layer
+}
+
+/// Sets a text layer along a pen path (or back on its own line, with `None`). Returns whether
+/// it was set.
+pub fn set_text_path(composition: &mut Composition, text_layer: Id, text_path: Option<crate::model::TextPath>) -> bool {
+    if let Some(on) = text_path
+        && (!can_set_text_on(composition, text_layer, on.layer) || !on.start.is_finite())
+    {
+        return false;
+    }
+    let Some(layer) = composition.layer_mut(text_layer) else { return false };
+    layer.text_path = text_path;
+    true
+}
+
 /// Which part of a path point is being moved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathPart {
@@ -540,6 +572,7 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
             track_matte: TrackMatte::None,
             mask: None,
             cutout: None,
+            text_path: None,
             parent: None,
             switches: LayerSwitches::default(),
             transform: Some(transform),

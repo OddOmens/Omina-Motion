@@ -53,7 +53,7 @@ pub fn paste_layers(project: &mut Project, comp_id: Id, layers: &[Layer], frame:
 /// Inserts copies of `originals` (top first, as `layers_to_copy` gives them) as a block at stack
 /// index `at`, each on a new track, `delta` frames later than the original. A parent that was
 /// copied too becomes the parent's copy; one outside the block is kept if it is in this
-/// composition. Masks follow the same rule. The block's top layer has nothing above it to use as a matte, so loses its own.
+/// composition. Masks and text paths follow the same rule. The block's top layer has nothing above it to use as a matte, so loses its own.
 fn insert_copies(project: &mut Project, comp_id: Id, originals: &[Layer], at: usize, delta: i64) -> Vec<Id> {
     let mut new_ids: HashMap<Id, Id> = HashMap::new();
     let mut copies = Vec::with_capacity(originals.len());
@@ -77,6 +77,10 @@ fn insert_copies(project: &mut Project, comp_id: Id, originals: &[Layer], at: us
         copy.mask = copy.mask.and_then(|mask| match new_ids.get(&mask.layer) {
             Some(&copied) => Some(LayerMask { layer: copied, ..mask }),
             None => composition.layer(mask.layer).map(|_| mask),
+        });
+        copy.text_path = copy.text_path.and_then(|on| match new_ids.get(&on.layer) {
+            Some(&copied) => Some(crate::model::TextPath { layer: copied, ..on }),
+            None => composition.layer(on.layer).map(|_| on),
         });
         if index == 0 {
             copy.track_matte = TrackMatte::None;

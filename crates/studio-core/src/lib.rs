@@ -24,3 +24,4 @@ pub mod time;
 pub mod tracks;
 pub mod transform;
 pub mod trim;
+pub mod trim_tools;

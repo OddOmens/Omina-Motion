@@ -245,6 +245,12 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             {
                 return damaged(&format!("layer \"{}\" has a damaged background removal", layer.name));
             }
+            // Text set on a path needs a pen path in the same composition.
+            if let Some(on) = layer.text_path
+                && (!crate::edit::can_set_text_on(comp, layer.id, on.layer) || !on.start.is_finite())
+            {
+                return damaged(&format!("layer \"{}\" is set on a missing path", layer.name));
+            }
             // A mask must be another layer of the same composition.
             if let Some(mask) = layer.mask
                 && (mask.layer == layer.id || comp.layer(mask.layer).is_none())

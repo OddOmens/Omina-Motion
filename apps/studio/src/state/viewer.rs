@@ -34,6 +34,9 @@ pub(super) enum ViewerDrag {
     /// Moving a layer's anchor point: where it started (layer pixels), the transform from
     /// composition pixels into the layer's pixels, and how near (in layer pixels) it snaps.
     Anchor { layer: Id, start: Vec2, to_local: Affine, reach: f32 },
+    /// Turning layers with the Rotate tool about the first one's anchor point (composition
+    /// pixels): each layer's rotation when the drag began, and where the pointer started.
+    Rotate { starts: Vec<(Id, f32)>, pivot: Vec2, start: Vec2 },
     /// Pulling out the handles of the point just placed with the Pen tool, making it smooth.
     PenHandle { index: usize },
     /// Moving a point (or handle) of a pen path layer, from where it started in composition
@@ -72,6 +75,9 @@ const DEFAULT_SHAPE_SIZE: f32 = 300.0;
 
 const POSITION: PropertyPath = PropertyPath::Transform(TransformProperty::Position);
 const SCALE: PropertyPath = PropertyPath::Transform(TransformProperty::Scale);
+const ROTATION: PropertyPath = PropertyPath::Transform(TransformProperty::Rotation);
+/// With Shift, the Rotate tool turns in steps this big, in degrees.
+const ROTATION_STEP: f32 = 15.0;
 
 impl EditorState {
     /// The topmost visible, unlocked layer under `point` (composition pixels) at the playhead,
@@ -130,6 +136,22 @@ impl EditorState {
         };
         let Some(to_local) = world.inverse() else { return };
         self.viewer_drag = Some(ViewerDrag::Scale { layer, scale, reach: corner - anchor, to_local });
+    }
+
+    /// Starts turning the selected layers with the Rotate tool, from `point` (composition
+    /// pixels). They turn by the angle the pointer sweeps around the first one's anchor point.
+    pub fn begin_rotate(&mut self, point: Vec2) {
+        let frame = self.current_frame as f64;
+        let comp = self.composition();
+        let starts: Vec<(Id, f32)> = self
+            .selected_layers
+            .iter()
+            .filter_map(|&id| comp.layer(id).filter(|layer| !layer.switches.locked).map(|layer| (id, layer)))
+            .filter_map(|(id, layer)| layer.transform.as_ref().map(|transform| (id, transform.rotation.value_at(frame))))
+            .collect();
+        let Some(&(first, _)) = starts.first() else { return };
+        let (Some(world), Some(anchor)) = (world_transform(comp, first, frame), comp.layer(first).and_then(|layer| layer.transform.as_ref()).map(|t| t.anchor_point.value_at(frame))) else { return };
+        self.viewer_drag = Some(ViewerDrag::Rotate { starts, pivot: world.apply(anchor), start: point });
     }
 
     /// Starts drawing a shape layer of `kind` at `point` (composition pixels), at the playhead.
@@ -281,6 +303,21 @@ impl EditorState {
                 }
                 edit::move_anchor(self.composition_mut(), layer, anchor, frame);
             }
+            ViewerDrag::Rotate { starts, pivot, start } => {
+                let angle = |v: Vec2| (v.y - pivot.y).atan2(v.x - pivot.x).to_degrees();
+                let mut turned = angle(start + delta) - angle(start);
+                // The shorter way round, so crossing the left of the pivot doesn't jump a turn.
+                turned = (turned + 540.0).rem_euclid(360.0) - 180.0;
+                for (id, rotation) in starts {
+                    let mut value = rotation + turned;
+                    if constrain {
+                        value = (value / ROTATION_STEP).round() * ROTATION_STEP;
+                    }
+                    if let Some(layer) = self.composition_mut().layer_mut(id) {
+                        layer.set_property(ROTATION, frame, PropertyValue::Scalar(value));
+                    }
+                }
+            }
             ViewerDrag::PenHandle { index } => {
                 // Dragging pulls out both handles, mirrored, so the curve runs smoothly through.
                 if let Some(point) = self.pen.as_mut().and_then(|pen| pen.points.get_mut(index)) {
@@ -408,6 +445,22 @@ mod tests {
         let near = |a: Vec2, b: Vec2| (a - b).length() < 1e-2;
         assert!(near(shown[2].at, Vec2::new(0.0, 350.0)), "the point follows the pointer: {:?}", shown[2].at);
         assert!(near(shown[0].at, Vec2::new(100.0, 100.0)) && near(shown[1].at, Vec2::new(300.0, 100.0)), "the others stay: {shown:?}");
+    }
+
+    #[test]
+    fn the_rotate_tool_turns_layers_about_their_anchor() {
+        let mut state = EditorState::new();
+        let layer = state.begin_shape_draw(ShapeKind::Rectangle, Vec2::new(500.0, 500.0)).unwrap();
+        state.end_viewer_drag();
+        // From right of the anchor to straight below it: a quarter turn clockwise.
+        state.begin_rotate(Vec2::new(600.0, 500.0));
+        state.drag_in_viewer(Vec2::new(-100.0, 100.0), false);
+        let rotation = |state: &EditorState| state.composition().layer(layer).unwrap().transform.as_ref().unwrap().rotation.value_at(0.0);
+        assert!((rotation(&state) - 90.0).abs() < 1e-3, "{}", rotation(&state));
+        // Shift keeps it to 15° steps.
+        state.drag_in_viewer(Vec2::new(-5.0, 20.0), true);
+        assert_eq!(rotation(&state) % 15.0, 0.0);
+        state.end_viewer_drag();
     }
 
     #[test]

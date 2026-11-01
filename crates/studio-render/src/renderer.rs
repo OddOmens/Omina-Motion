@@ -102,6 +102,9 @@ enum Source<'a> {
     Texture(&'a wgpu::TextureView),
     /// A texture drawn at an opacity (0–1), for caption fades.
     FadedTexture(&'a wgpu::TextureView, f32),
+    /// A vertical slice of a texture, from `u` 0–1 across it and that wide: one letter of text
+    /// set along a path.
+    TextureSlice(&'a wgpu::TextureView, f32, f32),
     /// Media that is not decoded yet: a checker in this premultiplied linear color.
     Placeholder([f32; 4]),
     /// A shape filling a box: its origin and size, in the same pixels as the drawn rectangle
@@ -129,6 +132,17 @@ struct CaptionDraw {
     opacity: f32,
     scale: f32,
     background: Option<Rgba>,
+}
+
+/// Text set along a path, worked out for one frame: where each letter sits on its line (left
+/// edge and width) and the baseline (see `TextRenderer::letters`), the path in composition
+/// pixels, where the text starts on it, and how big the letters are drawn.
+struct PathText {
+    letters: Vec<(f32, f32)>,
+    baseline: f32,
+    walk: studio_core::path::Walk,
+    start: f32,
+    letter_scale: f32,
 }
 
 /// Padding around caption text inside its background box, in layer pixels.
@@ -175,6 +189,8 @@ pub struct Renderer {
     path_cache: HashMap<u64, (MediaTexture, Vec2)>,
     /// Which cached path raster each path layer on screen draws this frame.
     paths: HashMap<Id, u64>,
+    /// Text set along a path this frame, by layer.
+    path_text: HashMap<Id, PathText>,
     /// The background-removal mask each cut-out layer on screen uses, with the file it came
     /// from (so it is loaded again only when the frame's mask changes).
     cutouts: HashMap<Id, (PathBuf, MediaTexture)>,
@@ -392,6 +408,7 @@ impl Renderer {
             depth: 0,
             path_cache: HashMap::new(),
             paths: HashMap::new(),
+            path_text: HashMap::new(),
             cutouts: HashMap::new(),
             text_boxes: HashMap::new(),
             images: HashMap::new(),
@@ -531,6 +548,7 @@ impl Renderer {
             Source::Solid(color) => (0.0, *color, &self.blank, 0.0),
             Source::Texture(view) => (1.0, [1.0; 4], *view, 0.0),
             Source::FadedTexture(view, opacity) => (1.0, [*opacity; 4], *view, 0.0),
+            Source::TextureSlice(view, ..) => (1.0, [1.0; 4], *view, 0.0),
             Source::Placeholder(color) => (2.0, *color, &self.blank, 40.0),
             Source::Shape(..) => (3.0, [0.0; 4], &self.blank, 0.0),
         };
@@ -544,6 +562,9 @@ impl Renderer {
                 paint_uniform(style.fill),
                 paint_uniform(style.stroke.map(|stroke| stroke.paint)),
             ),
+            // For textures, the part drawn: a slice, or all of it.
+            Source::TextureSlice(_, from, width) => ([0.0; 4], [*from, 0.0, *width, 1.0], 0.0, paint_uniform(None), paint_uniform(None)),
+            Source::Texture(_) | Source::FadedTexture(..) => ([0.0; 4], [0.0, 0.0, 1.0, 1.0], 0.0, paint_uniform(None), paint_uniform(None)),
             _ => ([0.0; 4], [0.0; 4], 0.0, paint_uniform(None), paint_uniform(None)),
         };
         // Source pixels → composition pixels → output pixels → clip space (y up).
@@ -853,6 +874,7 @@ impl Renderer {
         let mut text_keys: HashMap<Id, (u64, Vec2, Vec2)> = HashMap::new();
         self.captions.clear();
         self.paths.clear();
+        self.path_text.clear();
         for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame)) {
             match &layer.content {
                 LayerContent::Shape { style, path: Some(path) } => {
@@ -891,6 +913,19 @@ impl Renderer {
                     let prepared = self.prepare_text(text, style, raster_scale.max(0.05));
                     text_sizes.push((layer.id, prepared.1));
                     text_keys.insert(layer.id, prepared);
+                    if let Some(on) = layer.text_path
+                        && let Some(path_layer) = composition.layer(on.layer)
+                        && let LayerContent::Shape { path: Some(path), .. } = &path_layer.content
+                        && let Some(path_world) = world_transform(composition, on.layer, at_time)
+                    {
+                        let size = path_layer.size;
+                        if let Some(walk) = studio_core::path::Walk::new(path, |v| path_world.apply(Vec2::new(v.x * size.x, v.y * size.y))) {
+                            let (letters, baseline) = self.text.letters(text, style);
+                            // The letters' size: the text layer's own scale.
+                            let letter_scale = layer.transform.as_ref().map_or(1.0, |transform| transform.scale.value_at(at_time).x / 100.0);
+                            self.path_text.insert(layer.id, PathText { letters, baseline, walk, start: on.start, letter_scale });
+                        }
+                    }
                 }
                 LayerContent::Image { item } => {
                     if let Some(path) = project.item(*item).and_then(|item| item.path.clone()) {
@@ -1050,6 +1085,36 @@ impl Renderer {
         Ok(RenderedFrame { width, height, bgra, text_sizes, used_proxy })
     }
 
+    /// Draws a text layer's letters along the pen path it is set on, each one turned to follow
+    /// the path, with its baseline on it. Letters that run off the end of an open path are not
+    /// drawn. The text layer's scale sets their size; its position and rotation are not used.
+    fn draw_text_on_path(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, layer: &Layer, scale: f32, text_keys: &HashMap<Id, (u64, Vec2, Vec2)>, target: usize) {
+        let (Some((key, measured, pad)), Some(on_path)) = (text_keys.get(&layer.id), self.path_text.get(&layer.id)) else { return };
+        let PathText { letters, baseline, walk, start, letter_scale } = on_path;
+        let (baseline, letter_scale) = (*baseline, *letter_scale);
+        let texture = &self.text_cache[key];
+        let total = texture.size.x.max(1.0);
+        let mut sources = Vec::new();
+        for (index, &(left, width)) in letters.iter().enumerate() {
+            // The first and last letters take the raster's padding too, so nothing is cut off.
+            let from = if index == 0 { -pad.x } else { left };
+            let to = if index + 1 == letters.len() { measured.x + pad.x } else { left + width };
+            let middle = left + width * 0.5;
+            let Some((point, angle)) = walk.at(start + middle * letter_scale) else { continue };
+            // Letter pixels, centered on the letter's middle at the baseline, turned onto the path.
+            let world = Affine::translate(Vec2::new(-middle, -baseline))
+                .then(Affine::scale(Vec2::new(letter_scale, letter_scale)))
+                .then(Affine::rotate(angle.to_degrees()))
+                .then(Affine::translate(point));
+            let slice = Source::TextureSlice(&texture.view, (from + pad.x) / total, (to - from) / total);
+            sources.push((world, slice, (Vec2::new(from, -pad.y), Vec2::new(to - from, texture.size.y))));
+        }
+        let drawn: Vec<(Affine, &Source, (Vec2, Vec2))> = sources.iter().map(|(world, source, rect)| (*world, source, *rect)).collect();
+        if !drawn.is_empty() {
+            self.draw_sources(encoder, targets, target, scale, &drawn);
+        }
+    }
+
     /// Draws one layer's source (solid, text, image or a placeholder) into work slot `target`.
     #[allow(clippy::too_many_arguments)]
     fn draw_layer(
@@ -1099,6 +1164,7 @@ impl Renderer {
                 let rect = (Vec2::new(-grow, -grow), Vec2::new(layer.size.x + grow * 2.0, layer.size.y + grow * 2.0));
                 self.draw_source(encoder, targets, target, world, scale, &Source::Shape(*style, Vec2::default(), layer.size), rect);
             }
+            LayerContent::Text { .. } if self.path_text.contains_key(&layer.id) => self.draw_text_on_path(encoder, targets, layer, scale, text_keys, target),
             LayerContent::Text { .. } => {
                 if let Some((key, measured, pad)) = text_keys.get(&layer.id) {
                     let texture = &self.text_cache[key];

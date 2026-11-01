@@ -237,6 +237,9 @@ pub struct EditorState {
     snap_line: Option<i64>,
     /// The layer bar (or bar end) being dragged in time.
     layer_time_drag: Option<layer_time::LayerTimeDrag>,
+    /// The composition as it was when a multi-clip timeline edit (ripple, roll, slide, group
+    /// move) began; each step of the drag is applied to it afresh.
+    layer_time_base: Option<studio_core::model::Composition>,
     viewer_drag: Option<viewer::ViewerDrag>,
     history: history::History,
     /// The brands, colors and text styles shared by every project (see `library_store`).
@@ -270,6 +273,7 @@ impl EditorState {
             playback: None,
             keyframe_drag: None,
             layer_time_drag: None,
+            layer_time_base: None,
             magnetic_main_track: true,
             clip_drag: None,
             snapping: true,
@@ -477,6 +481,17 @@ impl EditorState {
     /// Masks `layer` with another layer of the composition (or removes its mask with `None`).
     pub fn set_layer_mask(&mut self, layer: Id, mask: Option<studio_core::model::LayerMask>) {
         edit::set_layer_mask(self.composition_mut(), layer, mask);
+    }
+
+    /// Sets a text layer along a pen path (or back on its own line, with `None`).
+    pub fn set_text_path(&mut self, layer: Id, text_path: Option<studio_core::model::TextPath>) {
+        edit::set_text_path(self.composition_mut(), layer, text_path);
+    }
+
+    /// Moves text set on a path to start `start` pixels along it.
+    pub fn set_text_path_start(&mut self, layer: Id, start: f32) {
+        let Some(on) = self.composition().layer(layer).and_then(|layer| layer.text_path) else { return };
+        edit::set_text_path(self.composition_mut(), layer, Some(studio_core::model::TextPath { start, ..on }));
     }
 
     /// Opens or closes a pen path layer's outline.

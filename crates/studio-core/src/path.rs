@@ -95,6 +95,65 @@ impl ShapePath {
     }
 }
 
+/// A path flattened into short straight pieces, measured along its length, for placing things
+/// (such as letters) a given distance along it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Walk {
+    points: Vec<Vec2>,
+    /// The distance along the path at each point.
+    distances: Vec<f32>,
+    closed: bool,
+}
+
+/// Straight pieces per curve: enough that letters follow even tight curves smoothly.
+const WALK_STEPS: usize = 48;
+
+impl Walk {
+    /// Flattens `path`, with every coordinate mapped by `place` (into composition pixels, say).
+    pub fn new(path: &ShapePath, place: impl Fn(Vec2) -> Vec2) -> Option<Self> {
+        let segments = path.segments();
+        let first = segments.first()?;
+        let mut points = vec![place(first[0])];
+        for segment in &segments {
+            points.extend((1..=WALK_STEPS).map(|step| place(point_on(*segment, step as f32 / WALK_STEPS as f32))));
+        }
+        let mut distances = Vec::with_capacity(points.len());
+        let mut total = 0.0;
+        for (index, point) in points.iter().enumerate() {
+            if index > 0 {
+                total += (*point - points[index - 1]).length();
+            }
+            distances.push(total);
+        }
+        Some(Self { points, distances, closed: path.closed })
+    }
+
+    /// The path's length.
+    pub fn length(&self) -> f32 {
+        self.distances.last().copied().unwrap_or(0.0)
+    }
+
+    /// The point `distance` along the path and the direction it runs there (radians, 0 to the
+    /// right, clockwise on screen). A closed path wraps around; an open one has nothing before
+    /// its start or past its end.
+    pub fn at(&self, distance: f32) -> Option<(Vec2, f32)> {
+        let length = self.length();
+        if length <= 0.0 || !distance.is_finite() {
+            return None;
+        }
+        let distance = if self.closed { distance.rem_euclid(length) } else { distance };
+        if !(0.0..=length).contains(&distance) {
+            return None;
+        }
+        let index = self.distances.partition_point(|&reached| reached < distance).clamp(1, self.points.len() - 1);
+        let (from, to) = (self.points[index - 1], self.points[index]);
+        let piece = self.distances[index] - self.distances[index - 1];
+        let t = if piece > 0.0 { (distance - self.distances[index - 1]) / piece } else { 0.0 };
+        let direction = to - from;
+        Some((from + direction * t, direction.y.atan2(direction.x)))
+    }
+}
+
 /// The point at `t` (0–1) along a segment.
 pub fn point_on(segment: Segment, t: f32) -> Vec2 {
     let [p0, p1, p2, p3] = segment;
@@ -180,6 +239,23 @@ mod tests {
         // A straight horizontal line still gets a box one pixel tall.
         let flat = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 5.0)), PathPoint::corner(Vec2::new(30.0, 5.0))], closed: false };
         assert_eq!(fit_to_box(&flat).unwrap().1, Vec2::new(30.0, 1.0));
+    }
+
+    #[test]
+    fn walking_a_path_finds_points_and_directions_along_it() {
+        // An open L: 100 right, then 100 down.
+        let corners = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)].map(|(x, y)| PathPoint::corner(Vec2::new(x, y)));
+        let path = ShapePath { points: corners.to_vec(), closed: false };
+        let walk = Walk::new(&path, |v| v).unwrap();
+        assert!((walk.length() - 200.0).abs() < 1e-3);
+        let (point, angle) = walk.at(50.0).unwrap();
+        assert!(close(point, Vec2::new(50.0, 0.0)) && angle.abs() < 1e-3, "along the top, heading right");
+        let (point, angle) = walk.at(150.0).unwrap();
+        assert!(close(point, Vec2::new(100.0, 50.0)) && (angle - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "down the side, heading down");
+        assert!(walk.at(250.0).is_none() && walk.at(-1.0).is_none(), "nothing off the ends of an open path");
+        // Closed, it comes back up the diagonal and wraps around.
+        let closed = Walk::new(&ShapePath { closed: true, ..path }, |v| v).unwrap();
+        assert!(closed.at(closed.length() + 50.0).is_some_and(|(point, _)| close(point, Vec2::new(50.0, 0.0))));
     }
 
     #[test]

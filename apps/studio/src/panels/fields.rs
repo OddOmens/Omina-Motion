@@ -24,6 +24,8 @@ pub enum FieldTarget {
     Text { layer: Id, setting: TextSetting },
     Shape { layer: Id, setting: ShapeSetting },
     Audio { layer: Id, setting: AudioSetting },
+    /// How far along its path a text layer set on one starts.
+    TextPathStart { layer: Id },
 }
 
 /// How a field's number is shown and how fast it scrubs.
@@ -82,6 +84,10 @@ impl FieldTarget {
                 };
                 Some((value, FieldFormat { step, decimals, unit, rotation: false }))
             }
+            Self::TextPathStart { layer } => {
+                let start = state.composition().layer(layer)?.text_path?.start;
+                Some((start, FieldFormat { step: 1.0, decimals: 0, unit: "px", rotation: false }))
+            }
         }
     }
 
@@ -91,6 +97,7 @@ impl FieldTarget {
             Self::Text { layer, setting } => state.set_text_setting(layer, setting, value),
             Self::Shape { layer, setting } => state.set_shape_setting(layer, setting, value),
             Self::Audio { layer, setting } => state.set_audio_setting(layer, setting, value),
+            Self::TextPathStart { layer } => state.set_text_path_start(layer, value),
         }
     }
 
