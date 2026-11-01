@@ -19,7 +19,7 @@ use studio_core::property::{PropertyPath, TransformProperty};
 use super::chrome::{divider, hint, icon_button, panel, section};
 use super::color_picker;
 use super::fields::{FieldTarget, property_row, value_field};
-use crate::state::{ColorTarget, PaintSlot, ShapeSetting, Switch, TextSetting};
+use crate::state::{AudioSetting, ColorTarget, PaintSlot, ShapeSetting, Switch, TextSetting};
 use crate::theme::{color, hsla, size};
 use crate::workspace::{EditTarget, PanelId, Workspace};
 
@@ -143,6 +143,50 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             ),
         )
     })
+}
+
+/// A layer's sound: whether its picture shows and its sound plays (separately), its volume and
+/// fades, and for a video clip, moving its sound onto a clip of its own.
+fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let field = |setting: AudioSetting, cx: &mut Context<Workspace>| value_field(FieldTarget::Audio { layer: id, setting }, workspace, cx);
+    let toggle = |name: &'static str, label: &'static str, on: bool, which: Switch, cx: &mut Context<Workspace>| {
+        Checkbox::new(name).label(label).checked(on).on_click(cx.listener(move |this, _, _, cx| {
+            this.state.toggle_switch(id, which);
+            cx.notify();
+        }))
+    };
+    let is_video = matches!(layer.content, LayerContent::Footage { .. });
+    div()
+        .child(divider())
+        .child(section("Audio", None))
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .py_1()
+                .when(is_video, |row| row.child(toggle("layer-show-video", "Show video", layer.switches.visible, Switch::Visible, cx)))
+                .child(toggle("layer-play-audio", "Play audio", layer.switches.audio, Switch::Audio, cx)),
+        )
+        .child(labeled_row("Volume", field(AudioSetting::Volume, cx)))
+        .child(labeled_row("Fade In", field(AudioSetting::FadeIn, cx)))
+        .child(labeled_row("Fade Out", field(AudioSetting::FadeOut, cx)))
+        .when(is_video, |section| {
+            section.child(
+                div().py_1().child(
+                    Button::new("separate-audio")
+                        .outline()
+                        .small()
+                        .icon(Icon::new(IconName::AudioLines))
+                        .label("Separate Audio")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.state.separate_audio(id).is_some() {
+                                cx.notify();
+                            }
+                        })),
+                ),
+            )
+        })
 }
 
 /// A caption layer's settings, for all its captions at once: the animation, how many words
@@ -559,6 +603,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(divider())
         .child(transform)
         .children(text)
+        .children(workspace.state.has_sound(layer.id).then(|| audio_section(layer, workspace, cx)))
         .into_any_element()
 }
 

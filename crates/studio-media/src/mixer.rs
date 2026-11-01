@@ -110,8 +110,11 @@ impl Mixer {
         // Past the end of the file `read` comes up short; the rest of the clip is silence.
         voice.next_frame = Some(end);
         let into = &mut block[(start - from) as usize * CHANNELS..];
-        for (mixed, sample) in into.iter_mut().zip(&self.scratch[..read * CHANNELS]) {
-            *mixed += sample * clip.gain;
+        let fading = clip.fade_in > 0.0 || clip.fade_out > 0.0;
+        for (index, (mixed, sample)) in into.iter_mut().zip(&self.scratch[..read * CHANNELS]).enumerate() {
+            // Fades change the level sample by sample; without them it is one gain.
+            let level = if fading { clip.level_at((start + (index / CHANNELS) as i64) as f64 / f64::from(sample_rate)) } else { clip.gain };
+            *mixed += sample * level;
         }
     }
 }

@@ -19,6 +19,18 @@ pub struct AudioClip {
     pub end_seconds: f64,
     /// Volume as a linear factor (1.0 = unchanged).
     pub gain: f32,
+    /// Seconds of fade up from silence after `start_seconds`, and down to it before `end_seconds`.
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+impl AudioClip {
+    /// How loud the clip is at `seconds` of composition time, from its volume and fades.
+    pub fn level_at(&self, seconds: f64) -> f32 {
+        let rising = if self.fade_in > 0.0 { ((seconds - self.start_seconds) / self.fade_in).clamp(0.0, 1.0) } else { 1.0 };
+        let falling = if self.fade_out > 0.0 { ((self.end_seconds - seconds) / self.fade_out).clamp(0.0, 1.0) } else { 1.0 };
+        self.gain * rising.min(falling) as f32
+    }
 }
 
 /// The sound of every audible layer in `composition`: footage and audio layers that have
@@ -44,7 +56,9 @@ pub fn composition_audio(project: &Project, composition: &Composition) -> Vec<Au
                 offset_seconds: layer.start_frame as f64 / fps,
                 start_seconds: layer.in_frame as f64 / fps,
                 end_seconds: layer.out_frame as f64 / fps,
-                gain: 1.0,
+                gain: layer.audio.gain(),
+                fade_in: f64::from(layer.audio.fade_in.max(0.0)),
+                fade_out: f64::from(layer.audio.fade_out.max(0.0)),
             })
         })
         .collect()

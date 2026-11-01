@@ -603,6 +603,31 @@ pub struct Layer {
     pub transform: Option<Transform>,
     pub effects: Vec<Effect>,
     pub has_audio: bool,
+    /// Volume and fades, for layers with sound.
+    #[serde(default)]
+    pub audio: LayerAudio,
+}
+
+/// A layer's sound settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LayerAudio {
+    /// Volume in decibels: 0 leaves it as it is; -6 is about half as loud.
+    pub volume_db: f32,
+    /// Seconds over which the sound rises from silence at the layer's in point.
+    pub fade_in: f32,
+    /// Seconds over which it falls to silence before the out point.
+    pub fade_out: f32,
+}
+
+impl LayerAudio {
+    /// The volume range offered, in decibels.
+    pub const VOLUME_RANGE: (f32, f32) = (-60.0, 12.0);
+
+    /// The volume as a factor to multiply samples by.
+    pub fn gain(self) -> f32 {
+        let db = if self.volume_db.is_finite() { self.volume_db.clamp(Self::VOLUME_RANGE.0, Self::VOLUME_RANGE.1) } else { 0.0 };
+        if db <= Self::VOLUME_RANGE.0 { 0.0 } else { 10f32.powf(db / 20.0) }
+    }
 }
 
 impl Layer {

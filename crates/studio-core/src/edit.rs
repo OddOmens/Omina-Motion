@@ -56,6 +56,7 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         transform: has_picture.then(|| Transform::centered(size, composition.size() * 0.5)),
         effects: Vec::new(),
         has_audio: item.has_audio,
+        audio: Default::default(),
         content,
     })
 }
@@ -84,6 +85,50 @@ pub fn add_layer_from_item(
     composition.layers.insert(index, layer);
     crate::tracks::normalize(composition);
     Some(id)
+}
+
+/// Separates a video clip's sound onto a clip of its own, as CapCut and Premiere do: an audio
+/// layer on a sound track playing the same file over the same span (trim and slip included),
+/// while the video clip itself goes quiet. Returns the new audio layer.
+pub fn separate_audio(project: &mut Project, comp_id: Id, layer_id: Id) -> Option<Id> {
+    let id = project.allocate_id();
+    let composition = project.composition_mut(comp_id)?;
+    let index = composition.layers.iter().position(|layer| layer.id == layer_id)?;
+    let video = &composition.layers[index];
+    let LayerContent::Footage { item } = video.content else { return None };
+    if !video.has_audio || video.switches.locked {
+        return None;
+    }
+    let audio = Layer {
+        id,
+        name: format!("{} (audio)", video.name),
+        content: LayerContent::Audio { item },
+        transform: None,
+        effects: Vec::new(),
+        parent: None,
+        track_matte: TrackMatte::None,
+        switches: LayerSwitches { visible: false, audio: video.switches.audio, ..LayerSwitches::default() },
+        ..video.clone()
+    };
+    composition.layers[index].switches.audio = false;
+    let track = crate::tracks::make_room_at(composition, composition.layers.len(), true);
+    composition.layers.push(Layer { track, ..audio });
+    crate::tracks::normalize(composition);
+    Some(id)
+}
+
+/// Sets a layer's sound settings, kept in range: volume within `LayerAudio::VOLUME_RANGE`, and
+/// fades from zero to the layer's length.
+pub fn set_layer_audio(composition: &mut Composition, layer_id: Id, edit: impl FnOnce(&mut crate::model::LayerAudio)) {
+    let fps = composition.frame_rate.fps();
+    let Some(layer) = composition.layer_mut(layer_id) else { return };
+    let length = ((layer.out_frame - layer.in_frame) as f64 / fps) as f32;
+    edit(&mut layer.audio);
+    let audio = &mut layer.audio;
+    let finite = |value: f32| if value.is_finite() { value } else { 0.0 };
+    audio.volume_db = finite(audio.volume_db).clamp(crate::model::LayerAudio::VOLUME_RANGE.0, crate::model::LayerAudio::VOLUME_RANGE.1);
+    audio.fade_in = finite(audio.fade_in).clamp(0.0, length);
+    audio.fade_out = finite(audio.fade_out).clamp(0.0, length);
 }
 
 /// Whether composition `outer` is, or holds somewhere inside it, composition `inner`.
@@ -407,6 +452,7 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
             transform: Some(transform),
             effects: Vec::new(),
             has_audio: false,
+            audio: Default::default(),
         },
     );
     crate::tracks::normalize(composition);
@@ -640,6 +686,24 @@ pub fn set_parent(composition: &mut Composition, layer_id: Id, parent: Option<Id
 mod tests {
     use super::*;
     use crate::sample::{self, ids};
+
+    #[test]
+    fn separating_audio_puts_the_sound_on_its_own_clip_in_step() {
+        let mut project = sample::sample_project();
+        let info = FootageInfo { size: Vec2::new(64.0, 36.0), duration_seconds: 4.0, frame_rate: FrameRate::new(24, 1), has_audio: true };
+        let item = import_footage(&mut project, "/media/interview.mp4".into(), &info);
+        let video = add_layer_from_item(&mut project, ids::MAIN_COMP, item, 0, 24).unwrap();
+        let audio = separate_audio(&mut project, ids::MAIN_COMP, video).unwrap();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        let (v, a) = (comp.layer(video).unwrap(), comp.layer(audio).unwrap());
+        assert!(matches!(a.content, LayerContent::Audio { item: i } if i == item));
+        assert_eq!((a.in_frame, a.out_frame, a.start_frame), (v.in_frame, v.out_frame, v.start_frame), "in step with the video");
+        assert!(!v.switches.audio && a.switches.audio, "the sound moved to the new clip");
+        assert!(crate::tracks::is_sound_only(a) && a.track < 0, "on a sound track");
+        let heard = crate::audio::composition_audio(&project, comp);
+        assert_eq!(heard.iter().map(|clip| clip.layer).collect::<Vec<_>>(), vec![audio], "heard once, from the audio clip");
+        assert!(separate_audio(&mut project, ids::MAIN_COMP, audio).is_none(), "an audio clip has nothing to separate");
+    }
 
     #[test]
     fn precomposing_moves_layers_into_a_new_composition_in_their_place() {

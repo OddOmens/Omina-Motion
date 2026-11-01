@@ -41,6 +41,8 @@ fn tone_clip(layer: u64, offset_seconds: f64) -> AudioClip {
         start_seconds: offset_seconds,
         end_seconds: offset_seconds + 2.0,
         gain: 1.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
     }
 }
 
@@ -131,6 +133,19 @@ fn clips_add_up_and_follow_their_gain() {
     let mut muted = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 72_000);
     muted.mix(&[quiet], &mut one);
     assert!(loudness(&one, 0..4800) == 0.0);
+}
+
+#[test]
+fn fades_rise_from_silence_and_fall_back_to_it() {
+    // Half a second of fade at each end of the two-second tone.
+    let faded = AudioClip { fade_in: 0.5, fade_out: 0.5, ..tone_clip(1, 0.0) };
+    let mut mixer = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 0);
+    let mut out = vec![0.0; 96_000 * CHANNELS];
+    mixer.mix(&[faded], &mut out);
+    let (start, middle, end) = (loudness(&out, 0..2400), loudness(&out, 46_000..50_800), loudness(&out, 93_600..96_000));
+    assert!(start < middle * 0.1, "nearly silent at the start: {start} vs {middle}");
+    assert!(end < middle * 0.1, "and at the end: {end}");
+    assert!(loudness(&out, 12_000..12_480) < middle * 0.6, "half way up a quarter second in");
 }
 
 #[test]

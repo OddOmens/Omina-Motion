@@ -2086,3 +2086,63 @@ fn precomposing_then_double_clicking_the_clip_opens_the_new_composition(cx: &mut
         assert!(state.composition().layer(TITLE).is_some(), "with the title in it");
     });
 }
+
+// Audio ----------------------------------------------------------------------------------------
+
+/// Imports the colors clip (with sound) and places it at frame 120, away from the playhead
+/// at 0 (so the test decodes no picture), selected.
+fn add_video_with_sound(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> Id {
+    let clip = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/colors.mp4");
+        ws.state.import_files(vec![path]);
+        let item = ws.state.selected_item.unwrap();
+        ws.state.add_layer_from_item(item, 0, 120);
+        let clip = ws.state.selected_layers[0];
+        cx.notify();
+        clip
+    }));
+    tall_window(visual);
+    clip
+}
+
+#[gpui_kit::test]
+fn separate_audio_moves_the_sound_to_its_own_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let video = add_video_with_sound(&workspace, visual);
+    visual.update(|window, cx| window.click("separate-audio", cx));
+    render(visual);
+    let (audio, video_plays) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.selected_layers[0], state.composition().layer(video).unwrap().switches.audio)
+    });
+    assert_ne!(audio, video);
+    assert!(!video_plays, "the video went quiet");
+    let content = visual.update(|_, cx| workspace.read(cx).state.composition().layer(audio).unwrap().content.clone());
+    assert!(matches!(content, LayerContent::Audio { .. }));
+}
+
+#[gpui_kit::test]
+fn video_and_sound_switch_separately_and_volume_and_fades_set(cx: &mut TestAppContext) {
+    use crate::state::AudioSetting;
+    let (workspace, visual) = open(cx);
+    let video = add_video_with_sound(&workspace, visual);
+    let switches = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(video).unwrap().switches);
+    visual.update(|window, cx| window.click("layer-play-audio", cx));
+    render(visual);
+    assert!(switches(visual).visible && !switches(visual).audio, "picture on, sound off");
+    visual.update(|window, cx| window.click("layer-play-audio", cx));
+    visual.update(|window, cx| window.click("layer-show-video", cx));
+    render(visual);
+    assert!(!switches(visual).visible && switches(visual).audio, "picture off, sound on");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_audio_setting(video, AudioSetting::Volume, -6.0);
+        ws.state.set_audio_setting(video, AudioSetting::FadeIn, 0.5);
+        ws.state.set_audio_setting(video, AudioSetting::FadeOut, 99.0);
+        cx.notify();
+    }));
+    render(visual);
+    let audio = visual.update(|_, cx| workspace.read(cx).state.composition().layer(video).unwrap().audio);
+    assert_eq!((audio.volume_db, audio.fade_in), (-6.0, 0.5));
+    assert_eq!(audio.fade_out, 2.0, "no longer than the two-second clip");
+    assert!((audio.gain() - 0.501).abs() < 0.01, "-6 dB is about half");
+}

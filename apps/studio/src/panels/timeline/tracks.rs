@@ -461,6 +461,22 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
         let along = (frame - in_frame) as f32 / (out_frame - in_frame) as f32;
         div().absolute().top_0().bottom_0().left(relative(along)).w(px(1.5)).bg(hsla(0xffffff))
     });
+    // Sound fades shade the clip's ends, darkest where the sound is quietest.
+    let fps = workspace.state.composition().frame_rate.fps();
+    let length = (layer.out_frame - layer.in_frame).max(1) as f64;
+    let fade = |seconds: f32, from_left: bool| {
+        (layer.has_audio && seconds > 0.0).then(|| {
+            let share = (f64::from(seconds) * fps / length).clamp(0.0, 1.0) as f32;
+            let (dark, clear) = (gpui_kit::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.55 }, gpui_kit::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
+            let shade = div().absolute().top_0().bottom_0().w(relative(share)).bg(gpui_kit::linear_gradient(
+                if from_left { 90.0 } else { 270.0 },
+                gpui_kit::linear_color_stop(dark, 0.0),
+                gpui_kit::linear_color_stop(clear, 1.0),
+            ));
+            if from_left { shade.left_0() } else { shade.right_0() }
+        })
+    };
+    let fades = [fade(layer.audio.fade_in, true), fade(layer.audio.fade_out, false)];
     let switches = layer.switches;
     let header = div()
         .h(px(CLIP_HEADER))
@@ -570,6 +586,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
             }))
             .child(header)
             .children(inside)
+            .children(fades.into_iter().flatten())
             .children(cut_line)
             // Trim grips would catch clicks near the ends, so the Cut tool goes without them.
             .when(!cutting, |clip| clip.child(grip(LayerTimeEdit::TrimIn, cx).left_0()).child(grip(LayerTimeEdit::TrimOut, cx).right_0()))

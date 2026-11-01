@@ -30,6 +30,7 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         transform: Some(Transform::centered(size, position)),
         effects: Vec::new(),
         has_audio: false,
+        audio: Default::default(),
     }
 }
 

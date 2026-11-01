@@ -66,6 +66,16 @@ impl Switch {
     }
 }
 
+/// A layer's sound settings that the Properties panel edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioSetting {
+    /// In decibels.
+    Volume,
+    /// In seconds.
+    FadeIn,
+    FadeOut,
+}
+
 /// Numeric shape settings that the Properties panel edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeSetting {
@@ -708,6 +718,36 @@ impl EditorState {
             LayerContent::Captions { style, .. } => Some(&style.text),
             _ => None,
         }
+    }
+
+    /// Whether a layer has sound to adjust: audio layers, and footage with a sound track.
+    pub fn has_sound(&self, layer: Id) -> bool {
+        self.composition().layer(layer).is_some_and(|layer| layer.has_audio && matches!(layer.content, LayerContent::Footage { .. } | LayerContent::Audio { .. }))
+    }
+
+    pub fn audio_setting(&self, layer: Id, setting: AudioSetting) -> Option<f32> {
+        let audio = self.composition().layer(layer)?.audio;
+        Some(match setting {
+            AudioSetting::Volume => audio.volume_db,
+            AudioSetting::FadeIn => audio.fade_in,
+            AudioSetting::FadeOut => audio.fade_out,
+        })
+    }
+
+    pub fn set_audio_setting(&mut self, layer: Id, setting: AudioSetting, value: f32) {
+        edit::set_layer_audio(self.composition_mut(), layer, |audio| match setting {
+            AudioSetting::Volume => audio.volume_db = value,
+            AudioSetting::FadeIn => audio.fade_in = value,
+            AudioSetting::FadeOut => audio.fade_out = value,
+        });
+    }
+
+    /// Moves a video clip's sound onto its own audio clip, and selects that.
+    pub fn separate_audio(&mut self, layer: Id) -> Option<Id> {
+        let comp = self.active_comp;
+        let audio = edit::separate_audio(&mut self.project, comp, layer)?;
+        self.select_layer(audio, false);
+        Some(audio)
     }
 
     pub fn text_of(&self, layer: Id) -> Option<(&str, &TextStyle)> {

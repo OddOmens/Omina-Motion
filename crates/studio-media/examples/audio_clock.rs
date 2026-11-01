@@ -18,7 +18,7 @@ fn main() {
     let clips = match &file {
         Some(path) => {
             let info = probe_audio(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            vec![AudioClip { layer: Id(1), path: path.clone(), offset_seconds: 0.0, start_seconds: 0.0, end_seconds: info.duration_seconds, gain: 1.0 }]
+            vec![AudioClip { layer: Id(1), path: path.clone(), offset_seconds: 0.0, start_seconds: 0.0, end_seconds: info.duration_seconds, gain: 1.0, fade_in: 0.0, fade_out: 0.0 }]
         }
         None => Vec::new(),
     };
