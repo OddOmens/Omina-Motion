@@ -55,12 +55,6 @@ pub enum Switch {
 }
 
 impl Switch {
-    /// Whether this switch is on.
-    pub fn get(self, switches: &LayerSwitches) -> bool {
-        let mut copy = *switches;
-        *self.slot(&mut copy)
-    }
-
     fn slot(self, switches: &mut LayerSwitches) -> &mut bool {
         match self {
             Self::Visible => &mut switches.visible,

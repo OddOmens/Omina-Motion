@@ -65,7 +65,7 @@ pub fn panel(
         .flex()
         .flex_col()
         .overflow_hidden()
-        .rounded(px(3.0))
+        .rounded(px(size::PANEL_RADIUS))
         .bg(hsla(color::PANEL))
         .border_1()
         .border_color(hsla(if is_active { color::ACCENT } else { color::PANEL }))

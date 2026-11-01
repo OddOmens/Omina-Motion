@@ -1116,14 +1116,55 @@ fn clip_grips_trim_in_the_tracks_view(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn track_header_toggles_work(cx: &mut TestAppContext) {
+fn clip_header_toggles_and_the_magnet_work(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     show_tracks(&workspace, visual);
     visual.update(|window, cx| window.click("magnetic", cx));
     render(visual);
     visual.update(|_, cx| assert!(!workspace.read(cx).state.magnetic_main_track));
-    let title_track = track_of(&workspace, visual, TITLE);
-    visual.update(|window, cx| window.click(ElementId::NamedInteger("track-lock".into(), title_track as i64 as u64), cx));
+    let switches = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().switches);
+    visual.update(|window, cx| window.click(("clip-show", TITLE.0 as usize), cx));
     render(visual);
-    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layer(TITLE).unwrap().switches.locked));
+    assert!(!switches(visual).visible, "the eye hides the clip");
+    visual.update(|window, cx| window.click(("clip-lock", TITLE.0 as usize), cx));
+    render(visual);
+    assert!(switches(visual).locked, "the padlock locks it");
+}
+
+#[gpui_kit::test]
+fn expanding_a_clip_shows_its_keyframes_which_drag_in_time(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    show_tracks(&workspace, visual);
+    visual.update(|window, cx| window.click(("clip-expand", TITLE.0 as usize), cx));
+    render(visual);
+    // The title's opacity has keyframes at 24, 36, 156 and 168.
+    let key = ElementId::Name(format!("clip-kf:{}:{OPACITY:?}:36", TITLE.0).into());
+    let at = center_of(visual, key);
+    let frames = 12.0 * pixels_per_frame(&workspace, visual);
+    visual.update(|window, cx| window.drag(at, point(at.x + px(frames), at.y), cx));
+    render(visual);
+    let keys = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().property(OPACITY, 0).unwrap().keyframes);
+    assert!(!keys.contains(&36) && keys.iter().any(|&k| (46..=50).contains(&k)), "the keyframe moved about 12 frames later: {keys:?}");
+}
+
+#[gpui_kit::test]
+fn the_export_button_opens_the_export_dialog(cx: &mut TestAppContext) {
+    let (_, visual) = open(cx);
+    visual.update(|window, cx| window.click("toolbar-export", cx));
+    render(visual);
+    visual.update(|window, cx| assert!(window.has_active_dialog(cx)));
+}
+
+#[gpui_kit::test]
+fn the_tracks_toolbar_plays_and_zooms(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    show_tracks(&workspace, visual);
+    visual.update(|window, cx| window.click("tracks-play", cx));
+    visual.update(|_, cx| assert!(workspace.read(cx).state.is_playing()));
+    visual.update(|window, cx| window.click("tracks-play", cx));
+    visual.update(|window, cx| window.click("tracks-zoom-in", cx));
+    let zoomed = visual.update(|_, cx| workspace.read(cx).state.view_range.len());
+    visual.update(|window, cx| window.click("tracks-zoom-fit", cx));
+    let fit = visual.update(|_, cx| workspace.read(cx).state.view_range.len());
+    assert!(zoomed < fit && fit == 240.0, "zoomed {zoomed}, fit {fit}");
 }

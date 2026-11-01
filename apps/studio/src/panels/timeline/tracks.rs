@@ -1,45 +1,50 @@
-//! The timeline's Tracks view, in the style of CapCut and Premiere: one row per track, each
-//! holding any number of clips side by side (see `studio_core::tracks`). Video clips show a
-//! filmstrip of thumbnails, sound shows its waveform, and other layers their name and color.
+//! The timeline's Tracks view, styled after modern motion tools and CapCut: one row per
+//! track, each holding any number of clips side by side (see `studio_core::tracks`). Clips are
+//! brightly colored by kind, with a header (expand arrow, kind icon, name, and mute / show /
+//! lock toggles). Video clips show a filmstrip of thumbnails, sound its waveform. Expanding a
+//! clip lists its animated properties under it, with their keyframes.
 //!
 //! Clips drag in time and between tracks (a clip that would overlap another gets a new track),
-//! their ends trim, Alt-drag slips the source, and project items drop straight onto a track.
-//! The ruler, navigator, playhead, snapping and zoom are shared with the Layers view.
+//! their ends trim, Alt-drag slips the source, keyframes drag in time, and project items drop
+//! straight onto a track. The ruler, navigator, snapping and zoom are shared with the Layers
+//! view; this view has its own transport bar above them.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
 use gpui_kit::{
-    AnyElement, Bounds, ImageSource, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement, RenderImage,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, Window, canvas, div, fill, img, point, prelude::FluentBuilder as _, px,
-    relative, rgba, size as gpui_size,
+    AnyElement, AppContext as _, Bounds, Context, Div, DragMoveEvent, ImageSource, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, RenderImage, StatefulInteractiveElement, Styled, TestSupportExt as _, Window, canvas, div, fill,
+    img, point, prelude::FluentBuilder as _, px, relative, rgba, size as gpui_size,
 };
 use studio_core::media::VideoFrame;
-use studio_core::model::{Layer, LayerContent};
+use studio_core::model::{Id, Layer, LayerContent};
+use studio_core::property::PropertyPath;
+use studio_core::time::{FrameRange, format_timecode};
 use studio_core::tracks::{self, MAIN_TRACK};
 use studio_media::{PeakCache, Peaks, Thumbnailer};
 
-use super::{TimelineDrag, fraction, frame_at};
+use super::{TimelineDrag, fraction, frame_at, view_switch, zoom_around_playhead};
 use crate::panels::chrome::{EmptyDragView, icon_button};
-use crate::state::{LayerTimeEdit, Switch};
+use crate::state::{KeyframeRef, LayerTimeEdit, Switch};
 use crate::theme::{color, hsla};
 use crate::workspace::{ProjectItemDrag, Workspace};
-use gpui_kit::assets::IconName;
-use gpui_kit::{AppContext as _, Context, DragMoveEvent};
 
-/// Width of the track headers on the left.
-pub const HEADER_WIDTH: f32 = 150.0;
 /// Row heights: the main track is tallest, as in CapCut; sound tracks are shorter.
-const MAIN_HEIGHT: f32 = 56.0;
-const PICTURE_HEIGHT: f32 = 40.0;
-const SOUND_HEIGHT: f32 = 32.0;
+const MAIN_HEIGHT: f32 = 58.0;
+const PICTURE_HEIGHT: f32 = 48.0;
+const SOUND_HEIGHT: f32 = 40.0;
+/// Each keyframe row under an expanded clip.
+const PROPERTY_ROW: f32 = 24.0;
 /// Height of filmstrip thumbnails, in pixels.
 pub const THUMBNAIL_HEIGHT: u32 = 36;
-/// Height of a clip's name strip.
-const CLIP_HEADER: f32 = 14.0;
+/// Height of a clip's header strip.
+const CLIP_HEADER: f32 = 18.0;
 /// Height of the waveform under a video clip that has sound.
-const CLIP_SOUND_STRIP: f32 = 12.0;
+const CLIP_SOUND_STRIP: f32 = 10.0;
 /// Grips at each end of a clip that trim it.
 const TRIM_GRIP: f32 = 6.0;
 /// Most thumbnail images kept on the GPU at once.
@@ -104,7 +109,7 @@ impl TrackMedia {
     }
 }
 
-fn track_height(track: i32) -> f32 {
+fn base_height(track: i32) -> f32 {
     match track {
         MAIN_TRACK => MAIN_HEIGHT,
         track if track < MAIN_TRACK => SOUND_HEIGHT,
@@ -112,76 +117,123 @@ fn track_height(track: i32) -> f32 {
     }
 }
 
-/// The track under window y position `y`, given where the rows start. Above the top row is a
-/// new track above it; below the bottom row, a new track below it.
-pub fn track_at(composition: &studio_core::model::Composition, rows_top: f32, y: f32) -> i32 {
-    let rows = tracks::tracks(composition);
-    let mut top = rows_top;
+/// The properties shown under an expanded clip: the animated ones, in panel order.
+fn animated_properties(layer: &Layer) -> Vec<(PropertyPath, String, Vec<i64>)> {
+    layer
+        .property_paths()
+        .into_iter()
+        .filter_map(|path| layer.property(path, 0).filter(|property| !property.keyframes.is_empty()).map(|property| (path, property.name, property.keyframes)))
+        .collect()
+}
+
+/// Every row top to bottom with its height: a track's own height plus room for the keyframe
+/// rows of any expanded clip on it.
+fn layout(workspace: &Workspace) -> Vec<(i32, f32)> {
+    let composition = workspace.state.composition();
+    let expanded = &workspace.ui.timeline.expanded_clips;
+    tracks::tracks(composition)
+        .into_iter()
+        .map(|track| {
+            let rows = composition
+                .layers
+                .iter()
+                .filter(|layer| layer.track == track && expanded.contains(&layer.id))
+                .map(|layer| animated_properties(layer).len().max(1))
+                .max()
+                .unwrap_or(0);
+            (track, base_height(track) + rows as f32 * PROPERTY_ROW)
+        })
+        .collect()
+}
+
+/// The track under window y position `y`. Above the top row is a new track above it; below
+/// the bottom row, a new track below it.
+pub fn track_at(workspace: &Workspace, y: f32) -> i32 {
+    let rows = layout(workspace);
+    let mut top = workspace.ui.timeline.rows.get().top;
     if y < top {
-        return rows.first().map_or(MAIN_TRACK, |track| track + 1);
+        return rows.first().map_or(MAIN_TRACK, |(track, _)| track + 1);
     }
-    for &track in &rows {
-        top += track_height(track);
+    for &(track, height) in &rows {
+        top += height;
         if y < top {
             return track;
         }
     }
-    rows.last().map_or(MAIN_TRACK, |track| track - 1)
+    rows.last().map_or(MAIN_TRACK, |(track, _)| track - 1)
 }
 
-fn track_name(track: i32) -> String {
-    match track {
-        MAIN_TRACK => "Main".to_owned(),
-        track if track > MAIN_TRACK => format!("Video {track}"),
-        track => format!("Audio {}", -track),
-    }
-}
-
-/// The colors a clip is drawn in: body and accent, by what it holds.
-fn clip_colors(layer: &Layer) -> (u32, u32) {
+/// A clip's colors by kind, as in the reference design: a bright header, a darker body, and
+/// whether text on the header should be dark (for the light colors).
+fn clip_colors(layer: &Layer) -> (u32, u32, bool) {
     match layer.content {
-        LayerContent::Footage { .. } => (0x173d44, 0x2bb3c0),
-        LayerContent::Audio { .. } => (0x16304d, 0x4c8fe0),
-        LayerContent::Image { .. } => (0x2f2b4a, 0x8a7cf0),
-        LayerContent::Text { .. } => (0x4a2438, 0xe0609a),
-        LayerContent::Solid { .. } => (0x2c2c32, 0x9a9aa6),
-        LayerContent::Adjustment => (0x3d3a1f, 0xd8c24a),
-        LayerContent::Composition { .. } => (0x1f3d2b, 0x4cc07a),
+        LayerContent::Footage { .. } => (0x8b5cf6, 0x6d44d9, false),
+        LayerContent::Audio { .. } => (0x6ee7a8, 0x1f5c45, true),
+        LayerContent::Image { .. } | LayerContent::Solid { .. } => (0xe0b93a, 0x8f7420, true),
+        LayerContent::Text { .. } => (0xf472b6, 0x9d3a6f, true),
+        LayerContent::Adjustment => (0xfb923c, 0x9a531c, true),
+        LayerContent::Composition { .. } => (0x60a5fa, 0x2f5f9e, true),
     }
 }
 
-/// The track headers on the left: name, and toggles that hide, mute or lock the whole track.
-pub fn headers(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+fn kind_icon(layer: &Layer) -> IconName {
+    match layer.content {
+        LayerContent::Footage { .. } => IconName::SquarePlay,
+        LayerContent::Audio { .. } => IconName::Music,
+        LayerContent::Image { .. } => IconName::Image,
+        LayerContent::Text { .. } => IconName::Type,
+        LayerContent::Adjustment => IconName::Contrast,
+        LayerContent::Composition { .. } => IconName::Clapperboard,
+        LayerContent::Solid { .. } => IconName::Square,
+    }
+}
+
+/// The bar above the ruler in this view: transport on the left, the time in the middle, and
+/// view, snapping, magnet and zoom controls on the right.
+pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let state = &workspace.state;
-    let rows = tracks::tracks(state.composition()).into_iter().map(|track| {
-        let has_sound = state.composition().layers.iter().any(|layer| layer.track == track && layer.has_audio);
-        let toggle = |id: &'static str, icon: IconName, tip: &'static str, switch: Switch, on: bool, cx: &mut Context<Workspace>| {
-            icon_button((id, track as i64 as usize), icon, tip, on, cx.listener(move |this, _, _, cx| {
-                this.state.toggle_track_switch(track, switch);
-                cx.notify();
-            }))
-        };
-        let picture = track >= MAIN_TRACK;
-        div()
-            .h(px(track_height(track)))
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .border_b_1()
-            .border_color(hsla(color::BORDER))
-            .child(div().flex_1().truncate().text_color(hsla(if track == MAIN_TRACK { color::TEXT } else { color::MUTED })).child(track_name(track)))
-            .when(track == MAIN_TRACK, |row| {
-                row.child(icon_button("magnetic", IconName::Link, "Magnetic main track: clips stay packed together", state.magnetic_main_track, cx.listener(|this, _, _, cx| {
-                    this.state.magnetic_main_track = !this.state.magnetic_main_track;
-                    cx.notify();
-                })))
-            })
-            .when(picture, |row| row.child(toggle("track-hide", IconName::Eye, "Show or hide this track", Switch::Visible, state.track_switch(track, Switch::Visible), cx)))
-            .when(has_sound, |row| row.child(toggle("track-mute", IconName::Volume2, "Mute or unmute this track", Switch::Audio, state.track_switch(track, Switch::Audio), cx)))
-            .child(toggle("track-lock", IconName::Lock, "Lock this track", Switch::Locked, state.track_switch(track, Switch::Locked), cx))
-    });
-    div().flex().flex_col().bg(hsla(color::PANEL)).children(rows.collect::<Vec<_>>())
+    let playing = state.is_playing();
+    let rate = state.composition().frame_rate;
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .child(icon_button("tracks-start", IconName::SkipBack, "Go to Start (Home)", false, cx.listener(|this, _, _, cx| {
+            let start = this.state.work_area.start as i64;
+            this.go_to(start, cx);
+        })))
+        .child(icon_button("tracks-play", if playing { IconName::Pause } else { IconName::Play }, "Play / Pause (Space)", playing, cx.listener(|this, _, _, cx| this.toggle_playback(cx))))
+        .child(icon_button("tracks-loop", IconName::Repeat, "Loop Playback", state.loop_playback, cx.listener(|this, _, _, cx| {
+            this.state.loop_playback = !this.state.loop_playback;
+            cx.notify();
+        })))
+        .child(div().flex_1())
+        .child(div().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)))
+        .child(div().flex_1())
+        .child(view_switch(workspace.ui.timeline.view, cx))
+        .child(icon_button("snapping", IconName::Magnet, "Snapping (S)", state.snapping, cx.listener(|this, _, _, cx| {
+            this.state.snapping = !this.state.snapping;
+            cx.notify();
+        })))
+        .child(icon_button("magnetic", IconName::Link, "Magnetic main track: its clips stay packed together", state.magnetic_main_track, cx.listener(|this, _, _, cx| {
+            this.state.magnetic_main_track = !this.state.magnetic_main_track;
+            cx.notify();
+        })))
+        .child(icon_button("tracks-zoom-out", IconName::ZoomOut, "Zoom Out (Alt + Scroll)", false, cx.listener(|this, _, _, cx| {
+            zoom_around_playhead(this, 1.5);
+            cx.notify();
+        })))
+        .child(icon_button("tracks-zoom-in", IconName::ZoomIn, "Zoom In (Alt + Scroll)", false, cx.listener(|this, _, _, cx| {
+            zoom_around_playhead(this, 1.0 / 1.5);
+            cx.notify();
+        })))
+        .child(icon_button("tracks-zoom-fit", IconName::Scan, "Zoom to Fit", false, cx.listener(|this, _, _, cx| {
+            let duration = this.state.composition().duration_frames as f64;
+            this.state.set_view_range(FrameRange::new(0.0, duration));
+            cx.notify();
+        })))
 }
 
 /// The track rows with their clips.
@@ -189,28 +241,29 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
     workspace.ui.timeline.media.free_retired(window, cx);
     let state = &workspace.state;
     let composition = state.composition();
+    let existing = tracks::tracks(composition);
     let dragging = state.clip_drag_target();
     let hovered = workspace.ui.timeline.track_drop.filter(|_| cx.has_active_drag()).map(|(track, _)| track);
 
-    let rows: Vec<AnyElement> = tracks::tracks(composition)
+    let rows: Vec<AnyElement> = layout(workspace)
         .into_iter()
-        .map(|track| {
+        .map(|(track, height)| {
             // A clip being dragged is drawn in the row it is headed for.
             let clips: Vec<AnyElement> = composition
                 .layers
                 .iter()
                 .filter(|layer| match dragging {
-                    Some((id, target)) if id == layer.id && tracks::tracks(composition).contains(&target) => target == track,
+                    Some((id, target)) if id == layer.id && existing.contains(&target) => target == track,
                     _ => layer.track == track,
                 })
-                .map(|layer| clip(layer, track_height(track), workspace, cx))
+                .flat_map(|layer| clip(layer, track, workspace, cx))
                 .collect();
             div()
                 .relative()
-                .h(px(track_height(track)))
+                .h(px(height))
                 .border_b_1()
                 .border_color(hsla(color::BORDER))
-                .bg(hsla(if hovered == Some(track) { color::HOVER } else if track == MAIN_TRACK { color::INSET } else { color::PANEL }))
+                .bg(hsla(if hovered == Some(track) { color::HOVER } else if track == MAIN_TRACK { color::PANEL } else { color::INSET }))
                 .children(clips)
                 .into_any_element()
         })
@@ -222,6 +275,9 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
     let drop_line = workspace.ui.timeline.track_drop.filter(|_| cx.has_active_drag()).map(|(_, frame)| {
         div().absolute().top_0().bottom_0().left(relative(fraction(frame as f64, view))).w(px(1.0)).bg(hsla(color::ACCENT))
     });
+    // The work area's ends, as faint lines through the rows.
+    let (work_start, work_end) = (fraction(state.work_area.start, view), fraction(state.work_area.end, view));
+    let work_line = |at: f32| div().absolute().top_0().bottom_0().left(relative(at)).w(px(1.0)).bg(hsla(color::WORK_AREA));
 
     div()
         .id("track-rows")
@@ -244,8 +300,7 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
             let inside = Bounds::contains(&event.bounds, &event.event.position);
             this.ui.timeline.track_drop = inside.then(|| {
                 let graph = this.ui.timeline.graph.get();
-                let track = track_at(this.state.composition(), this.ui.timeline.rows.get().top, y);
-                (track, frame_at(x, graph, this.state.view_range).round().max(0.0) as i64)
+                (track_at(this, y), frame_at(x, graph, this.state.view_range).round().max(0.0) as i64)
             });
             cx.notify();
         }))
@@ -256,44 +311,67 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
             cx.notify();
         }))
         .children(rows)
-        .child(div().absolute().top_0().bottom_0().left(relative(playhead)).w(px(1.0)).bg(hsla(color::TEXT)))
+        .child(work_line(work_start))
+        .child(work_line(work_end))
+        .child(div().absolute().top_0().bottom_0().left(relative(playhead)).w(px(1.0)).bg(hsla(color::PLAYHEAD)))
         .children(snap)
         .children(drop_line)
 }
 
-/// One clip: a rounded box spanning its time, with what it holds drawn inside.
-fn clip(layer: &Layer, row_height: f32, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+/// A small icon toggle on a clip's header; the icon shows the state (crossed out when off).
+fn clip_toggle(layer: Id, which: &'static str, on: bool, icons: (IconName, IconName), switch: Switch, dark: bool, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let ink = if dark { 0x111111 } else { 0xffffff };
+    div()
+        .id((which, layer.0 as usize))
+        .size(px(16.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.0))
+        .hover(|style| style.bg(rgba(0x0000002a)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.state.toggle_switch(layer, switch);
+            cx.notify();
+        }))
+        .child(Icon::new(if on { icons.0 } else { icons.1 }).size(px(12.0)).text_color(rgba((ink << 8) | if on { 0xdd } else { 0x88 })))
+        .test_support()
+}
+
+/// One clip, and (when expanded) its keyframe rows underneath, as positioned elements of its
+/// track row.
+fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     let state = &workspace.state;
     let view = state.view_range;
     let id = layer.id;
     let left = fraction(layer.in_frame as f64, view);
     let width = fraction(layer.out_frame as f64, view) - left;
     let selected = state.selected_layers.contains(&id);
-    let (body, accent) = clip_colors(layer);
+    let expanded = workspace.ui.timeline.expanded_clips.contains(&id);
+    let (head, body, dark_ink) = clip_colors(layer);
+    let ink = if dark_ink { 0x111111 } else { 0xffffff };
     let graph_width = workspace.ui.timeline.graph.get().width.max(1.0);
     let clip_px = width * graph_width;
+    let height = base_height(track) - 8.0;
 
     let mut inside: Vec<AnyElement> = Vec::new();
     let has_strip = matches!(layer.content, LayerContent::Footage { .. }) && layer.has_audio;
-    let media_height = row_height - 8.0 - CLIP_HEADER - if has_strip { CLIP_SOUND_STRIP } else { 0.0 };
+    let media_height = height - CLIP_HEADER - if has_strip { CLIP_SOUND_STRIP } else { 0.0 };
     match &layer.content {
         LayerContent::Footage { item } => {
             if let Some(source) = state.project.item(*item) {
                 inside.push(filmstrip(layer, source, left, clip_px, media_height, workspace));
                 if has_strip && let Some(path) = &source.path {
-                    inside.push(waveform(layer, workspace.ui.timeline.media.peaks.peaks(path), CLIP_SOUND_STRIP, accent, workspace));
+                    inside.push(waveform(layer, workspace.ui.timeline.media.peaks.peaks(path), CLIP_SOUND_STRIP, 0xffffff, workspace));
                 }
             }
         }
         LayerContent::Audio { item } => {
             let peaks = state.project.item(*item).and_then(|source| source.path.as_ref()).and_then(|path| workspace.ui.timeline.media.peaks.peaks(path));
-            inside.push(waveform(layer, peaks, media_height, accent, workspace));
+            inside.push(waveform(layer, peaks, media_height, head, workspace));
         }
         LayerContent::Text { text, .. } => {
-            inside.push(div().px_1().truncate().text_color(hsla(color::TEXT)).child(text.lines().next().unwrap_or_default().to_owned()).into_any_element());
-        }
-        LayerContent::Solid { color: fill_color } => {
-            inside.push(div().mx_1().h(px(media_height.max(4.0))).rounded(px(2.0)).bg(rgba(fill_color.to_rgba_u32())).into_any_element());
+            inside.push(div().px_1p5().truncate().text_size(px(11.0)).text_color(rgba(0xffffffcc)).child(text.lines().next().unwrap_or_default().to_owned()).into_any_element());
         }
         _ => {}
     }
@@ -318,54 +396,151 @@ fn clip(layer: &Layer, row_height: f32, workspace: &Workspace, cx: &mut Context<
             .test_support()
     };
 
-    let effects = layer.effects.len();
+    let switches = layer.switches;
     let header = div()
         .h(px(CLIP_HEADER))
         .flex_none()
         .flex()
         .items_center()
-        .gap_1()
+        .gap_0p5()
         .px_1()
-        .text_size(px(10.0))
-        .text_color(hsla(color::TEXT))
-        .child(div().truncate().child(layer.name.clone()))
-        .when(effects > 0, |header| header.child(div().px_1().rounded(px(2.0)).bg(rgba(0xffffff1f)).child(format!("fx {effects}"))));
+        .bg(rgba((head << 8) | 0xff))
+        .text_size(px(11.0))
+        .text_color(rgba((ink << 8) | 0xff))
+        // The arrow opens the clip's keyframe rows.
+        .child(
+            div()
+                .id(("clip-expand", id.0 as usize))
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let expanded = &mut this.ui.timeline.expanded_clips;
+                    if !expanded.remove(&id) {
+                        expanded.insert(id);
+                    }
+                    cx.notify();
+                }))
+                .child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(rgba((ink << 8) | 0xdd)))
+                .test_support(),
+        )
+        .child(Icon::new(kind_icon(layer)).size(px(12.0)).text_color(rgba((ink << 8) | 0xdd)))
+        .child(div().flex_1().min_w_0().truncate().child(layer.name.clone()))
+        .when(!layer.effects.is_empty(), |header| header.child(div().px_1().rounded(px(3.0)).bg(rgba(0x00000026)).child(format!("fx {}", layer.effects.len()))))
+        .when(layer.has_audio, |header| header.child(clip_toggle(id, "clip-mute", switches.audio, (IconName::Volume2, IconName::VolumeX), Switch::Audio, dark_ink, cx)))
+        .when(layer.content.has_picture(), |header| header.child(clip_toggle(id, "clip-show", switches.visible, (IconName::Eye, IconName::EyeOff), Switch::Visible, dark_ink, cx)))
+        .child(clip_toggle(id, "clip-lock", !switches.locked, (IconName::LockOpen, IconName::Lock), Switch::Locked, dark_ink, cx));
 
+    let mut elements = vec![
+        div()
+            .id(("clip", id.0 as usize))
+            .absolute()
+            .top(px(4.0))
+            .h(px(height))
+            .left(relative(left))
+            .w(relative(width))
+            .overflow_hidden()
+            .rounded(px(5.0))
+            .bg(rgba((body << 8) | 0xff))
+            .border_1()
+            .border_color(if selected { hsla(0xffffff) } else { rgba((head << 8) | 0x55).into() })
+            .when(!switches.visible, |clip| clip.opacity(0.45))
+            .flex()
+            .flex_col()
+            .cursor_grab()
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.state.select_layer(id, event.modifiers.shift || event.modifiers.platform);
+                this.anchor_drag(event);
+                // Alt-drag slips the source under the clip, as elsewhere in the timeline.
+                if event.modifiers.alt && this.state.can_slip(id) {
+                    this.state.begin_layer_time_drag(id, LayerTimeEdit::Slip);
+                } else {
+                    this.state.begin_clip_drag(id);
+                }
+                cx.notify();
+            }))
+            .on_drag(TimelineDrag::Clip, |_, _, _, cx| cx.new(|_| EmptyDragView))
+            .child(header)
+            .children(inside)
+            .child(grip(LayerTimeEdit::TrimIn, cx).left_0())
+            .child(grip(LayerTimeEdit::TrimOut, cx).right_0())
+            .test_support()
+            .into_any_element(),
+    ];
+
+    if expanded {
+        elements.push(property_rows(layer, left, width, base_height(track), head, workspace, cx).into_any_element());
+    }
+    elements
+}
+
+/// The rows under an expanded clip: one per animated property, with its name, a line across
+/// its keyframes, and the keyframes themselves, which select and drag like anywhere else.
+fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let state = &workspace.state;
+    let view = state.view_range;
+    let id = layer.id;
+    let properties = animated_properties(layer);
+    // Keyframe positions are fractions of the visible range; inside this box they are measured
+    // from its left edge, so convert.
+    let local = move |frame: i64| (fraction(frame as f64, view) - left) / width.max(1e-6);
+    let rows: Vec<AnyElement> = if properties.is_empty() {
+        vec![div().h(px(PROPERTY_ROW)).flex().items_center().px_2().text_size(px(11.0)).text_color(hsla(color::MUTED)).child("No keyframes yet: animate a property in Properties").into_any_element()]
+    } else {
+        properties
+            .into_iter()
+            .map(|(path, name, frames)| {
+                let (first, last) = (frames.first().copied().unwrap_or(0), frames.last().copied().unwrap_or(0));
+                let keys = frames.into_iter().map(|frame| {
+                    let key = KeyframeRef { layer: id, path, frame };
+                    let selected = state.is_keyframe_selected(&key);
+                    div()
+                        .id(gpui_kit::ElementId::Name(format!("clip-kf:{}:{path:?}:{frame}", id.0).into()))
+                        .absolute()
+                        .top(px(PROPERTY_ROW * 0.5 - 6.0))
+                        .left(relative(local(frame)))
+                        .ml(px(-6.0))
+                        .size(px(12.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_ew_resize()
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            let additive = event.modifiers.shift || event.modifiers.platform;
+                            if !(this.state.is_keyframe_selected(&key) && !additive) {
+                                this.state.select_keyframe(key, additive);
+                            }
+                            this.anchor_drag(event);
+                            this.state.begin_keyframe_drag();
+                            cx.notify();
+                        }))
+                        .on_drag(TimelineDrag::Keyframes, |_, _, _, cx| cx.new(|_| EmptyDragView))
+                        .child(Icon::new(IconName::Diamond).size(px(if selected { 11.0 } else { 9.0 })).text_color(if selected { hsla(0xffffff) } else { rgba((head << 8) | 0xff).into() }))
+                        .test_support()
+                });
+                let (line_left, line_right) = (local(first), local(last));
+                div()
+                    .relative()
+                    .h(px(PROPERTY_ROW))
+                    .child(div().absolute().top(px(PROPERTY_ROW * 0.5)).h(px(1.0)).left(relative(line_left)).w(relative((line_right - line_left).max(0.0))).bg(rgba((head << 8) | 0x99)))
+                    .child(div().absolute().left(px(8.0)).top(px(4.0)).text_size(px(11.0)).text_color(rgba((head << 8) | 0xff)).child(name))
+                    .children(keys.collect::<Vec<_>>())
+                    .into_any_element()
+            })
+            .collect()
+    };
     div()
-        .id(("clip", id.0 as usize))
         .absolute()
-        .top(px(4.0))
-        .bottom(px(4.0))
+        .top(px(top))
         .left(relative(left))
         .w(relative(width))
-        .overflow_hidden()
-        .rounded(px(4.0))
-        .bg(rgba((body << 8) | 0xff))
-        .border_1()
-        .border_color(if selected { hsla(0xffffff) } else { rgba((accent << 8) | 0x66).into() })
-        .when(!layer.switches.visible, |clip| clip.opacity(0.4))
-        .flex()
-        .flex_col()
-        .cursor_grab()
-        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-            cx.stop_propagation();
-            this.state.select_layer(id, event.modifiers.shift || event.modifiers.platform);
-            this.anchor_drag(event);
-            // Alt-drag slips the source under the clip, as elsewhere in the timeline.
-            if event.modifiers.alt && this.state.can_slip(id) {
-                this.state.begin_layer_time_drag(id, LayerTimeEdit::Slip);
-            } else {
-                this.state.begin_clip_drag(id);
-            }
-            cx.notify();
-        }))
-        .on_drag(TimelineDrag::Clip, |_, _, _, cx| cx.new(|_| EmptyDragView))
-        .child(header)
-        .children(inside)
-        .child(grip(LayerTimeEdit::TrimIn, cx).left_0())
-        .child(grip(LayerTimeEdit::TrimOut, cx).right_0())
-        .test_support()
-        .into_any_element()
+        .rounded_b(px(5.0))
+        .bg(rgba((head << 8) | 0x1c))
+        .children(rows)
 }
 
 /// Thumbnails across a video clip, one per tile, each showing the source frame at its spot.
@@ -397,11 +572,11 @@ fn filmstrip(layer: &Layer, source: &studio_core::model::ProjectItem, left: f32,
 }
 
 /// A waveform across a clip: one bar per two pixels, from the source's peak levels at that time.
-fn waveform(layer: &Layer, peaks: Option<Arc<Peaks>>, height: f32, accent: u32, workspace: &Workspace) -> AnyElement {
+fn waveform(layer: &Layer, peaks: Option<Arc<Peaks>>, height: f32, ink: u32, workspace: &Workspace) -> AnyElement {
     let Some(peaks) = peaks else { return div().h(px(height)).into_any_element() };
     let fps = workspace.state.composition().frame_rate.fps();
     let (in_frame, out_frame, start_frame) = (layer.in_frame, layer.out_frame, layer.start_frame);
-    let color = rgba((accent << 8) | 0xcc);
+    let color = rgba((ink << 8) | 0xcc);
     canvas(|_, _, _| (), move |bounds, _, window, _| {
         let width = f32::from(bounds.size.width);
         let tall = f32::from(bounds.size.height);
@@ -424,3 +599,4 @@ fn waveform(layer: &Layer, peaks: Option<Arc<Peaks>>, height: f32, accent: u32, 
     .w_full()
     .into_any_element()
 }
+

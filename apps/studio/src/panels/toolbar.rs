@@ -3,7 +3,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Disableable as _;
-use gpui_kit::{Context, IntoElement, ParentElement, Styled, div, px};
+use gpui_kit::{Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, TestSupportExt as _, div, px};
 
 use super::chrome::icon_button;
 use crate::theme::{color, hsla, size};
@@ -67,4 +67,19 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         // An export running in the background shows its progress at the right.
         .child(div().flex_1())
         .children(super::export::status(workspace, cx))
+        // The one bright button on screen: export the composition (⌘M).
+        .child(
+            div()
+                .id("toolbar-export")
+                .px_3()
+                .py_1()
+                .rounded(px(6.0))
+                .bg(hsla(color::HIGHLIGHT))
+                .text_color(hsla(0x111111))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .hover(|style| style.opacity(0.9))
+                .on_click(cx.listener(|this, _, window, cx| super::export::open(this, window, cx)))
+                .child("Export")
+                .test_support(),
+        )
 }

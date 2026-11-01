@@ -105,6 +105,8 @@ pub struct TimelineUi {
     pub(crate) media: tracks::TrackMedia,
     /// While a project item is dragged over the Tracks view: the track and frame it would land at.
     track_drop: Option<(i32, i64)>,
+    /// Clips opened in the Tracks view to show their keyframe rows.
+    expanded_clips: std::collections::HashSet<Id>,
     pub outline_width: f32,
     /// Bounds of the rows content (it scrolls, so its top moves with the scroll position).
     rows: MeasuredBounds,
@@ -123,6 +125,7 @@ impl Default for TimelineUi {
             view: TimelineView::Tracks,
             media: tracks::TrackMedia::default(),
             track_drop: None,
+            expanded_clips: Default::default(),
             // Wide enough to show every column, Parent & Link included.
             outline_width: columns::FULL,
             graph: MeasuredBounds::default(),
@@ -241,7 +244,7 @@ impl Workspace {
             }
             TimelineDrag::LayerBar => self.state.drag_layer_time(ruler_delta.round() as i64),
             TimelineDrag::Clip => {
-                let track = tracks::track_at(self.state.composition(), self.ui.timeline.rows.get().top, y);
+                let track = tracks::track_at(self, y);
                 self.state.drag_clip(ruler_delta.round() as i64, track);
             }
             TimelineDrag::Splitter => {
@@ -841,10 +844,11 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                         .top_0()
                         .bottom_0()
                         .left(relative(playhead))
-                        .ml(px(-5.0))
-                        .w(px(11.0))
-                        .child(div().absolute().bottom_0().left_0().w(px(11.0)).h(px(10.0)).rounded_t(px(2.0)).bg(hsla(color::ACCENT)))
-                        .child(div().absolute().top_0().bottom_0().left(px(5.0)).w(px(1.0)).bg(hsla(color::ACCENT))),
+                        .ml(px(-7.0))
+                        .w(px(14.0))
+                        // A white pill head on a thin white line.
+                        .child(div().absolute().top_0().bottom_0().left(px(6.5)).w(px(1.0)).bg(hsla(color::PLAYHEAD)))
+                        .child(div().absolute().bottom(px(2.0)).left_0().w(px(14.0)).h(px(18.0)).rounded(px(7.0)).bg(hsla(color::PLAYHEAD))),
                 ),
         )
 }
@@ -956,14 +960,14 @@ fn controls(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
 pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let ui = &workspace.ui.timeline;
     let show_tracks = ui.view == TimelineView::Tracks;
-    // The left column: the layer outline, or the narrower track headers.
-    let outline_width = if show_tracks { tracks::HEADER_WIDTH } else { ui.outline_width };
+    // The left column holds the layer outline; the Tracks view has none (clips carry their own controls).
+    let outline_width = if show_tracks { 0.0 } else { ui.outline_width };
     let rows = workspace.timeline_rows();
     let playhead = fraction(workspace.state.current_frame as f64, workspace.state.view_range);
     let drop_preview = ui.drop_preview.filter(|_| cx.has_active_drag());
 
     let band = |height: f32| div().h(px(height)).flex_none().flex().border_b_1().border_color(hsla(color::HAIRLINE));
-    let gap = || div().w(px(SPLITTER)).flex_none().h_full();
+    let gap = || div().w(px(if show_tracks { 0.0 } else { SPLITTER })).flex_none().h_full();
 
     let outline_rows: Vec<AnyElement> = rows.iter().map(|row| outline_row(row, workspace, cx)).collect();
     let graph_rows: Vec<AnyElement> = rows.iter().map(|row| graph_row(row, workspace, cx)).collect();
@@ -991,7 +995,7 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
             .h(px((y1 - y0).abs()))
             .border_1()
             .border_color(hsla(color::ACCENT))
-            .bg(gpui_kit::rgba(0x2d8ceb22))
+            .bg(gpui_kit::rgba(0x8b5cf622))
     });
 
     let rows_content = div()
@@ -1047,7 +1051,7 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
                     cx.notify();
                 }))
                 .children(graph_rows)
-                .child(div().absolute().top_0().bottom_0().left(relative(playhead)).w(px(1.0)).bg(hsla(color::ACCENT)))
+                .child(div().absolute().top_0().bottom_0().left(relative(playhead)).w(px(1.0)).bg(hsla(color::PLAYHEAD)))
                 // Where the current drag snapped to.
                 .children(workspace.state.snap_line().map(|frame| {
                     div()
@@ -1073,8 +1077,6 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
             .min_h_full()
             .flex()
             .child(ui.rows.probe())
-            .child(div().w(px(outline_width)).flex_none().overflow_hidden().child(tracks::headers(workspace, cx)))
-            .child(gap())
             .child(tracks::rows(workspace, window, cx))
     } else {
         rows_content
@@ -1093,7 +1095,7 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
         }))
         // In the Tracks view the track headers are too narrow for the controls, so they get a
         // full-width bar of their own above the navigator, as CapCut's toolbar is.
-        .children(show_tracks.then(|| band(CONTROLS_BAND).child(div().flex_1().min_w_0().child(controls(workspace, cx)))))
+        .children(show_tracks.then(|| band(CONTROLS_BAND).child(div().flex_1().min_w_0().child(tracks::toolbar(workspace, cx)))))
         .child(
             band(CONTROLS_BAND)
                 .child(div().w(px(outline_width)).flex_none().overflow_hidden().children((!show_tracks).then(|| controls(workspace, cx))))
