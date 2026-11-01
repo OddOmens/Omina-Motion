@@ -3,6 +3,7 @@
 
 mod app_settings;
 mod assets;
+mod library_store;
 mod panels;
 mod project_files;
 mod sound;

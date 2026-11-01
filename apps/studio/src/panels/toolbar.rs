@@ -229,6 +229,7 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .bg(hsla(color::BACKGROUND))
         .child(rail_button("rail-media", IconName::Folder, "Media", side == LeftPanel::Media, show(LeftPanel::Media), cx))
         .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
+        .child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx))
         .child(separator())
         .child(rail_button("tool-selection", IconName::MousePointer2, "Select", tool == Tool::Selection, pick(Tool::Selection), cx))
         .child(rail_button("tool-type", IconName::Type, "Text", tool == Tool::Type, pick(Tool::Type), cx))

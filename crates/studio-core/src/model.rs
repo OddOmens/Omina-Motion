@@ -12,6 +12,11 @@ pub const MAX_FRAME: i64 = 1 << 40;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Id(pub u64);
 
+/// An item in a library (a brand, color or text style); see `crate::library`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct LinkId(pub u64);
+
 /// A color with straight (non-premultiplied) alpha, each channel 0.0–1.0.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rgba {
@@ -19,6 +24,10 @@ pub struct Rgba {
     pub g: f32,
     pub b: f32,
     pub a: f32,
+    /// The library color this one comes from. A linked color follows its library color when
+    /// that changes (see `library::sync_project`); picking any other color unlinks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkId>,
 }
 
 impl Rgba {
@@ -29,7 +38,23 @@ impl Rgba {
             g: ((rgb >> 8) & 0xff) as f32 / 255.0,
             b: (rgb & 0xff) as f32 / 255.0,
             a: 1.0,
+            link: None,
         }
+    }
+
+    /// The same color with its opacity set (0–1).
+    pub fn with_alpha(self, alpha: f32) -> Self {
+        Self { a: if alpha.is_finite() { alpha.clamp(0.0, 1.0) } else { 1.0 }, ..self }
+    }
+
+    /// The same color, linked to library color `link` (or unlinked, with `None`).
+    pub fn linked(self, link: Option<LinkId>) -> Self {
+        Self { link, ..self }
+    }
+
+    /// Whether two colors look the same (ignoring links), to the nearest 8-bit step.
+    pub fn same_look(self, other: Self) -> bool {
+        self.to_rgba_u32() == other.to_rgba_u32()
     }
 
     /// Packs the color as 0xRRGGBBAA, the format GPUI's `rgba()` expects.
@@ -73,7 +98,7 @@ impl Rgba {
             _ => (chroma, 0.0, x),
         };
         let m = v - chroma;
-        Self { r: r + m, g: g + m, b: b + m, a: 1.0 }
+        Self { r: r + m, g: g + m, b: b + m, a: 1.0, link: None }
     }
 
     /// The color as "#RRGGBB".
@@ -166,6 +191,15 @@ impl Paint {
 
     /// The colors it is made of: one for a solid, start and end for a gradient.
     pub fn colors(self) -> Vec<Rgba> {
+        match self {
+            Self::Solid(color) => vec![color],
+            Self::Linear { start, end, .. } => vec![start, end],
+            Self::Radial { inner, outer } => vec![inner, outer],
+        }
+    }
+
+    /// Every color in it, to change in place.
+    pub fn colors_mut(&mut self) -> Vec<&mut Rgba> {
         match self {
             Self::Solid(color) => vec![color],
             Self::Linear { start, end, .. } => vec![start, end],
@@ -381,6 +415,10 @@ pub struct TextStyle {
     pub fill: Option<Rgba>,
     pub stroke: Option<(Rgba, f32)>,
     pub align: TextAlign,
+    /// The library text style this follows (font, weight, size, leading, tracking and fill).
+    /// Changing one of those by hand unlinks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<LinkId>,
 }
 
 impl TextStyle {
@@ -411,6 +449,7 @@ impl Default for TextStyle {
             fill: Some(Rgba::hex(0xffffff)),
             stroke: None,
             align: TextAlign::Center,
+            template: None,
         }
     }
 }
@@ -701,6 +740,33 @@ impl Project {
         let id = Id(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    /// Calls `visit` on every color in the project: solid items, composition backgrounds, and
+    /// the colors of solid, text and shape layers.
+    pub fn for_each_color_mut(&mut self, mut visit: impl FnMut(&mut Rgba)) {
+        for color in self.items.iter_mut().filter_map(|item| item.color.as_mut()) {
+            visit(color);
+        }
+        for composition in &mut self.compositions {
+            visit(&mut composition.background);
+            for layer in &mut composition.layers {
+                match &mut layer.content {
+                    LayerContent::Solid { color } => visit(color),
+                    LayerContent::Text { style, .. } => {
+                        style.fill.iter_mut().for_each(&mut visit);
+                        style.stroke.iter_mut().for_each(|(color, _)| visit(color));
+                    }
+                    LayerContent::Shape { style } => {
+                        let paints = style.fill.iter_mut().chain(style.stroke.iter_mut().map(|stroke| &mut stroke.paint));
+                        for paint in paints {
+                            paint.colors_mut().into_iter().for_each(&mut visit);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     pub fn item(&self, id: Id) -> Option<&ProjectItem> {

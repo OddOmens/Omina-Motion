@@ -17,6 +17,7 @@ pub enum PanelKind {
     Timeline,
     Properties,
     Effects,
+    Libraries,
     Align,
 }
 
@@ -59,6 +60,7 @@ impl Render for PanelView {
                     PanelKind::Timeline => timeline::render(workspace, window, cx).into_any_element(),
                     PanelKind::Properties => properties::render(workspace, cx).into_any_element(),
                     PanelKind::Effects => effects::render(workspace, cx).into_any_element(),
+                    PanelKind::Libraries => libraries::render(workspace, cx).into_any_element(),
                     PanelKind::Align => align::render(workspace, cx).into_any_element(),
                 }
             })

@@ -30,7 +30,7 @@ pub struct AppSettings {
 }
 
 /// Studio's settings folder.
-fn folder() -> PathBuf {
+pub(crate) fn folder() -> PathBuf {
     if cfg!(test) {
         // Per test thread, so tests running side by side don't share settings.
         let thread = format!("{:?}", std::thread::current().id()).replace(|c: char| !c.is_ascii_alphanumeric(), "");

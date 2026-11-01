@@ -9,6 +9,7 @@ pub mod effects;
 pub mod export;
 pub mod fields;
 pub mod graph_editor;
+pub mod libraries;
 pub mod project;
 pub mod properties;
 pub mod timeline;

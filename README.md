@@ -32,8 +32,11 @@ Inside `apps/studio/src`:
   per row, thumbnails and waveforms, and each clip's keyframe rows when it is opened.
 - `panels/toolbar.rs`: the top bar and the rail on the left: the side panel (Media or Effects), the tools
   (Select, Text, Shape, Cut) and import. Holding the Shape button opens the shape menu.
-- `panels/color_picker.rs`: the color wheel that every color chip opens (hue around, saturation outward,
-  brightness bar, hex field, swatches).
+- `panels/color_picker.rs`: the color picker every color chip opens: a saturation/brightness square, hue and
+  opacity sliders, hex and opacity fields, the project's colors, paint type for shapes, and a Libraries tab.
+- `panels/libraries.rs`, `state/library.rs`, `library_store.rs`: Libraries (brands holding shared colors and
+  text styles, linked wherever they are used; the model and syncing are in `studio-core/src/library.rs`).
+  They are stored in Studio's settings folder as `libraries.json`, with backups in `Library Backups`.
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout.
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).

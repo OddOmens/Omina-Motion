@@ -14,6 +14,7 @@ mod copy;
 mod history;
 mod keyframes;
 mod layer_time;
+mod library;
 mod snap;
 mod viewer;
 
@@ -95,6 +96,8 @@ pub enum ColorTarget {
     Shape { layer: Id, slot: PaintSlot, stop: usize },
     TextFill(Id),
     TextStroke(Id),
+    /// A color in a library; changing it changes everything linked to it.
+    Library(studio_core::model::LinkId),
 }
 
 /// A paint's angle, if it is a linear gradient.
@@ -215,6 +218,9 @@ pub struct EditorState {
     layer_time_drag: Option<layer_time::LayerTimeDrag>,
     viewer_drag: Option<viewer::ViewerDrag>,
     history: history::History,
+    /// The brands, colors and text styles shared by every project (see `library_store`).
+    pub libraries: studio_core::library::Libraries,
+    library_save: library::LibrarySave,
     /// Layers copied with Cmd+C, ready to paste.
     clipboard: Vec<studio_core::model::Layer>,
     /// The project file being edited; `None` until the project is first saved.
@@ -249,6 +255,8 @@ impl EditorState {
             viewer_drag: None,
             history: history::History::new(&project),
             clipboard: Vec::new(),
+            libraries: studio_core::library::Libraries::default(),
+            library_save: library::LibrarySave::Saved,
             file: None,
             project,
         }
@@ -556,18 +564,31 @@ impl EditorState {
     }
 
     pub fn set_text_setting(&mut self, layer: Id, setting: TextSetting, value: f32) {
-        edit::edit_text(self.composition_mut(), layer, |_, style| setting.set(style, value));
+        edit::edit_text(self.composition_mut(), layer, |_, style| {
+            setting.set(style, value);
+            // Changing what a library text style sets unlinks it (stroke width is not part of one).
+            if setting != TextSetting::StrokeWidth {
+                style.template = None;
+            }
+        });
     }
 
     pub fn set_font(&mut self, layer: Id, family: &str, weight: u16) {
         edit::edit_text(self.composition_mut(), layer, |_, style| {
             style.font_family = family.to_owned();
             style.font_weight = weight;
+            style.template = None;
         });
     }
 
     pub fn set_text_fill(&mut self, layer: Id, fill: Option<studio_core::model::Rgba>) {
-        edit::edit_text(self.composition_mut(), layer, |_, style| style.fill = fill);
+        edit::edit_text(self.composition_mut(), layer, |_, style| {
+            // A different fill from the one the linked text style sets unlinks it.
+            if style.fill.map(|old| old.linked(None)) != fill.map(|new| new.linked(None)) {
+                style.template = None;
+            }
+            style.fill = fill;
+        });
     }
 
     pub fn set_text_stroke(&mut self, layer: Id, stroke: Option<(studio_core::model::Rgba, f32)>) {
@@ -634,6 +655,7 @@ impl EditorState {
             ColorTarget::Shape { layer, slot, stop } => self.shape_paint(layer, slot)?.colors().get(stop).copied(),
             ColorTarget::TextFill(layer) => self.text_of(layer)?.1.fill,
             ColorTarget::TextStroke(layer) => self.text_of(layer)?.1.stroke.map(|(color, _)| color),
+            ColorTarget::Library(id) => self.libraries.color(id).map(|(_, item)| item.color),
         }
     }
 
@@ -649,6 +671,7 @@ impl EditorState {
                 let width = self.text_of(layer).and_then(|(_, style)| style.stroke).map_or(2.0, |(_, width)| width);
                 self.set_text_stroke(layer, Some((color, width)));
             }
+            ColorTarget::Library(id) => self.set_library_color(id, color),
         }
     }
 
@@ -954,6 +977,8 @@ impl EditorState {
         self.end_viewer_drag();
         self.end_layer_time_drag();
         self.project = project;
+        // Library colors and text styles may have changed since it was saved.
+        studio_core::library::sync_project(&mut self.project, &self.libraries);
         self.open_composition(view.active_composition);
         self.current_frame = view.current_frame;
         self.work_area = view.work_area;

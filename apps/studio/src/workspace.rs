@@ -151,6 +151,8 @@ pub enum LeftPanel {
     Media,
     /// Effects & Presets, to drag onto clips.
     Effects,
+    /// Brands' shared colors and text styles.
+    Libraries,
 }
 
 /// Panels that can hold focus; the focused one gets a blue outline.
@@ -163,6 +165,7 @@ pub enum PanelId {
     Properties,
     /// Holds the Effects & Presets and Flow tabs.
     Effects,
+    Libraries,
     Align,
 }
 
@@ -195,6 +198,8 @@ pub struct EffectDrag {
 pub enum EditTarget {
     Number(FieldTarget),
     SourceText(Id),
+    /// The name of a library brand, color or text style.
+    LibraryName(studio_core::model::LinkId),
 }
 
 /// The text input currently open over a value, and the subscription that commits it.
@@ -219,6 +224,8 @@ pub struct UiState {
     /// Active tab index for panels with tabs.
     pub tabs: HashMap<PanelId, usize>,
     pub collapsed_folders: HashSet<Id>,
+    /// Library brands the user folded away (all are open to begin with).
+    pub closed_brands: HashSet<studio_core::model::LinkId>,
     /// Effect categories the user folded away (all are open to begin with).
     pub closed_effect_categories: HashSet<&'static str>,
     pub viewer_bounds: panels::chrome::MeasuredBounds,
@@ -274,6 +281,7 @@ struct Panels {
     timeline: Entity<PanelView>,
     properties: Entity<PanelView>,
     effects: Entity<PanelView>,
+    libraries: Entity<PanelView>,
     align: Entity<PanelView>,
     clock: Entity<PlaybackClock>,
 }
@@ -285,18 +293,20 @@ impl Panels {
         let (toolbar, project, viewer, timeline) =
             (view(PanelKind::Toolbar), view(PanelKind::Project), view(PanelKind::Viewer), view(PanelKind::Timeline));
         let (properties, effects, align) = (view(PanelKind::Properties), view(PanelKind::Effects), view(PanelKind::Align));
+        let libraries = view(PanelKind::Libraries);
         let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id()];
         let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed));
-        Self { toolbar, project, viewer, timeline, properties, effects, align, clock }
+        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, clock }
     }
 }
 
 #[cfg(test)]
 impl Workspace {
-    /// How many times each panel has rendered: toolbar, project, viewer, timeline, properties, effects, align.
-    pub fn panel_render_counts(&self, cx: &App) -> [usize; 7] {
+    /// How many times each panel has rendered, in `PanelKind` order: toolbar, project, viewer,
+    /// timeline, properties, effects, libraries, align.
+    pub fn panel_render_counts(&self, cx: &App) -> [usize; 8] {
         let p = &self.panels;
-        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.align].map(|view| view.read(cx).renders)
+        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align].map(|view| view.read(cx).renders)
     }
 }
 
@@ -386,6 +396,14 @@ impl Workspace {
         // (Not in headless tests, which start fresh and must not touch real settings.)
         #[cfg(not(test))]
         {
+            // Libraries first, so the restored project's linked colors come up to date.
+            let loaded = crate::library_store::load();
+            cx.defer_in(window, move |this, window, cx| {
+                this.state.set_libraries(loaded.libraries);
+                if let Some(notice) = loaded.notice {
+                    window.push_notification(notice.as_str(), cx);
+                }
+            });
             cx.defer_in(window, |this, window, cx| this.restore_session(window, cx));
             cx.spawn(async move |this, cx| {
                 loop {
@@ -414,6 +432,7 @@ impl Workspace {
                 tabs: HashMap::new(),
                 collapsed_folders: HashSet::new(),
                 closed_effect_categories: HashSet::new(),
+                closed_brands: HashSet::new(),
                 viewer_bounds: Default::default(),
                 frame_bounds: Default::default(),
                 viewer_anchor: None,
@@ -536,6 +555,7 @@ impl Workspace {
                 }
             }
             EditTarget::SourceText(layer) => self.state.set_text(layer, &text),
+            EditTarget::LibraryName(id) => self.state.rename_library_item(id, &text),
         }
         // Hand keyboard focus back to the editor so shortcuts work again.
         window.focus(&self.focus, cx);
@@ -627,7 +647,17 @@ impl Render for Workspace {
         // Every edit redraws the workspace, so this is where edits become undo steps, and where
         // manual stops (moving the playhead) and changes such as muting a layer reach the sound.
         let picking = self.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
-        self.state.record_history(cx.has_active_drag() || picking);
+        let dragging = cx.has_active_drag() || picking;
+        self.state.record_history(dragging);
+        // Library edits are saved once a drag (on the color wheel, say) is over.
+        if !dragging && let Some(back_up) = self.state.take_library_save() {
+            #[cfg(not(test))]
+            if let Err(problem) = crate::library_store::save(&self.state.libraries, back_up) {
+                window.push_notification(problem.as_str(), cx);
+            }
+            #[cfg(test)]
+            let _ = back_up;
+        }
         // A dialog closed with OK leaves nothing focused, which would silence every shortcut
         // until the next click; give focus back to the editor.
         if window.focused(cx).is_none() && !window.has_active_dialog(cx) {
@@ -652,6 +682,7 @@ impl Render for Workspace {
                                             .child(match self.ui.left_panel {
                                                 LeftPanel::Media => cached(&panels.project),
                                                 LeftPanel::Effects => cached(&panels.effects),
+                                                LeftPanel::Libraries => cached(&panels.libraries),
                                             }),
                                     )
                                     .child(resizable_panel().child(cached(&panels.viewer))),

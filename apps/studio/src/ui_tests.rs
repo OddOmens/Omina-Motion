@@ -509,7 +509,7 @@ fn playback_rerenders_only_the_panels_that_show_time(cx: &mut TestAppContext) {
     }
     let after = visual.update(|_, cx| workspace.read(cx).panel_render_counts(cx));
     let rendered = |kind: PanelKind| after[kind as usize] - before[kind as usize];
-    for kind in [PanelKind::Toolbar, PanelKind::Project, PanelKind::Effects, PanelKind::Align] {
+    for kind in [PanelKind::Toolbar, PanelKind::Project, PanelKind::Effects, PanelKind::Libraries, PanelKind::Align] {
         assert_eq!(rendered(kind), 0, "{kind:?} should stay cached during playback");
     }
     for kind in [PanelKind::Viewer, PanelKind::Timeline, PanelKind::Properties] {
@@ -1541,42 +1541,53 @@ fn shape_style(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, la
     visual.update(|_, cx| *workspace.read(cx).state.shape_of(layer).unwrap())
 }
 
-#[gpui_kit::test]
-fn the_color_wheel_picks_a_shapes_fill(cx: &mut TestAppContext) {
-    use studio_core::model::{Paint, ShapeKind};
-    let (workspace, visual) = open(cx);
-    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
-    visual.update(|window, cx| window.click("shape-fill-color:0", cx));
+/// Clicks `id` at a point `fraction` of the way across and down it.
+fn click_at_fraction(visual: &mut VisualTestContext, id: &'static str, fraction: (f32, f32)) {
+    let bounds = visual.update(|window, _| window.find(id).bounds());
+    let offset = point(bounds.size.width * fraction.0, bounds.size.height * fraction.1);
+    visual.update(|window, cx| window.click_with_options(id, gpui_kit::test::ClickOptions::new().with_offset(offset), cx));
     render(visual);
-    assert!(visual.update(|window, _| window.try_find("color-wheel")).is_some(), "the chip opens the wheel");
-    // The right edge of the wheel is red, at full saturation.
-    let wheel = visual.update(|window, _| window.find("color-wheel").bounds());
-    let offset = point(wheel.size.width - px(2.0), wheel.size.height / 2.0);
-    visual.update(|window, cx| window.click_with_options("color-wheel", gpui_kit::test::ClickOptions::new().with_offset(offset), cx));
-    render(visual);
-    let Some(Paint::Solid(color)) = shape_style(&workspace, visual, layer).fill else { panic!("still a solid fill") };
-    assert!(color.r > 0.8 && color.g < 0.2 && color.b < 0.2, "picked red: {color:?}");
-    // The brightness bar's left end is black.
-    visual.update(|window, cx| window.click_with_options("color-brightness", gpui_kit::test::ClickOptions::new().with_offset(point(px(1.0), px(7.0))), cx));
-    render(visual);
-    let Some(Paint::Solid(color)) = shape_style(&workspace, visual, layer).fill else { panic!() };
-    assert!(color.r < 0.05, "darkened to black: {color:?}");
-    // A swatch sets it outright.
-    visual.update(|window, cx| window.click(("color-swatch", 0usize), cx));
-    render(visual);
-    assert_eq!(shape_style(&workspace, visual, layer).fill, Some(Paint::Solid(studio_core::model::Rgba::hex(0xffffff))));
 }
 
 #[gpui_kit::test]
-fn dragging_on_the_wheel_is_one_undo_step(cx: &mut TestAppContext) {
+fn the_color_picker_sets_hue_saturation_brightness_and_opacity(cx: &mut TestAppContext) {
+    use studio_core::model::{Paint, ShapeKind};
+    let (workspace, visual) = open(cx);
+    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    let fill = |visual: &mut VisualTestContext| match shape_style(&workspace, visual, layer).fill {
+        Some(Paint::Solid(color)) => color,
+        other => panic!("expected a solid fill, got {other:?}"),
+    };
+    visual.update(|window, cx| window.click("shape-fill-color:0", cx));
+    render(visual);
+    // Hue all the way left is red; the square's top right is that hue at full strength.
+    click_at_fraction(visual, "color-hue", (0.0, 0.5));
+    click_at_fraction(visual, "color-field", (0.999, 0.001));
+    let red = fill(visual);
+    assert!(red.r > 0.95 && red.g < 0.05 && red.b < 0.05, "full red: {red:?}");
+    // The square's bottom is black, whatever the hue.
+    click_at_fraction(visual, "color-field", (0.5, 0.999));
+    assert!(fill(visual).r < 0.02, "black at the bottom");
+    // The opacity slider sets alpha.
+    click_at_fraction(visual, "color-alpha", (0.5, 0.5));
+    assert!((fill(visual).a - 0.5).abs() < 0.03, "half opacity: {}", fill(visual).a);
+    // A color in the project's row applies as it is.
+    let first = visual.update(|_, cx| workspace.read(cx).state.project_colors()[0]);
+    visual.update(|window, cx| window.click(("color-swatch", 0usize), cx));
+    render(visual);
+    assert!(fill(visual).same_look(first));
+}
+
+#[gpui_kit::test]
+fn dragging_in_the_color_picker_is_one_undo_step(cx: &mut TestAppContext) {
     use studio_core::model::ShapeKind;
     let (workspace, visual) = open(cx);
     let layer = add_shape(&workspace, visual, ShapeKind::Ellipse);
     let before = shape_style(&workspace, visual, layer).fill;
     visual.update(|window, cx| window.click("shape-fill-color:0", cx));
     render(visual);
-    let wheel = visual.update(|window, _| window.find("color-wheel").bounds());
-    visual.update(|window, cx| window.drag(wheel.center(), point(wheel.center().x + px(60.0), wheel.center().y + px(30.0)), cx));
+    let field = visual.update(|window, _| window.find("color-field").bounds());
+    visual.update(|window, cx| window.drag(field.center(), point(field.center().x + px(60.0), field.center().y + px(30.0)), cx));
     render(visual);
     assert_ne!(shape_style(&workspace, visual, layer).fill, before);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
@@ -1652,7 +1663,7 @@ fn shapes_size_by_width_and_height_or_by_radius(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_text_fill_chip_opens_the_color_wheel(cx: &mut TestAppContext) {
+fn the_text_fill_chip_opens_the_color_picker(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.state.select_layer(TITLE, false);
@@ -1661,8 +1672,133 @@ fn the_text_fill_chip_opens_the_color_wheel(cx: &mut TestAppContext) {
     render(visual);
     visual.update(|window, cx| window.click("fill-color", cx));
     render(visual);
-    visual.update(|window, cx| window.click(("color-swatch", 3usize), cx));
+    click_at_fraction(visual, "color-field", (0.0, 0.999));
+    let fill = visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().1.fill).unwrap();
+    assert!(fill.r < 0.02 && fill.g < 0.02 && fill.b < 0.02, "black: {fill:?}");
+}
+
+// Libraries ------------------------------------------------------------------------------------
+
+/// Opens the Libraries panel and makes a brand named `name` from its New Brand button.
+fn make_brand(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, name: &str) -> studio_core::model::LinkId {
+    visual.update(|window, cx| window.click("rail-libraries", cx));
     render(visual);
-    let fill = visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().1.fill);
-    assert_eq!(fill, Some(studio_core::model::Rgba::hex(0xe5484d)), "the red swatch");
+    visual.update(|window, cx| window.click("library-new-brand", cx));
+    render(visual);
+    // The new brand's name is ready to type over.
+    visual.update(|window, cx| window.press("cmd-a", cx));
+    visual.update(|window, cx| window.input(name, cx));
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let brands = &workspace.read(cx).state.libraries.brands;
+        let brand = brands.last().expect("a brand was made");
+        assert_eq!(brand.name, name);
+        brand.id
+    })
+}
+
+#[gpui_kit::test]
+fn a_library_color_links_and_changing_it_updates_the_shape(cx: &mut TestAppContext) {
+    use studio_core::model::{Paint, Rgba, ShapeKind};
+    let (workspace, visual) = open(cx);
+    let brand = make_brand(&workspace, visual, "Brand A");
+    let layer = add_shape(&workspace, visual, ShapeKind::Ellipse);
+    // + adds the selected shape's fill to the brand, and opens the picker on the new color.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("library-add-color:{}", brand.0).into()), cx));
+    render(visual);
+    let color = visual.update(|_, cx| workspace.read(cx).state.libraries.brand(brand).unwrap().colors[0].id);
+    click_at_fraction(visual, "color-field", (0.999, 0.001));
+    visual.update(|window, cx| window.click("color-picker-close", cx));
+    render(visual);
+    // Clicking the library color uses it on the shape, linked.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("library-color:{}", color.0).into()), cx));
+    render(visual);
+    let Some(Paint::Solid(fill)) = shape_style(&workspace, visual, layer).fill else { panic!() };
+    assert_eq!(fill.link, Some(color));
+    // Changing the library color changes the shape.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_library_color(color, Rgba::hex(0x00ff00));
+        cx.notify();
+    }));
+    render(visual);
+    let Some(Paint::Solid(fill)) = shape_style(&workspace, visual, layer).fill else { panic!() };
+    assert!(fill.same_look(Rgba::hex(0x00ff00)) && fill.link == Some(color));
+}
+
+#[gpui_kit::test]
+fn the_pickers_libraries_tab_links_a_color(cx: &mut TestAppContext) {
+    use studio_core::model::{Paint, Rgba, ShapeKind};
+    let (workspace, visual) = open(cx);
+    let brand = make_brand(&workspace, visual, "Brand A");
+    let primary = visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.add_library_color(brand, Rgba::hex(0x2d8ceb)).unwrap()));
+    let layer = add_shape(&workspace, visual, ShapeKind::Star);
+    visual.update(|window, cx| window.click("rail-media", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("shape-fill-color:0", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("picker-tab", 1usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("library-swatch", 0usize), cx));
+    render(visual);
+    let Some(Paint::Solid(fill)) = shape_style(&workspace, visual, layer).fill else { panic!() };
+    assert_eq!(fill.link, Some(primary));
+    // The picker says where it comes from, and Detach stops following the library.
+    visual.update(|window, cx| window.click(("picker-tab", 0usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("color-unlink", cx));
+    render(visual);
+    let Some(Paint::Solid(fill)) = shape_style(&workspace, visual, layer).fill else { panic!() };
+    assert_eq!(fill.link, None);
+}
+
+#[gpui_kit::test]
+fn text_styles_save_from_a_layer_and_apply_to_another(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let brand = make_brand(&workspace, visual, "Brand A");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        ws.state.set_text_setting(TITLE, crate::state::TextSetting::FontSize, 48.0);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name(format!("library-add-text:{}", brand.0).into()), cx));
+    render(visual);
+    let style = visual.update(|_, cx| workspace.read(cx).state.libraries.brand(brand).unwrap().text_styles[0].id);
+    // A second text layer takes the style.
+    let other = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let other = ws.state.add_text_layer("Body", Vec2::new(200.0, 200.0)).unwrap();
+        ws.state.select_layer(other, false);
+        cx.notify();
+        other
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name(format!("library-text:{}", style.0).into()), cx));
+    render(visual);
+    let applied = visual.update(|_, cx| workspace.read(cx).state.text_of(other).unwrap().1.clone());
+    assert_eq!((applied.font_size, applied.template), (48.0, Some(style)));
+}
+
+#[gpui_kit::test]
+fn library_items_and_whole_brands_delete(cx: &mut TestAppContext) {
+    use studio_core::model::Rgba;
+    let (workspace, visual) = open(cx);
+    let brand = make_brand(&workspace, visual, "Brand A");
+    let (one, two) = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let one = ws.state.add_library_color(brand, Rgba::hex(0x111111)).unwrap();
+        let two = ws.state.add_library_color(brand, Rgba::hex(0x222222)).unwrap();
+        cx.notify();
+        (one, two)
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name(format!("library-delete:{}", one.0).into()), cx));
+    render(visual);
+    let left: Vec<_> = visual.update(|_, cx| workspace.read(cx).state.libraries.brand(brand).unwrap().colors.iter().map(|c| c.id).collect());
+    assert_eq!(left, vec![two], "just that color went");
+    // Deleting the brand asks first, then takes everything in it.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("library-delete-brand:{}", brand.0).into()), cx));
+    render(visual);
+    click_label(visual, "Delete");
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.libraries.brands.is_empty()));
 }
