@@ -53,7 +53,7 @@ impl FieldTarget {
                 Some((snapshot.value.component(component), format))
             }
             Self::Text { layer, setting } => {
-                let (_, style) = state.text_of(layer)?;
+                let style = state.text_style_of(layer)?;
                 let (step, decimals, unit) = match setting {
                     TextSetting::FontSize | TextSetting::Leading => (0.5, 0, "px"),
                     TextSetting::Tracking => (1.0, 0, ""),

@@ -79,6 +79,12 @@ impl TextRenderer {
     /// Draws `text` at `scale`, never larger than `max_size` pixels on a side (the GPU's
     /// texture limit); very large text is drawn at a lower scale and stretched.
     pub fn rasterize(&mut self, text: &str, style: &TextStyle, scale: f32, max_size: u32) -> TextImage {
+        self.rasterize_highlighted(text, style, None, scale, max_size)
+    }
+
+    /// Like `rasterize`, with the characters in a byte range of `text` filled in another color
+    /// (a caption's spoken word).
+    pub fn rasterize_highlighted(&mut self, text: &str, style: &TextStyle, highlight: Option<(std::ops::Range<usize>, Rgba)>, scale: f32, max_size: u32) -> TextImage {
         let mut scale = scale.clamp(0.05, 8.0);
         let mut laid_out = self.raster_layout(text, style, scale);
         let biggest = laid_out.2.max(laid_out.3);
@@ -90,10 +96,12 @@ impl TextRenderer {
         let (buffer, size, width, height, pad, stroke) = laid_out;
         let (width, height) = (width.min(max_size as usize), height.min(max_size as usize));
 
-        // Glyph coverage, 0-1.
+        // Glyph coverage, 0-1, and the part of it that is highlighted.
         let mut coverage = vec![0.0_f32; width * height];
+        let mut highlighted = vec![0.0_f32; if highlight.is_some() { width * height } else { 0 }];
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
+                let lit = highlight.as_ref().is_some_and(|(range, _)| range.contains(&glyph.start));
                 let physical = glyph.physical((pad as f32, pad as f32 + run.line_y), 1.0);
                 let Some(image) = self.glyphs.get_image(&mut self.fonts, physical.cache_key).as_ref() else { continue };
                 let (left, top) = (physical.x + image.placement.left, physical.y - image.placement.top);
@@ -110,15 +118,20 @@ impl TextRenderer {
                             SwashContent::Color => image.data[index * 4 + 3],
                             SwashContent::SubpixelMask => image.data[index * 3],
                         };
-                        let cell = &mut coverage[y as usize * width + x as usize];
-                        *cell = cell.max(f32::from(alpha) / 255.0);
+                        let at = y as usize * width + x as usize;
+                        let value = f32::from(alpha) / 255.0;
+                        coverage[at] = coverage[at].max(value);
+                        if lit {
+                            highlighted[at] = highlighted[at].max(value);
+                        }
                     }
                 }
             }
         }
 
         let stroke_coverage = stroke.map(|(_, stroke_width)| stroke_mask(&coverage, width, height, stroke_width.max(0.0)));
-        let pixels = paint(&coverage, stroke_coverage.as_deref(), style.fill, stroke.map(|(color, _)| color));
+        let lit = highlight.map(|(_, color)| (highlighted.as_slice(), color));
+        let pixels = paint(&coverage, stroke_coverage.as_deref(), style.fill, stroke.map(|(color, _)| color), lit);
         TextImage { width: width as u32, height: height as u32, pixels, size, scale }
     }
 
@@ -182,9 +195,14 @@ fn stroke_mask(coverage: &[f32], width: usize, height: usize, radius: f32) -> Ve
 }
 
 /// Fill over stroke, as straight sRGB RGBA bytes.
-fn paint(fill_coverage: &[f32], stroke_coverage: Option<&[f32]>, fill: Option<Rgba>, stroke: Option<Rgba>) -> Vec<u8> {
+fn paint(fill_coverage: &[f32], stroke_coverage: Option<&[f32]>, fill: Option<Rgba>, stroke: Option<Rgba>, highlight: Option<(&[f32], Rgba)>) -> Vec<u8> {
     let mut pixels = Vec::with_capacity(fill_coverage.len() * 4);
     for (index, &coverage) in fill_coverage.iter().enumerate() {
+        // Highlighted glyphs take the highlight's color instead of the fill.
+        let fill = match highlight {
+            Some((lit, color)) if lit[index] > 0.0 => Some(color),
+            _ => fill,
+        };
         let fill_alpha = fill.map_or(0.0, |color| color.a * coverage);
         let stroke_alpha = match (stroke, stroke_coverage) {
             (Some(color), Some(mask)) => color.a * mask[index],
@@ -232,6 +250,30 @@ mod tests {
         assert!(tracked.x > plain.x + 50.0, "{plain:?} vs {tracked:?}");
         let two = text.measure("A\nB", &style());
         assert!((two.y - plain.y * 2.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_highlighted_word_takes_its_own_color() {
+        let mut text = TextRenderer::new();
+        let style = TextStyle { fill: Some(Rgba::hex(0xffffff)), ..style() };
+        let image = text.rasterize_highlighted("AB CD", &style, Some((3..5, Rgba::hex(0xff0000))), 1.0, 8192);
+        let reddish = |pixel: &[u8]| pixel[3] > 200 && pixel[0] > 200 && pixel[1] < 60;
+        let whitish = |pixel: &[u8]| pixel[3] > 200 && pixel[0] > 200 && pixel[1] > 200;
+        let columns = image.width as usize;
+        let mut left_red = 0;
+        let mut right_red = 0;
+        let mut left_white = 0;
+        for (i, pixel) in image.pixels.chunks(4).enumerate() {
+            let x = i % columns;
+            if x < columns / 3 {
+                left_red += usize::from(reddish(pixel));
+                left_white += usize::from(whitish(pixel));
+            } else if x > columns * 2 / 3 {
+                right_red += usize::from(reddish(pixel));
+            }
+        }
+        assert!(left_white > 20 && left_red == 0, "the first word stays white");
+        assert!(right_red > 20, "the second word is red");
     }
 
     #[test]

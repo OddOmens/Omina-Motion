@@ -230,6 +230,12 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             {
                 return damaged(&format!("shape layer \"{}\" has impossible corners or points", layer.name));
             }
+            if let crate::model::LayerContent::Captions { words, style } = &layer.content
+                && (words.iter().any(|word| word.start.abs() > MAX_FRAME || word.end.abs() > MAX_FRAME || word.end < word.start)
+                    || !(1..=crate::captions::MAX_WORDS_PER_PHRASE).contains(&style.words_per_phrase))
+            {
+                return damaged(&format!("caption layer \"{}\" has impossible timing", layer.name));
+            }
             // Parents must exist in the same composition and never loop back.
             if let Some(parent) = layer.parent
                 && !crate::edit::can_parent(comp, layer.id, parent)

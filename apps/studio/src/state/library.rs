@@ -128,7 +128,7 @@ impl EditorState {
         let template = template.clone();
         let mut applied = 0;
         for &layer in layers {
-            if self.text_of(layer).is_some() {
+            if self.text_style_of(layer).is_some() {
                 studio_core::edit::edit_text(self.composition_mut(), layer, |_, style| template.apply_to(style));
                 applied += 1;
             }

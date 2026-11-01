@@ -65,7 +65,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (mode == 1u) {
         // Textures hold premultiplied colors, sRGB encoded; the sRGB format linearizes on
         // sampling, so filtering already happened on premultiplied values.
-        return textureSample(source, source_sampler, in.uv);
+        // Drawn at the opacity in the color's alpha (1 for ordinary textures; less for fades).
+        return textureSample(source, source_sampler, in.uv) * u.color.a;
     }
     if (mode == 2u) {
         // Media that is not decoded yet: a checker in the layer's label color.

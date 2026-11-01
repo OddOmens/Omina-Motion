@@ -19,6 +19,8 @@ crates/studio-media  Media probing and video decoding with FFmpeg (hardware or s
                      Also audio: decoding and resampling, a mixer for a composition's sound, and playback
                      through the sound card (cpal: CoreAudio, WASAPI, ALSA). And movie writing: H.264 + AAC
                      (.mp4) and ProRes 422 HQ + 24-bit PCM (.mov), converted to BT.709 YUV in `yuv.rs`.
+crates/studio-captions Speech to timed words with OpenAI's Whisper (tiny), run locally with Candle (Metal on
+                     macOS). Reads the model from disk; the app downloads it once, after asking.
 crates/studio-export Exports a composition to a movie: GPU render, audio mix and encode, written under a
                      temporary name and renamed when done. No UI, so it also runs on a headless render machine.
 apps/studio          Desktop app (GPUI + gpui-kit). UI only: panels render EditorState and forward input.
@@ -37,6 +39,8 @@ Inside `apps/studio/src`:
 - `panels/libraries.rs`, `state/library.rs`, `library_store.rs`: Libraries (brands holding shared colors and
   text styles, linked wherever they are used; the model and syncing are in `studio-core/src/library.rs`).
   They are stored in Studio's settings folder as `libraries.json`, with backups in `Library Backups`.
+- `panels/captions.rs`, `state/captions.rs`: Generate Captions (download the model, transcribe in the
+  background) and caption layers; their timing and animations are in `studio-core/src/captions.rs`.
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout.
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).

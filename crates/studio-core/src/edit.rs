@@ -279,6 +279,27 @@ pub fn add_text_layer(project: &mut Project, comp_id: Id, text: &str, position: 
     add_top_layer(project, comp_id, name, LayerContent::Text { text: text.to_owned(), style }, size, position, in_frame)
 }
 
+/// Adds a caption layer at the top of the stack, spanning `frames` of the composition, with
+/// `words` timed from `start_frame` (where the sound they came from starts). It is as wide
+/// as the composition and sits in its lower third, as captions do.
+pub fn add_caption_layer(
+    project: &mut Project,
+    comp_id: Id,
+    words: Vec<crate::captions::CaptionWord>,
+    style: crate::captions::CaptionStyle,
+    frames: std::ops::Range<i64>,
+    start_frame: i64,
+) -> Option<Id> {
+    let composition = project.composition(comp_id)?;
+    let size = Vec2::new(composition.width as f32, style.text.line_height * 2.5);
+    let position = Vec2::new(composition.width as f32 * 0.5, composition.height as f32 * 0.8);
+    let id = add_top_layer(project, comp_id, "Captions".into(), LayerContent::Captions { words, style }, size, position, frames.start)?;
+    let layer = project.composition_mut(comp_id)?.layer_mut(id)?;
+    layer.out_frame = frames.end.max(frames.start + 1);
+    layer.start_frame = start_frame;
+    Some(id)
+}
+
 /// Adds a shape layer of `size` at the top of the stack, centered on `position` and starting at
 /// `in_frame`. Its name is the shape's, numbered after any shape layers already named that way.
 pub fn add_shape_layer(project: &mut Project, comp_id: Id, style: ShapeStyle, size: Vec2, position: Vec2, in_frame: i64) -> Option<Id> {
@@ -475,8 +496,16 @@ fn resize_box(layer: &mut Layer, size: Vec2) {
 }
 
 /// Changes a text layer's text and/or style, keeping its size (and so its bounds) in step.
+/// Caption layers take the same style edits (font, size, fill, stroke) for all their captions;
+/// their words and box stay as they are.
 pub fn edit_text(composition: &mut Composition, layer_id: Id, edit: impl FnOnce(&mut String, &mut TextStyle)) {
     let Some(layer) = composition.layer_mut(layer_id) else { return };
+    if let LayerContent::Captions { style, .. } = &mut layer.content {
+        edit(&mut String::new(), &mut style.text);
+        style.text.font_size = style.text.font_size.clamp(1.0, 2000.0);
+        style.text.line_height = style.text.line_height.clamp(1.0, 4000.0);
+        return;
+    }
     if let LayerContent::Text { text, style } = &mut layer.content {
         edit(text, style);
         style.font_size = style.font_size.clamp(1.0, 2000.0);

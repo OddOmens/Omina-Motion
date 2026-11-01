@@ -202,6 +202,8 @@ pub enum EditTarget {
     SourceText(Id),
     /// The name of a library brand, color or text style.
     LibraryName(studio_core::model::LinkId),
+    /// The text of a caption layer's words in a range (one phrase).
+    CaptionText(Id, usize, usize),
 }
 
 /// The text input currently open over a value, and the subscription that commits it.
@@ -256,6 +258,8 @@ pub struct UiState {
     pub export_job: Option<panels::export::ExportJob>,
     /// While an effect is dragged over the viewer, the layer it would be dropped on.
     pub effect_drop_layer: Option<Id>,
+    /// Captions being made in the background, if any.
+    pub caption_job: Option<panels::captions::CaptionJob>,
     /// The color picker, while it is open.
     pub color_picker: Option<panels::color_picker::Picker>,
     /// Keeps the open dialog's field links alive (Composition Settings' locked aspect ratio).
@@ -456,6 +460,7 @@ impl Workspace {
                 export_job: None,
                 dialog_subscriptions: Vec::new(),
                 color_picker: None,
+                caption_job: None,
                 effect_drop_layer: None,
                 quit_after_export: false,
             },
@@ -566,6 +571,7 @@ impl Workspace {
             }
             EditTarget::SourceText(layer) => self.state.set_text(layer, &text),
             EditTarget::LibraryName(id) => self.state.rename_library_item(id, &text),
+            EditTarget::CaptionText(layer, start, end) => self.state.set_caption_text(layer, start..end, &text),
         }
         // Hand keyboard focus back to the editor so shortcuts work again.
         window.focus(&self.focus, cx);

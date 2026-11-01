@@ -9,6 +9,7 @@
 //! tracks (the Tracks view) and the magnetic main track;
 //! `history` holds the undo steps.
 
+mod captions;
 mod clips;
 mod copy;
 mod history;
@@ -35,6 +36,7 @@ use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
 use studio_core::sample::{ids, sample_project};
 use studio_core::time::FrameRange;
 
+pub use captions::HeardWord;
 pub use keyframes::KeyframeRef;
 pub use layer_time::LayerTimeEdit;
 pub use viewer::{ANCHOR_POINTS, ScaleHandle};
@@ -98,6 +100,9 @@ pub enum ColorTarget {
     TextStroke(Id),
     /// A color in a library; changing it changes everything linked to it.
     Library(studio_core::model::LinkId),
+    /// A caption layer's spoken-word color, and its background box.
+    CaptionHighlight(Id),
+    CaptionBackground(Id),
 }
 
 /// A paint's angle, if it is a linear gradient.
@@ -656,8 +661,10 @@ impl EditorState {
     pub fn color_of(&self, target: ColorTarget) -> Option<Rgba> {
         match target {
             ColorTarget::Shape { layer, slot, stop } => self.shape_paint(layer, slot)?.colors().get(stop).copied(),
-            ColorTarget::TextFill(layer) => self.text_of(layer)?.1.fill,
-            ColorTarget::TextStroke(layer) => self.text_of(layer)?.1.stroke.map(|(color, _)| color),
+            ColorTarget::TextFill(layer) => self.text_style_of(layer)?.fill,
+            ColorTarget::TextStroke(layer) => self.text_style_of(layer)?.stroke.map(|(color, _)| color),
+            ColorTarget::CaptionHighlight(layer) => self.caption_style(layer).map(|style| style.highlight),
+            ColorTarget::CaptionBackground(layer) => self.caption_style(layer)?.background,
             ColorTarget::Library(id) => self.libraries.color(id).map(|(_, item)| item.color),
         }
     }
@@ -671,10 +678,12 @@ impl EditorState {
             }
             ColorTarget::TextFill(layer) => self.set_text_fill(layer, Some(color)),
             ColorTarget::TextStroke(layer) => {
-                let width = self.text_of(layer).and_then(|(_, style)| style.stroke).map_or(2.0, |(_, width)| width);
+                let width = self.text_style_of(layer).and_then(|style| style.stroke).map_or(2.0, |(_, width)| width);
                 self.set_text_stroke(layer, Some((color, width)));
             }
             ColorTarget::Library(id) => self.set_library_color(id, color),
+            ColorTarget::CaptionHighlight(layer) => self.edit_captions(layer, |style| style.highlight = color),
+            ColorTarget::CaptionBackground(layer) => self.edit_captions(layer, |style| style.background = Some(color)),
         }
     }
 
@@ -690,6 +699,15 @@ impl EditorState {
     /// Changes which shape a shape layer draws, keeping its box, colour and corners.
     pub fn set_shape_kind(&mut self, layer: Id, kind: ShapeKind) {
         edit::edit_shape(self.composition_mut(), layer, |style| style.kind = kind);
+    }
+
+    /// The text style of a text or caption layer (captions share one style for all their words).
+    pub fn text_style_of(&self, layer: Id) -> Option<&TextStyle> {
+        match &self.composition().layer(layer)?.content {
+            LayerContent::Text { style, .. } => Some(style),
+            LayerContent::Captions { style, .. } => Some(&style.text),
+            _ => None,
+        }
     }
 
     pub fn text_of(&self, layer: Id) -> Option<(&str, &TextStyle)> {

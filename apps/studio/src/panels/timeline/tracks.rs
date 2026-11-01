@@ -176,6 +176,7 @@ fn clip_colors(layer: &Layer) -> (u32, u32, bool) {
         LayerContent::Image { .. } | LayerContent::Solid { .. } => (0xe0b93a, 0x8f7420, true),
         LayerContent::Text { .. } => (0xf472b6, 0x9d3a6f, true),
         LayerContent::Shape { .. } => (0x22d3ee, 0x167a8a, true),
+        LayerContent::Captions { .. } => (0xfacc15, 0x8a6d0a, true),
         LayerContent::Adjustment => (0xfb923c, 0x9a531c, true),
         LayerContent::Composition { .. } => (0x60a5fa, 0x2f5f9e, true),
     }
@@ -188,6 +189,7 @@ fn kind_icon(layer: &Layer) -> IconName {
         LayerContent::Image { .. } => IconName::Image,
         LayerContent::Text { .. } => IconName::Type,
         LayerContent::Shape { .. } => IconName::Shapes,
+        LayerContent::Captions { .. } => IconName::Captions,
         LayerContent::Adjustment => IconName::Contrast,
         LayerContent::Composition { .. } => IconName::Clapperboard,
         LayerContent::Solid { .. } => IconName::Square,

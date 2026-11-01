@@ -693,3 +693,33 @@ fn effect_sheet() {
     }
     image::save_buffer(path, &sheet, cell * columns, cell * rows, image::ColorType::Rgba8).unwrap();
 }
+
+#[test]
+fn captions_show_the_phrase_with_the_spoken_word_highlighted_over_their_box() {
+    use studio_core::captions::{CaptionStyle, CaptionWord};
+    let words = ["make", "it", "pop"].iter().enumerate().map(|(i, text)| CaptionWord { text: (*text).into(), start: i as i64 * 5, end: i as i64 * 5 + 5 }).collect();
+    let style = CaptionStyle {
+        text: TextStyle { font_size: 40.0, line_height: 48.0, font_weight: 800, fill: Some(Rgba::hex(0xffffff)), stroke: None, ..TextStyle::default() },
+        highlight: Rgba::hex(0xff0000),
+        background: Some(Rgba::hex(0x0000ff)),
+        ..CaptionStyle::default()
+    };
+    let (width, height) = (400, 160);
+    let mut layer = solid(2, 0, Vec2::new(width as f32, 120.0), Vec2::new(width as f32 / 2.0, height as f32 / 2.0));
+    layer.content = LayerContent::Captions { words, style };
+    let mut scene = project(vec![layer]);
+    (scene.compositions[0].width, scene.compositions[0].height) = (width, height);
+    let mut renderer = Renderer::new().unwrap();
+    // Frame 7: "it" is being said.
+    let frame = renderer.render(&scene, Id(1), 7, width, height, &studio_core::media::NoVideo).unwrap();
+    let pixels: Vec<[u8; 3]> = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| pixel(&frame, x, y)).collect();
+    let count = |test: fn(&[u8; 3]) -> bool| pixels.iter().filter(|p| test(p)).count();
+    assert!(count(|p| p[0] > 200 && p[1] < 60 && p[2] < 60) > 30, "the spoken word is red");
+    assert!(count(|p| p[0] > 200 && p[1] > 200 && p[2] > 200) > 100, "the others are white");
+    assert!(count(|p| p[2] > 200 && p[0] < 40) > 2000, "on a blue box");
+    assert_eq!(pixel(&frame, 2, 2), [0, 0, 0], "outside the box is clear");
+    if let Ok(path) = std::env::var("CAPTION_IMAGE") {
+        let rgba: Vec<u8> = frame.bgra.chunks(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+        image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8).unwrap();
+    }
+}

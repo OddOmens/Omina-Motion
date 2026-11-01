@@ -168,7 +168,7 @@ pub fn category_of(name: &str) -> Option<&'static EffectCategory> {
 pub fn suits(category: &EffectCategory, content: &LayerContent) -> bool {
     match content {
         LayerContent::Audio { .. } => false,
-        LayerContent::Text { .. } | LayerContent::Shape { .. } | LayerContent::Solid { .. } => !matches!(category.name, "Color Correction" | "Keying"),
+        LayerContent::Text { .. } | LayerContent::Captions { .. } | LayerContent::Shape { .. } | LayerContent::Solid { .. } => !matches!(category.name, "Color Correction" | "Keying"),
         LayerContent::Footage { .. } | LayerContent::Image { .. } | LayerContent::Composition { .. } | LayerContent::Adjustment => true,
     }
 }

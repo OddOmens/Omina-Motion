@@ -7,11 +7,12 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{Icon, Sizable as _};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _};
 use gpui_kit::{
     AnyElement, App, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px,
 };
+use studio_core::captions::{CaptionAnimation, CaptionStyle, CaptionWord};
 use studio_core::model::{BlendMode, Id, Layer, LayerContent, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 
@@ -127,6 +128,105 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             .child(switch("layer-solo", "Solo", layer.switches.solo, Switch::Solo, cx))
             .when(layer.content.has_picture(), |row| row.child(switch("layer-effects", "Effects", layer.switches.effects_enabled, Switch::EffectsEnabled, cx))),
     )
+    // Clips with sound can be captioned.
+    .when(workspace.state.caption_source(id).is_some(), |rows| {
+        let busy = workspace.ui.caption_job.is_some();
+        rows.child(
+            div().py_1().child(
+                Button::new("generate-captions")
+                    .outline()
+                    .small()
+                    .icon(Icon::new(IconName::Captions))
+                    .label(if busy { "Making captions…" } else { "Generate Captions" })
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| super::captions::generate(this, id, window, cx))),
+            ),
+        )
+    })
+}
+
+/// A caption layer's settings, for all its captions at once: the animation, how many words
+/// show together, capitals, the font and colors, the spoken word's color and a background box,
+/// then the words themselves (click a phrase to jump to it, double-click to fix its text).
+fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let weak = cx.weak_entity();
+    let animations = CaptionAnimation::ALL.iter().map(|&animation| (animation.name().to_owned(), animation == style.animation, animation)).collect();
+    let per_phrase = (1..=6u32).map(|count| (if count == 1 { "1 word".to_owned() } else { format!("{count} words") }, count == style.words_per_phrase, count)).collect();
+    let uppercase = Checkbox::new("captions-uppercase").label("All capitals").checked(style.uppercase).on_click(cx.listener(move |this, checked: &bool, _, cx| {
+        let checked = *checked;
+        this.state.edit_captions(id, |style| style.uppercase = checked);
+        cx.notify();
+    }));
+    let background_on = Checkbox::new("captions-background-on").checked(style.background.is_some()).on_click(cx.listener(move |this, checked: &bool, _, cx| {
+        let checked = *checked;
+        this.state.edit_captions(id, |style| style.background = checked.then(|| Rgba::hex(0x000000).with_alpha(0.7)));
+        cx.notify();
+    }));
+    let mut families: Vec<&str> = workspace.ui.font_families.clone();
+    if !families.contains(&style.text.font_family.as_str()) {
+        families.insert(0, style.text.font_family.as_str());
+    }
+    let weight = style.text.font_weight;
+    let family_choices = families.iter().map(|family| ((*family).to_owned(), *family == style.text.font_family, (*family).to_owned())).collect();
+    let weight_choices = FONT_WEIGHTS.iter().map(|(value, name)| ((*name).to_owned(), *value == weight, *value)).collect();
+    let current_family = style.text.font_family.clone();
+    let stroke_width = style.text.stroke.map_or(4.0, |(_, width)| width);
+
+    let fps = workspace.state.composition().frame_rate.fps();
+    let rate = workspace.state.composition().frame_rate;
+    let start_frame = layer.start_frame;
+    let mut transcript = div().flex().flex_col().gap_0p5();
+    for range in studio_core::captions::phrases(words, style.words_per_phrase, fps) {
+        let text = words[range.clone()].iter().map(|word| word.text.as_str()).collect::<Vec<_>>().join(" ");
+        let at = start_frame + words[range.start].start;
+        let editing = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::CaptionText(id, range.start, range.end));
+        let row = div()
+            .id(("caption-phrase", range.start))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .py_0p5()
+            .rounded(px(4.0))
+            .hover(|style| style.bg(hsla(color::HOVER)))
+            .child(div().w(px(70.0)).flex_none().font_family("Menlo").text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(studio_core::time::format_timecode(at, rate)));
+        let row = match editing {
+            Some(editing) => row.child(div().flex_1().child(Input::new(&editing.input).xsmall())).into_any_element(),
+            None => {
+                let (start, end, current) = (range.start, range.end, text.clone());
+                row.cursor_pointer()
+                    .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                        if event.click_count() >= 2 {
+                            this.begin_edit(EditTarget::CaptionText(id, start, end), current.clone(), window, cx);
+                        } else {
+                            this.go_to(at, cx);
+                        }
+                    }))
+                    .child(div().flex_1().min_w_0().child(text))
+                    .test_support()
+                    .into_any_element()
+            }
+        };
+        transcript = transcript.child(row);
+    }
+
+    div()
+        .child(divider())
+        .child(section("Captions", None))
+        .child(labeled_row("Animation", choice_menu("captions-animation", style.animation.name().to_owned(), animations, move |this, animation| this.state.edit_captions(id, |style| style.animation = animation), weak.clone())))
+        .child(labeled_row("Words at once", choice_menu("captions-words", format!("{}", style.words_per_phrase), per_phrase, move |this, count| this.state.edit_captions(id, |style| style.words_per_phrase = count), weak.clone())))
+        .child(div().py_1().child(uppercase))
+        .child(div().h(px(30.0)).child(choice_menu("captions-font-family", style.text.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
+        .child(div().h(px(30.0)).child(choice_menu("captions-font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
+        .child(div().grid().grid_cols(2).gap_x_3().child(setting_field(IconName::ALargeSmall, "Size", id, TextSetting::FontSize, workspace, cx)).child(setting_field(IconName::MoveHorizontal, "Tracking", id, TextSetting::Tracking, workspace, cx)))
+        .child(paint_row("fill", "Fill", style.text.fill, ColorTarget::TextFill(id), move |this, fill| this.state.set_text_fill(id, fill), cx))
+        .child(paint_row("stroke", "Stroke", style.text.stroke.map(|(color, _)| color), ColorTarget::TextStroke(id), move |this, color| this.state.set_text_stroke(id, color.map(|color| (color, stroke_width))), cx))
+        .child(labeled_row("Spoken word", color_picker::swatch("captions-highlight", ColorTarget::CaptionHighlight(id), Some(style.highlight), cx)))
+        .child(labeled_row("Background", div().flex().items_center().gap_2().child(background_on).child(color_picker::swatch("captions-background", ColorTarget::CaptionBackground(id), style.background, cx))))
+        .child(divider())
+        .child(section(format!("Transcript · {} words", words.len()), None))
+        .child(transcript)
 }
 
 fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -433,6 +533,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
     let text = match &layer.content {
         LayerContent::Text { text, style } => Some(text_section(layer, text, style, workspace, cx)),
         LayerContent::Shape { style } => Some(shape_section(layer, style, workspace, cx)),
+        LayerContent::Captions { words, style } => Some(captions_section(layer, style, words, workspace, cx)),
         _ => None,
     };
     // Tell the user when an edit will change several keyframes at once.

@@ -96,11 +96,13 @@ enum Source<'a> {
     Solid([f32; 4]),
     /// A straight-alpha sRGB texture (text, images).
     Texture(&'a wgpu::TextureView),
+    /// A texture drawn at an opacity (0–1), for caption fades.
+    FadedTexture(&'a wgpu::TextureView, f32),
     /// Media that is not decoded yet: a checker in this premultiplied linear color.
     Placeholder([f32; 4]),
-    /// A shape filling the layer's box (`Vec2` is the box size; the drawn rectangle is larger by
-    /// the stroke width, so a stroke centered on the edge is not cut off).
-    Shape(ShapeStyle, Vec2),
+    /// A shape filling a box: its origin and size, in the same pixels as the drawn rectangle
+    /// (which can be larger, so a stroke centered on the edge is not cut off).
+    Shape(ShapeStyle, Vec2, Vec2),
 }
 
 /// A paint as `layer.wgsl` takes it: mode (1 solid, 2 linear, 3 radial), angle in radians, and
@@ -113,6 +115,16 @@ fn paint_uniform(paint: Option<Paint>) -> (f32, f32, [f32; 4], [f32; 4]) {
         Some(Paint::Radial { inner, outer }) => (3.0, 0.0, linear(inner), linear(outer)),
     }
 }
+
+/// A caption layer's drawing for one frame, from its animation.
+struct CaptionDraw {
+    opacity: f32,
+    scale: f32,
+    background: Option<Rgba>,
+}
+
+/// Padding around caption text inside its background box, in layer pixels.
+const CAPTION_PADDING: Vec2 = Vec2::new(28.0, 14.0);
 
 /// The shape number `layer.wgsl` expects for each kind.
 fn shape_code(kind: ShapeKind) -> f32 {
@@ -141,6 +153,8 @@ pub struct Renderer {
     targets: Option<Targets>,
     text: TextRenderer,
     text_cache: HashMap<u64, MediaTexture>,
+    /// How each caption layer on screen draws this frame (its text is in the text cache).
+    captions: HashMap<Id, CaptionDraw>,
     /// The measured text box for each cached raster.
     text_boxes: HashMap<u64, Vec2>,
     /// Loaded images (or `None` where loading failed), with the file's modification time when
@@ -335,6 +349,7 @@ impl Renderer {
             targets: None,
             text: TextRenderer::new(),
             text_cache: HashMap::new(),
+            captions: HashMap::new(),
             text_boxes: HashMap::new(),
             images: HashMap::new(),
             videos: HashMap::new(),
@@ -432,19 +447,46 @@ impl Renderer {
         source: &Source,
         rect: (Vec2, Vec2),
     ) {
+        self.draw_sources(encoder, targets, target, scale, &[(world, source, rect)]);
+    }
+
+    /// Draws several sources into work slot `target` in one pass, each over the ones before
+    /// (a caption's text over its background box).
+    fn draw_sources(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, target: usize, scale: f32, sources: &[(Affine, &Source, (Vec2, Vec2))]) {
+        let groups: Vec<wgpu::BindGroup> = sources.iter().map(|(world, source, rect)| self.source_bind_group(targets, *world, scale, source, *rect)).collect();
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("layer"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &targets.msaa.view,
+                depth_slice: None,
+                resolve_target: Some(&targets.work[target].view),
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.layer_pipeline);
+        for group in &groups {
+            pass.set_bind_group(0, group, &[]);
+            pass.draw(0..6, 0..1);
+        }
+    }
+
+    /// The uniforms and textures for drawing one source with `layer.wgsl`.
+    fn source_bind_group(&self, targets: &Targets, world: Affine, scale: f32, source: &Source, rect: (Vec2, Vec2)) -> wgpu::BindGroup {
         let (width, height) = (targets.width as f32, targets.height as f32);
         let (mode, color, view, cell) = match source {
             Source::Solid(color) => (0.0, *color, &self.blank, 0.0),
-            Source::Texture(view) => (1.0, [0.0; 4], *view, 0.0),
+            Source::Texture(view) => (1.0, [1.0; 4], *view, 0.0),
+            Source::FadedTexture(view, opacity) => (1.0, [*opacity; 4], *view, 0.0),
             Source::Placeholder(color) => (2.0, *color, &self.blank, 40.0),
             Source::Shape(..) => (3.0, [0.0; 4], &self.blank, 0.0),
         };
         let (origin, size) = rect;
         // For shapes: the outline, where its box sits in the drawn rectangle, and the paints.
         let (shape, shape_box, stroke_width, fill, stroke) = match source {
-            Source::Shape(style, box_size) => (
+            Source::Shape(style, box_origin, box_size) => (
                 [shape_code(style.kind), style.corner_radius, style.points as f32, style.inner_radius],
-                [origin.x, origin.y, box_size.x, box_size.y],
+                [origin.x - box_origin.x, origin.y - box_origin.y, box_size.x, box_size.y],
                 style.stroke.map_or(0.0, |stroke| stroke.width),
                 paint_uniform(style.fill),
                 paint_uniform(style.stroke.map(|stroke| stroke.paint)),
@@ -468,7 +510,7 @@ impl Renderer {
         uniform.extend(stroke.3);
         uniform.extend([fill.0, fill.1, stroke.0, stroke.1]);
         let buffer = self.uniform(bytemuck::cast_slice(&uniform));
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("layer"),
             layout: &self.layer_layout,
             entries: &[
@@ -476,20 +518,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
-        });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("layer"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &targets.msaa.view,
-                depth_slice: None,
-                resolve_target: Some(&targets.work[target].view),
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
-            })],
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.layer_pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.draw(0..6, 0..1);
+        })
     }
 }
 
@@ -588,11 +617,24 @@ impl Renderer {
     /// Makes sure the text raster for a layer exists at `raster_scale`, returning its cache key,
     /// its box in source pixels and the raster's padding in source pixels.
     fn prepare_text(&mut self, text: &str, style: &TextStyle, raster_scale: f32) -> (u64, Vec2, Vec2) {
-        let key = text_key(text, style, raster_scale);
+        self.prepare_highlighted_text(text, style, None, raster_scale)
+    }
+
+    /// `prepare_text`, with a byte range of the text in another color.
+    fn prepare_highlighted_text(&mut self, text: &str, style: &TextStyle, highlight: Option<(std::ops::Range<usize>, Rgba)>, raster_scale: f32) -> (u64, Vec2, Vec2) {
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text_key(text, style, raster_scale).hash(&mut hasher);
+            if let Some((range, color)) = &highlight {
+                (range.start, range.end, color.to_rgba_u32()).hash(&mut hasher);
+            }
+            hasher.finish()
+        };
         // The cache is trimmed after all of a frame's text is prepared (see `render`), never
         // here: a raster prepared earlier in this frame must still be there to draw.
         if !self.text_cache.contains_key(&key) {
-            let image = self.text.rasterize(text, style, raster_scale, self.max_texture);
+            let image = self.text.rasterize_highlighted(text, style, highlight, raster_scale, self.max_texture);
             let view = self.upload(image.width, image.height, &image.pixels);
             // Sized by the scale actually drawn at, which can be lower than the one asked for.
             let drawn = Vec2::new(image.width as f32 / image.scale, image.height as f32 / image.scale);
@@ -695,16 +737,36 @@ impl Renderer {
         let (width, height) = (width.clamp(1, 8192), height.clamp(1, 8192));
         let scale = width as f32 / composition.width as f32;
         let at = frame as f64;
+        let at_time = at;
         let time = (frame as f64 / composition.frame_rate.fps()) as f32;
 
         // Prepare text rasters and images first (this needs `&mut self`), noting text box sizes.
         let mut text_sizes = Vec::new();
         let mut used_proxy = false;
         let mut text_keys: HashMap<Id, (u64, Vec2, Vec2)> = HashMap::new();
+        self.captions.clear();
         for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame)) {
             match &layer.content {
+                LayerContent::Captions { words, style } => {
+                    let fps = composition.frame_rate.fps();
+                    let Some(shown) = studio_core::captions::frame_at(words, style, frame - layer.start_frame, fps) else { continue };
+                    let text = shown.text();
+                    // The spoken word's place in the line, to color it.
+                    let mut at = 0;
+                    let mut highlight = None;
+                    for (word, spoken) in &shown.words {
+                        if *spoken {
+                            highlight = Some((at..at + word.len(), style.highlight));
+                        }
+                        at += word.len() + 1;
+                    }
+                    let raster_scale = world_transform(composition, layer.id, at_time).map_or(scale, |w| max_scale(w) * scale) * shown.scale;
+                    let prepared = self.prepare_highlighted_text(&text, &style.text, highlight, raster_scale.max(0.05));
+                    text_keys.insert(layer.id, prepared);
+                    self.captions.insert(layer.id, CaptionDraw { opacity: shown.opacity, scale: shown.scale, background: style.background });
+                }
                 LayerContent::Text { text, style } => {
-                    let raster_scale = world_transform(composition, layer.id, at).map_or(scale, |w| max_scale(w) * scale);
+                    let raster_scale = world_transform(composition, layer.id, at_time).map_or(scale, |w| max_scale(w) * scale);
                     let prepared = self.prepare_text(text, style, raster_scale.max(0.05));
                     text_sizes.push((layer.id, prepared.1));
                     text_keys.insert(layer.id, prepared);
@@ -849,11 +911,32 @@ impl Renderer {
         let full = (Vec2::default(), layer.size);
         match &layer.content {
             LayerContent::Solid { color } => self.draw_source(encoder, targets, target, world, scale, &Source::Solid(linear(*color)), full),
+            LayerContent::Captions { .. } => {
+                let (Some((key, measured, pad)), Some(draw)) = (text_keys.get(&layer.id), self.captions.get(&layer.id)) else { return };
+                let texture = &self.text_cache[key];
+                // Centered in the layer's box, scaled about its center by the animation.
+                let center = layer.size * 0.5;
+                let around = |world: Affine| Affine::translate(Vec2::new(-center.x, -center.y)).then(Affine::scale(Vec2::new(draw.scale, draw.scale))).then(Affine::translate(center)).then(world);
+                let world = around(world);
+                let top_left = center - *measured * 0.5;
+                let text = Source::FadedTexture(&texture.view, draw.opacity);
+                let text_rect = (top_left - *pad, texture.size);
+                match draw.background {
+                    // A rounded box behind the text, padded around it.
+                    Some(color) => {
+                        let size = *measured + CAPTION_PADDING * 2.0;
+                        let style = ShapeStyle { fill: Some(Paint::Solid(color.with_alpha(color.a * draw.opacity))), corner_radius: size.y.min(size.x) * 0.25, ..ShapeStyle::new(ShapeKind::Rectangle) };
+                        let box_source = Source::Shape(style, top_left - CAPTION_PADDING, size);
+                        self.draw_sources(encoder, targets, target, scale, &[(world, &box_source, (top_left - CAPTION_PADDING, size)), (world, &text, text_rect)]);
+                    }
+                    None => self.draw_source(encoder, targets, target, world, scale, &text, text_rect),
+                }
+            }
             LayerContent::Shape { style } => {
                 // Grow the drawn rectangle by the stroke, which is centered on the edge.
                 let grow = style.stroke.map_or(0.0, |stroke| stroke.width * 0.5 + 1.0);
                 let rect = (Vec2::new(-grow, -grow), Vec2::new(layer.size.x + grow * 2.0, layer.size.y + grow * 2.0));
-                self.draw_source(encoder, targets, target, world, scale, &Source::Shape(*style, layer.size), rect);
+                self.draw_source(encoder, targets, target, world, scale, &Source::Shape(*style, Vec2::default(), layer.size), rect);
             }
             LayerContent::Text { .. } => {
                 if let Some((key, measured, pad)) = text_keys.get(&layer.id) {

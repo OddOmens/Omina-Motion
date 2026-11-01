@@ -539,6 +539,8 @@ pub enum LayerContent {
     Solid { color: Rgba },
     Text { text: String, style: TextStyle },
     Shape { style: ShapeStyle },
+    /// Timed words, shown a phrase at a time in one style (see `captions`).
+    Captions { words: Vec<crate::captions::CaptionWord>, style: crate::captions::CaptionStyle },
     Adjustment,
     Composition { composition: Id },
 }
@@ -756,6 +758,12 @@ impl Project {
                     LayerContent::Text { style, .. } => {
                         style.fill.iter_mut().for_each(&mut visit);
                         style.stroke.iter_mut().for_each(|(color, _)| visit(color));
+                    }
+                    LayerContent::Captions { style, .. } => {
+                        style.text.fill.iter_mut().for_each(&mut visit);
+                        style.text.stroke.iter_mut().for_each(|(color, _)| visit(color));
+                        visit(&mut style.highlight);
+                        style.background.iter_mut().for_each(&mut visit);
                     }
                     LayerContent::Shape { style } => {
                         let paints = style.fill.iter_mut().chain(style.stroke.iter_mut().map(|stroke| &mut stroke.paint));

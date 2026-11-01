@@ -1979,3 +1979,82 @@ fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppCont
     assert!(!folder.join("old-proxy.mov").exists());
     visual.update(|_, cx| crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx));
 }
+
+// Captions -------------------------------------------------------------------------------------
+
+/// Adds a caption layer for the title's time with three words, selected.
+fn add_test_captions(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> Id {
+    let words = ["make", "it", "pop."].iter().enumerate().map(|(i, text)| crate::state::HeardWord { text: (*text).into(), start: i as f64 * 0.5, end: i as f64 * 0.5 + 0.5 }).collect::<Vec<_>>();
+    let layer = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let layer = ws.state.add_captions(TITLE, &words).unwrap();
+        cx.notify();
+        layer
+    }));
+    tall_window(visual);
+    layer
+}
+
+#[gpui_kit::test]
+fn generating_captions_asks_before_downloading_the_model(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let clip = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        // Sound only, so no picture is decoded in the background.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/tone.m4a");
+        ws.state.import_files(vec![path]);
+        let item = ws.state.selected_item.unwrap();
+        ws.state.add_layer_from_item(item, 0, 0);
+        let clip = ws.state.selected_layers[0];
+        cx.notify();
+        clip
+    }));
+    tall_window(visual);
+    // Tests keep their settings (and so the model) in a folder of their own, where it is missing.
+    assert!(!studio_captions::model_present(&crate::panels::captions::model_folder()));
+    let before = layer_ids(&workspace, visual).len();
+    visual.update(|window, cx| window.click("generate-captions", cx));
+    render(visual);
+    click_label(visual, "Cancel");
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.caption_job.is_none(), "nothing started without saying yes"));
+    assert_eq!(layer_ids(&workspace, visual).len(), before);
+    let _ = clip;
+}
+
+#[gpui_kit::test]
+fn caption_style_and_animation_apply_to_the_whole_layer(cx: &mut TestAppContext) {
+    use studio_core::captions::CaptionAnimation;
+    let (workspace, visual) = open(cx);
+    let layer = add_test_captions(&workspace, visual);
+    visual.update(|window, cx| window.click("captions-animation", cx));
+    render(visual);
+    click_label(visual, "Pop");
+    render(visual);
+    visual.update(|window, cx| window.click("captions-words", cx));
+    render(visual);
+    click_label(visual, "1 word");
+    render(visual);
+    visual.update(|window, cx| window.click("captions-uppercase", cx));
+    render(visual);
+    let style = visual.update(|_, cx| workspace.read(cx).state.caption_style(layer).unwrap().clone());
+    assert_eq!((style.animation, style.words_per_phrase, style.uppercase), (CaptionAnimation::Pop, 1, false));
+    // The font size field works on captions too.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_text_setting(layer, crate::state::TextSetting::FontSize, 96.0);
+        cx.notify();
+    }));
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.caption_style(layer).unwrap().text.font_size), 96.0);
+}
+
+#[gpui_kit::test]
+fn a_phrase_in_the_transcript_can_be_corrected(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let layer = add_test_captions(&workspace, visual);
+    visual.update(|window, cx| window.click_with_options(("caption-phrase", 0usize), gpui_kit::test::ClickOptions::new().with_count(2), cx));
+    render(visual);
+    visual.update(|window, cx| window.press("cmd-a", cx));
+    visual.update(|window, cx| window.input("make it shine.", cx));
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    let words: Vec<String> = visual.update(|_, cx| workspace.read(cx).state.caption_words(layer).unwrap().iter().map(|w| w.text.clone()).collect());
+    assert_eq!(words, ["make", "it", "shine."]);
+}

@@ -40,6 +40,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .child(div().text_color(hsla(color::TEXT)).child(composition))
         .child(div().flex_1())
         // An export running in the background shows its progress here.
+        .children(super::captions::status(workspace, cx))
         .children(super::export::status(workspace, cx))
         // The one bright button on screen: export the composition (⌘M).
         .child(

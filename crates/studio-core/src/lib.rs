@@ -5,6 +5,7 @@
 pub mod align;
 pub mod animation;
 pub mod audio;
+pub mod captions;
 pub mod copy;
 pub mod cut;
 pub mod edit;
