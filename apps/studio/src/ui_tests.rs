@@ -2058,3 +2058,31 @@ fn a_phrase_in_the_transcript_can_be_corrected(cx: &mut TestAppContext) {
     let words: Vec<String> = visual.update(|_, cx| workspace.read(cx).state.caption_words(layer).unwrap().iter().map(|w| w.text.clone()).collect());
     assert_eq!(words, ["make", "it", "shine."]);
 }
+
+// Nested compositions ---------------------------------------------------------------------------
+
+#[gpui_kit::test]
+fn precomposing_then_double_clicking_the_clip_opens_the_new_composition(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.press("cmd-shift-c", cx));
+    render(visual);
+    let (main, layer) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.active_comp, state.selected_layers[0])
+    });
+    let inner = visual.update(|_, cx| workspace.read(cx).state.nested_composition(layer)).expect("the title is now inside a composition");
+    visual.update(|window, cx| window.click_with_options(("clip", layer.0 as usize), gpui_kit::test::ClickOptions::new().with_count(2), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.active_comp, inner, "the nested composition opened");
+        assert_ne!(inner, main);
+        assert!(state.composition().layer(TITLE).is_some(), "with the title in it");
+    });
+}

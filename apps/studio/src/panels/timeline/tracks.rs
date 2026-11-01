@@ -303,9 +303,12 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
     let (work_start, work_end) = (fraction(state.work_area.start, view), fraction(state.work_area.end, view));
     let work_line = |at: f32| div().absolute().top_0().bottom_0().left(relative(at)).w(px(1.0)).bg(hsla(color::WORK_AREA));
 
+    // While a clip is held, the closed hand stays wherever the pointer goes over the tracks.
+    let holding = state.clip_drag_target().is_some() || state.slipping_layer().is_some();
     div()
         .id("track-rows")
         .relative()
+        .when(holding, |rows| rows.cursor(gpui_kit::CursorStyle::ClosedHand))
         .flex_1()
         .min_w_0()
         .flex()
@@ -372,6 +375,8 @@ fn clip_toggle(layer: Id, which: &'static str, on: bool, icons: (IconName, IconN
         .items_center()
         .justify_center()
         .rounded(px(3.0))
+        // A button on the clip, not part of it to grab: the ordinary arrow.
+        .cursor(gpui_kit::CursorStyle::Arrow)
         .hover(|style| style.bg(rgba(0x0000002a)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -398,6 +403,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     let clip_px = width * graph_width;
     let height = base_height(track) - 8.0;
     let cutting = workspace.ui.tool == Tool::Cut;
+    let held = state.clip_drag_target().is_some_and(|(layer, _)| layer == id) || state.slipping_layer() == Some(id);
     // The frame under the pointer, for the Cut tool.
     let pointer_frame = |this: &Workspace, x: gpui_kit::Pixels| frame_at(f32::from(x), this.ui.timeline.graph.get(), this.state.view_range).round() as i64;
 
@@ -474,6 +480,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 .flex()
                 .items_center()
                 .justify_center()
+                .cursor(gpui_kit::CursorStyle::Arrow)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let expanded = &mut this.ui.timeline.expanded_clips;
@@ -508,9 +515,18 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
             .when(!switches.visible, |clip| clip.opacity(0.45))
             .flex()
             .flex_col()
-            .cursor_grab()
+            // An open hand to say it can be picked up, closed while it is held.
+            .map(|clip| if held { clip.cursor(gpui_kit::CursorStyle::ClosedHand) } else { clip.cursor_grab() })
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
+                // Double-clicking a nested composition's clip opens it.
+                if event.click_count >= 2
+                    && let Some(inner) = this.state.nested_composition(id)
+                {
+                    this.state.open_composition(inner);
+                    cx.notify();
+                    return;
+                }
                 // The Cut tool splits the clip where it is clicked, and does nothing else.
                 if this.ui.tool == Tool::Cut {
                     let frame = pointer_frame(this, event.position.x);

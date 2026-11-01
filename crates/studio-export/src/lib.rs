@@ -17,6 +17,19 @@ pub const AUDIO_RATE: u32 = 48_000;
 /// The largest frame the renderer draws.
 pub const MAX_SIZE: u32 = 8192;
 
+/// Straight-alpha BGRA pixels laid over black, as an opaque picture.
+fn over_black(bgra: &[u8]) -> Vec<u8> {
+    bgra.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|pixel| {
+            let alpha = u16::from(pixel[3]);
+            let channel = |value: u8| ((u16::from(value) * alpha + 127) / 255) as u8;
+            [channel(pixel[0]), channel(pixel[1]), channel(pixel[2]), 255]
+        })
+        .collect()
+}
+
 /// What to export, and where.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExportRequest {
@@ -119,7 +132,9 @@ pub fn export(
             if let Some((path, error)) = video.errors().into_iter().next() {
                 return Err(format!("{} could not be decoded ({error}).", path.display()));
             }
-            writer.write_video(&picture.bgra, picture.width, picture.height).map_err(|error| format!("Frame {frame} could not be encoded: {error}"))?;
+            // Movies have no transparency: a transparent composition is shown over black.
+            let flattened = over_black(&picture.bgra);
+            writer.write_video(&flattened, picture.width, picture.height).map_err(|error| format!("Frame {frame} could not be encoded: {error}"))?;
             if !clips.is_empty() {
                 let until = to_sample(frame + 1);
                 sound.resize((until - mixed) as usize * CHANNELS, 0.0);

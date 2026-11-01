@@ -110,6 +110,11 @@ impl EditorState {
     }
 
     /// Whether `layer`'s source can be slipped (it has more source than is showing).
+    /// The layer being slipped (Alt-dragged in the timeline), if any.
+    pub fn slipping_layer(&self) -> Option<Id> {
+        self.layer_time_drag.filter(|drag| drag.edit == LayerTimeEdit::Slip).map(|drag| drag.layer)
+    }
+
     pub fn can_slip(&self, layer: Id) -> bool {
         let composition = self.composition();
         composition.layer(layer).is_some_and(|layer| trim::can_slip(&self.project, composition, layer))

@@ -42,6 +42,9 @@ impl Rgba {
         }
     }
 
+    /// No color at all: a composition background that lets everything below show through.
+    pub const TRANSPARENT: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0, link: None };
+
     /// The same color with its opacity set (0–1).
     pub fn with_alpha(self, alpha: f32) -> Self {
         Self { a: if alpha.is_finite() { alpha.clamp(0.0, 1.0) } else { 1.0 }, ..self }

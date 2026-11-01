@@ -723,3 +723,52 @@ fn captions_show_the_phrase_with_the_spoken_word_highlighted_over_their_box() {
         image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8).unwrap();
     }
 }
+
+/// A 100 × 100 composition `id` with `layers` and a transparent background.
+fn clear_comp(id: u64, layers: Vec<Layer>) -> Composition {
+    Composition {
+        id: Id(id),
+        name: format!("comp {id}"),
+        width: SIZE,
+        height: SIZE,
+        frame_rate: FrameRate::new(24, 1),
+        duration_frames: 10,
+        background: Rgba::TRANSPARENT,
+        layers,
+    }
+}
+
+/// A layer showing composition `inner`, filling the frame.
+fn nested(id: u64, inner: u64) -> Layer {
+    let mut layer = full(id, 0);
+    layer.content = LayerContent::Composition { composition: Id(inner) };
+    layer
+}
+
+#[test]
+fn a_nested_composition_shows_its_layers() {
+    let inner = clear_comp(20, vec![solid(21, 0xff0000, Vec2::new(40.0, 40.0), Vec2::new(30.0, 30.0))]);
+    let outer = clear_comp(1, vec![nested(2, 20), full(3, 0x0000ff)]);
+    let project = Project::new(Vec::new(), vec![outer, inner]);
+    let frame = render(&project);
+    assert!(close(pixel(&frame, 30, 30), [255, 0, 0]), "the inner red square shows: {:?}", pixel(&frame, 30, 30));
+    assert!(close(pixel(&frame, 80, 80), [0, 0, 255]), "and the inner comp is see-through elsewhere: {:?}", pixel(&frame, 80, 80));
+}
+
+#[test]
+fn a_transparent_background_stays_transparent() {
+    let project = Project::new(Vec::new(), vec![clear_comp(1, vec![solid(2, 0xffffff, Vec2::new(20.0, 20.0), Vec2::new(50.0, 50.0))])]);
+    let frame = render(&project);
+    let alpha = |x: u32, y: u32| frame.bgra[((y * frame.width + x) * 4 + 3) as usize];
+    assert_eq!(alpha(5, 5), 0, "nothing there");
+    assert_eq!(alpha(50, 50), 255, "the solid");
+}
+
+#[test]
+fn compositions_inside_each_other_stop_rather_than_hang() {
+    let a = clear_comp(1, vec![nested(2, 20), solid(3, 0x00ff00, Vec2::new(10.0, 10.0), Vec2::new(50.0, 50.0))]);
+    let b = clear_comp(20, vec![nested(21, 1)]);
+    let project = Project::new(Vec::new(), vec![a, b]);
+    let frame = render(&project);
+    assert!(close(pixel(&frame, 50, 50), [0, 255, 0]));
+}

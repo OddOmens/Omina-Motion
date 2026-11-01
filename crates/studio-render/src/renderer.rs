@@ -116,6 +116,10 @@ fn paint_uniform(paint: Option<Paint>) -> (f32, f32, [f32; 4], [f32; 4]) {
     }
 }
 
+/// Compositions nest at most this deep (a composition inside one that is inside it again
+/// would otherwise never end).
+const MAX_NESTING: u32 = 8;
+
 /// A caption layer's drawing for one frame, from its animation.
 struct CaptionDraw {
     opacity: f32,
@@ -150,11 +154,17 @@ pub struct Renderer {
     output_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     blank: wgpu::TextureView,
-    targets: Option<Targets>,
+    /// Work textures for the sizes recently rendered at, most recent last: the frame itself, and
+    /// any nested compositions in it (each at its own size).
+    targets: Vec<Targets>,
     text: TextRenderer,
     text_cache: HashMap<u64, MediaTexture>,
     /// How each caption layer on screen draws this frame (its text is in the text cache).
     captions: HashMap<Id, CaptionDraw>,
+    /// Nested compositions on screen this frame, rendered, by the layer that shows them.
+    nested: HashMap<Id, MediaTexture>,
+    /// How deep the composition being rendered is nested (0 for the one asked for).
+    depth: u32,
     /// The measured text box for each cached raster.
     text_boxes: HashMap<u64, Vec2>,
     /// Loaded images (or `None` where loading failed), with the file's modification time when
@@ -203,6 +213,11 @@ fn srgb_to_linear(value: f32) -> f32 {
 fn linear(color: Rgba) -> [f32; 4] {
     let a = color.a.clamp(0.0, 1.0);
     [srgb_to_linear(color.r) * a, srgb_to_linear(color.g) * a, srgb_to_linear(color.b) * a, a]
+}
+
+/// BGRA pixels as RGBA (the order `upload` takes).
+fn swap_bgra_rgba(bgra: &[u8]) -> Vec<u8> {
+    bgra.as_chunks::<4>().0.iter().flat_map(|pixel| [pixel[2], pixel[1], pixel[0], pixel[3]]).collect()
 }
 
 /// The largest factor by which a transform enlarges things, for choosing raster resolution.
@@ -346,10 +361,12 @@ impl Renderer {
             output_layout,
             sampler,
             blank,
-            targets: None,
+            targets: Vec::new(),
             text: TextRenderer::new(),
             text_cache: HashMap::new(),
             captions: HashMap::new(),
+            nested: HashMap::new(),
+            depth: 0,
             text_boxes: HashMap::new(),
             images: HashMap::new(),
             videos: HashMap::new(),
@@ -362,9 +379,14 @@ impl Renderer {
         self.text.measure(text, style)
     }
 
-    fn ensure_targets(&mut self, width: u32, height: u32) {
-        if self.targets.as_ref().is_some_and(|t| t.width == width && t.height == height) {
-            return;
+    /// The index of a set of work textures `width` × `height`, made if needed. A few sizes are
+    /// kept, so nested compositions don't make the frame's textures again every frame.
+    fn ensure_targets(&mut self, width: u32, height: u32) -> usize {
+        if let Some(index) = self.targets.iter().position(|t| t.width == width && t.height == height) {
+            // Most recently used last, so the oldest goes first when there are too many.
+            let set = self.targets.remove(index);
+            self.targets.push(set);
+            return self.targets.len() - 1;
         }
         let make = |label: &str, format, samples, usage| {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -392,7 +414,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        self.targets = Some(Targets { width, height, work, msaa, output, readback, padded_row });
+        const KEPT_SIZES: usize = 4;
+        if self.targets.len() >= KEPT_SIZES {
+            self.targets.remove(0);
+        }
+        self.targets.push(Targets { width, height, work, msaa, output, readback, padded_row });
+        self.targets.len() - 1
     }
 
     fn uniform(&self, bytes: &[u8]) -> wgpu::Buffer {
@@ -738,11 +765,40 @@ impl Renderer {
         let scale = width as f32 / composition.width as f32;
         let at = frame as f64;
         let at_time = at;
+        let mut used_proxy_nested = false;
         let time = (frame as f64 / composition.frame_rate.fps()) as f32;
+
+        // Nested compositions first: rendering one reuses the renderer's own buffers, so it must
+        // happen before anything for this composition is prepared.
+        let mut nested = HashMap::new();
+        if self.depth < MAX_NESTING {
+            for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame) && layer.switches.visible) {
+                let LayerContent::Composition { composition: inner_id } = layer.content else { continue };
+                let Some(inner) = project.composition(inner_id) else { continue };
+                // Its own time: from where the layer starts, at its own frame rate.
+                let seconds = (frame - layer.start_frame) as f64 / composition.frame_rate.fps();
+                let inner_frame = (seconds * inner.frame_rate.fps() + 1e-6).floor() as i64;
+                if !(0..inner.duration_frames).contains(&inner_frame) {
+                    continue;
+                }
+                // Drawn at the size it appears on screen, so it stays sharp when scaled up.
+                let on_screen = world_transform(composition, layer.id, at_time).map_or(scale, |w| max_scale(w) * scale).clamp(0.01, 8.0);
+                let (inner_width, inner_height) = (((inner.width as f32 * on_screen).round() as u32).clamp(1, 8192), ((inner.height as f32 * on_screen).round() as u32).clamp(1, 8192));
+                self.depth += 1;
+                let rendered = self.render(project, inner_id, inner_frame, inner_width, inner_height, video);
+                self.depth -= 1;
+                if let Ok(picture) = rendered {
+                    used_proxy_nested |= picture.used_proxy;
+                    let view = self.upload(picture.width, picture.height, &swap_bgra_rgba(&picture.bgra));
+                    nested.insert(layer.id, MediaTexture { view, size: Vec2::new(picture.width as f32, picture.height as f32) });
+                }
+            }
+        }
+        self.nested = nested;
 
         // Prepare text rasters and images first (this needs `&mut self`), noting text box sizes.
         let mut text_sizes = Vec::new();
-        let mut used_proxy = false;
+        let mut used_proxy = used_proxy_nested;
         let mut text_keys: HashMap<Id, (u64, Vec2, Vec2)> = HashMap::new();
         self.captions.clear();
         for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame)) {
@@ -807,8 +863,8 @@ impl Renderer {
         let in_project: HashSet<&PathBuf> = project.items.iter().filter_map(|item| item.path.as_ref()).collect();
         self.images.retain(|path, _| in_project.contains(path));
 
-        self.ensure_targets(width, height);
-        let targets = self.targets.as_ref().expect("targets were just created");
+        let index = self.ensure_targets(width, height);
+        let targets = &self.targets[index];
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         let (mut accum, mut spare) = (slot::ACCUM_A, slot::ACCUM_B);
         self.clear(&mut encoder, &targets.work[accum].view, linear(composition.background));
@@ -973,7 +1029,13 @@ impl Renderer {
                 }
             }
             // Nested compositions are not rendered yet.
-            LayerContent::Composition { .. } => self.draw_source(encoder, targets, target, world, scale, &placeholder(), full),
+            // A nested composition, rendered before this one, stretched over the layer's box.
+            LayerContent::Composition { .. } => {
+                if let Some(picture) = self.nested.get(&layer.id) {
+                    let fit = Vec2::new(layer.size.x / picture.size.x.max(1.0), layer.size.y / picture.size.y.max(1.0));
+                    self.draw_source(encoder, targets, target, Affine::scale(fit).then(world), scale, &Source::Texture(&picture.view), (Vec2::default(), picture.size));
+                }
+            }
             LayerContent::Adjustment | LayerContent::Audio { .. } => {}
         }
     }

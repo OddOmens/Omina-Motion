@@ -1,4 +1,5 @@
-// Converts the finished composition (premultiplied, linear light) to display sRGB.
+// Converts the finished composition (premultiplied, linear light) to display sRGB with
+// straight alpha, so transparent parts of a composition stay transparent.
 
 @group(0) @binding(0) var frame_tex: texture_2d<f32>;
 
@@ -22,6 +23,6 @@ fn to_srgb(linear: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let c = textureLoad(frame_tex, vec2<i32>(in.position.xy), 0);
-    // The composition background is opaque, so alpha is 1 wherever it matters.
-    return vec4(to_srgb(c.rgb), 1.0);
+    let straight = select(c.rgb / c.a, vec3(0.0), c.a <= 0.0001);
+    return vec4(to_srgb(straight), c.a);
 }

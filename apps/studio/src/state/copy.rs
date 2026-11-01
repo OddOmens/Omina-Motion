@@ -33,6 +33,28 @@ impl EditorState {
         copies
     }
 
+    /// Pre-compose: moves the selected layers into a new composition, in their place, and
+    /// selects the layer that shows it.
+    pub fn precompose_selection(&mut self) -> Option<Id> {
+        if self.selected_layers.is_empty() {
+            return None;
+        }
+        let comp = self.active_comp;
+        let name = format!("Pre-comp {}", self.project.compositions.len());
+        let selected = self.selected_layers.clone();
+        let layer = studio_core::edit::precompose(&mut self.project, comp, &selected, &name)?;
+        self.select_new_layers(&[layer]);
+        Some(layer)
+    }
+
+    /// The composition a layer shows, if it is a nested composition.
+    pub fn nested_composition(&self, layer: Id) -> Option<Id> {
+        match self.composition().layer(layer)?.content {
+            studio_core::model::LayerContent::Composition { composition } => Some(composition),
+            _ => None,
+        }
+    }
+
     fn select_new_layers(&mut self, layers: &[Id]) {
         if !layers.is_empty() {
             self.selected_layers = layers.to_vec();

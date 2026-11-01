@@ -40,6 +40,7 @@ actions!(studio, [
     Paste,
     Duplicate,
     OpenSettings,
+    Precompose,
     CompositionSettings,
     NewComposition,
     Import,
@@ -84,6 +85,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-c", Copy, Some(NOT_TYPING)),
         KeyBinding::new("cmd-v", Paste, Some(NOT_TYPING)),
         KeyBinding::new("cmd-d", Duplicate, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-shift-c", Precompose, Some(NOT_TYPING)),
         KeyBinding::new("cmd-k", CompositionSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-,", OpenSettings, Some(KEY_CONTEXT)),
         KeyBinding::new("cmd-n", NewComposition, Some(KEY_CONTEXT)),
@@ -134,6 +136,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Copy", Copy),
             MenuItem::action("Paste", Paste),
             MenuItem::action("Duplicate", Duplicate),
+            MenuItem::action("Pre-compose", Precompose),
             MenuItem::separator(),
             MenuItem::action("Trim In Point to Playhead", TrimInToPlayhead),
             MenuItem::action("Trim Out Point to Playhead", TrimOutToPlayhead),
@@ -752,6 +755,11 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| panels::settings::open(this, window, cx)))
+            .on_action(cx.listener(|this, _: &Precompose, _, cx| {
+                if this.state.precompose_selection().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| {
                 this.state.copy_selection();
                 cx.notify();

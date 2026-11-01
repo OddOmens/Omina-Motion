@@ -86,6 +86,9 @@ fn aspect_label(width: u32, height: u32) -> String {
 }
 
 fn background_name(color: Rgba) -> String {
+    if color.a <= 0.0 {
+        return "Transparent".to_owned();
+    }
     BACKGROUNDS
         .iter()
         .find(|(_, hex)| Rgba::hex(*hex).to_rgba_u32() == color.to_rgba_u32())
@@ -180,8 +183,10 @@ fn link_frame_size(workspace: &mut Workspace, fields: &Fields, window: &mut Wind
 /// Opens the dialog. With `create`, OK makes a new composition; otherwise it changes the open one.
 pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &mut Context<Workspace>) {
     let base = workspace.state.composition_settings();
+    // New compositions start transparent, as in After Effects: set a color here, or add a
+    // solid or shape layer, to fill them.
     let base = if create {
-        CompositionSettings { name: format!("Comp {}", workspace.state.project.compositions.len() + 1), ..base }
+        CompositionSettings { name: format!("Comp {}", workspace.state.project.compositions.len() + 1), background: Rgba::TRANSPARENT, ..base }
     } else {
         base
     };
@@ -269,7 +274,14 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
         let background_menu = {
             let fields = fields.clone();
             Button::new("comp-background").outline().small().label(background_name(background)).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
-                BACKGROUNDS.iter().fold(menu, |menu, &(name, hex)| {
+                let transparent = {
+                    let fields = fields.clone();
+                    PopupMenuItem::new("Transparent").checked(fields.background.get().a <= 0.0).on_click(move |_, window, _| {
+                        fields.background.set(Rgba::TRANSPARENT);
+                        window.refresh();
+                    })
+                };
+                BACKGROUNDS.iter().fold(menu.item(transparent), |menu, &(name, hex)| {
                     let fields = fields.clone();
                     let checked = fields.background.get().to_rgba_u32() == Rgba::hex(hex).to_rgba_u32();
                     menu.item(PopupMenuItem::new(name).checked(checked).on_click(move |_, window, _| {

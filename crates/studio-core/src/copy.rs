@@ -40,7 +40,7 @@ pub fn duplicate_layers(project: &mut Project, comp_id: Id, ids: &[Id]) -> Vec<I
 /// pasted layers' ids, top first.
 pub fn paste_layers(project: &mut Project, comp_id: Id, layers: &[Layer], frame: i64) -> Vec<Id> {
     let fits = |layer: &&Layer| match layer.content {
-        LayerContent::Composition { composition } => composition != comp_id && project.composition(composition).is_some(),
+        LayerContent::Composition { composition } => project.composition(composition).is_some() && !crate::edit::contains_composition(project, composition, comp_id),
         LayerContent::Footage { item } | LayerContent::Image { item } | LayerContent::Audio { item } => project.item(item).is_some(),
         _ => true,
     };

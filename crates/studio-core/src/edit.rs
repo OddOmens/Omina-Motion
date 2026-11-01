@@ -69,6 +69,10 @@ pub fn add_layer_from_item(
     stack_index: usize,
     in_frame: i64,
 ) -> Option<Id> {
+    // A composition can't end up inside itself, however deeply.
+    if contains_composition(project, item_id, comp_id) {
+        return None;
+    }
     let id = project.allocate_id();
     let item = project.item(item_id)?.clone();
     let composition = project.composition_mut(comp_id)?;
@@ -80,6 +84,71 @@ pub fn add_layer_from_item(
     composition.layers.insert(index, layer);
     crate::tracks::normalize(composition);
     Some(id)
+}
+
+/// Whether composition `outer` is, or holds somewhere inside it, composition `inner`.
+pub fn contains_composition(project: &Project, outer: Id, inner: Id) -> bool {
+    let mut pending = vec![outer];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = pending.pop() {
+        if id == inner {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(composition) = project.composition(id) else { continue };
+        pending.extend(composition.layers.iter().filter_map(|layer| match layer.content {
+            LayerContent::Composition { composition } => Some(composition),
+            _ => None,
+        }));
+    }
+    false
+}
+
+/// Moves `ids` (with any track mattes they use) into a new composition named `name`, the
+/// same size, rate and length as this one, and puts a layer showing it where they were, as
+/// After Effects' Pre-compose does. The layers keep their timing. Parenting that would cross
+/// between the two compositions is let go. Returns the new composition's layer.
+pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str) -> Option<Id> {
+    let parent = project.composition(comp_id)?;
+    let moving: Vec<Id> = crate::copy::layers_to_copy(parent, ids).iter().map(|layer| layer.id).collect();
+    let top = parent.layers.iter().position(|layer| moving.contains(&layer.id))?;
+    let settings = CompositionSettings {
+        name: name.to_owned(),
+        width: parent.width,
+        height: parent.height,
+        frame_rate: parent.frame_rate,
+        duration_frames: parent.duration_frames,
+        background: Rgba::TRANSPARENT,
+    };
+    let inner_id = new_composition(project, &settings).ok()?;
+    let parent = project.composition_mut(comp_id)?;
+    let (mut moved, kept): (Vec<Layer>, Vec<Layer>) = std::mem::take(&mut parent.layers).into_iter().partition(|layer| moving.contains(&layer.id));
+    parent.layers = kept;
+    for layer in &mut parent.layers {
+        if layer.parent.is_some_and(|p| moving.contains(&p)) {
+            layer.parent = None;
+        }
+    }
+    for layer in &mut moved {
+        if layer.parent.is_some_and(|p| !moving.contains(&p)) {
+            layer.parent = None;
+        }
+    }
+    let inner = project.composition_mut(inner_id)?;
+    inner.layers = moved;
+    crate::tracks::normalize(inner);
+    // The layer showing it, in the moved layers' place, for the whole composition.
+    let layer_id = project.allocate_id();
+    let item = project.item(inner_id)?.clone();
+    let parent = project.composition_mut(comp_id)?;
+    let mut layer = layer_from_item(&item, parent, 0, layer_id)?;
+    let index = keep_matte_pairs(parent, top.min(parent.layers.len()));
+    layer.track = crate::tracks::make_room_at(parent, index, false);
+    parent.layers.insert(index, layer);
+    crate::tracks::normalize(parent);
+    Some(layer_id)
 }
 
 /// Where to insert a layer near `index` without coming between a layer and its track matte
@@ -571,6 +640,28 @@ pub fn set_parent(composition: &mut Composition, layer_id: Id, parent: Option<Id
 mod tests {
     use super::*;
     use crate::sample::{self, ids};
+
+    #[test]
+    fn precomposing_moves_layers_into_a_new_composition_in_their_place() {
+        let mut project = sample::sample_project();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        let (title, second) = (comp.layers[0].id, comp.layers[1].id);
+        let count = comp.layers.len();
+        let (in_frame, out_frame) = (comp.layers[0].in_frame, comp.layers[0].out_frame);
+        let layer = precompose(&mut project, ids::MAIN_COMP, &[title, second], "Title Card").unwrap();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        assert_eq!(comp.layers.len(), count - 1, "two layers became one");
+        let LayerContent::Composition { composition } = comp.layer(layer).unwrap().content else { panic!() };
+        let inner = project.composition(composition).unwrap();
+        assert_eq!(inner.name, "Title Card");
+        assert_eq!(inner.layers.iter().map(|l| l.id).collect::<Vec<_>>(), vec![title, second], "in the same order");
+        let moved = inner.layer(title).unwrap();
+        assert_eq!((moved.in_frame, moved.out_frame), (in_frame, out_frame), "with their timing");
+        assert!(project.item(composition).is_some(), "it is in the Project panel");
+        // And it can't be put inside itself.
+        assert!(add_layer_from_item(&mut project, composition, ids::MAIN_COMP, 0, 0).is_none());
+        assert!(add_layer_from_item(&mut project, composition, composition, 0, 0).is_none());
+    }
 
     #[test]
     fn moving_the_anchor_keeps_a_rotated_scaled_layer_in_place() {

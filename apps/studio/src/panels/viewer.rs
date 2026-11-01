@@ -8,7 +8,7 @@ use gpui_kit::{
     AnyElement, AppContext as _, Context, CursorStyle, DragMoveEvent, ElementId, ImageSource, InteractiveElement, RenderImage, img,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled, TestSupportExt as _,
     Window, div,
-    PathBuilder, canvas, point, prelude::FluentBuilder as _, px, relative, rgba,
+    PathBuilder, canvas, point, prelude::FluentBuilder as _, px, relative,
 };
 use std::sync::Arc;
 
@@ -40,6 +40,24 @@ pub struct ViewerRender {
     showing_proxy: bool,
     /// How long the last viewer frame took to render, shown under the timeline.
     pub last_render_ms: Option<f64>,
+}
+
+/// A gray checkerboard, made once, shown under transparent parts of the composition.
+fn transparency_grid() -> Arc<RenderImage> {
+    static GRID: std::sync::OnceLock<Arc<RenderImage>> = std::sync::OnceLock::new();
+    GRID.get_or_init(|| {
+        let (size, cell) = (1024u32, 16u32);
+        let mut bgra = Vec::with_capacity((size * size * 4) as usize);
+        for y in 0..size {
+            for x in 0..size {
+                let shade = if (x / cell + y / cell) % 2 == 0 { 0x2a } else { 0x1e };
+                bgra.extend([shade, shade, shade, 255]);
+            }
+        }
+        let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(size, size, bgra).expect("the grid holds size × size pixels");
+        Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]))
+    })
+    .clone()
 }
 
 /// Footage is decoded at most this wide for the viewer.
@@ -228,6 +246,14 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
             workspace.ui.tabs.insert(PanelId::Properties, 0);
             cx.notify();
         }
+        return;
+    }
+    // Double-clicking a nested composition opens it, as in After Effects.
+    if event.click_count >= 2
+        && let Some(inner) = workspace.state.layer_at(point).and_then(|layer| workspace.state.nested_composition(layer))
+    {
+        workspace.state.open_composition(inner);
+        cx.notify();
         return;
     }
     // Double-clicking a text layer edits its text right there, over the layer.
@@ -440,11 +466,13 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         _ => None,
     };
 
+    // A checkerboard under the picture shows where the composition is transparent.
     let comp_frame = div()
         .relative()
         .w(px(composition.width as f32 * scale))
         .h(px(composition.height as f32 * scale))
-        .bg(rgba(composition.background.to_rgba_u32()))
+        // Only the grid is clipped to the frame: selection handles may reach past its edges.
+        .child(div().absolute().size_full().overflow_hidden().child(gpui_kit::StyledImage::object_fit(img(transparency_grid()).size_full(), gpui_kit::ObjectFit::Cover)))
         .child(workspace.ui.frame_bounds.probe())
         .children(picture)
         .children(problem)
