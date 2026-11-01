@@ -1381,3 +1381,74 @@ fn discarding_recovered_work_removes_the_copy(cx: &mut TestAppContext) {
     visual.run_until_parked();
     assert!(!crate::app_settings::recovery_path().exists());
 }
+
+// Keyframes in the Tracks view ------------------------------------------------------------------
+
+fn bounds_of(visual: &mut VisualTestContext, id: impl Into<ElementId>) -> gpui_kit::Bounds<Pixels> {
+    let id = id.into();
+    visual.update(|window, _| window.find(id).bounds())
+}
+
+/// The Tracks view with the title clip opened to its keyframe rows.
+fn open_title_keyframes(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    let (workspace, visual) = open(cx);
+    show_tracks(&workspace, visual);
+    visual.update(|window, cx| window.click(("clip-expand", TITLE.0 as usize), cx));
+    render(visual);
+    (workspace, visual)
+}
+
+#[gpui_kit::test]
+fn keyframe_labels_never_sit_under_a_keyframe(cx: &mut TestAppContext) {
+    let (_, visual) = open_title_keyframes(cx);
+    // The title's first opacity keyframe is at its in point, right where the label starts.
+    let label = bounds_of(visual, ElementId::Name(format!("clip-prop-name:{}:{OPACITY:?}", TITLE.0).into()));
+    let key = bounds_of(visual, ElementId::Name(format!("clip-kf:{}:{OPACITY:?}:24", TITLE.0).into()));
+    assert!(label.bottom() <= key.top() + px(2.0), "label {label:?} and keyframe {key:?} overlap");
+}
+
+#[gpui_kit::test]
+fn pressing_a_property_row_selects_all_its_keyframes(cx: &mut TestAppContext) {
+    let (workspace, visual) = open_title_keyframes(cx);
+    let row = ElementId::Name(format!("clip-prop:{}:{OPACITY:?}", TITLE.0).into());
+    // Press near the right end of the row, away from any keyframe.
+    let bounds = bounds_of(visual, row.clone());
+    visual.update(|window, cx| window.click_with_options(row, gpui_kit::test::ClickOptions::new().with_offset(point(bounds.size.width - px(30.0), px(6.0))), cx));
+    render(visual);
+    let selected: Vec<i64> = visual.update(|_, cx| workspace.read(cx).state.selected_keyframes.iter().filter(|key| key.path == OPACITY).map(|key| key.frame).collect());
+    assert_eq!(selected.len(), 4, "every opacity keyframe: {selected:?}");
+}
+
+#[gpui_kit::test]
+fn clicking_the_line_between_keyframes_opens_the_graph_editor_for_that_segment(cx: &mut TestAppContext) {
+    let (workspace, visual) = open_title_keyframes(cx);
+    // The opacity segment from frame 36 to 156.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("clip-seg:{}:{OPACITY:?}:36", TITLE.0).into()), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        let mut frames: Vec<i64> = ws.state.selected_keyframes.iter().map(|key| key.frame).collect();
+        frames.sort();
+        assert_eq!(frames, vec![36, 156], "the segment's two keyframes");
+        assert!(ws.ui.graph_editor.is_some(), "the graph editor opened");
+    });
+    // An easing chosen there applies to exactly that segment.
+    visual.update(|window, cx| window.click(ElementId::Name("easing:Expo:Both".into()), cx));
+    render(visual);
+    let easings = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().keyframe_easings(OPACITY));
+    assert!(matches!(easings[1].1, Easing::Curve(_)), "36 → 156 is eased: {easings:?}");
+    assert_eq!(easings[0].1, Easing::Linear, "24 → 36 is untouched");
+}
+
+#[gpui_kit::test]
+fn double_clicking_a_keyframe_opens_the_graph_editor(cx: &mut TestAppContext) {
+    let (workspace, visual) = open_title_keyframes(cx);
+    let key = ElementId::Name(format!("clip-kf:{}:{OPACITY:?}:36", TITLE.0).into());
+    visual.update(|window, cx| window.click_with_options(key, gpui_kit::test::ClickOptions::new().with_count(2), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.ui.graph_editor.is_some());
+        assert!(ws.state.selected_keyframes.iter().any(|key| key.frame == 36));
+    });
+}

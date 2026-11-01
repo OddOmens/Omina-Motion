@@ -37,8 +37,12 @@ use crate::workspace::{ProjectItemDrag, Workspace};
 const MAIN_HEIGHT: f32 = 58.0;
 const PICTURE_HEIGHT: f32 = 48.0;
 const SOUND_HEIGHT: f32 = 40.0;
-/// Each keyframe row under an expanded clip.
-const PROPERTY_ROW: f32 = 24.0;
+/// Each keyframe row under an expanded clip: a small name on top, keyframes on a line below it.
+const PROPERTY_ROW: f32 = 38.0;
+/// Where a property row's keyframe line runs, from the row's top.
+const KEY_LINE: f32 = 27.0;
+/// The keyframes' clickable size (larger than the diamond drawn, so they are easy to grab).
+const KEY_TARGET: f32 = 20.0;
 /// Height of filmstrip thumbnails, in pixels.
 pub const THUMBNAIL_HEIGHT: u32 = 36;
 /// Height of a clip's header strip.
@@ -382,10 +386,16 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     match &layer.content {
         LayerContent::Footage { item } => {
             if let Some(source) = state.project.item(*item) {
-                inside.push(filmstrip(layer, source, left, clip_px, media_height, workspace));
+                inside.push(filmstrip(layer, source, left, clip_px, media_height, false, workspace));
                 if has_strip && let Some(path) = &source.path {
                     inside.push(waveform(layer, workspace.ui.timeline.media.peaks.peaks(path), CLIP_SOUND_STRIP, 0xffffff, workspace));
                 }
+            }
+        }
+        // A still image: its picture, repeated along the clip.
+        LayerContent::Image { item } => {
+            if let Some(source) = state.project.item(*item) {
+                inside.push(filmstrip(layer, source, left, clip_px, media_height, true, workspace));
             }
         }
         LayerContent::Audio { item } => {
@@ -499,8 +509,15 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     elements
 }
 
-/// The rows under an expanded clip: one per animated property, with its name, a line across
-/// its keyframes, and the keyframes themselves, which select and drag like anywhere else.
+/// Opens the graph editor next to `at` (window coordinates), for the keyframes just selected.
+fn open_graph_editor(workspace: &mut Workspace, at: gpui_kit::Point<gpui_kit::Pixels>) {
+    workspace.ui.graph_editor = Some(point(at.x - px(120.0), at.y + px(14.0)));
+}
+
+/// The rows under an expanded clip: one per animated property, with its name above a line
+/// across its keyframes. Pressing a row selects all its keyframes; keyframes select (Shift
+/// adds) and drag in time; clicking the line between two keyframes selects that segment and
+/// opens the graph editor to ease it, as does double-clicking a keyframe.
 fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
     let state = &workspace.state;
     let view = state.view_range;
@@ -509,26 +526,52 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
     // Keyframe positions are fractions of the visible range; inside this box they are measured
     // from its left edge, so convert.
     let local = move |frame: i64| (fraction(frame as f64, view) - left) / width.max(1e-6);
+    let tint = |alpha: u32| -> gpui_kit::Hsla { rgba((head << 8) | alpha).into() };
     let rows: Vec<AnyElement> = if properties.is_empty() {
         vec![div().h(px(PROPERTY_ROW)).flex().items_center().px_2().text_size(px(11.0)).text_color(hsla(color::MUTED)).child("No keyframes yet: animate a property in Properties").into_any_element()]
     } else {
         properties
             .into_iter()
             .map(|(path, name, frames)| {
-                let (first, last) = (frames.first().copied().unwrap_or(0), frames.last().copied().unwrap_or(0));
-                let keys = frames.into_iter().map(|frame| {
+                let all_selected = frames.iter().all(|&frame| state.is_keyframe_selected(&KeyframeRef { layer: id, path, frame }));
+                // The line between each pair of keyframes: click it to ease that segment.
+                let segments = frames.windows(2).map(|pair| {
+                    let (from, to) = (pair[0], pair[1]);
+                    let selected = state.is_keyframe_selected(&KeyframeRef { layer: id, path, frame: from }) && state.is_keyframe_selected(&KeyframeRef { layer: id, path, frame: to });
+                    div()
+                        .id(gpui_kit::ElementId::Name(format!("clip-seg:{}:{path:?}:{from}", id.0).into()))
+                        .absolute()
+                        .top(px(KEY_LINE - 6.0))
+                        .h(px(12.0))
+                        .left(relative(local(from)))
+                        .w(relative((local(to) - local(from)).max(0.0)))
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .child(div().w_full().h(px(if selected { 2.0 } else { 1.0 })).bg(if selected { hsla(0xffffff) } else { tint(0x99) }))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.state.set_keyframe_selection(vec![KeyframeRef { layer: id, path, frame: from }, KeyframeRef { layer: id, path, frame: to }]);
+                            open_graph_editor(this, event.position);
+                            cx.notify();
+                        }))
+                        .test_support()
+                });
+                let keys = frames.iter().map(|&frame| {
                     let key = KeyframeRef { layer: id, path, frame };
                     let selected = state.is_keyframe_selected(&key);
                     div()
                         .id(gpui_kit::ElementId::Name(format!("clip-kf:{}:{path:?}:{frame}", id.0).into()))
                         .absolute()
-                        .top(px(PROPERTY_ROW * 0.5 - 6.0))
+                        .top(px(KEY_LINE - KEY_TARGET * 0.5))
                         .left(relative(local(frame)))
-                        .ml(px(-6.0))
-                        .size(px(12.0))
+                        .ml(px(-KEY_TARGET * 0.5))
+                        .size(px(KEY_TARGET))
                         .flex()
                         .items_center()
                         .justify_center()
+                        .rounded(px(4.0))
+                        .hover(|style| style.bg(rgba(0xffffff1a)))
                         .cursor_ew_resize()
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
@@ -536,21 +579,46 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
                             if !(this.state.is_keyframe_selected(&key) && !additive) {
                                 this.state.select_keyframe(key, additive);
                             }
-                            this.anchor_drag(event);
-                            this.state.begin_keyframe_drag();
+                            // A double-click opens the graph editor to ease it.
+                            if event.click_count >= 2 {
+                                open_graph_editor(this, event.position);
+                            } else {
+                                this.anchor_drag(event);
+                                this.state.begin_keyframe_drag();
+                            }
                             cx.notify();
                         }))
                         .on_drag(TimelineDrag::Keyframes, |_, _, _, cx| cx.new(|_| EmptyDragView))
-                        .child(Icon::new(IconName::Diamond).size(px(if selected { 11.0 } else { 9.0 })).text_color(if selected { hsla(0xffffff) } else { rgba((head << 8) | 0xff).into() }))
+                        .child(Icon::new(IconName::Diamond).size(px(if selected { 13.0 } else { 11.0 })).text_color(if selected { hsla(0xffffff) } else { tint(0xff) }))
                         .test_support()
                 });
-                let (line_left, line_right) = (local(first), local(last));
                 div()
+                    .id(gpui_kit::ElementId::Name(format!("clip-prop:{}:{path:?}", id.0).into()))
                     .relative()
                     .h(px(PROPERTY_ROW))
-                    .child(div().absolute().top(px(PROPERTY_ROW * 0.5)).h(px(1.0)).left(relative(line_left)).w(relative((line_right - line_left).max(0.0))).bg(rgba((head << 8) | 0x99)))
-                    .child(div().absolute().left(px(8.0)).top(px(4.0)).text_size(px(11.0)).text_color(rgba((head << 8) | 0xff)).child(name))
+                    .when(all_selected, |row| row.bg(rgba(0xffffff0d)))
+                    // Pressing the row (not a keyframe) selects all of its keyframes.
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.state.select_property_keyframes(id, path, event.modifiers.shift || event.modifiers.platform);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .id(gpui_kit::ElementId::Name(format!("clip-prop-name:{}:{path:?}", id.0).into()))
+                            .absolute()
+                            .left(px(8.0))
+                            .top(px(2.0))
+                            .h(px(13.0))
+                            .text_size(px(10.0))
+                            .line_height(px(13.0))
+                            .text_color(tint(0xee))
+                            .child(name)
+                            .test_support(),
+                    )
+                    .children(segments.collect::<Vec<_>>())
                     .children(keys.collect::<Vec<_>>())
+                    .test_support()
                     .into_any_element()
             })
             .collect()
@@ -565,9 +633,10 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
         .children(rows)
 }
 
-/// Thumbnails across a video clip, one per tile, each showing the source frame at its spot.
-/// Only tiles that are on screen are asked for.
-fn filmstrip(layer: &Layer, source: &studio_core::model::ProjectItem, left: f32, clip_px: f32, height: f32, workspace: &Workspace) -> AnyElement {
+/// Thumbnails across a clip, one per tile: for video, the source frame at each tile's spot; for
+/// a still image (`still`), its one picture. Only tiles that are on screen are asked for.
+#[allow(clippy::too_many_arguments)]
+fn filmstrip(layer: &Layer, source: &studio_core::model::ProjectItem, left: f32, clip_px: f32, height: f32, still: bool, workspace: &Workspace) -> AnyElement {
     let Some(path) = source.path.as_ref() else { return div().into_any_element() };
     let aspect = source.size.map_or(16.0 / 9.0, |size| size.x / size.y.max(1.0));
     let tile = (height * aspect).max(16.0);
@@ -585,7 +654,7 @@ fn filmstrip(layer: &Layer, source: &studio_core::model::ProjectItem, left: f32,
         }
         // The source moment at the tile's middle.
         let frame = layer.in_frame as f64 + f64::from((offset + tile * 0.5) / clip_px.max(1.0) * frames);
-        let seconds = (frame - layer.start_frame as f64) / fps;
+        let seconds = if still { 0.0 } else { (frame - layer.start_frame as f64) / fps };
         let picture = media.thumbnails.thumbnail(path, seconds.max(0.0))?;
         let image = media.image(&picture);
         Some(img(ImageSource::Render(image)).absolute().left(px(offset)).top_0().w(px(tile)).h(px(height)).into_any_element())

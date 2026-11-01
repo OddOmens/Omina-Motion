@@ -160,3 +160,23 @@ fn the_peak_cache_computes_in_the_background_and_remembers_failures() {
     }
     assert_eq!(readies.load(Ordering::SeqCst), 2, "the failed file was not tried again");
 }
+
+#[test]
+fn still_images_get_a_thumbnail() {
+    // A green PNG and JPEG, as Image layers use: FFmpeg reads them as one-frame videos.
+    for name in ["still.png", "still.jpg"] {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+        let thumbnailer = studio_media::Thumbnailer::new(18);
+        let started = std::time::Instant::now();
+        let picture = loop {
+            if let Some(picture) = thumbnailer.thumbnail(&path, 0.0) {
+                break picture;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(5), "{name}: no thumbnail");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(picture.height, 18, "{name}");
+        let i = ((picture.height / 2 * picture.width + picture.width / 2) * 4) as usize;
+        assert!(picture.rgba[i + 1] > 200 && picture.rgba[i] < 60, "{name}: green");
+    }
+}

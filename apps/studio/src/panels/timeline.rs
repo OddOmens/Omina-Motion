@@ -707,8 +707,13 @@ fn graph_row(row: &TimelineRow, workspace: &Workspace, cx: &mut Context<Workspac
                         if !(this.state.is_keyframe_selected(&key) && !additive) {
                             this.state.select_keyframe(key, additive);
                         }
-                        this.anchor_drag(event);
-                        this.state.begin_keyframe_drag();
+                        // A double-click opens the graph editor beside it to ease it.
+                        if event.click_count >= 2 {
+                            this.ui.graph_editor = Some(gpui_kit::point(event.position.x - px(120.0), event.position.y + px(14.0)));
+                        } else {
+                            this.anchor_drag(event);
+                            this.state.begin_keyframe_drag();
+                        }
                         cx.notify();
                     }))
                     .on_drag(TimelineDrag::Keyframes, |_, _, _, cx| cx.new(|_| EmptyDragView))
