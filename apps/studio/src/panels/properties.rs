@@ -3,7 +3,7 @@
 //! paragraph styling. Every value scrubs or can be typed into.
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -13,7 +13,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px,
 };
 use studio_core::captions::{CaptionAnimation, CaptionStyle, CaptionWord};
-use studio_core::model::{BlendMode, Id, Layer, LayerContent, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
+use studio_core::model::{BlendMode, Id, Layer, LayerContent, LayerMask, MaskMode, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 
 use super::chrome::{divider, hint, icon_button, panel, section};
@@ -87,6 +87,31 @@ fn labeled_row(label: &'static str, control: impl IntoElement) -> Div {
         .child(div().flex_1().min_w_0().child(control))
 }
 
+/// The Mask row: which other layer shows (or hides) this one where it draws, and which of the
+/// two it does. The mask layer itself is not drawn.
+fn mask_row(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let target = cx.weak_entity();
+    let composition = workspace.state.composition();
+    let mode = layer.mask.map_or(MaskMode::Show, |mask| mask.mode);
+    let mut choices: Vec<(String, bool, Option<Id>)> = vec![("None".to_owned(), layer.mask.is_none(), None)];
+    choices.extend(
+        composition
+            .layers
+            .iter()
+            .filter(|candidate| candidate.id != id && candidate.content.has_picture())
+            .map(|candidate| (candidate.name.clone(), layer.mask.is_some_and(|mask| mask.layer == candidate.id), Some(candidate.id))),
+    );
+    let current = layer.mask.and_then(|mask| composition.layer(mask.layer)).map_or("None".to_owned(), |mask| mask.name.clone());
+    let pick = choice_menu("layer-mask", current, choices, move |this, chosen: Option<Id>| this.state.set_layer_mask(id, chosen.map(|layer| LayerMask { layer, mode })), target.clone());
+    let mut row = div().child(labeled_row("Mask", pick));
+    if let Some(mask) = layer.mask {
+        let modes = MaskMode::ALL.iter().map(|&choice| (choice.name().to_owned(), choice == mask.mode, choice)).collect();
+        row = row.child(labeled_row("", choice_menu("layer-mask-mode", mask.mode.name().to_owned(), modes, move |this, mode| this.state.set_layer_mask(id, Some(LayerMask { mode, ..mask })), target)));
+    }
+    row
+}
+
 /// How the layer combines with what is below it: blend mode, track matte (the layer above it,
 /// so not offered on the top layer), parent, and the solo and effects switches.
 fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -102,6 +127,7 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             let mattes = TrackMatte::ALL.iter().map(|&matte| (matte.label().to_owned(), matte == layer.track_matte, matte)).collect();
             rows = rows.child(labeled_row("Track Matte", choice_menu("layer-matte", layer.track_matte.label().to_owned(), mattes, move |this, matte| this.state.set_track_matte(id, matte), target.clone())));
         }
+        rows = rows.child(mask_row(layer, workspace, cx));
         // Only layers that can be the parent: not this one, and none of its children (a loop).
         let mut parents: Vec<(String, bool, Option<Id>)> = vec![("None".to_owned(), layer.parent.is_none(), None)];
         parents.extend(
@@ -143,6 +169,72 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             ),
         )
     })
+}
+
+/// Remove Background, for footage and images: pick the subject by clicking it in the viewer,
+/// choose whether to keep it or take it out, and for video, follow it through the clip.
+fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let target = cx.weak_entity();
+    let picking = workspace.ui.cutout_pick == Some(id);
+    let job = workspace.ui.cutout_job.as_ref().filter(|job| job.layer == id);
+    let is_video = matches!(layer.content, LayerContent::Footage { .. });
+    let cut = layer.cutout.as_ref();
+    let mut section = div().child(divider()).child(section("Remove Background", None));
+    let pick = Button::new("cutout-pick")
+        .small()
+        .icon(Icon::new(IconName::WandSparkles))
+        .label(if picking { "Done Picking" } else if cut.is_some() { "Pick Again" } else { "Pick Subject" })
+        .when(picking, |button| button.primary())
+        .when(!picking, |button| button.outline())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.ui.cutout_pick = if this.ui.cutout_pick == Some(id) { None } else { Some(id) };
+            cx.notify();
+        }));
+    section = section.child(div().py_1().flex().gap_2().child(pick).when(cut.is_some(), |row| {
+        row.child(Button::new("cutout-clear").ghost().small().label("Clear").on_click(cx.listener(move |this, _, _, cx| {
+            if this.ui.cutout_job.as_ref().is_some_and(|job| job.layer == id) {
+                super::cutout::cancel(this);
+            }
+            this.state.clear_cutout(id);
+            this.ui.cutout_pick = None;
+            cx.notify();
+        })))
+    }));
+    if picking {
+        section = section.child(hint("Click what to keep in the viewer. Option-click what to leave out. Each click updates the cut-out."));
+    }
+    let Some(cut) = cut else {
+        return section.when(!picking, |section| section.child(hint("Pick a subject to cut it out of its background, or an object to take it out of the shot.")));
+    };
+    let modes = [("Keep Subject", false), ("Remove Subject", true)].map(|(label, remove)| (label.to_owned(), remove == cut.remove, remove)).to_vec();
+    let mode_label = if cut.remove { "Remove Subject" } else { "Keep Subject" };
+    section = section.child(labeled_row("Picked", choice_menu("cutout-mode", mode_label.to_owned(), modes, move |this, remove| this.state.set_cutout_remove(id, remove), target)));
+    // Where the masks stand: being made, made for one frame, or followed through the clip.
+    let state = match (job, cut.frames) {
+        (Some(job), _) if job.tracking => "Following the subject through the clip…".to_owned(),
+        (Some(_), _) => "Finding the subject…".to_owned(),
+        (None, None) if cut.clicks.is_empty() => "Click the subject in the viewer.".to_owned(),
+        (None, None) => "Not made yet.".to_owned(),
+        (None, Some((start, end))) if is_video && end - start <= 1 => "Made for the clicked frame. Track it to follow the subject through the clip.".to_owned(),
+        (None, Some((start, end))) if is_video => format!("Following the subject over {} frames.", end - start),
+        (None, Some(_)) => "Cut out.".to_owned(),
+    };
+    section = section.child(div().py_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(state));
+    if is_video {
+        let busy = job.is_some();
+        section = section.child(
+            div().py_1().child(
+                Button::new("cutout-track")
+                    .outline()
+                    .small()
+                    .label("Track Through Clip")
+                    .disabled(busy || cut.clicks.is_empty())
+                    .on_click(cx.listener(move |this, _, window, cx| super::cutout::make_masks(this, id, true, window, cx))),
+            ),
+        );
+    }
+    section
 }
 
 /// A layer's sound: whether its picture shows and its sound plays (separately), its volume and
@@ -544,16 +636,32 @@ fn shape_section(layer: &Layer, style: &ShapeStyle, workspace: &Workspace, cx: &
     );
     // Polygons and stars are sized by radius, as in After Effects.
     let radial = style.kind.has_points();
+    let is_path = style.kind == ShapeKind::Path;
+    let closed = match &layer.content {
+        LayerContent::Shape { path: Some(path), .. } => path.closed,
+        _ => true,
+    };
     div()
         .child(divider())
         .child(section("Shape", None))
-        .child(labeled_row("Shape", choice_menu("shape-kind", style.kind.name().to_owned(), kinds, move |this, kind| this.state.set_shape_kind(id, kind), weak)))
+        // A pen path keeps its own outline; the drawn shapes can switch between each other.
+        .when(!is_path, |section| section.child(labeled_row("Shape", choice_menu("shape-kind", style.kind.name().to_owned(), kinds, move |this, kind| this.state.set_shape_kind(id, kind), weak))))
+        .when(is_path, |section| {
+            section.child(labeled_row(
+                "Path",
+                Checkbox::new("path-closed").label("Closed").checked(closed).on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.set_path_closed(id, !closed);
+                    cx.notify();
+                })),
+            ))
+        })
         .when(!radial, |section| section.child(size_row))
         .when(radial, |section| section.child(labeled_row("Outer Radius", field(ShapeSetting::OuterRadius, cx))))
         .when(style.kind == ShapeKind::Star, |section| section.child(labeled_row("Inner Radius", field(ShapeSetting::InnerRadius, cx))))
         .when(radial, |section| section.child(labeled_row(points_label, field(ShapeSetting::Points, cx))))
         .when(style.kind.has_corners(), |section| section.child(labeled_row("Corner Radius", field(ShapeSetting::CornerRadius, cx))))
-        .child(shape_paint_rows(id, PaintSlot::Fill, style.fill, workspace, cx))
+        // An open path is a line: it has nothing inside to fill.
+        .when(closed, |section| section.child(shape_paint_rows(id, PaintSlot::Fill, style.fill, workspace, cx)))
         .child(shape_paint_rows(id, PaintSlot::Stroke, style.stroke.map(|stroke| stroke.paint), workspace, cx))
 }
 
@@ -576,7 +684,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
     };
     let text = match &layer.content {
         LayerContent::Text { text, style } => Some(text_section(layer, text, style, workspace, cx)),
-        LayerContent::Shape { style } => Some(shape_section(layer, style, workspace, cx)),
+        LayerContent::Shape { style, .. } => Some(shape_section(layer, style, workspace, cx)),
         LayerContent::Captions { words, style } => Some(captions_section(layer, style, words, workspace, cx)),
         _ => None,
     };
@@ -603,6 +711,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(divider())
         .child(transform)
         .children(text)
+        .children(studio_core::cutout::can_cut_out(layer).then(|| cutout_section(layer, workspace, cx)))
         .children(workspace.state.has_sound(layer.id).then(|| audio_section(layer, workspace, cx)))
         .into_any_element()
 }

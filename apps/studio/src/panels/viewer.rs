@@ -203,6 +203,7 @@ enum ViewerDrag {
     Move,
     Scale,
     Anchor,
+    PathPoint,
 }
 
 /// Screen pixels per composition pixel at the current Fit magnification.
@@ -212,6 +213,136 @@ fn viewer_scale(workspace: &Workspace) -> f32 {
     ((bounds.width - FIT_PADDING * 2.0) / composition.width as f32)
         .min((bounds.height - FIT_PADDING * 2.0) / composition.height as f32)
         .max(0.0)
+}
+
+/// The layer whose subject is being picked for background removal, while it is still the one
+/// selected (picking ends when the selection moves on).
+fn picking_layer(workspace: &Workspace) -> Option<Id> {
+    workspace.ui.cutout_pick.filter(|layer| workspace.state.selected_layers == [*layer])
+}
+
+/// The clicks picking a cut-out's subject: green dots on what to keep, red on what to leave out.
+fn cutout_clicks_overlay(workspace: &Workspace) -> Vec<AnyElement> {
+    let Some(layer) = picking_layer(workspace) else { return Vec::new() };
+    let composition = workspace.state.composition();
+    let (width, height) = (composition.width as f32, composition.height as f32);
+    workspace
+        .state
+        .cutout_clicks_on_screen(layer)
+        .into_iter()
+        .map(|(at, keep)| {
+            div()
+                .absolute()
+                .left(relative(at.x / width))
+                .top(relative(at.y / height))
+                .ml(px(-6.0))
+                .mt(px(-6.0))
+                .size(px(12.0))
+                .rounded_full()
+                .border_2()
+                .border_color(gpui_kit::rgb(0xffffff))
+                .bg(gpui_kit::rgb(if keep { 0x22c55e } else { 0xef4444 }))
+                .into_any_element()
+        })
+        .collect()
+}
+
+/// How near (in screen points) a Pen click must be to the path's first point to close it.
+const CLOSE_PATH_REACH: f32 = 8.0;
+
+/// Draws curves given in composition pixels as a thin line over the frame.
+fn curve_canvas(segments: Vec<[Vec2; 4]>, composition_size: Vec2, line: gpui_kit::Hsla) -> AnyElement {
+    canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let at = |v: Vec2| point(bounds.origin.x + bounds.size.width * (v.x / composition_size.x), bounds.origin.y + bounds.size.height * (v.y / composition_size.y));
+        let mut path = PathBuilder::stroke(px(1.5));
+        for [start, control_a, control_b, end] in &segments {
+            path.move_to(at(*start));
+            path.cubic_bezier_to(at(*end), at(*control_a), at(*control_b));
+        }
+        if let Ok(path) = path.build() {
+            window.paint_path(path, line);
+        }
+    })
+    .absolute()
+    .size_full()
+    .into_any_element()
+}
+
+/// A small square marking a path point (filled for the first point of a path being drawn, which
+/// closes it when clicked).
+fn point_mark(at: (f32, f32), filled: bool) -> gpui_kit::Div {
+    div()
+        .absolute()
+        .left(relative(at.0))
+        .top(relative(at.1))
+        .ml(px(-4.0))
+        .mt(px(-4.0))
+        .size(px(8.0))
+        .border_1()
+        .border_color(hsla(color::ACCENT))
+        .bg(if filled { hsla(color::ACCENT) } else { hsla(color::PANEL) })
+}
+
+/// The pen path being drawn: its curves so far and its points.
+fn pen_draft_overlay(workspace: &Workspace) -> Vec<AnyElement> {
+    let Some(pen) = workspace.state.pen.as_ref() else { return Vec::new() };
+    let composition = workspace.state.composition();
+    let size = Vec2::new(composition.width as f32, composition.height as f32);
+    let frac = |v: Vec2| (v.x / size.x, v.y / size.y);
+    let mut elements = vec![curve_canvas(pen.segments(), size, hsla(color::ACCENT))];
+    for (index, point) in pen.points.iter().enumerate() {
+        // The handles of a smooth point, as in every pen tool.
+        if point.handle_out.length() > 0.0 {
+            let handles = vec![[point.at + point.handle_in, point.at + point.handle_in, point.at + point.handle_out, point.at + point.handle_out]];
+            elements.push(curve_canvas(handles, size, hsla(color::MUTED)));
+        }
+        elements.push(point_mark(frac(point.at), index == 0).into_any_element());
+    }
+    elements
+}
+
+/// The points and handles of a selected pen path layer, each draggable to reshape it.
+fn path_points_overlay(workspace: &Workspace, layer: Id, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
+    use studio_core::edit::PathPart;
+    let composition = workspace.state.composition();
+    let size = Vec2::new(composition.width as f32, composition.height as f32);
+    let frac = |v: Vec2| (v.x / size.x, v.y / size.y);
+    let points = workspace.state.path_points_on_screen(layer);
+    let mut elements = Vec::new();
+    let grab = |id: String, at: (f32, f32), part: PathPart, index: usize, look: gpui_kit::Div, cx: &mut Context<Workspace>| {
+        div()
+            .id(ElementId::Name(id.into()))
+            .absolute()
+            .left(relative(at.0))
+            .top(relative(at.1))
+            .ml(px(-7.0))
+            .mt(px(-7.0))
+            .size(px(14.0))
+            .cursor(CursorStyle::Crosshair)
+            .child(look)
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.ui.viewer_anchor = Some((f32::from(event.position.x), f32::from(event.position.y)));
+                this.state.begin_path_point_drag(layer, index, part);
+                cx.notify();
+            }))
+            .on_drag(ViewerDrag::PathPoint, |_, _, _, cx| cx.new(|_| EmptyDragView))
+            .test_support()
+            .into_any_element()
+    };
+    for (index, point) in points.iter().enumerate() {
+        for (part, handle) in [(PathPart::HandleIn, point.handle_in), (PathPart::HandleOut, point.handle_out)] {
+            if (handle - point.at).length() < 0.5 {
+                continue;
+            }
+            elements.push(curve_canvas(vec![[point.at, point.at, handle, handle]], size, hsla(color::MUTED)));
+            let dot = div().absolute().left(px(3.5)).top(px(3.5)).size(px(7.0)).rounded_full().bg(hsla(color::ACCENT));
+            elements.push(grab(format!("path-handle:{}:{index}:{part:?}", layer.0), frac(handle), part, index, dot, cx));
+        }
+        let square = point_mark((0.5, 0.5), false);
+        elements.push(grab(format!("path-point:{}:{index}", layer.0), frac(point.at), PathPart::Point, index, square, cx));
+    }
+    elements
 }
 
 /// Converts a window position to composition pixels, using where the frame was drawn last frame.
@@ -228,6 +359,15 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
     let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
     let point = to_comp(workspace, x, y);
     workspace.ui.viewer_anchor = Some((x, y));
+    // Picking a subject to cut out: clicks mark what to keep (Option: what to leave out), and
+    // each one updates the mask.
+    if let Some(layer) = picking_layer(workspace) {
+        if workspace.state.add_cutout_click(layer, point, !event.modifiers.alt) {
+            super::cutout::make_masks(workspace, layer, false, window, cx);
+        }
+        cx.notify();
+        return;
+    }
     if workspace.ui.tool == Tool::Type {
         if let Some(layer) = workspace.state.add_text_layer("", point) {
             workspace.ui.tabs.insert(PanelId::Properties, 0);
@@ -238,6 +378,20 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
             });
             cx.notify();
         }
+        return;
+    }
+    if workspace.ui.tool == Tool::Pen {
+        // A double-click ends the path as an open line; a click on its first point closes it.
+        let finished = if event.click_count >= 2 {
+            workspace.state.finish_pen(false)
+        } else {
+            let reach = CLOSE_PATH_REACH / viewer_scale(workspace).max(f32::EPSILON);
+            workspace.state.pen_press(point, reach)
+        };
+        if finished.is_some() {
+            workspace.ui.tabs.insert(PanelId::Properties, 0);
+        }
+        cx.notify();
         return;
     }
     if workspace.ui.tool == Tool::Shape {
@@ -371,6 +525,10 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
             .into_any_element(),
         );
 
+        // While its subject is being picked, clicks belong to the picture: no handles to catch them.
+        if picking_layer(workspace) == Some(id) {
+            continue;
+        }
         let handles = [ScaleHandle::TopLeft, ScaleHandle::TopRight, ScaleHandle::BottomRight, ScaleHandle::BottomLeft];
         for (handle, corner) in handles.into_iter().zip(outline) {
             let (hx, hy) = corner;
@@ -400,6 +558,9 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
                     .into_any_element(),
             );
         }
+
+        // A pen path's own points, over the scale handles (a point often sits on a corner).
+        elements.extend(path_points_overlay(workspace, id, cx));
 
         // The anchor point, where the layer scales and rotates around, drawn over the scale
         // handles so it can be dragged off a corner. Drag it to move it; the layer stays put.
@@ -489,6 +650,8 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 .child("Proxy")
         }))
         .children(selection_overlay(workspace, cx))
+        .children(pen_draft_overlay(workspace))
+        .children(cutout_clicks_overlay(workspace))
         .children(text_editor_overlay(workspace))
         .children(effect_drop_highlight(workspace));
 
@@ -503,7 +666,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .overflow_hidden()
         .bg(hsla(color::PASTEBOARD))
         .when(workspace.ui.tool == Tool::Type, |viewer| viewer.cursor_text())
-        .when(workspace.ui.tool == Tool::Shape, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
+        .when(matches!(workspace.ui.tool, Tool::Shape | Tool::Pen) || picking_layer(workspace).is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| press_viewer(this, event, window, cx)))
         .on_drag(ViewerDrag::Move, |_, _, _, cx| cx.new(|_| EmptyDragView))
         // An effect dragged over the picture lights up the layer it would go on (one it suits).

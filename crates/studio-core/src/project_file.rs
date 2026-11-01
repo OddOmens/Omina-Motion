@@ -225,10 +225,31 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             if layer.id.0 > MAX_ID || layer.effects.iter().any(|effect| effect.id.0 > MAX_ID) {
                 return damaged(&format!("layer \"{}\" has an id too large to use", layer.name));
             }
-            if let crate::model::LayerContent::Shape { style } = &layer.content
+            if let crate::model::LayerContent::Shape { style, .. } = &layer.content
                 && !shape_is_sound(style)
             {
                 return damaged(&format!("shape layer \"{}\" has impossible corners or points", layer.name));
+            }
+            // A pen path needs its outline, and only a pen path has one.
+            if let crate::model::LayerContent::Shape { style, path } = &layer.content
+                && (style.kind == crate::model::ShapeKind::Path) != path.as_ref().is_some_and(crate::path::ShapePath::is_sound)
+            {
+                return damaged(&format!("shape layer \"{}\" has a missing or broken path", layer.name));
+            }
+            // Background removal is for pictures, with a sane number of clicks on the picture.
+            if let Some(cutout) = &layer.cutout
+                && (!crate::cutout::can_cut_out(layer)
+                    || cutout.clicks.len() > crate::model::MAX_CUTOUT_CLICKS
+                    || cutout.clicks.iter().any(|click| !((0.0..=1.0).contains(&click.at.x) && (0.0..=1.0).contains(&click.at.y)))
+                    || cutout.frames.is_some_and(|(start, end)| end <= start || start.abs() > MAX_FRAME || end.abs() > MAX_FRAME))
+            {
+                return damaged(&format!("layer \"{}\" has a damaged background removal", layer.name));
+            }
+            // A mask must be another layer of the same composition.
+            if let Some(mask) = layer.mask
+                && (mask.layer == layer.id || comp.layer(mask.layer).is_none())
+            {
+                return damaged(&format!("layer \"{}\" has a missing mask layer", layer.name));
             }
             if let crate::model::LayerContent::Captions { words, style } = &layer.content
                 && (words.iter().any(|word| word.start.abs() > MAX_FRAME || word.end.abs() > MAX_FRAME || word.end < word.start)

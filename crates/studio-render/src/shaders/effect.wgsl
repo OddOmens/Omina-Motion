@@ -410,6 +410,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let dark = step(0.5, line) * u.p0.y / 100.0;
             return vec4(c.rgb * (1.0 - dark), c.a);
         }
+        // Mask: keep the image where the mask (in aux) draws, or with p0.x = 1 where it does not.
+        case 60u: {
+            let m = textureSampleLevel(aux, linear_sampler, uv, 0.0).a;
+            return c * select(m, 1.0 - m, u.p0.x > 0.5);
+        }
         default: { return c; }
     }
 }

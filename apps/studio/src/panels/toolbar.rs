@@ -3,7 +3,7 @@
 //! pick the panel beside it (Media, Effects), the editing tools, and import. The rail holds
 //! only things that work; more are added as they are built.
 //!
-//! The Shape button picks the Shape tool on a click; pressing and holding it (or right-clicking)
+//! The Pen button (G) draws custom shapes point by point. The Shape button picks the Shape tool on a click; pressing and holding it (or right-clicking)
 //! opens a menu beside it to choose which shape the tool draws.
 
 use gpui_kit::assets::IconName;
@@ -41,6 +41,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .child(div().flex_1())
         // An export running in the background shows its progress here.
         .children(super::captions::status(workspace, cx))
+        .children(super::cutout::status(workspace, cx))
         .children(super::export::status(workspace, cx))
         // The one bright button on screen: export the composition (⌘M).
         .child(
@@ -74,6 +75,7 @@ pub fn shape_icon(kind: ShapeKind) -> IconName {
         ShapeKind::Triangle => IconName::Triangle,
         ShapeKind::Polygon => IconName::Hexagon,
         ShapeKind::Star => IconName::Star,
+        ShapeKind::Path => IconName::PenTool,
     }
 }
 
@@ -122,7 +124,7 @@ fn shape_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl Into
             rail_button_look("tool-shape", shape_icon(kind), "Shape", active)
                 .relative()
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
-                    this.ui.tool = Tool::Shape;
+                    this.set_tool(Tool::Shape);
                     this.ui.shape_press = true;
                     cx.notify();
                     // Still held after a moment: open the menu.
@@ -164,7 +166,7 @@ fn shape_menu(current: ShapeKind, cx: &mut Context<Workspace>) -> impl IntoEleme
             .hover(|style| style.bg(hsla(color::HOVER)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.ui.shape_kind = kind;
-                this.ui.tool = Tool::Shape;
+                this.set_tool(Tool::Shape);
                 this.ui.shape_menu = false;
                 cx.notify();
             }))
@@ -214,7 +216,7 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
     };
     let pick = |which: Tool| {
         move |this: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
-            this.ui.tool = which;
+            this.set_tool(which);
             cx.notify();
         }
     };
@@ -235,6 +237,7 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .child(rail_button("tool-selection", IconName::MousePointer2, "Select", tool == Tool::Selection, pick(Tool::Selection), cx))
         .child(rail_button("tool-type", IconName::Type, "Text", tool == Tool::Type, pick(Tool::Type), cx))
         .child(shape_button(workspace, cx))
+        .child(rail_button("tool-pen", IconName::PenTool, "Pen", tool == Tool::Pen, pick(Tool::Pen), cx))
         .child(rail_button("tool-cut", IconName::Scissors, "Cut", tool == Tool::Cut, pick(Tool::Cut), cx))
         .child(separator())
         .child(rail_button("rail-import", IconName::FileInput, "Import", false, |this, window, cx| this.import(window, cx), cx))

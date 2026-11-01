@@ -3,6 +3,7 @@
 //! node all share it. See `renderer` for the pipeline.
 
 pub mod effects;
+mod path;
 mod renderer;
 pub mod text;
 

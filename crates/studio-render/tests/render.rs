@@ -25,6 +25,8 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         track: 0,
         blend_mode: BlendMode::Normal,
         track_matte: TrackMatte::None,
+        mask: None,
+        cutout: None,
         parent: None,
         switches: LayerSwitches::default(),
         transform: Some(Transform::centered(size, position)),
@@ -258,7 +260,7 @@ fn every_rendered_effect_is_fast_at_1080p() {
 /// An 80 × 80 white shape in the middle of the frame, over black.
 fn shape_frame(kind: ShapeKind, corner_radius: f32) -> studio_render::RenderedFrame {
     let mut layer = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
-    layer.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Solid(Rgba::hex(0xffffff))), corner_radius, ..ShapeStyle::new(kind) } };
+    layer.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Solid(Rgba::hex(0xffffff))), corner_radius, ..ShapeStyle::new(kind) }, path: None };
     render(&project(vec![layer]))
 }
 
@@ -591,7 +593,7 @@ fn an_image_changed_on_disk_is_shown_as_it_is_now() {
 /// Draws `style` in an 80 × 80 box in the middle of the frame, over black.
 fn styled_shape(style: ShapeStyle) -> studio_render::RenderedFrame {
     let mut layer = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
-    layer.content = LayerContent::Shape { style };
+    layer.content = LayerContent::Shape { style, path: None };
     render(&project(vec![layer]))
 }
 
@@ -649,7 +651,7 @@ fn shape_sheet() {
         for (column, kind) in ShapeKind::ALL.into_iter().enumerate() {
             let center = Vec2::new(gap + cell * 0.5 + column as f32 * (cell + gap), gap + cell * 0.5 + row as f32 * (cell + gap));
             let mut layer = solid((10 + row * 5 + column) as u64, 0, Vec2::new(cell, cell * if column == 0 { 0.7 } else { 1.0 }), center);
-            layer.content = LayerContent::Shape { style: ShapeStyle { fill, stroke, corner_radius: radius, inner_radius, ..ShapeStyle::new(kind) } };
+            layer.content = LayerContent::Shape { style: ShapeStyle { fill, stroke, corner_radius: radius, inner_radius, ..ShapeStyle::new(kind) }, path: None };
             layers.push(layer);
         }
     }
@@ -675,7 +677,7 @@ fn effect_sheet() {
     let mut renderer = Renderer::new().unwrap();
     for (index, name) in names.iter().enumerate() {
         let mut card = solid(2, 0, Vec2::new(cell as f32, cell as f32 * 0.75), Vec2::new(cell as f32 / 2.0, cell as f32 / 2.0));
-        card.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Linear { start: Rgba::hex(0xf97316), end: Rgba::hex(0x3b82f6), angle: 30.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) } };
+        card.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Linear { start: Rgba::hex(0xf97316), end: Rgba::hex(0x3b82f6), angle: 30.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) }, path: None };
         card.effects.push(effects::instantiate(effects::find(name).unwrap(), Id(9)));
         let mut text = solid(4, 0, Vec2::new(150.0, 60.0), Vec2::new(cell as f32 / 2.0, cell as f32 / 2.0));
         text.content = LayerContent::Text { text: "Sale".into(), style: TextStyle { font_size: 52.0, line_height: 60.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() } };
@@ -772,4 +774,87 @@ fn compositions_inside_each_other_stop_rather_than_hang() {
     let project = Project::new(Vec::new(), vec![a, b]);
     let frame = render(&project);
     assert!(close(pixel(&frame, 50, 50), [0, 255, 0]));
+}
+
+/// A pen path layer: a closed triangle (or an open line when `closed` is false) filling an
+/// 80 × 80 box in the middle of the frame, white, with an optional stroke.
+fn path_layer(id: u64, closed: bool, stroke: Option<Stroke>) -> Layer {
+    use studio_core::path::{PathPoint, ShapePath};
+    let mut layer = solid(id, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
+    let points = [(0.5, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(x, y)| PathPoint::corner(Vec2::new(x, y))).to_vec();
+    let style = ShapeStyle { fill: Some(Paint::Solid(Rgba::hex(0xffffff))), stroke, ..ShapeStyle::new(ShapeKind::Path) };
+    layer.content = LayerContent::Shape { style, path: Some(ShapePath { points, closed }) };
+    layer
+}
+
+#[test]
+fn pen_paths_fill_their_outline_and_open_ones_are_only_stroked() {
+    let lit = |frame: &studio_render::RenderedFrame, x, y| pixel(frame, x, y)[0] > 200;
+    let dark = |frame: &studio_render::RenderedFrame, x, y| pixel(frame, x, y)[0] < 40;
+    // The triangle's tip is at (50, 10), its base from (10, 90) to (90, 90).
+    let triangle = render(&project(vec![path_layer(2, true, None)]));
+    assert!(lit(&triangle, 50, 70) && lit(&triangle, 15, 88), "filled inside");
+    assert!(dark(&triangle, 15, 15) && dark(&triangle, 85, 15), "and empty outside");
+    // Open, it is a red line along two sides, with nothing filled.
+    let red = Stroke { paint: Paint::Solid(Rgba::hex(0xff0000)), width: 6.0 };
+    let line = render(&project(vec![path_layer(2, false, Some(red))]));
+    assert!(pixel(&line, 50, 70)[0] < 40, "nothing filled: {:?}", pixel(&line, 50, 70));
+    assert!(close(pixel(&line, 30, 50), [0, 0, 0]), "the missing left side is not drawn");
+    assert!(close(pixel(&line, 50, 90), [255, 0, 0]), "the base is");
+    assert!(close(pixel(&line, 70, 50), [255, 0, 0]), "the right side is: {:?}", pixel(&line, 70, 50));
+}
+
+#[test]
+fn a_mask_layer_shows_or_hides_the_layer_it_masks_and_is_not_drawn_itself() {
+    use studio_core::model::{LayerMask, MaskMode};
+    // A red full-frame solid, masked by the triangle above it.
+    let masked = |mode| {
+        let mut red = full(3, 0xff0000);
+        red.mask = Some(LayerMask { layer: Id(2), mode });
+        render(&project(vec![path_layer(2, true, None), red]))
+    };
+    let shown = masked(MaskMode::Show);
+    assert!(close(pixel(&shown, 50, 70), [255, 0, 0]), "red inside the triangle, not the mask's white");
+    assert!(close(pixel(&shown, 15, 15), [0, 0, 0]), "nothing outside it");
+    let hidden = masked(MaskMode::Hide);
+    assert!(close(pixel(&hidden, 50, 70), [0, 0, 0]), "a hole where the triangle is");
+    assert!(close(pixel(&hidden, 15, 15), [255, 0, 0]), "red everywhere else");
+}
+
+#[test]
+fn a_cut_out_shows_only_what_its_mask_keeps_or_only_what_it_removes() {
+    use studio_core::model::{Cutout, CutoutClick, ProjectItem, ProjectItemKind};
+    let folder = std::env::temp_dir().join(format!("studio-cutout-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let picture = folder.join("red.png");
+    image::RgbaImage::from_pixel(50, 50, image::Rgba([255, 0, 0, 255])).save(&picture).unwrap();
+    // The mask keeps the left half of the picture (at its own, smaller size).
+    image::GrayImage::from_fn(20, 20, |x, _| image::Luma([if x < 10 { 255 } else { 0 }])).save(folder.join("0.png")).unwrap();
+    let cut = |remove| {
+        let mut layer = full(2, 0);
+        layer.content = LayerContent::Image { item: Id(63) };
+        let clicks = vec![CutoutClick { at: Vec2::new(0.25, 0.5), keep: true }];
+        layer.cutout = Some(Cutout { frame: 0, clicks, remove, masks: Some(folder.clone()), frames: Some((0, 1)) });
+        let mut project = project(vec![layer]);
+        project.items.push(ProjectItem {
+            id: Id(63),
+            name: "red.png".into(),
+            kind: ProjectItemKind::Image,
+            label: LabelColor::Aqua,
+            parent: None,
+            size: Some(Vec2::new(50.0, 50.0)),
+            duration_seconds: None,
+            frame_rate: None,
+            has_audio: false,
+            color: None,
+            path: Some(picture.clone()),
+        });
+        render(&project)
+    };
+    let kept = cut(false);
+    assert!(close(pixel(&kept, 20, 50), [255, 0, 0]), "the kept half shows");
+    assert!(close(pixel(&kept, 80, 50), [0, 0, 0]), "the rest is cut away");
+    let removed = cut(true);
+    assert!(close(pixel(&removed, 20, 50), [0, 0, 0]) && close(pixel(&removed, 80, 50), [255, 0, 0]), "or the other way round");
+    std::fs::remove_dir_all(&folder).ok();
 }

@@ -12,6 +12,7 @@
 mod captions;
 mod clips;
 mod copy;
+mod cutout;
 mod history;
 mod keyframes;
 mod layer_time;
@@ -37,6 +38,7 @@ use studio_core::sample::{ids, sample_project};
 use studio_core::time::FrameRange;
 
 pub use captions::HeardWord;
+pub use cutout::CutoutSource;
 pub use keyframes::KeyframeRef;
 pub use layer_time::LayerTimeEdit;
 pub use viewer::{ANCHOR_POINTS, ScaleHandle};
@@ -220,6 +222,8 @@ pub struct EditorState {
     pub shape_size_linked: bool,
     /// Whether anchor points snap to their layer's corners, edge middles and center in the viewer.
     pub viewer_snapping: bool,
+    /// The pen path being drawn with the Pen tool, in composition pixels, until it is finished.
+    pub pen: Option<studio_core::path::ShapePath>,
     playback: Option<PlaybackClock>,
     keyframe_drag: Option<keyframes::KeyframeDrag>,
     /// Whether the main track keeps its clips packed together from frame 0, as in CapCut.
@@ -262,6 +266,7 @@ impl EditorState {
             scale_linked: true,
             shape_size_linked: false,
             viewer_snapping: true,
+            pen: None,
             playback: None,
             keyframe_drag: None,
             layer_time_drag: None,
@@ -469,6 +474,16 @@ impl EditorState {
         }
     }
 
+    /// Masks `layer` with another layer of the composition (or removes its mask with `None`).
+    pub fn set_layer_mask(&mut self, layer: Id, mask: Option<studio_core::model::LayerMask>) {
+        edit::set_layer_mask(self.composition_mut(), layer, mask);
+    }
+
+    /// Opens or closes a pen path layer's outline.
+    pub fn set_path_closed(&mut self, layer: Id, closed: bool) {
+        edit::set_path_closed(self.composition_mut(), layer, closed);
+    }
+
     pub fn set_track_matte(&mut self, layer: Id, matte: TrackMatte) {
         if let Some(layer) = self.composition_mut().layer_mut(layer) {
             layer.track_matte = matte;
@@ -615,7 +630,7 @@ impl EditorState {
 
     pub fn shape_of(&self, layer: Id) -> Option<&ShapeStyle> {
         match &self.composition().layer(layer)?.content {
-            LayerContent::Shape { style } => Some(style),
+            LayerContent::Shape { style, .. } => Some(style),
             _ => None,
         }
     }

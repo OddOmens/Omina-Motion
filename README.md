@@ -10,9 +10,11 @@ crates/studio-core   Data model, frame-exact time, keyframes, playback timing, e
                      `.studio` project file format (JSON; loaded files are validated before use).
                      No UI or I/O, so the desktop app and a future headless render node share it.
 crates/studio-render GPU compositor (wgpu: Metal, Vulkan, DirectX 12). Renders a composition frame without a
-                     window: transforms and parenting, blend modes, track mattes, adjustment layers, effects
-                     (WGSL shaders), text with real fonts, and shapes drawn from signed distances (smooth
-                     edges at any size, rounded corners, solid or gradient fills, centered strokes). Used by the viewer, and later export and render nodes.
+                     window: transforms and parenting, blend modes, track mattes, mask layers, background
+                     removal masks, adjustment layers, effects (WGSL shaders), text with real fonts, and
+                     shapes drawn from signed distances (smooth edges at any size, rounded corners, solid or
+                     gradient fills, centered strokes). Pen paths are rasterized with tiny-skia in `path.rs`
+                     at their on-screen size. Used by the viewer, export and render nodes.
 crates/studio-media  Media probing and video decoding with FFmpeg (hardware or software, whichever measures
                      faster per clip), a frame server that decodes on background threads, and proxies:
                      all-intra ProRes Proxy copies built in the background so scrubbing is instant.
@@ -21,6 +23,9 @@ crates/studio-media  Media probing and video decoding with FFmpeg (hardware or s
                      (.mp4) and ProRes 422 HQ + 24-bit PCM (.mov), converted to BT.709 YUV in `yuv.rs`.
 crates/studio-captions Speech to timed words with OpenAI's Whisper (tiny), run locally with Candle (Metal on
                      macOS). Reads the model from disk; the app downloads it once, after asking.
+crates/studio-cutout Background removal with MobileSAM, run locally with Candle (Metal on macOS): clicks pick
+                     out a subject, and video follows it frame to frame. Reads the model from disk; the app
+                     downloads it once (40 MB, checked by SHA-256), after asking.
 crates/studio-export Exports a composition to a movie: GPU render, audio mix and encode, written under a
                      temporary name and renamed when done. No UI, so it also runs on a headless render machine.
 apps/studio          Desktop app (GPUI + gpui-kit). UI only: panels render EditorState and forward input.
@@ -33,7 +38,11 @@ Inside `apps/studio/src`:
 - `panels/timeline/tracks.rs`: the timeline's tracks (CapCut style): one row per track, several clips
   per row, thumbnails and waveforms, and each clip's keyframe rows when it is opened.
 - `panels/toolbar.rs`: the top bar and the rail on the left: the side panel (Media or Effects), the tools
-  (Select, Text, Shape, Cut) and import. Holding the Shape button opens the shape menu.
+  (Select, Text, Shape, Pen, Cut) and import. Holding the Shape button opens the shape menu.
+- Pen paths: the model and geometry are in `studio-core/src/path.rs`; drawing and point dragging are in
+  `state/viewer.rs` and `panels/viewer.rs`. Masks (`Layer::mask`) let any layer show or hide another.
+- `panels/cutout.rs`, `state/cutout.rs`: Remove Background (pick clicks, the mask job and tracking). Masks
+  are grayscale PNGs per source frame under Studio's cache folder, in `Cutouts`.
 - `panels/color_picker.rs`: the color picker every color chip opens: a saturation/brightness square, hue and
   opacity sliders, hex and opacity fields, the project's colors, paint type for shapes, and a Libraries tab.
 - `panels/libraries.rs`, `state/library.rs`, `library_store.rs`: Libraries (brands holding shared colors and

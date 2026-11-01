@@ -2146,3 +2146,121 @@ fn video_and_sound_switch_separately_and_volume_and_fades_set(cx: &mut TestAppCo
     assert_eq!(audio.fade_out, 2.0, "no longer than the two-second clip");
     assert!((audio.gain() - 0.501).abs() < 0.01, "-6 dB is about half");
 }
+
+/// Clicks once at a screen point (a press and release, no movement).
+fn click_at(visual: &mut VisualTestContext, at: Point<Pixels>) {
+    visual.update(|window, cx| {
+        window.pointer_down(at, MouseButton::Left, cx);
+        window.pointer_up(at, MouseButton::Left, cx);
+    });
+    render(visual);
+}
+
+#[gpui_kit::test]
+fn the_pen_tool_draws_a_closed_shape_whose_points_can_be_dragged(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("g", cx));
+    render(visual);
+    for corner in [(400.0, 300.0), (800.0, 300.0), (600.0, 700.0)] {
+        let at = screen_point(&workspace, visual, Vec2::new(corner.0, corner.1));
+        click_at(visual, at);
+    }
+    assert!(visual.update(|_, cx| workspace.read(cx).state.pen.as_ref().map(|pen| pen.points.len())) == Some(3), "three points so far");
+    // Clicking the first point again closes the path into a shape layer.
+    let first = screen_point(&workspace, visual, Vec2::new(401.0, 301.0));
+    click_at(visual, first);
+    let layer = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert!(state.pen.is_none());
+        state.selected_layers[0]
+    });
+    let size = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().size);
+    assert!((size.x - 400.0).abs() < 2.0 && (size.y - 400.0).abs() < 2.0, "boxed around the drawn points: {size:?}");
+    // Properties offer opening and closing it, and the viewer shows its points.
+    assert!(visual.update(|window, _| window.try_find("path-closed")).is_some());
+    let point_id = ElementId::Name(format!("path-point:{}:2", layer.0).into());
+    let from = center_of(visual, point_id);
+    let to = screen_point(&workspace, visual, Vec2::new(600.0, 900.0));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+    let size = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().size);
+    assert!((size.y - 600.0).abs() < 4.0, "the bottom point moved down, stretching the box: {size:?}");
+}
+
+#[gpui_kit::test]
+fn enter_ends_a_pen_path_as_a_line(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("tool-pen", cx));
+    render(visual);
+    for point in [(300.0, 500.0), (900.0, 500.0)] {
+        let at = screen_point(&workspace, visual, Vec2::new(point.0, point.1));
+        click_at(visual, at);
+    }
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    let content = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().layer(state.selected_layers[0]).unwrap().content.clone()
+    });
+    let LayerContent::Shape { style, path: Some(path) } = content else { panic!("a path layer") };
+    assert!(!path.closed && style.stroke.is_some() && style.fill.is_none(), "an open, stroked line");
+}
+
+#[gpui_kit::test]
+fn a_masked_layer_shows_its_mask_and_how_it_masks(cx: &mut TestAppContext) {
+    use studio_core::model::{LayerMask, MaskMode};
+    let (workspace, visual) = open(cx);
+    let mask = visual.update(|_, cx| workspace.read(cx).state.composition().layers[2].id);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("layer-mask")).is_some(), "every picture layer can be masked");
+    assert!(visual.update(|window, _| window.try_find("layer-mask-mode")).is_none(), "no mode until there is a mask");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_layer_mask(TITLE, Some(LayerMask { layer: mask, mode: MaskMode::Hide }));
+        cx.notify();
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("layer-mask-mode")).is_some());
+}
+
+#[gpui_kit::test]
+fn picking_a_subject_places_clicks_on_the_picture_and_asks_before_downloading(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let layer = visual.update(|_, cx| {
+        workspace.update(cx, |ws, cx| {
+            let item = studio_core::edit::import_image(&mut ws.state.project, "/media/portrait.png".into(), Vec2::new(400.0, 200.0));
+            let comp = ws.state.active_comp;
+            let layer = studio_core::edit::add_layer_from_item(&mut ws.state.project, comp, item, 0, 0).unwrap();
+            ws.state.select_layer(layer, false);
+            cx.notify();
+            layer
+        })
+    });
+    render(visual);
+    visual.update(|window, cx| window.click("cutout-pick", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.cutout_pick), Some(layer));
+    // A click on the subject (the image's top-left quarter). The model is not on this (test)
+    // computer, so Studio asks before downloading it, and nothing runs until that is agreed.
+    let keep = screen_point(&workspace, visual, Vec2::new(860.0, 490.0));
+    click_at(visual, keep);
+    assert!(visual.update(|window, _| window.try_find_by_label("Download and Continue")).is_some());
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.cutout_job.is_none()));
+    click_label(visual, "Cancel");
+    render(visual);
+    // Then an Option-click on something to leave out.
+    let leave_out = screen_point(&workspace, visual, Vec2::new(1060.0, 590.0));
+    visual.update(|window, cx| {
+        window.change_modifiers(gpui_kit::Modifiers::alt(), cx);
+        window.pointer_down(leave_out, MouseButton::Left, cx);
+        window.pointer_up(leave_out, MouseButton::Left, cx);
+        window.change_modifiers(gpui_kit::Modifiers::default(), cx);
+    });
+    render(visual);
+    let clicks = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().cutout.clone().unwrap().clicks);
+    assert_eq!(clicks.iter().map(|click| click.keep).collect::<Vec<_>>(), vec![true, false]);
+    assert!((clicks[0].at.x - 0.25).abs() < 0.01 && (clicks[0].at.y - 0.25).abs() < 0.01, "{clicks:?}");
+}

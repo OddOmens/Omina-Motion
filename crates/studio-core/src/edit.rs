@@ -5,7 +5,7 @@ use crate::animation::Vec2;
 use crate::transform::Affine;
 use crate::model::{
     BlendMode, Composition, INNER_RADIUS_RANGE, Id, Layer, LayerContent, LayerSwitches, MAX_SHAPE_POINTS, MAX_STROKE_WIDTH, Paint,
-    Project, ProjectItem, ProjectItemKind, Rgba, ShapeStyle, TextStyle, TrackMatte, Transform,
+    Project, ProjectItem, ProjectItemKind, Rgba, ShapeKind, ShapeStyle, TextStyle, TrackMatte, Transform,
 };
 use crate::time::FrameRate;
 
@@ -51,6 +51,8 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         track: 0,
         blend_mode: BlendMode::Normal,
         track_matte: TrackMatte::None,
+        mask: None,
+        cutout: None,
         parent: None,
         switches: LayerSwitches { visible: has_picture, audio: item.has_audio, ..LayerSwitches::default() },
         transform: has_picture.then(|| Transform::centered(size, composition.size() * 0.5)),
@@ -107,6 +109,8 @@ pub fn separate_audio(project: &mut Project, comp_id: Id, layer_id: Id) -> Optio
         effects: Vec::new(),
         parent: None,
         track_matte: TrackMatte::None,
+        mask: None,
+        cutout: None,
         switches: LayerSwitches { visible: false, audio: video.switches.audio, ..LayerSwitches::default() },
         ..video.clone()
     };
@@ -153,8 +157,8 @@ pub fn contains_composition(project: &Project, outer: Id, inner: Id) -> bool {
 
 /// Moves `ids` (with any track mattes they use) into a new composition named `name`, the
 /// same size, rate and length as this one, and puts a layer showing it where they were, as
-/// After Effects' Pre-compose does. The layers keep their timing. Parenting that would cross
-/// between the two compositions is let go. Returns the new composition's layer.
+/// After Effects' Pre-compose does. The layers keep their timing. Parenting and masks that would
+/// cross between the two compositions are let go. Returns the new composition's layer.
 pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str) -> Option<Id> {
     let parent = project.composition(comp_id)?;
     let moving: Vec<Id> = crate::copy::layers_to_copy(parent, ids).iter().map(|layer| layer.id).collect();
@@ -175,10 +179,16 @@ pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str) ->
         if layer.parent.is_some_and(|p| moving.contains(&p)) {
             layer.parent = None;
         }
+        if layer.mask.is_some_and(|mask| moving.contains(&mask.layer)) {
+            layer.mask = None;
+        }
     }
     for layer in &mut moved {
         if layer.parent.is_some_and(|p| !moving.contains(&p)) {
             layer.parent = None;
+        }
+        if layer.mask.is_some_and(|mask| !moving.contains(&mask.layer)) {
+            layer.mask = None;
         }
     }
     let inner = project.composition_mut(inner_id)?;
@@ -227,13 +237,17 @@ pub fn remove_effect(composition: &mut Composition, layer_id: Id, effect_id: Id)
     }
 }
 
-/// Removes layers from a composition. Layers parented to a removed layer are unparented.
+/// Removes layers from a composition. Layers parented to a removed layer are unparented, and
+/// layers it masked lose their mask.
 pub fn delete_layers(composition: &mut Composition, ids: &[Id]) -> usize {
     let before = composition.layers.len();
     composition.layers.retain(|layer| !ids.contains(&layer.id));
     for layer in &mut composition.layers {
         if layer.parent.is_some_and(|parent| ids.contains(&parent)) {
             layer.parent = None;
+        }
+        if layer.mask.is_some_and(|mask| ids.contains(&mask.layer)) {
+            layer.mask = None;
         }
     }
     // Tracks left empty go away.
@@ -421,7 +435,84 @@ pub fn add_shape_layer(project: &mut Project, comp_id: Id, style: ShapeStyle, si
     let taken = project.composition(comp_id)?.layers.iter().filter(|layer| layer.name.starts_with(base)).count();
     let name = format!("{base} {}", taken + 1);
     let size = Vec2::new(size.x.max(1.0), size.y.max(1.0));
-    add_top_layer(project, comp_id, name, LayerContent::Shape { style }, size, position, in_frame)
+    add_top_layer(project, comp_id, name, LayerContent::Shape { style, path: None }, size, position, in_frame)
+}
+
+/// Adds a pen path drawn in composition pixels as a shape layer at the top of the stack. The
+/// layer's box is fitted around the path and anchored at its center, so the shape appears
+/// exactly where it was drawn. An open path gets a stroke and no fill; a closed one is filled.
+/// Returns `None` for a path too short or broken to draw.
+pub fn add_path_layer(project: &mut Project, comp_id: Id, path: &crate::path::ShapePath, style: ShapeStyle, in_frame: i64) -> Option<Id> {
+    if !path.is_sound() {
+        return None;
+    }
+    let (origin, size, fitted) = crate::path::fit_to_box(path)?;
+    let mut style = ShapeStyle { kind: ShapeKind::Path, corner_radius: 0.0, ..style };
+    if !path.closed {
+        let paint = style.fill.unwrap_or(Paint::Solid(Rgba::hex(0xffffff)));
+        style.stroke = Some(style.stroke.unwrap_or(crate::model::Stroke { paint, width: 4.0 }));
+        style.fill = None;
+    }
+    let taken = project.composition(comp_id)?.layers.iter().filter(|layer| layer.name.starts_with("Path")).count();
+    let center = origin + size * 0.5;
+    add_top_layer(project, comp_id, format!("Path {}", taken + 1), LayerContent::Shape { style, path: Some(fitted) }, size, center, in_frame)
+}
+
+/// Moves a pen path's point (or one of its handles) to `to`, in the layer's own pixels, then
+/// fits the layer's box around the path again without moving anything on screen. `part` picks
+/// what moves: the point itself (its handles come with it) or one handle. Returns whether it
+/// changed. Locked layers are left alone.
+pub fn move_path_point(composition: &mut Composition, layer_id: Id, index: usize, part: PathPart, to: Vec2) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    let size = layer.size;
+    let LayerContent::Shape { path: Some(path), .. } = &mut layer.content else { return false };
+    if layer.switches.locked || index >= path.points.len() || !(to.x.is_finite() && to.y.is_finite()) {
+        return false;
+    }
+    // Work in layer pixels, then fit the box again.
+    let mut pixels = path.mapped(|v| Vec2::new(v.x * size.x, v.y * size.y));
+    let point = &mut pixels.points[index];
+    match part {
+        PathPart::Point => point.at = to,
+        PathPart::HandleIn => point.handle_in = to - point.at,
+        PathPart::HandleOut => point.handle_out = to - point.at,
+    }
+    let Some((origin, new_size, fitted)) = crate::path::fit_to_box(&pixels) else { return false };
+    *path = fitted;
+    layer.size = new_size;
+    // The layer's own pixels now start at `origin`: move the anchor point by the same amount,
+    // so every point keeps its place on screen.
+    if let Some(transform) = layer.transform.as_mut() {
+        transform.anchor_point.map_values(|anchor| anchor - origin);
+    }
+    true
+}
+
+/// Opens or closes a pen path. Returns whether the layer is one.
+pub fn set_path_closed(composition: &mut Composition, layer_id: Id, closed: bool) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    let LayerContent::Shape { path: Some(path), .. } = &mut layer.content else { return false };
+    path.closed = closed;
+    true
+}
+
+/// Which part of a path point is being moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathPart {
+    Point,
+    HandleIn,
+    HandleOut,
+}
+
+/// Sets (or clears) the layer that masks `layer_id`. A layer cannot mask itself, and the mask
+/// must be in the same composition. Returns whether it was set.
+pub fn set_layer_mask(composition: &mut Composition, layer_id: Id, mask: Option<crate::model::LayerMask>) -> bool {
+    if mask.is_some_and(|mask| mask.layer == layer_id || composition.layer(mask.layer).is_none()) {
+        return false;
+    }
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    layer.mask = mask;
+    true
 }
 
 /// Adds a layer showing `content` at the top of the stack, on a new track above everything,
@@ -447,6 +538,8 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
             track,
             blend_mode: BlendMode::Normal,
             track_matte: TrackMatte::None,
+            mask: None,
+            cutout: None,
             parent: None,
             switches: LayerSwitches::default(),
             transform: Some(transform),
@@ -461,13 +554,19 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
 
 /// Changes a shape layer's style with `edit`, keeping the values in range: corner radius from
 /// 0 to half the shorter side, 3 to `MAX_SHAPE_POINTS` sides or points, a star's inner radius
-/// within `INNER_RADIUS_RANGE`, and strokes up to `MAX_STROKE_WIDTH`. Returns whether the layer
-/// is a shape.
+/// within `INNER_RADIUS_RANGE`, and strokes up to `MAX_STROKE_WIDTH`. A pen path stays a path
+/// and a drawn shape cannot become one. Returns whether the layer is a shape.
 pub fn edit_shape(composition: &mut Composition, layer_id: Id, edit: impl FnOnce(&mut ShapeStyle)) -> bool {
     let Some(layer) = composition.layer_mut(layer_id) else { return false };
     let size = layer.size;
-    let LayerContent::Shape { style } = &mut layer.content else { return false };
+    let LayerContent::Shape { style, path } = &mut layer.content else { return false };
+    let kind_before = style.kind;
     edit(style);
+    // A path shape is drawn from its outline: a box shape cannot become one, nor can a path
+    // turn into a box shape and keep a stale outline.
+    if (style.kind == ShapeKind::Path) != path.is_some() {
+        style.kind = kind_before;
+    }
     let finite_or = |value: f32, fallback: f32| if value.is_finite() { value } else { fallback };
     style.corner_radius = finite_or(style.corner_radius, 0.0).clamp(0.0, ShapeStyle::max_corner_radius(size));
     style.points = style.points.clamp(3, MAX_SHAPE_POINTS);
@@ -959,5 +1058,60 @@ mod tests {
         assert!(set_parent(comp, a, Some(b), 0));
         assert!(!set_parent(comp, b, Some(a), 0), "b → a → b would be a cycle");
         assert!(!set_parent(comp, a, Some(a), 0));
+    }
+
+    /// A closed triangle drawn in composition pixels.
+    fn triangle() -> crate::path::ShapePath {
+        let corners = [(100.0, 100.0), (300.0, 100.0), (200.0, 260.0)];
+        crate::path::ShapePath { points: corners.map(|(x, y)| crate::path::PathPoint::corner(Vec2::new(x, y))).to_vec(), closed: true }
+    }
+
+    #[test]
+    fn a_pen_path_becomes_a_layer_exactly_where_it_was_drawn() {
+        let mut project = sample::sample_project();
+        let id = add_path_layer(&mut project, ids::MAIN_COMP, &triangle(), ShapeStyle::new(ShapeKind::Rectangle), 0).unwrap();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        let layer = comp.layer(id).unwrap();
+        assert_eq!(layer.size, Vec2::new(200.0, 160.0));
+        let corners = crate::transform::layer_corners(comp, id, 0.0).unwrap();
+        assert_eq!((corners[0], corners[2]), (Vec2::new(100.0, 100.0), Vec2::new(300.0, 260.0)));
+        let LayerContent::Shape { style, path: Some(path) } = &layer.content else { panic!("a path shape") };
+        assert_eq!(style.kind, ShapeKind::Path);
+        assert!(style.fill.is_some(), "closed paths are filled");
+        assert_eq!(path.points[2].at, Vec2::new(0.5, 1.0));
+        // An open path is a line: stroked, not filled.
+        let open = crate::path::ShapePath { closed: false, ..triangle() };
+        let line = add_path_layer(&mut project, ids::MAIN_COMP, &open, ShapeStyle::new(ShapeKind::Rectangle), 0).unwrap();
+        let LayerContent::Shape { style, .. } = &project.composition(ids::MAIN_COMP).unwrap().layer(line).unwrap().content else { panic!() };
+        assert!(style.fill.is_none() && style.stroke.is_some());
+    }
+
+    #[test]
+    fn moving_a_path_point_refits_the_box_without_moving_the_rest() {
+        let mut project = sample::sample_project();
+        let id = add_path_layer(&mut project, ids::MAIN_COMP, &triangle(), ShapeStyle::new(ShapeKind::Rectangle), 0).unwrap();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        // Pull the bottom point further down and left, past the old box (layer pixels).
+        assert!(move_path_point(comp, id, 2, PathPart::Point, Vec2::new(-50.0, 240.0)));
+        let layer = comp.layer(id).unwrap();
+        assert_eq!(layer.size, Vec2::new(250.0, 240.0));
+        // The first point is still at (100, 100) in the composition.
+        let world = crate::transform::world_transform(comp, id, 0.0).unwrap();
+        let LayerContent::Shape { path: Some(path), .. } = &layer.content else { panic!() };
+        let first = world.apply(Vec2::new(path.points[0].at.x * layer.size.x, path.points[0].at.y * layer.size.y));
+        assert!((first.x - 100.0).abs() < 1e-3 && (first.y - 100.0).abs() < 1e-3, "{first:?}");
+        assert!(!move_path_point(comp, id, 9, PathPart::Point, Vec2::default()), "no such point");
+    }
+
+    #[test]
+    fn masks_must_be_another_layer_and_go_when_it_is_deleted() {
+        use crate::model::{LayerMask, MaskMode};
+        let mut project = sample::sample_project();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let (layer, mask) = (comp.layers[2].id, comp.layers[0].id);
+        assert!(!set_layer_mask(comp, layer, Some(LayerMask { layer, mode: MaskMode::Show })), "not itself");
+        assert!(set_layer_mask(comp, layer, Some(LayerMask { layer: mask, mode: MaskMode::Hide })));
+        delete_layers(comp, &[mask]);
+        assert_eq!(comp.layer(layer).unwrap().mask, None);
     }
 }

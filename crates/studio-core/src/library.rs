@@ -278,7 +278,7 @@ mod tests {
         assert!(sync_project(&mut project, &libraries));
         let comp = project.composition(ids::MAIN_COMP).unwrap();
         assert!(comp.background.same_look(Rgba::hex(0x00ff00)) && comp.background.link == Some(primary));
-        let LayerContent::Shape { style } = &comp.layer(shape).unwrap().content else { panic!() };
+        let LayerContent::Shape { style, .. } = &comp.layer(shape).unwrap().content else { panic!() };
         let colors = style.fill.unwrap().colors();
         assert!(colors[0].same_look(Rgba::hex(0x00ff00)), "the linked gradient stop followed");
         assert!(colors[1].same_look(Rgba::hex(0x000000)), "the unlinked one did not");

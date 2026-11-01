@@ -182,8 +182,14 @@ fn clip_colors(layer: &Layer) -> (u32, u32, bool) {
     }
 }
 
-fn kind_icon(layer: &Layer) -> IconName {
-    match layer.content {
+/// The icon on a clip: what kind of layer it is, or a mask's icon for a layer that masks
+/// another (it is not drawn itself, only used to show or hide that layer).
+fn kind_icon(layer: &Layer, is_mask: bool) -> IconName {
+    if is_mask {
+        return IconName::VenetianMask;
+    }
+    match &layer.content {
+        LayerContent::Shape { path: Some(_), .. } => IconName::PenTool,
         LayerContent::Footage { .. } => IconName::SquarePlay,
         LayerContent::Audio { .. } => IconName::Music,
         LayerContent::Image { .. } => IconName::Image,
@@ -398,6 +404,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     let selected = state.selected_layers.contains(&id);
     let expanded = workspace.ui.timeline.expanded_clips.contains(&id);
     let (head, body, dark_ink) = clip_colors(layer);
+    let is_mask = state.composition().layers.iter().any(|other| other.mask.is_some_and(|mask| mask.layer == id));
     let ink = if dark_ink { 0x111111 } else { 0xffffff };
     let graph_width = workspace.ui.timeline.graph.get().width.max(1.0);
     let clip_px = width * graph_width;
@@ -508,7 +515,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 .child(Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(rgba((ink << 8) | 0xdd)))
                 .test_support(),
         )
-        .child(Icon::new(kind_icon(layer)).size(px(12.0)).text_color(rgba((ink << 8) | 0xdd)))
+        .child(Icon::new(kind_icon(layer, is_mask)).size(px(12.0)).text_color(rgba((ink << 8) | 0xdd)))
         .child(div().flex_1().min_w_0().truncate().child(layer.name.clone()))
         .when(!layer.effects.is_empty(), |header| header.child(div().px_1().rounded(px(3.0)).bg(rgba(0x00000026)).child(format!("fx {}", layer.effects.len()))))
         .when(layer.has_audio, |header| header.child(clip_toggle(id, "clip-mute", switches.audio, (IconName::Volume2, IconName::VolumeX), Switch::Audio, dark_ink, cx)))

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::model::{Composition, Id, Layer, LayerContent, MAX_FRAME, Project, TrackMatte};
+use crate::model::{Composition, Id, Layer, LayerContent, LayerMask, MAX_FRAME, Project, TrackMatte};
 
 /// The layers to copy from `composition`, in stacking order (top first), so a pasted block keeps
 /// the order it had. A layer that uses a track matte brings its matte (the layer directly above)
@@ -53,7 +53,7 @@ pub fn paste_layers(project: &mut Project, comp_id: Id, layers: &[Layer], frame:
 /// Inserts copies of `originals` (top first, as `layers_to_copy` gives them) as a block at stack
 /// index `at`, each on a new track, `delta` frames later than the original. A parent that was
 /// copied too becomes the parent's copy; one outside the block is kept if it is in this
-/// composition. The block's top layer has nothing above it to use as a matte, so loses its own.
+/// composition. Masks follow the same rule. The block's top layer has nothing above it to use as a matte, so loses its own.
 fn insert_copies(project: &mut Project, comp_id: Id, originals: &[Layer], at: usize, delta: i64) -> Vec<Id> {
     let mut new_ids: HashMap<Id, Id> = HashMap::new();
     let mut copies = Vec::with_capacity(originals.len());
@@ -72,6 +72,11 @@ fn insert_copies(project: &mut Project, comp_id: Id, originals: &[Layer], at: us
         copy.parent = copy.parent.and_then(|parent| match new_ids.get(&parent) {
             Some(&copied) => Some(copied),
             None => composition.layer(parent).map(|_| parent),
+        });
+        // The same for a mask: the copied mask if it came too, else the original if it is here.
+        copy.mask = copy.mask.and_then(|mask| match new_ids.get(&mask.layer) {
+            Some(&copied) => Some(LayerMask { layer: copied, ..mask }),
+            None => composition.layer(mask.layer).map(|_| mask),
         });
         if index == 0 {
             copy.track_matte = TrackMatte::None;

@@ -2,6 +2,7 @@
 
 pub mod align;
 pub mod captions;
+pub mod cutout;
 pub mod chrome;
 pub mod color_picker;
 pub mod composition_settings;

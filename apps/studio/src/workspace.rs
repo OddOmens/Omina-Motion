@@ -36,6 +36,8 @@ actions!(studio, [
     TypeTool,
     ShapeTool,
     CutTool,
+    PenTool,
+    FinishPath,
     Copy,
     Paste,
     Duplicate,
@@ -81,6 +83,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-t", TypeTool, Some(KEY_CONTEXT)),
         KeyBinding::new("q", ShapeTool, Some(NOT_TYPING)),
         KeyBinding::new("c", CutTool, Some(NOT_TYPING)),
+        KeyBinding::new("g", PenTool, Some(NOT_TYPING)),
+        KeyBinding::new("enter", FinishPath, Some(NOT_TYPING)),
         // Outside text fields, so copying and pasting text in a field still works.
         KeyBinding::new("cmd-c", Copy, Some(NOT_TYPING)),
         KeyBinding::new("cmd-v", Paste, Some(NOT_TYPING)),
@@ -184,6 +188,8 @@ pub enum Tool {
     Shape,
     /// Click a clip in the timeline to split it there, like Premiere's Razor tool.
     Cut,
+    /// Click (or drag, for curves) point by point in the viewer to draw a custom shape.
+    Pen,
 }
 
 /// Drag payloads. GPUI routes drops by type, so each kind of drag has its own type.
@@ -263,6 +269,10 @@ pub struct UiState {
     pub effect_drop_layer: Option<Id>,
     /// Captions being made in the background, if any.
     pub caption_job: Option<panels::captions::CaptionJob>,
+    /// Background removal running in the background, if any.
+    pub cutout_job: Option<panels::cutout::CutoutJob>,
+    /// The layer whose subject is being picked: clicks in the viewer go to its cut-out.
+    pub cutout_pick: Option<Id>,
     /// The color picker, while it is open.
     pub color_picker: Option<panels::color_picker::Picker>,
     /// Keeps the open dialog's field links alive (Composition Settings' locked aspect ratio).
@@ -464,6 +474,8 @@ impl Workspace {
                 dialog_subscriptions: Vec::new(),
                 color_picker: None,
                 caption_job: None,
+                cutout_job: None,
+                cutout_pick: None,
                 effect_drop_layer: None,
                 quit_after_export: false,
             },
@@ -546,6 +558,15 @@ impl Workspace {
     }
 
     /// Opens a text input over a value. Enter or clicking elsewhere commits it.
+    /// Switches tools. A pen path still being drawn is finished as an open line first, so
+    /// changing tools never throws away what was drawn.
+    pub fn set_tool(&mut self, tool: Tool) {
+        if tool != Tool::Pen {
+            self.state.finish_pen(false);
+        }
+        self.ui.tool = tool;
+    }
+
     pub fn begin_edit(&mut self, target: EditTarget, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_edit(window, cx);
         let input = cx.new(|cx| InputState::new(window, cx).default_value(text));
@@ -739,19 +760,30 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SelectionTool, _, cx| {
-                this.ui.tool = Tool::Selection;
+                this.set_tool(Tool::Selection);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TypeTool, _, cx| {
-                this.ui.tool = Tool::Type;
+                this.set_tool(Tool::Type);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ShapeTool, _, cx| {
-                this.ui.tool = Tool::Shape;
+                this.set_tool(Tool::Shape);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CutTool, _, cx| {
-                this.ui.tool = Tool::Cut;
+                this.set_tool(Tool::Cut);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &PenTool, _, cx| {
+                this.set_tool(Tool::Pen);
+                cx.notify();
+            }))
+            // Enter ends a pen path as an open line (a path closes by clicking its first point).
+            .on_action(cx.listener(|this, _: &FinishPath, _, cx| {
+                if this.state.finish_pen(false).is_some() {
+                    this.ui.tabs.insert(PanelId::Properties, 0);
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| panels::settings::open(this, window, cx)))

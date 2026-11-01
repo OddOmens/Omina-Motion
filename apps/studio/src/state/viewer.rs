@@ -5,7 +5,9 @@
 use studio_core::animation::{Animated, Vec2};
 use studio_core::edit;
 use studio_core::transform::{Affine, layer_contains, parent_space, world_transform};
-use studio_core::model::{Id, ShapeKind, ShapeStyle};
+use studio_core::edit::PathPart;
+use studio_core::model::{Id, LayerContent, ShapeKind, ShapeStyle};
+use studio_core::path::{PathPoint, ShapePath};
 use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
 
 use super::EditorState;
@@ -32,6 +34,20 @@ pub(super) enum ViewerDrag {
     /// Moving a layer's anchor point: where it started (layer pixels), the transform from
     /// composition pixels into the layer's pixels, and how near (in layer pixels) it snaps.
     Anchor { layer: Id, start: Vec2, to_local: Affine, reach: f32 },
+    /// Pulling out the handles of the point just placed with the Pen tool, making it smooth.
+    PenHandle { index: usize },
+    /// Moving a point (or handle) of a pen path layer, from where it started in composition
+    /// pixels. The layer's box is fitted again as it moves, so its own pixels shift; working
+    /// from composition pixels keeps the drag steady.
+    PathPoint { layer: Id, index: usize, part: PathPart, start: Vec2 },
+}
+
+/// A point of a pen path layer as shown in the viewer, in composition pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScreenPathPoint {
+    pub at: Vec2,
+    pub handle_in: Vec2,
+    pub handle_out: Vec2,
 }
 
 /// The nine points of a layer's box an anchor snaps to (corners, edge middles, center), as
@@ -171,6 +187,57 @@ impl EditorState {
         edit::move_anchor(self.composition_mut(), layer, Vec2::new(size.x * fraction.0, size.y * fraction.1), frame);
     }
 
+    /// A press with the Pen tool at `point` (composition pixels). Pressing on the first point of
+    /// a path with at least two points closes it and makes the shape layer; anywhere else adds a
+    /// corner point, whose handles a drag then pulls out. `close_reach` is how near the first
+    /// point a press must be to close the path. Returns the new layer when the path is finished.
+    pub fn pen_press(&mut self, point: Vec2, close_reach: f32) -> Option<Id> {
+        let pen = self.pen.get_or_insert_with(ShapePath::default);
+        if pen.points.len() >= 2 && (pen.points[0].at - point).length() <= close_reach {
+            return self.finish_pen(true);
+        }
+        pen.points.push(PathPoint::corner(point));
+        self.viewer_drag = Some(ViewerDrag::PenHandle { index: pen.points.len() - 1 });
+        None
+    }
+
+    /// Ends the pen path being drawn: with at least two points it becomes a shape layer
+    /// (filled if `closed`, a stroked line if not), which is selected. Returns it.
+    pub fn finish_pen(&mut self, closed: bool) -> Option<Id> {
+        let mut path = self.pen.take()?;
+        path.closed = closed;
+        let (comp, frame) = (self.active_comp, self.current_frame);
+        let layer = edit::add_path_layer(&mut self.project, comp, &path, ShapeStyle::new(ShapeKind::Path), frame)?;
+        self.select_layer(layer, false);
+        Some(layer)
+    }
+
+    /// The points of a pen path layer in composition pixels at the playhead, for the viewer to
+    /// draw and let them be dragged. Empty for other layers.
+    pub fn path_points_on_screen(&self, layer: Id) -> Vec<ScreenPathPoint> {
+        let comp = self.composition();
+        let Some(target) = comp.layer(layer) else { return Vec::new() };
+        let LayerContent::Shape { path: Some(path), .. } = &target.content else { return Vec::new() };
+        let Some(world) = world_transform(comp, layer, self.current_frame as f64) else { return Vec::new() };
+        let size = target.size;
+        let place = |v: Vec2| world.apply(Vec2::new(v.x * size.x, v.y * size.y));
+        path.points.iter().map(|point| ScreenPathPoint { at: place(point.at), handle_in: place(point.at + point.handle_in), handle_out: place(point.at + point.handle_out) }).collect()
+    }
+
+    /// Starts moving one point (or handle) of a pen path layer.
+    pub fn begin_path_point_drag(&mut self, layer: Id, index: usize, part: PathPart) {
+        let Some(shown) = self.path_points_on_screen(layer).get(index).copied() else { return };
+        if self.composition().layer(layer).is_none_or(|target| target.switches.locked) {
+            return;
+        }
+        let start = match part {
+            PathPart::Point => shown.at,
+            PathPart::HandleIn => shown.handle_in,
+            PathPart::HandleOut => shown.handle_out,
+        };
+        self.viewer_drag = Some(ViewerDrag::PathPoint { layer, index, part, start });
+    }
+
     /// Applies the current drag. `delta` is how far the pointer moved since the drag began, in
     /// composition pixels. With `constrain` (Shift), moves stay on one axis and scaling keeps proportions.
     pub fn drag_in_viewer(&mut self, delta: Vec2, constrain: bool) {
@@ -213,6 +280,18 @@ impl EditorState {
                     anchor = snapped;
                 }
                 edit::move_anchor(self.composition_mut(), layer, anchor, frame);
+            }
+            ViewerDrag::PenHandle { index } => {
+                // Dragging pulls out both handles, mirrored, so the curve runs smoothly through.
+                if let Some(point) = self.pen.as_mut().and_then(|pen| pen.points.get_mut(index)) {
+                    *point = PathPoint::smooth(point.at, delta);
+                }
+            }
+            ViewerDrag::PathPoint { layer, index, part, start } => {
+                let comp = self.composition();
+                let Some(to_local) = world_transform(comp, layer, frame as f64).and_then(|world| world.inverse()) else { return };
+                let target = to_local.apply(start + delta);
+                edit::move_path_point(self.composition_mut(), layer, index, part, target);
             }
             ViewerDrag::DrawShape { layer, start } => {
                 // Shift keeps it square (or circular), as in every drawing tool.
@@ -285,6 +364,50 @@ mod tests {
         state.end_viewer_drag();
         assert_eq!(state.composition().layer(clicked).unwrap().size, Vec2::new(DEFAULT_SHAPE_SIZE, DEFAULT_SHAPE_SIZE));
         assert_eq!(state.selected_layers, vec![clicked]);
+    }
+
+    #[test]
+    fn the_pen_draws_corners_and_smooth_points_and_closes_on_the_first_point() {
+        let mut state = EditorState::new();
+        assert_eq!(state.pen_press(Vec2::new(100.0, 100.0), 8.0), None);
+        state.end_viewer_drag();
+        state.pen_press(Vec2::new(300.0, 100.0), 8.0);
+        // Dragging after the press pulls out mirrored handles.
+        state.drag_in_viewer(Vec2::new(0.0, 50.0), false);
+        state.end_viewer_drag();
+        state.pen_press(Vec2::new(200.0, 250.0), 8.0);
+        state.end_viewer_drag();
+        let pen = state.pen.clone().unwrap();
+        assert_eq!(pen.points[1].handle_out, Vec2::new(0.0, 50.0));
+        assert_eq!(pen.points[1].handle_in, Vec2::new(0.0, -50.0));
+        // Pressing near the first point closes it into a selected shape layer.
+        let layer = state.pen_press(Vec2::new(104.0, 103.0), 8.0).expect("closing makes the layer");
+        assert!(state.pen.is_none());
+        assert_eq!(state.selected_layers, vec![layer]);
+        let shown = state.path_points_on_screen(layer);
+        assert_eq!(shown.len(), 3);
+        assert!((shown[0].at - Vec2::new(100.0, 100.0)).length() < 1e-3, "drawn where it was clicked: {:?}", shown[0].at);
+        // A single point is not enough for a shape.
+        state.pen_press(Vec2::new(10.0, 10.0), 8.0);
+        assert_eq!(state.finish_pen(false), None);
+    }
+
+    #[test]
+    fn dragging_a_path_point_moves_only_that_point() {
+        let mut state = EditorState::new();
+        for point in [(100.0, 100.0), (300.0, 100.0), (200.0, 250.0)] {
+            state.pen_press(Vec2::new(point.0, point.1), 8.0);
+            state.end_viewer_drag();
+        }
+        let layer = state.finish_pen(true).unwrap();
+        state.begin_path_point_drag(layer, 2, PathPart::Point);
+        state.drag_in_viewer(Vec2::new(-150.0, 50.0), false);
+        state.drag_in_viewer(Vec2::new(-200.0, 100.0), false);
+        state.end_viewer_drag();
+        let shown = state.path_points_on_screen(layer);
+        let near = |a: Vec2, b: Vec2| (a - b).length() < 1e-2;
+        assert!(near(shown[2].at, Vec2::new(0.0, 350.0)), "the point follows the pointer: {:?}", shown[2].at);
+        assert!(near(shown[0].at, Vec2::new(100.0, 100.0)) && near(shown[1].at, Vec2::new(300.0, 100.0)), "the others stay: {shown:?}");
     }
 
     #[test]

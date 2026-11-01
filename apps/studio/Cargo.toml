@@ -12,6 +12,9 @@ studio-render = { path = "../../crates/studio-render" }
 studio-media = { path = "../../crates/studio-media" }
 studio-export = { path = "../../crates/studio-export" }
 studio-captions = { path = "../../crates/studio-captions" }
+studio-cutout = { path = "../../crates/studio-cutout" }
+# Checks downloaded models are the files published.
+sha2 = "0.10"
 # Wakes the UI thread when a background decoder has a frame ready.
 async-channel = "2"
 # Studio's own settings file (last project, window placement).

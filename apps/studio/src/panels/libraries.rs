@@ -84,7 +84,7 @@ fn selection_color(workspace: &Workspace) -> Rgba {
     let state = &workspace.state;
     let layer = state.selected_layers.first().and_then(|&id| state.composition().layer(id));
     let color = match layer.map(|layer| &layer.content) {
-        Some(LayerContent::Shape { style }) => style.fill.map(|paint| paint.colors()[0]),
+        Some(LayerContent::Shape { style, .. }) => style.fill.map(|paint| paint.colors()[0]),
         Some(LayerContent::Text { style, .. }) => style.fill,
         Some(LayerContent::Solid { color }) => Some(*color),
         _ => None,

@@ -467,9 +467,12 @@ pub enum ShapeKind {
     Polygon,
     /// A star with `ShapeStyle::points` points.
     Star,
+    /// A custom outline drawn with the Pen tool (the layer's `ShapePath`).
+    Path,
 }
 
 impl ShapeKind {
+    /// The shapes the Shape tool draws (a path is drawn with the Pen tool instead).
     pub const ALL: [ShapeKind; 5] = [Self::Rectangle, Self::Ellipse, Self::Triangle, Self::Polygon, Self::Star];
 
     pub fn name(self) -> &'static str {
@@ -479,12 +482,14 @@ impl ShapeKind {
             Self::Triangle => "Triangle",
             Self::Polygon => "Polygon",
             Self::Star => "Star",
+            Self::Path => "Path",
         }
     }
 
-    /// Whether the shape has corners that can be rounded (everything except the ellipse).
+    /// Whether the shape has corners that can be rounded (the drawn shapes except the ellipse;
+    /// a pen path's corners are its own points).
     pub fn has_corners(self) -> bool {
-        self != Self::Ellipse
+        !matches!(self, Self::Ellipse | Self::Path)
     }
 
     /// Whether the number of sides or points can be changed.
@@ -541,7 +546,13 @@ pub enum LayerContent {
     Audio { item: Id },
     Solid { color: Rgba },
     Text { text: String, style: TextStyle },
-    Shape { style: ShapeStyle },
+    /// A drawn shape. `path` holds the outline of a `ShapeKind::Path` shape and is `None` for
+    /// the others.
+    Shape {
+        style: ShapeStyle,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<crate::path::ShapePath>,
+    },
     /// Timed words, shown a phrase at a time in one style (see `captions`).
     Captions { words: Vec<crate::captions::CaptionWord>, style: crate::captions::CaptionStyle },
     Adjustment,
@@ -597,6 +608,13 @@ pub struct Layer {
     pub track: i32,
     pub blend_mode: BlendMode,
     pub track_matte: TrackMatte,
+    /// Another layer in the same composition whose shape shows or hides this one. The mask
+    /// layer itself is not drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<LayerMask>,
+    /// Background removal, for footage and image layers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cutout: Option<Cutout>,
     pub parent: Option<Id>,
     pub switches: LayerSwitches,
     /// `None` for layers without a picture, such as audio.
@@ -606,6 +624,77 @@ pub struct Layer {
     /// Volume and fades, for layers with sound.
     #[serde(default)]
     pub audio: LayerAudio,
+}
+
+/// A layer used as a mask: where it draws, the masked layer is shown (or hidden).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LayerMask {
+    pub layer: Id,
+    pub mode: MaskMode,
+}
+
+/// Whether a mask shows the layer inside its shape or hides it there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MaskMode {
+    /// The layer shows only where the mask draws.
+    #[default]
+    Show,
+    /// The layer is cut away where the mask draws.
+    Hide,
+}
+
+impl MaskMode {
+    pub const ALL: [Self; 2] = [Self::Show, Self::Hide];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Show => "Show Inside",
+            Self::Hide => "Hide Inside",
+        }
+    }
+}
+
+/// Background removal on a footage or image layer: clicks on one frame pick out a subject, and
+/// masks made from them (by the `studio-cutout` model, followed through the clip for video)
+/// cut it out of everything around it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Cutout {
+    /// The source frame the clicks were placed on (0 for an image).
+    pub frame: i64,
+    pub clicks: Vec<CutoutClick>,
+    /// Remove what was picked (an object to take out) instead of keeping it (a subject to
+    /// take out of its background).
+    #[serde(default)]
+    pub remove: bool,
+    /// The folder holding the masks, one grayscale PNG per source frame (`<frame>.png`), in
+    /// Studio's cache. `None` until masks are made.
+    #[serde(default)]
+    pub masks: Option<std::path::PathBuf>,
+    /// The source frames that have masks made from the current clicks (start, end exclusive).
+    /// Frames outside it use the nearest mask made.
+    #[serde(default)]
+    pub frames: Option<(i64, i64)>,
+}
+
+/// A click picking out a cut-out's subject: where on the source picture (fractions of its width
+/// and height) and whether it marks something to keep or something to leave out.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CutoutClick {
+    pub at: Vec2,
+    pub keep: bool,
+}
+
+/// The most clicks a cut-out can have.
+pub const MAX_CUTOUT_CLICKS: usize = 64;
+
+impl Cutout {
+    /// The mask file for source frame `index`: the nearest frame that has one, or `None` when no
+    /// masks have been made yet.
+    pub fn mask_path(&self, index: i64) -> Option<std::path::PathBuf> {
+        let (folder, (start, end)) = (self.masks.as_ref()?, self.frames?);
+        let index = index.clamp(start, (end - 1).max(start));
+        Some(folder.join(format!("{index}.png")))
+    }
 }
 
 /// A layer's sound settings.
@@ -645,6 +734,14 @@ impl Layer {
     /// Whether the layer is present at `frame`.
     pub fn is_active_at(&self, frame: i64) -> bool {
         (self.in_frame..self.out_frame).contains(&frame)
+    }
+
+    /// Which frame of a time-based source (`source_rate` frames a second) plays at composition
+    /// frame `frame`: time since the source's start (which trimming and slipping move),
+    /// converted to the source's rate.
+    pub fn source_frame(&self, frame: i64, comp_rate: FrameRate, source_rate: FrameRate) -> i64 {
+        let seconds = (frame - self.start_frame) as f64 / comp_rate.fps();
+        (seconds * source_rate.fps() + 1e-6).floor() as i64
     }
 }
 
@@ -793,7 +890,7 @@ impl Project {
                         visit(&mut style.highlight);
                         style.background.iter_mut().for_each(&mut visit);
                     }
-                    LayerContent::Shape { style } => {
+                    LayerContent::Shape { style, .. } => {
                         let paints = style.fill.iter_mut().chain(style.stroke.iter_mut().map(|stroke| &mut stroke.paint));
                         for paint in paints {
                             paint.colors_mut().into_iter().for_each(&mut visit);

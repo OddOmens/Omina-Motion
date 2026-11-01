@@ -23,6 +23,10 @@ const MEDIA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const MSAA_SAMPLES: u32 = 4;
 /// Text rasters kept in memory; older ones are dropped when the cache is full.
 const TEXT_CACHE_LIMIT: usize = 64;
+/// Pen path rasters kept in memory, trimmed the same way.
+const PATH_CACHE_LIMIT: usize = 32;
+/// The effect shader pass that keeps an image only where (or only outside where) a mask draws.
+const MASK_PASS: u32 = 60;
 
 #[derive(Debug)]
 pub struct RenderError(pub String);
@@ -138,6 +142,8 @@ fn shape_code(kind: ShapeKind) -> f32 {
         ShapeKind::Triangle => 2.0,
         ShapeKind::Polygon => 3.0,
         ShapeKind::Star => 4.0,
+        // Paths are drawn from a raster (see `path`), never by the shape shader.
+        ShapeKind::Path => 0.0,
     }
 }
 
@@ -165,6 +171,13 @@ pub struct Renderer {
     nested: HashMap<Id, MediaTexture>,
     /// How deep the composition being rendered is nested (0 for the one asked for).
     depth: u32,
+    /// Rasterized pen paths: the texture, and where it sits in the layer's own pixels.
+    path_cache: HashMap<u64, (MediaTexture, Vec2)>,
+    /// Which cached path raster each path layer on screen draws this frame.
+    paths: HashMap<Id, u64>,
+    /// The background-removal mask each cut-out layer on screen uses, with the file it came
+    /// from (so it is loaded again only when the frame's mask changes).
+    cutouts: HashMap<Id, (PathBuf, MediaTexture)>,
     /// The measured text box for each cached raster.
     text_boxes: HashMap<u64, Vec2>,
     /// Loaded images (or `None` where loading failed), with the file's modification time when
@@ -223,6 +236,16 @@ fn swap_bgra_rgba(bgra: &[u8]) -> Vec<u8> {
 /// The largest factor by which a transform enlarges things, for choosing raster resolution.
 fn max_scale(transform: Affine) -> f32 {
     (transform.a.hypot(transform.b)).max(transform.c.hypot(transform.d))
+}
+
+/// The cache key for a pen path drawn at `raster_scale`: the path, its paints and its box.
+fn path_key(path: &studio_core::path::ShapePath, style: &ShapeStyle, size: Vec2, raster_scale: f32) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{path:?}{style:?}").hash(&mut hasher);
+    for value in [size.x, size.y, (raster_scale * 16.0).round()] {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn text_key(text: &str, style: &TextStyle, raster_scale: f32) -> u64 {
@@ -367,6 +390,9 @@ impl Renderer {
             captions: HashMap::new(),
             nested: HashMap::new(),
             depth: 0,
+            path_cache: HashMap::new(),
+            paths: HashMap::new(),
+            cutouts: HashMap::new(),
             text_boxes: HashMap::new(),
             images: HashMap::new(),
             videos: HashMap::new(),
@@ -732,6 +758,31 @@ impl Renderer {
         video.index = picture.index;
     }
 
+    /// Loads the background-removal mask a cut-out layer uses at source frame `index`, unless it
+    /// is already loaded. A mask that cannot be read (its cache was cleared) is left out, so the
+    /// whole picture shows rather than none of it.
+    fn prepare_cutout(&mut self, layer: &Layer, index: i64) {
+        let Some(path) = layer.cutout.as_ref().and_then(|cutout| cutout.mask_path(index)) else {
+            self.cutouts.remove(&layer.id);
+            return;
+        };
+        if self.cutouts.get(&layer.id).is_some_and(|(loaded, _)| *loaded == path) {
+            return;
+        }
+        match image::open(&path).map(|mask| mask.to_luma8()) {
+            Ok(mask) => {
+                let (width, height) = mask.dimensions();
+                // White, as see-through as the mask says: only its alpha is used.
+                let rgba: Vec<u8> = mask.as_raw().iter().flat_map(|&kept| [255, 255, 255, kept]).collect();
+                let texture = MediaTexture { view: self.upload(width, height, &rgba), size: Vec2::new(width as f32, height as f32) };
+                self.cutouts.insert(layer.id, (path, texture));
+            }
+            Err(_) => {
+                self.cutouts.remove(&layer.id);
+            }
+        }
+    }
+
     /// Loads an image file into a texture once. Failed loads are remembered so they are not retried every frame.
     fn prepare_image(&mut self, path: &PathBuf) -> bool {
         let modified = std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok();
@@ -801,8 +852,22 @@ impl Renderer {
         let mut used_proxy = used_proxy_nested;
         let mut text_keys: HashMap<Id, (u64, Vec2, Vec2)> = HashMap::new();
         self.captions.clear();
+        self.paths.clear();
         for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame)) {
             match &layer.content {
+                LayerContent::Shape { style, path: Some(path) } => {
+                    let raster_scale = world_transform(composition, layer.id, at_time).map_or(scale, |w| max_scale(w) * scale).max(0.05);
+                    let key = path_key(path, style, layer.size, raster_scale);
+                    if !self.path_cache.contains_key(&key)
+                        && let Some(image) = crate::path::rasterize(path, style, layer.size, raster_scale, self.max_texture)
+                    {
+                        let view = self.upload(image.width, image.height, &image.pixels);
+                        self.path_cache.insert(key, (MediaTexture { view, size: image.size }, image.origin));
+                    }
+                    if self.path_cache.contains_key(&key) {
+                        self.paths.insert(layer.id, key);
+                    }
+                }
                 LayerContent::Captions { words, style } => {
                     let fps = composition.frame_rate.fps();
                     let Some(shown) = studio_core::captions::frame_at(words, style, frame - layer.start_frame, fps) else { continue };
@@ -831,18 +896,17 @@ impl Renderer {
                     if let Some(path) = project.item(*item).and_then(|item| item.path.clone()) {
                         self.prepare_image(&path);
                     }
+                    self.prepare_cutout(layer, 0);
                 }
                 LayerContent::Footage { item } => {
                     let source = project.item(*item).and_then(|source| source.path.clone().zip(source.frame_rate));
                     if let Some((path, rate)) = source {
-                        // Which source frame plays now: time since the source's start (which trimming
-                        // and slipping move), converted to the clip's frame rate.
-                        let seconds = (frame - layer.start_frame) as f64 / composition.frame_rate.fps();
-                        let index = (seconds * rate.fps() + 1e-6).floor() as i64;
+                        let index = layer.source_frame(frame, composition.frame_rate, rate);
                         if let Some(picture) = video.frame(&path, index) {
                             used_proxy |= picture.from_proxy;
                             self.prepare_video(layer.id, &picture);
                         }
+                        self.prepare_cutout(layer, index);
                     }
                 }
                 _ => {}
@@ -856,8 +920,13 @@ impl Renderer {
             self.text_cache.retain(|key, _| in_use.contains(key));
             self.text_boxes.retain(|key, _| in_use.contains(key));
         }
+        if self.path_cache.len() > PATH_CACHE_LIMIT {
+            let in_use: HashSet<u64> = self.paths.values().copied().collect();
+            self.path_cache.retain(|key, _| in_use.contains(key));
+        }
         let on_screen: HashSet<Id> = composition.layers.iter().filter(|layer| layer.is_active_at(frame)).map(|layer| layer.id).collect();
         self.videos.retain(|layer, _| on_screen.contains(layer));
+        self.cutouts.retain(|layer, _| on_screen.contains(layer));
         // Images stay loaded while the project has them (reloading a still is slow), and are let
         // go once removed from it.
         let in_project: HashSet<&PathBuf> = project.items.iter().filter_map(|item| item.path.as_ref()).collect();
@@ -877,10 +946,12 @@ impl Renderer {
             .filter(|pair| pair[1].track_matte != studio_core::model::TrackMatte::None)
             .map(|pair| pair[0].id)
             .collect();
+        // Mask layers only shape the layers they mask; they are not drawn themselves.
+        let mask_sources: HashSet<Id> = composition.layers.iter().filter_map(|layer| layer.mask).map(|mask| mask.layer).collect();
 
         for (index, layer) in composition.layers.iter().enumerate().rev() {
             let shown = layer.switches.visible && layer.is_active_at(frame) && layer.content.has_picture() && (!any_solo || layer.switches.solo);
-            if !shown || matte_sources.contains(&layer.id) {
+            if !shown || matte_sources.contains(&layer.id) || mask_sources.contains(&layer.id) {
                 continue;
             }
             let Some(world) = world_transform(composition, layer.id, at) else { continue };
@@ -897,7 +968,36 @@ impl Renderer {
             }
 
             self.draw_layer(&mut encoder, targets, project, layer, world, scale, &text_keys, slot::LAYER_A);
-            let image = self.apply_effects(&mut encoder, targets, layer, at, time, scale, slot::LAYER_A, slot::LAYER_B);
+            // Background removal comes first, so effects (a glow, a shadow) follow the cut-out.
+            let (drawn, spare_layer) = match (self.cutouts.get(&layer.id), layer.cutout.as_ref()) {
+                (Some((_, mask)), Some(cutout)) => {
+                    // The mask covers the whole picture, so it is stretched over the layer's box.
+                    let fit = Vec2::new(layer.size.x / mask.size.x.max(1.0), layer.size.y / mask.size.y.max(1.0));
+                    self.draw_source(&mut encoder, targets, slot::MATTE_A, Affine::scale(fit).then(world), scale, &Source::Texture(&mask.view), (Vec2::default(), mask.size));
+                    let remove = if cutout.remove { 1.0 } else { 0.0 };
+                    self.effect_pass(&mut encoder, targets, MASK_PASS, [remove, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, slot::LAYER_A, slot::MATTE_A, slot::LAYER_B);
+                    (slot::LAYER_B, slot::LAYER_A)
+                }
+                _ => (slot::LAYER_A, slot::LAYER_B),
+            };
+            let mut image = self.apply_effects(&mut encoder, targets, layer, at, time, scale, drawn, spare_layer);
+
+            // A mask layer keeps the image only inside (or only outside) what the mask draws.
+            if let Some(mask) = layer.mask
+                && let Some(mask_layer) = composition.layer(mask.layer)
+                && let Some(mask_world) = world_transform(composition, mask_layer.id, at)
+            {
+                // An empty mask (one that has ended) shows nothing inside, so Show hides all.
+                self.clear(&mut encoder, &targets.work[slot::MATTE_A].view, [0.0; 4]);
+                if mask_layer.is_active_at(frame) {
+                    self.draw_layer(&mut encoder, targets, project, mask_layer, mask_world, scale, &text_keys, slot::MATTE_A);
+                }
+                let drawn = self.apply_effects(&mut encoder, targets, mask_layer, at, time, scale, slot::MATTE_A, slot::MATTE_B);
+                let other = if image == slot::LAYER_A { slot::LAYER_B } else { slot::LAYER_A };
+                let hide = if mask.mode == studio_core::model::MaskMode::Hide { 1.0 } else { 0.0 };
+                self.effect_pass(&mut encoder, targets, MASK_PASS, [hide, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, drawn, other);
+                image = other;
+            }
 
             let matte = match (layer.track_matte, index.checked_sub(1).map(|above| &composition.layers[above])) {
                 (studio_core::model::TrackMatte::None, _) | (_, None) => None,
@@ -988,7 +1088,12 @@ impl Renderer {
                     None => self.draw_source(encoder, targets, target, world, scale, &text, text_rect),
                 }
             }
-            LayerContent::Shape { style } => {
+            LayerContent::Shape { path: Some(_), .. } => {
+                if let Some((texture, origin)) = self.paths.get(&layer.id).and_then(|key| self.path_cache.get(key)) {
+                    self.draw_source(encoder, targets, target, world, scale, &Source::Texture(&texture.view), (*origin, texture.size));
+                }
+            }
+            LayerContent::Shape { style, path: None } => {
                 // Grow the drawn rectangle by the stroke, which is centered on the edge.
                 let grow = style.stroke.map_or(0.0, |stroke| stroke.width * 0.5 + 1.0);
                 let rect = (Vec2::new(-grow, -grow), Vec2::new(layer.size.x + grow * 2.0, layer.size.y + grow * 2.0));

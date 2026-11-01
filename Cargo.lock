@@ -7276,8 +7276,10 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "studio-captions",
  "studio-core",
+ "studio-cutout",
  "studio-export",
  "studio-media",
  "studio-render",
@@ -7301,6 +7303,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "studio-cutout"
+version = "0.1.0"
+dependencies = [
+ "candle-core",
+ "candle-metal-kernels",
+ "candle-nn",
+ "candle-transformers",
+ "image",
 ]
 
 [[package]]
@@ -7331,6 +7344,7 @@ dependencies = [
  "image",
  "pollster 0.4.0",
  "studio-core",
+ "tiny-skia",
  "wgpu",
 ]
 

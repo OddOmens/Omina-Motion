@@ -44,6 +44,8 @@ fn layer(id: u64, name: &str, label: LabelColor, content: LayerContent, size: Ve
         track: 0,
         blend_mode: BlendMode::Normal,
         track_matte: TrackMatte::None,
+        mask: None,
+        cutout: None,
         parent: None,
         switches: LayerSwitches::default(),
         transform: has_picture.then(|| Transform::centered(size, COMP_SIZE * 0.5)),
