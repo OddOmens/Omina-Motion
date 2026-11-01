@@ -55,8 +55,8 @@ pub mod size {
     pub const TEXT: f32 = 12.0;
     pub const SMALL_TEXT: f32 = 11.0;
     pub const GUTTER: f32 = 6.0;
-    /// Corner radius of panels.
-    pub const PANEL_RADIUS: f32 = 10.0;
+    /// Corner radius of panels: square, so panels meet the window and each other cleanly.
+    pub const PANEL_RADIUS: f32 = 0.0;
 }
 
 /// The app's look: how light the surfaces are.
