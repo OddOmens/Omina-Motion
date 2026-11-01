@@ -48,6 +48,7 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         in_frame,
         out_frame: in_frame.saturating_add(duration),
         start_frame: in_frame,
+        track: 0,
         blend_mode: BlendMode::Normal,
         track_matte: TrackMatte::None,
         parent: None,
@@ -72,9 +73,12 @@ pub fn add_layer_from_item(
     let item = project.item(item_id)?.clone();
     let composition = project.composition_mut(comp_id)?;
     let start = in_frame.clamp(0, composition.duration_frames - 1);
-    let layer = layer_from_item(&item, composition, start, id)?;
+    let mut layer = layer_from_item(&item, composition, start, id)?;
     let index = keep_matte_pairs(composition, stack_index.min(composition.layers.len()));
+    // A track of its own at that height (see `tracks`).
+    layer.track = crate::tracks::make_room_at(composition, index, crate::tracks::is_sound_only(&layer));
     composition.layers.insert(index, layer);
+    crate::tracks::normalize(composition);
     Some(id)
 }
 
@@ -113,6 +117,8 @@ pub fn delete_layers(composition: &mut Composition, ids: &[Id]) -> usize {
             layer.parent = None;
         }
     }
+    // Tracks left empty go away.
+    crate::tracks::normalize(composition);
     before - composition.layers.len()
 }
 
@@ -269,6 +275,8 @@ pub fn add_text_layer(project: &mut Project, comp_id: Id, text: &str, position: 
     let mut transform = Transform::centered(size, position);
     // Text layers anchor at the center of their text box so they scale and rotate in place.
     transform.anchor_point = crate::animation::Animated::constant(size * 0.5);
+    // On a new track above everything, as the top layer.
+    let track = crate::tracks::make_room_at(composition, 0, false);
     composition.layers.insert(
         0,
         Layer {
@@ -280,6 +288,7 @@ pub fn add_text_layer(project: &mut Project, comp_id: Id, text: &str, position: 
             in_frame: in_frame.clamp(0, composition.duration_frames - 1),
             out_frame: composition.duration_frames,
             start_frame: in_frame.clamp(0, composition.duration_frames - 1),
+            track,
             blend_mode: BlendMode::Normal,
             track_matte: TrackMatte::None,
             parent: None,
@@ -289,6 +298,7 @@ pub fn add_text_layer(project: &mut Project, comp_id: Id, text: &str, position: 
             has_audio: false,
         },
     );
+    crate::tracks::normalize(composition);
     Some(id)
 }
 
@@ -492,6 +502,20 @@ mod tests {
         comp.layer_mut(b).unwrap().parent = Some(a);
         assert!(!can_parent(comp, c, a));
         assert!(!set_parent(comp, c, Some(a), 0));
+    }
+
+    #[test]
+    fn added_layers_get_a_track_of_their_own() {
+        let mut project = sample::sample_project();
+        // Between the title (track 5) and the grade layer (track 4).
+        let added = add_layer_from_item(&mut project, ids::MAIN_COMP, ids::GRAY_SOLID, 1, 0).unwrap();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        assert_eq!(comp.layers[1].id, added);
+        let tracks: Vec<i32> = comp.layers.iter().map(|layer| layer.track).collect();
+        assert_eq!(tracks, vec![6, 5, 4, 3, 2, 1, 0]);
+        // Sound goes below the main track.
+        let music = add_layer_from_item(&mut project, ids::MAIN_COMP, ids::MUSIC, 0, 0).unwrap();
+        assert_eq!(project.composition(ids::MAIN_COMP).unwrap().layer(music).unwrap().track, -1);
     }
 
     #[test]

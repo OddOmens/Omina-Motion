@@ -41,6 +41,7 @@ fn layer(id: u64, name: &str, label: LabelColor, content: LayerContent, size: Ve
         in_frame: frames.0,
         out_frame: frames.1,
         start_frame: frames.0,
+        track: 0,
         blend_mode: BlendMode::Normal,
         track_matte: TrackMatte::None,
         parent: None,
@@ -184,5 +185,7 @@ pub fn sample_project() -> Project {
         },
     ];
 
+    let mut composition = composition;
+    crate::tracks::assign_tracks_by_stack(&mut composition);
     Project::new(items, vec![composition])
 }

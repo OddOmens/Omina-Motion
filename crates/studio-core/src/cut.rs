@@ -94,6 +94,10 @@ pub fn split_layers(project: &mut Project, comp_id: Id, layers: &[Id], frame: i6
         report.created.splice(0..0, halves.iter().map(|half| half.id));
         composition.layers.splice(top..top, halves);
     }
+    // Halves share their originals' tracks (they don't overlap); keep the stack in track order.
+    if let Some(composition) = project.composition_mut(comp_id) {
+        crate::tracks::normalize(composition);
+    }
     report
 }
 
@@ -101,32 +105,33 @@ fn composition_index(composition: &Composition, id: Id) -> usize {
     composition.layers.iter().position(|layer| layer.id == id).unwrap_or(usize::MAX)
 }
 
-/// Deletes `layers` and closes the gaps they leave, as Premiere's Ripple Delete does: every
-/// remaining layer that starts at or after a deleted layer's out point moves earlier by that
-/// layer's length (keyframes included). Where deleted layers overlap, their combined span is
-/// closed once. Locked layers are neither deleted nor moved. Returns how many were deleted.
+/// Deletes `layers` and closes the gaps they leave, as Premiere's Ripple Delete does: on each
+/// deleted layer's track, every remaining clip that starts at or after its out point moves
+/// earlier by its length (keyframes included). Other tracks are left alone. Where deleted
+/// layers on one track overlap, their combined span is closed once. Locked layers are neither
+/// deleted nor moved. Returns how many were deleted.
 pub fn ripple_delete(project: &mut Project, comp_id: Id, layers: &[Id]) -> usize {
     let Some(composition) = project.composition_mut(comp_id) else { return 0 };
     let doomed: Vec<Id> = composition.layers.iter().filter(|l| layers.contains(&l.id) && !l.switches.locked).map(|l| l.id).collect();
     // The time spans being removed, merged where they overlap.
-    let mut spans: Vec<(i64, i64)> = composition.layers.iter().filter(|l| doomed.contains(&l.id)).map(|l| (l.in_frame, l.out_frame)).collect();
+    let mut spans: Vec<(i32, i64, i64)> = composition.layers.iter().filter(|l| doomed.contains(&l.id)).map(|l| (l.track, l.in_frame, l.out_frame)).collect();
     spans.sort_unstable();
-    let mut merged: Vec<(i64, i64)> = Vec::new();
-    for (start, end) in spans {
+    let mut merged: Vec<(i32, i64, i64)> = Vec::new();
+    for (track, start, end) in spans {
         match merged.last_mut() {
-            Some(last) if start <= last.1 => last.1 = last.1.max(end),
-            _ => merged.push((start, end)),
+            Some(last) if last.0 == track && start <= last.2 => last.2 = last.2.max(end),
+            _ => merged.push((track, start, end)),
         }
     }
-    let deleted = crate::edit::delete_layers(composition, &doomed);
-    for layer in composition.layers.iter_mut().filter(|layer| !layer.switches.locked) {
-        // Every removed span that ends by this layer's start pulls it earlier.
-        let shift: i64 = merged.iter().filter(|(_, end)| *end <= layer.in_frame).map(|(start, end)| end - start).sum();
+    // Close the gaps before deleting, so emptied tracks being renumbered can't mix them up.
+    for layer in composition.layers.iter_mut().filter(|layer| !layer.switches.locked && !doomed.contains(&layer.id)) {
+        // Every removed span on this layer's track that ends by its start pulls it earlier.
+        let shift: i64 = merged.iter().filter(|(track, _, end)| *track == layer.track && *end <= layer.in_frame).map(|(_, start, end)| end - start).sum();
         if shift > 0 {
             layer.shift_in_time(-shift);
         }
     }
-    deleted
+    crate::edit::delete_layers(composition, &doomed)
 }
 
 #[cfg(test)]
@@ -238,6 +243,19 @@ mod tests {
         ripple_delete(&mut project, ids::MAIN_COMP, &[layers[1], layers[2], layers[3]]);
         assert_eq!(span(&project, layers[4]), (30, 40));
         assert_eq!(span(&project, layers[0]), (0, 10));
+    }
+
+    #[test]
+    fn ripple_delete_closes_the_gap_only_on_its_own_track() {
+        let (mut project, layers) = solids(&[(0, 24), (24, 48), (24, 48)]);
+        // The third clip is on another track: deleting the first must not move it.
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        for (layer, track) in comp.layers.iter_mut().zip([0, 0, 1]) {
+            layer.track = track;
+        }
+        ripple_delete(&mut project, ids::MAIN_COMP, &[layers[0]]);
+        assert_eq!(span(&project, layers[1]), (0, 24), "the next clip on the same track moves up");
+        assert_eq!(span(&project, layers[2]), (24, 48), "a clip on another track stays");
     }
 
     #[test]

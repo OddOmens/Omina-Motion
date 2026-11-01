@@ -81,6 +81,7 @@ pub fn from_text(text: &str) -> Result<(Project, EditorView), String> {
     let FileIn { mut project, mut view } = file;
     restore_effect_info(&mut project);
     fill_missing_start_frames(&mut project);
+    fill_missing_tracks(&mut project);
     check(&project)?;
     project.refresh_next_id();
 
@@ -181,6 +182,18 @@ fn check(project: &Project) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Files from before tracks: each layer gets its own track in its stacking order, so the file
+/// looks exactly as it did. Then the stack is brought into track order (and empty tracks
+/// closed up), in case a hand-edited file left it otherwise.
+fn fill_missing_tracks(project: &mut Project) {
+    for composition in &mut project.compositions {
+        if composition.layers.iter().any(|layer| layer.track == crate::tracks::UNSET_TRACK) {
+            crate::tracks::assign_tracks_by_stack(composition);
+        }
+        crate::tracks::normalize(composition);
+    }
 }
 
 /// Files from before trimming have no start frames: their sources started at the in point.
@@ -325,6 +338,18 @@ mod tests {
         }
         let (opened, _) = from_text(&file.to_string()).unwrap();
         assert!(opened.compositions[0].layers.iter().all(|layer| layer.start_frame == layer.in_frame));
+    }
+
+    #[test]
+    fn files_from_before_tracks_get_one_track_per_layer() {
+        let text = to_text(&sample_project(), view()).unwrap();
+        let mut file: serde_json::Value = serde_json::from_str(&text).unwrap();
+        for layer in file["project"]["compositions"][0]["layers"].as_array_mut().unwrap() {
+            layer.as_object_mut().unwrap().remove("track");
+        }
+        let (opened, _) = from_text(&file.to_string()).unwrap();
+        let tracks: Vec<i32> = opened.compositions[0].layers.iter().map(|layer| layer.track).collect();
+        assert_eq!(tracks, vec![5, 4, 3, 2, 1, 0], "stacking order is kept exactly");
     }
 
     #[test]

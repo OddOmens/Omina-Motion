@@ -50,8 +50,12 @@ impl EditorState {
     }
 
     pub fn end_layer_time_drag(&mut self) {
-        self.layer_time_drag = None;
+        let finished = self.layer_time_drag.take();
         self.clear_snap_line();
+        // A layer moved onto a busy part of its track moves up to a track of its own.
+        if let Some(drag) = finished.filter(|drag| drag.edit == LayerTimeEdit::Move) {
+            self.settle_on_track(drag.layer);
+        }
     }
 
     /// Applies the drag `delta` frames from where it started, snapping what moves (both ends

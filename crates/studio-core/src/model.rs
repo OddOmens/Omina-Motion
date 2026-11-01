@@ -299,6 +299,11 @@ pub struct Layer {
     /// Files saved before trimming existed leave it out; it is then set to `in_frame` on loading.
     #[serde(default = "Layer::unset_start")]
     pub start_frame: i64,
+    /// Which track the layer is on (see `tracks`): 0 is the main track, picture tracks count
+    /// up from it and sound-only tracks down. Older files leave it out; on loading, each
+    /// layer then gets its own track in its stacking order.
+    #[serde(default = "Layer::unset_track")]
+    pub track: i32,
     pub blend_mode: BlendMode,
     pub track_matte: TrackMatte,
     pub parent: Option<Id>,
@@ -315,6 +320,10 @@ impl Layer {
 
     fn unset_start() -> i64 {
         Self::UNSET_START
+    }
+
+    fn unset_track() -> i32 {
+        crate::tracks::UNSET_TRACK
     }
 
     /// Whether the layer is present at `frame`.

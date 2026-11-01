@@ -16,5 +16,6 @@ pub mod property;
 pub mod sample;
 pub mod snap;
 pub mod time;
+pub mod tracks;
 pub mod transform;
 pub mod trim;

@@ -25,20 +25,32 @@ pub fn source_frames(project: &Project, composition: &Composition, layer: &Layer
     item.duration_seconds.map(|seconds| composition.frame_rate.seconds_to_frames(seconds).max(1))
 }
 
-/// The layer (unlocked) and its source length, for an edit.
-fn editable(project: &mut Project, comp: Id, layer: Id) -> Option<(&mut Layer, Option<i64>)> {
+/// The room a trim has on the layer's track: the out point of the clip before it, and the in
+/// point of the clip after it. Clips on a track never overlap.
+fn neighbors(composition: &Composition, layer: &Layer) -> (i64, i64) {
+    let same_track = composition.layers.iter().filter(|other| other.id != layer.id && other.track == layer.track);
+    let before = same_track.clone().filter(|other| other.out_frame <= layer.in_frame).map(|other| other.out_frame).max();
+    let after = same_track.filter(|other| other.in_frame >= layer.out_frame).map(|other| other.in_frame).min();
+    (before.unwrap_or(i64::MIN), after.unwrap_or(i64::MAX))
+}
+
+/// The layer (unlocked), its source length, and the room its neighbors on the track leave, for an edit.
+fn editable(project: &mut Project, comp: Id, layer: Id) -> Option<(&mut Layer, Option<i64>, (i64, i64))> {
     let composition = project.composition(comp)?;
-    let length = source_frames(project, composition, composition.layer(layer)?);
+    let found = composition.layer(layer)?;
+    let length = source_frames(project, composition, found);
+    let room = neighbors(composition, found);
     let layer = project.composition_mut(comp)?.layer_mut(layer)?;
-    (!layer.switches.locked).then_some((layer, length))
+    (!layer.switches.locked).then_some((layer, length, room))
 }
 
 /// Moves the layer's in point to `frame`, as far as its source and out point allow.
 /// Returns whether anything changed.
 pub fn trim_in(project: &mut Project, comp: Id, layer: Id, frame: i64) -> bool {
-    let Some((layer, length)) = editable(project, comp, layer) else { return false };
-    // Not before the source's first frame, and at least one frame before the out point.
-    let earliest = length.map_or(i64::MIN, |_| layer.start_frame);
+    let Some((layer, length, (before, _))) = editable(project, comp, layer) else { return false };
+    // Not before the source's first frame or into the clip before it on the track, and at
+    // least one frame before the out point.
+    let earliest = length.map_or(i64::MIN, |_| layer.start_frame).max(before);
     let frame = frame.max(earliest).min(layer.out_frame - 1);
     let changed = frame != layer.in_frame;
     layer.in_frame = frame;
@@ -48,9 +60,10 @@ pub fn trim_in(project: &mut Project, comp: Id, layer: Id, frame: i64) -> bool {
 /// Moves the layer's out point (the frame after its last) to `frame`, as far as its source
 /// and in point allow. Returns whether anything changed.
 pub fn trim_out(project: &mut Project, comp: Id, layer: Id, frame: i64) -> bool {
-    let Some((layer, length)) = editable(project, comp, layer) else { return false };
-    // Not past the source's last frame, and at least one frame after the in point.
-    let latest = length.map_or(i64::MAX, |length| layer.start_frame + length);
+    let Some((layer, length, (_, after))) = editable(project, comp, layer) else { return false };
+    // Not past the source's last frame or into the clip after it on the track, and at least
+    // one frame after the in point.
+    let latest = length.map_or(i64::MAX, |length| layer.start_frame + length).min(after);
     let frame = frame.min(latest).max(layer.in_frame + 1);
     let changed = frame != layer.out_frame;
     layer.out_frame = frame;
@@ -66,7 +79,7 @@ pub fn can_slip(project: &Project, composition: &Composition, layer: &Layer) -> 
 /// Slips the layer's source so its first frame plays at composition frame `start`, keeping
 /// the in and out points; the source must still cover them. Returns whether anything changed.
 pub fn slip_to(project: &mut Project, comp: Id, layer: Id, start: i64) -> bool {
-    let Some((layer, Some(length))) = editable(project, comp, layer) else { return false };
+    let Some((layer, Some(length), _)) = editable(project, comp, layer) else { return false };
     // A source shorter than the layer (after a frame rate change, say) cannot cover it anywhere.
     if length < layer.out_frame - layer.in_frame {
         return false;
@@ -159,6 +172,21 @@ mod tests {
         comp.frame_rate = FrameRate::new(12, 1);
         assert!(!slip_to(&mut project, ids::MAIN_COMP, clip, 30));
         assert_eq!(timing(&project, clip), (24, 24, 120));
+    }
+
+    #[test]
+    fn trims_stop_at_the_next_clip_on_the_same_track() {
+        let mut project = sample_project();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        // The title (24–168) and the logo (48–240) put on one track, the logo moved after the title.
+        let (title, logo) = (comp.layers[0].id, comp.layers[2].id);
+        let logo_layer = comp.layer_mut(logo).unwrap();
+        logo_layer.shift_in_time(200 - 48);
+        logo_layer.track = 5;
+        assert!(trim_out(&mut project, ids::MAIN_COMP, title, 300));
+        assert_eq!(project.composition(ids::MAIN_COMP).unwrap().layer(title).unwrap().out_frame, 200, "stops at the logo");
+        assert!(!trim_in(&mut project, ids::MAIN_COMP, logo, 100), "no room: nothing changes");
+        assert_eq!(project.composition(ids::MAIN_COMP).unwrap().layer(logo).unwrap().in_frame, 200, "the logo can't reach into the title");
     }
 
     #[test]

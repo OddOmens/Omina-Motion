@@ -5,9 +5,11 @@
 //! project files; `keyframes` holds keyframe selection, dragging and easing;
 //! `viewer` holds moving and scaling layers by dragging them in the composition
 //! viewer; `layer_time` holds moving, trimming and slipping layers in time; `snap`
-//! holds snapping while dragging in the timeline;
+//! holds snapping while dragging in the timeline; `clips` holds editing clips on
+//! tracks (the Tracks view) and the magnetic main track;
 //! `history` holds the undo steps.
 
+mod clips;
 mod history;
 mod keyframes;
 mod layer_time;
@@ -139,6 +141,10 @@ pub struct EditorState {
     pub scale_linked: bool,
     playback: Option<PlaybackClock>,
     keyframe_drag: Option<keyframes::KeyframeDrag>,
+    /// Whether the main track keeps its clips packed together from frame 0, as in CapCut.
+    pub magnetic_main_track: bool,
+    /// A clip being dragged in the timeline's Tracks view.
+    clip_drag: Option<clips::ClipDrag>,
     /// Whether timeline drags snap (S toggles it), how far they reach in frames (set by the
     /// timeline from its zoom), and the frame the current drag snapped to.
     pub snapping: bool,
@@ -171,6 +177,8 @@ impl EditorState {
             playback: None,
             keyframe_drag: None,
             layer_time_drag: None,
+            magnetic_main_track: true,
+            clip_drag: None,
             snapping: true,
             snap_threshold: 0,
             snap_line: None,
@@ -608,7 +616,7 @@ impl EditorState {
     /// Whether a drag that edits the project (keyframes, a layer in time or in the viewer) is
     /// in progress. Its changes become one undo step when it ends.
     pub fn is_dragging(&self) -> bool {
-        self.keyframe_drag.is_some() || self.layer_time_drag.is_some() || self.viewer_drag.is_some()
+        self.keyframe_drag.is_some() || self.layer_time_drag.is_some() || self.viewer_drag.is_some() || self.clip_drag.is_some()
     }
 
     /// Records the project's latest changes as an undo step. Call after edits, with `ui_drag`
@@ -616,6 +624,8 @@ impl EditorState {
     /// drag becomes one step.
     pub fn record_history(&mut self, ui_drag: bool) {
         if !ui_drag && !self.is_dragging() {
+            // The magnetic main track closes gaps as part of the edit that opened them.
+            self.apply_magnetism();
             self.history.record(&self.project);
         }
     }

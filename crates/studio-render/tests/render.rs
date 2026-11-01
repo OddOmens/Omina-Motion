@@ -22,6 +22,7 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         in_frame: 0,
         out_frame: 10,
         start_frame: 0,
+        track: 0,
         blend_mode: BlendMode::Normal,
         track_matte: TrackMatte::None,
         parent: None,
