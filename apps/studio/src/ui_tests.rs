@@ -1111,7 +1111,7 @@ fn expanding_a_clip_shows_its_keyframes_which_drag_in_time(cx: &mut TestAppConte
 #[gpui_kit::test]
 fn the_export_button_opens_the_export_dialog(cx: &mut TestAppContext) {
     let (_, visual) = open(cx);
-    visual.update(|window, cx| window.click("toolbar-export", cx));
+    visual.update(|window, cx| window.click("rail-export", cx));
     render(visual);
     visual.update(|window, cx| assert!(window.has_active_dialog(cx)));
 }

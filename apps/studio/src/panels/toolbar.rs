@@ -1,7 +1,7 @@
-//! The window's chrome around the panels: a slim top bar (the project's name, export
-//! progress and the Export button) and a rail down the left side, CapCut style: buttons that
-//! pick the panel beside it (Media, Effects), the editing tools, and import. The rail holds
-//! only things that work; more are added as they are built.
+//! The window's chrome around the panels: a slim top bar (the project's name and the progress
+//! of background jobs) and a rail down the left side, CapCut style: Settings at the top, then
+//! Export, Import and New Comp, then the buttons that pick the panel beside it (Media, Effects,
+//! Libraries) and the editing tools. The rail holds only things that work.
 //!
 //! The Pen button (G) draws custom shapes point by point. The Shape button picks the Shape tool on a click; pressing and holding it (or right-clicking)
 //! opens a menu beside it to choose which shape the tool draws.
@@ -22,7 +22,7 @@ use crate::workspace::{LeftPanel, Tool, Workspace};
 /// Width of the left rail: room for an icon and its name.
 pub const RAIL_WIDTH: f32 = 68.0;
 
-/// The top bar: where you are on the left, and export on the right.
+/// The top bar: where you are on the left, and background jobs' progress on the right.
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let project = workspace.state.document_name();
     let composition = workspace.state.composition().name.clone();
@@ -39,25 +39,10 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .child(div().text_color(hsla(color::MUTED)).child("/"))
         .child(div().text_color(hsla(color::TEXT)).child(composition))
         .child(div().flex_1())
-        // An export running in the background shows its progress here.
+        // Captions, cut-outs and exports running in the background show their progress here.
         .children(super::captions::status(workspace, cx))
         .children(super::cutout::status(workspace, cx))
         .children(super::export::status(workspace, cx))
-        // The one bright button on screen: export the composition (⌘M).
-        .child(
-            div()
-                .id("toolbar-export")
-                .px_3()
-                .py_1()
-                .rounded(px(6.0))
-                .bg(hsla(color::HIGHLIGHT))
-                .text_color(hsla(0x111111))
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .hover(|style| style.opacity(0.9))
-                .on_click(cx.listener(|this, _, window, cx| super::export::open(this, window, cx)))
-                .child("Export")
-                .test_support(),
-        )
 }
 
 fn separator() -> gpui_kit::Div {
@@ -230,6 +215,13 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .gap_1()
         .py_2()
         .bg(hsla(color::BACKGROUND))
+        .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, cx))
+        .child(separator())
+        // Getting work in and out: export (⌘M), import (⌘I) and a new composition (⌘N).
+        .child(rail_button("rail-export", IconName::Download, "Export", false, super::export::open, cx))
+        .child(rail_button("rail-import", IconName::FileInput, "Import", false, |this, window, cx| this.import(window, cx), cx))
+        .child(rail_button("rail-new-comp", IconName::Clapperboard, "New Comp", false, |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
+        .child(separator())
         .child(rail_button("rail-media", IconName::Folder, "Media", side == LeftPanel::Media, show(LeftPanel::Media), cx))
         .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
         .child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx))
@@ -239,10 +231,4 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .child(shape_button(workspace, cx))
         .child(rail_button("tool-pen", IconName::PenTool, "Pen", tool == Tool::Pen, pick(Tool::Pen), cx))
         .child(rail_button("tool-cut", IconName::Scissors, "Cut", tool == Tool::Cut, pick(Tool::Cut), cx))
-        .child(separator())
-        .child(rail_button("rail-import", IconName::FileInput, "Import", false, |this, window, cx| this.import(window, cx), cx))
-        .child(rail_button("rail-new-comp", IconName::Clapperboard, "New Comp", false, |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
-        // Settings sit at the bottom, apart from the tools.
-        .child(div().flex_1())
-        .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, cx))
 }

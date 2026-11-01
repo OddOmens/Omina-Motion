@@ -37,8 +37,9 @@ Inside `apps/studio/src`:
   unit-tested without a window. `state/history.rs` is undo and redo.
 - `panels/timeline/tracks.rs`: the timeline's tracks (CapCut style): one row per track, several clips
   per row, thumbnails and waveforms, and each clip's keyframe rows when it is opened.
-- `panels/toolbar.rs`: the top bar and the rail on the left: the side panel (Media or Effects), the tools
-  (Select, Text, Shape, Pen, Cut) and import. Holding the Shape button opens the shape menu.
+- `panels/toolbar.rs`: the top bar (where you are, and background jobs' progress) and the rail on the left:
+  Settings; Export, Import and New Comp; the side panel (Media, Effects, Libraries); and the tools (Select,
+  Text, Shape, Pen, Cut). Holding the Shape button opens the shape menu.
 - Pen paths: the model and geometry are in `studio-core/src/path.rs`; drawing and point dragging are in
   `state/viewer.rs` and `panels/viewer.rs`. Masks (`Layer::mask`) let any layer show or hide another.
 - `panels/cutout.rs`, `state/cutout.rs`: Remove Background (pick clicks, the mask job and tracking). Masks
