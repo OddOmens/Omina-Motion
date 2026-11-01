@@ -416,6 +416,27 @@ pub fn import_audio(project: &mut Project, path: std::path::PathBuf, duration_se
     id
 }
 
+/// Moves a layer's anchor point to `anchor` (in its own pixels) at `frame`, moving its position
+/// to match so the layer stays exactly where it is on screen (After Effects' Pan Behind). Only
+/// what the layer rotates and scales around changes. Locked layers and layers without a
+/// transform are left alone. Returns whether it moved.
+pub fn move_anchor(composition: &mut Composition, layer_id: Id, anchor: Vec2, frame: i64) -> bool {
+    use crate::property::{PropertyPath, PropertyValue, TransformProperty};
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    if layer.switches.locked || !(anchor.x.is_finite() && anchor.y.is_finite()) {
+        return false;
+    }
+    let Some(local) = crate::transform::local_transform(layer, frame as f64) else { return false };
+    let Some(transform) = layer.transform.as_ref() else { return false };
+    let old_anchor = transform.anchor_point.value_at(frame as f64);
+    let old_position = transform.position.value_at(frame as f64);
+    // The anchor's step, measured in the parent's space (the layer's scale and rotation applied).
+    let shift = local.apply_vector(anchor - old_anchor);
+    layer.set_property(PropertyPath::Transform(TransformProperty::AnchorPoint), frame, PropertyValue::Pair(anchor));
+    layer.set_property(PropertyPath::Transform(TransformProperty::Position), frame, PropertyValue::Pair(old_position + shift));
+    true
+}
+
 /// Sets a text layer's box to its measured size, keeping the anchor point in the same relative spot.
 /// Returns whether anything changed.
 pub fn set_text_box(composition: &mut Composition, layer_id: Id, size: Vec2) -> bool {
@@ -521,6 +542,26 @@ pub fn set_parent(composition: &mut Composition, layer_id: Id, parent: Option<Id
 mod tests {
     use super::*;
     use crate::sample::{self, ids};
+
+    #[test]
+    fn moving_the_anchor_keeps_a_rotated_scaled_layer_in_place() {
+        use crate::property::{PropertyPath, PropertyValue, TransformProperty};
+        let mut project = sample::sample_project();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let layer = comp.layers[0].id;
+        let target = comp.layer_mut(layer).unwrap();
+        target.switches.locked = false;
+        target.set_property(PropertyPath::Transform(TransformProperty::Rotation), 0, PropertyValue::Scalar(30.0));
+        target.set_property(PropertyPath::Transform(TransformProperty::Scale), 0, PropertyValue::Pair(Vec2::new(150.0, 80.0)));
+        let before = crate::transform::layer_corners(comp, layer, 0.0).unwrap();
+        assert!(move_anchor(comp, layer, Vec2::new(0.0, 0.0), 0), "to the top left corner");
+        let after = crate::transform::layer_corners(comp, layer, 0.0).unwrap();
+        for (a, b) in before.iter().zip(after) {
+            assert!((a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01, "the layer did not move: {before:?} vs {after:?}");
+        }
+        let world = crate::transform::world_transform(comp, layer, 0.0).unwrap();
+        assert!((world.apply(Vec2::new(0.0, 0.0)) - before[0]).x.abs() < 0.01, "the anchor now sits on that corner");
+    }
 
     #[test]
     fn footage_keeps_its_length_in_comp_frames() {

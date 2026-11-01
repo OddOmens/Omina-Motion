@@ -15,6 +15,11 @@ impl Vec2 {
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
+
+    /// The vector's length.
+    pub fn length(self) -> f32 {
+        self.x.hypot(self.y)
+    }
 }
 
 impl Add for Vec2 {

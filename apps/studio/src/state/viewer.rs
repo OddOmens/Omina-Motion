@@ -29,6 +29,24 @@ pub(super) enum ViewerDrag {
     Scale { layer: Id, scale: Vec2, reach: Vec2, to_local: Affine },
     /// Drawing a new shape layer with the Shape tool, from the point where the drag began.
     DrawShape { layer: Id, start: Vec2 },
+    /// Moving a layer's anchor point: where it started (layer pixels), the transform from
+    /// composition pixels into the layer's pixels, and how near (in layer pixels) it snaps.
+    Anchor { layer: Id, start: Vec2, to_local: Affine, reach: f32 },
+}
+
+/// The nine points of a layer's box an anchor snaps to (corners, edge middles, center), as
+/// fractions of its size.
+pub const ANCHOR_POINTS: [(f32, f32); 9] = [(0.0, 0.0), (0.5, 0.0), (1.0, 0.0), (0.0, 0.5), (0.5, 0.5), (1.0, 0.5), (0.0, 1.0), (0.5, 1.0), (1.0, 1.0)];
+
+/// The nearest of a box's nine anchor points to `point`, if it is within `reach`.
+fn snap_anchor(point: Vec2, size: Vec2, reach: f32) -> Option<Vec2> {
+    ANCHOR_POINTS
+        .iter()
+        .map(|&(fx, fy)| Vec2::new(size.x * fx, size.y * fy))
+        .map(|target| (target, (target - point).length()))
+        .filter(|&(_, distance)| distance <= reach)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(target, _)| target)
 }
 
 /// A shape drawn smaller than this (a click rather than a drag) gets `DEFAULT_SHAPE_SIZE`.
@@ -124,6 +142,35 @@ impl EditorState {
         edit::edit_shape(composition, layer, |_| {});
     }
 
+    /// Starts moving `layer`'s anchor point. `snap_reach` is how near (in composition pixels) the
+    /// pointer must come to a corner, edge middle or center to snap to it, when snapping is on.
+    pub fn begin_anchor_drag(&mut self, layer: Id, snap_reach: f32) {
+        let frame = self.current_frame as f64;
+        let comp = self.composition();
+        let Some(target) = comp.layer(layer).filter(|layer| !layer.switches.locked) else { return };
+        let (Some(transform), Some(world)) = (target.transform.as_ref(), world_transform(comp, layer, frame)) else { return };
+        let Some(to_local) = world.inverse() else { return };
+        // Composition pixels to layer pixels, for the reach: the layer's scale, roughly.
+        let reach = to_local.apply_vector(Vec2::new(snap_reach, 0.0)).length().max(to_local.apply_vector(Vec2::new(0.0, snap_reach)).length());
+        self.viewer_drag = Some(ViewerDrag::Anchor { layer, start: transform.anchor_point.value_at(frame), to_local, reach });
+    }
+
+    /// The layer whose anchor point is being dragged, so the viewer can show where it snaps.
+    pub fn anchor_drag_layer(&self) -> Option<Id> {
+        match self.viewer_drag {
+            Some(ViewerDrag::Anchor { layer, .. }) => Some(layer),
+            _ => None,
+        }
+    }
+
+    /// Puts a layer's anchor point at a fraction of its box (0, 0 is the top left; 0.5, 0.5
+    /// the center), keeping the layer where it is.
+    pub fn set_anchor_fraction(&mut self, layer: Id, fraction: (f32, f32)) {
+        let frame = self.current_frame;
+        let Some(size) = self.composition().layer(layer).map(|layer| layer.size) else { return };
+        edit::move_anchor(self.composition_mut(), layer, Vec2::new(size.x * fraction.0, size.y * fraction.1), frame);
+    }
+
     /// Applies the current drag. `delta` is how far the pointer moved since the drag began, in
     /// composition pixels. With `constrain` (Shift), moves stay on one axis and scaling keeps proportions.
     pub fn drag_in_viewer(&mut self, delta: Vec2, constrain: bool) {
@@ -157,6 +204,16 @@ impl EditorState {
                     target.set_property(SCALE, frame, PropertyValue::Pair(Vec2::new(scale.x * x, scale.y * y)));
                 }
             }
+            ViewerDrag::Anchor { layer, start, to_local, reach } => {
+                let size = self.composition().layer(layer).map_or(Vec2::default(), |layer| layer.size);
+                let mut anchor = start + to_local.apply_vector(delta);
+                if self.viewer_snapping
+                    && let Some(snapped) = snap_anchor(anchor, size, reach)
+                {
+                    anchor = snapped;
+                }
+                edit::move_anchor(self.composition_mut(), layer, anchor, frame);
+            }
             ViewerDrag::DrawShape { layer, start } => {
                 // Shift keeps it square (or circular), as in every drawing tool.
                 let delta = if constrain {
@@ -187,6 +244,30 @@ mod tests {
     use super::*;
     use studio_core::align::layer_bounds;
     use studio_core::property::TransformProperty;
+
+    #[test]
+    fn the_anchor_drags_anywhere_and_snaps_to_the_box_when_close() {
+        let mut state = EditorState::new();
+        let layer = state.begin_shape_draw(ShapeKind::Rectangle, Vec2::new(500.0, 500.0)).unwrap();
+        state.end_viewer_drag();
+        // The 300 px box runs from 350 to 650; its anchor starts at the center.
+        let corners_before = studio_core::transform::layer_corners(state.composition(), layer, 0.0).unwrap();
+        let anchor = |state: &EditorState| state.composition().layer(layer).unwrap().transform.as_ref().unwrap().anchor_point.value_at(0.0);
+        state.begin_anchor_drag(layer, 10.0);
+        state.drag_in_viewer(Vec2::new(-146.0, -147.0), false);
+        assert_eq!(anchor(&state), Vec2::new(0.0, 0.0), "near the top left corner, it snaps there");
+        state.drag_in_viewer(Vec2::new(-100.0, 20.0), false);
+        assert_eq!(anchor(&state), Vec2::new(50.0, 170.0), "elsewhere, it goes where it is put");
+        state.viewer_snapping = false;
+        state.drag_in_viewer(Vec2::new(-146.0, -147.0), false);
+        assert_eq!(anchor(&state), Vec2::new(4.0, 3.0), "snapping off, it stays where dragged");
+        state.end_viewer_drag();
+        let corners_after = studio_core::transform::layer_corners(state.composition(), layer, 0.0).unwrap();
+        assert_eq!(corners_before, corners_after, "the shape itself never moved");
+
+        state.set_anchor_fraction(layer, (1.0, 1.0));
+        assert_eq!(anchor(&state), Vec2::new(300.0, 300.0));
+    }
 
     #[test]
     fn dragging_with_the_shape_tool_draws_the_box_and_a_click_places_a_default_one() {

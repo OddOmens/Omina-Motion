@@ -44,7 +44,7 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             .flex()
             .items_center()
             .gap_1p5()
-            .child(icon_button(ElementId::Name(format!("fx-on:{}", effect_id.0).into()), IconName::SquareFunction, "Effect On/Off", effect.enabled, cx.listener(move |this, _, _, cx| {
+            .child(icon_button(ElementId::Name(format!("fx-on:{}", effect_id.0).into()), if effect.enabled { IconName::Eye } else { IconName::EyeOff }, if effect.enabled { "Hide Effect" } else { "Show Effect" }, false, cx.listener(move |this, _, _, cx| {
                 this.state.toggle_effect(layer_id, effect_id);
                 cx.notify();
             })))

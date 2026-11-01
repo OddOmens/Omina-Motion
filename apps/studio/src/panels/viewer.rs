@@ -112,7 +112,11 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         .text_size(px(size::SMALL_TEXT))
         .text_color(hsla(color::MUTED))
         .child(format!("{:.0}%", scale * 100.0))
-        .child(format!("{} × {}", composition.width, composition.height));
+        .child(format!("{} × {}", composition.width, composition.height))
+        .child(icon_button("viewer-snapping", IconName::Magnet, "Snap anchor points to corners, edges and center", workspace.state.viewer_snapping, cx.listener(|this, _, _, cx| {
+            this.state.viewer_snapping = !this.state.viewer_snapping;
+            cx.notify();
+        })));
     let timecode = div().flex_1().flex().justify_end().child(
         div()
             .px_2()
@@ -175,6 +179,7 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
 enum ViewerDrag {
     Move,
     Scale,
+    Anchor,
 }
 
 /// Screen pixels per composition pixel at the current Fit magnification.
@@ -262,27 +267,6 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
             .into_any_element(),
         );
 
-        if let Some(anchor) = layer.transform.as_ref().map(|t| t.position.value_at(frame as f64)) {
-            // The anchor sits at the layer's position in its parent's space; draw it where it lands on screen.
-            let on_screen = studio_core::transform::world_transform(composition, id, frame as f64)
-                .map(|world| world.apply(layer.transform.as_ref().unwrap().anchor_point.value_at(frame as f64)))
-                .unwrap_or(anchor);
-            let (ax, ay) = frac(on_screen);
-            elements.push(
-                div()
-                    .absolute()
-                    .left(relative(ax))
-                    .top(relative(ay))
-                    .ml(px(-5.0))
-                    .mt(px(-5.0))
-                    .size(px(10.0))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(hsla(color::ACCENT))
-                    .into_any_element(),
-            );
-        }
-
         let handles = [ScaleHandle::TopLeft, ScaleHandle::TopRight, ScaleHandle::BottomRight, ScaleHandle::BottomLeft];
         for (handle, corner) in handles.into_iter().zip(outline) {
             let (hx, hy) = corner;
@@ -292,10 +276,14 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
                     .absolute()
                     .left(relative(hx))
                     .top(relative(hy))
-                    .ml(px(-4.0))
-                    .mt(px(-4.0))
-                    .size(px(8.0))
-                    .bg(hsla(color::ACCENT))
+                    .ml(px(-8.0))
+                    .mt(px(-8.0))
+                    .size(px(16.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    // A 16 pt grab area around the visible 8 pt square.
+                    .child(div().size(px(8.0)).bg(hsla(color::ACCENT)))
                     .cursor(if matches!(handle, ScaleHandle::TopLeft | ScaleHandle::BottomRight) { CursorStyle::ResizeUpLeftDownRight } else { CursorStyle::ResizeUpRightDownLeft })
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
@@ -308,6 +296,49 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
                     .into_any_element(),
             );
         }
+
+        // The anchor point, where the layer scales and rotates around, drawn over the scale
+        // handles so it can be dragged off a corner. Drag it to move it; the layer stays put.
+        // While dragging, the points it snaps to are shown.
+        if let (Some(transform), Some(world)) = (layer.transform.as_ref(), studio_core::transform::world_transform(composition, id, frame as f64)) {
+            if workspace.state.anchor_drag_layer() == Some(id) && workspace.state.viewer_snapping {
+                for (fx, fy) in crate::state::ANCHOR_POINTS {
+                    let (sx, sy) = frac(world.apply(Vec2::new(layer.size.x * fx, layer.size.y * fy)));
+                    elements.push(div().absolute().left(relative(sx)).top(relative(sy)).ml(px(-2.5)).mt(px(-2.5)).size(px(5.0)).rounded_full().bg(hsla(color::HIGHLIGHT)).into_any_element());
+                }
+            }
+            let (ax, ay) = frac(world.apply(transform.anchor_point.value_at(frame as f64)));
+            let line = |horizontal: bool| {
+                let bar = div().absolute().bg(hsla(color::ACCENT));
+                if horizontal { bar.left(px(-4.0)).right(px(-4.0)).top(px(5.5)).h(px(1.0)) } else { bar.top(px(-4.0)).bottom(px(-4.0)).left(px(5.5)).w(px(1.0)) }
+            };
+            elements.push(
+                div()
+                    .id(ElementId::Name(format!("anchor-handle:{}", id.0).into()))
+                    .absolute()
+                    .left(relative(ax))
+                    .top(relative(ay))
+                    .ml(px(-6.0))
+                    .mt(px(-6.0))
+                    .size(px(12.0))
+                    .cursor(CursorStyle::Crosshair)
+                    .child(line(true))
+                    .child(line(false))
+                    .child(div().absolute().left(px(1.0)).top(px(1.0)).size(px(10.0)).rounded_full().border_1().border_color(hsla(color::ACCENT)).bg(gpui_kit::rgba(0x00000066)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.ui.viewer_anchor = Some((f32::from(event.position.x), f32::from(event.position.y)));
+                        // Snap within about 8 screen points of a corner, edge middle or center.
+                        let reach = 8.0 / viewer_scale(this).max(f32::EPSILON);
+                        this.state.begin_anchor_drag(id, reach);
+                        cx.notify();
+                    }))
+                    .on_drag(ViewerDrag::Anchor, |_, _, _, cx| cx.new(|_| EmptyDragView))
+                    .test_support()
+                    .into_any_element(),
+            );
+        }
+
     }
     elements
 }

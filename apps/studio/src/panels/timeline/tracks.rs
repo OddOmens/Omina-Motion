@@ -194,22 +194,19 @@ fn kind_icon(layer: &Layer) -> IconName {
     }
 }
 
-/// The bar above the ruler in this view: transport on the left, the time in the middle, and
-/// view, snapping, magnet and zoom controls on the right.
+/// The bar above the ruler: the composition's name and the graph editor on the left, the
+/// transport and time in the middle, and snapping and zoom on the right. The two sides share
+/// the leftover width equally, so the middle stays centered however long the name is.
 pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let state = &workspace.state;
     let playing = state.is_playing();
     let rate = state.composition().frame_rate;
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_2()
+    let side = || div().flex_1().flex_basis(px(0.0)).min_w_0().flex().items_center().gap_1();
+    let left = side()
         .child(
             div()
                 .id("timeline-comp-name")
-                .max_w(px(220.0))
+                .min_w_0()
                 .truncate()
                 .pl_1()
                 .pr_2()
@@ -218,7 +215,13 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                 .child(state.composition().name.clone())
                 .test_support(),
         )
-        .child(div().w(px(1.0)).h(px(16.0)).mr_1().bg(hsla(color::HAIRLINE)))
+        .child(div().w(px(1.0)).h(px(16.0)).mr_1().flex_none().bg(hsla(color::HAIRLINE)))
+        .child(crate::panels::graph_editor::button(workspace, cx));
+    let middle = div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
         .child(icon_button("tracks-start", IconName::SkipBack, "Go to Start (Home)", false, cx.listener(|this, _, _, cx| {
             let start = this.state.work_area.start as i64;
             this.go_to(start, cx);
@@ -228,11 +231,9 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             this.state.loop_playback = !this.state.loop_playback;
             cx.notify();
         })))
-        .child(div().w(px(1.0)).h(px(16.0)).mx_1().bg(hsla(color::HAIRLINE)))
-        .child(crate::panels::graph_editor::button(workspace, cx))
-        .child(div().flex_1())
-        .child(div().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)))
-        .child(div().flex_1())
+        .child(div().pl_2().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)));
+    let right = side()
+        .justify_end()
         .child(icon_button("snapping", IconName::Magnet, "Snapping (S)", state.snapping, cx.listener(|this, _, _, cx| {
             this.state.snapping = !this.state.snapping;
             cx.notify();
@@ -253,7 +254,8 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             let duration = this.state.composition().duration_frames as f64;
             this.state.set_view_range(FrameRange::new(0.0, duration));
             cx.notify();
-        })))
+        })));
+    div().size_full().flex().items_center().gap_2().px_2().child(left).child(middle).child(right)
 }
 
 /// The track rows with their clips.

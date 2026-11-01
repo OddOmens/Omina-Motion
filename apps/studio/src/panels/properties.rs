@@ -19,7 +19,7 @@ use super::chrome::{divider, hint, icon_button, panel, section};
 use super::color_picker;
 use super::fields::{FieldTarget, property_row, value_field};
 use crate::state::{ColorTarget, PaintSlot, ShapeSetting, Switch, TextSetting};
-use crate::theme::{color, hsla};
+use crate::theme::{color, hsla, size};
 use crate::workspace::{EditTarget, PanelId, Workspace};
 
 /// Font families offered in the Text section, shown only if installed. The layer's own font is always listed.
@@ -154,8 +154,49 @@ fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Work
             .into_any_element()
         });
         rows = rows.child(property_row(id, PropertyPath::Transform(property), extra, workspace, cx));
+        if property == TransformProperty::AnchorPoint {
+            rows = rows.child(anchor_grid(layer, workspace, cx));
+        }
     }
     rows
+}
+
+/// Nine buttons in the layout of the layer's box (corners, edge middles, center): pressing one
+/// moves the anchor point there, keeping the layer where it is. The one the anchor is on is lit.
+fn anchor_grid(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let frame = workspace.state.current_frame as f64;
+    let anchor = layer.transform.as_ref().map(|transform| transform.anchor_point.value_at(frame));
+    let size = layer.size;
+    let at = |(fx, fy): (f32, f32)| anchor.is_some_and(|a| (a.x - size.x * fx).abs() < 0.5 && (a.y - size.y * fy).abs() < 0.5);
+    let grid = div().w(px(56.0)).p(px(2.0)).flex().flex_wrap().rounded(px(5.0)).border_1().border_color(hsla(color::HAIRLINE)).children(
+        crate::state::ANCHOR_POINTS.into_iter().enumerate().map(|(index, fraction)| {
+            let lit = at(fraction);
+            div()
+                .id(("anchor-grid", index))
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .cursor_pointer()
+                .hover(|style| style.bg(hsla(color::HOVER)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.set_anchor_fraction(id, fraction);
+                    cx.notify();
+                }))
+                .child(div().size(px(if lit { 7.0 } else { 5.0 })).rounded_full().bg(hsla(if lit { color::ACCENT } else { color::MUTED })))
+                .test_support()
+        }),
+    );
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .py_1()
+        .pl(px(28.0))
+        .child(grid)
+        .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Move the anchor point to a corner, edge or the center. Drag it in the viewer to put it anywhere."))
 }
 
 /// A labeled row with an icon and a text-setting field, as in the character grid.

@@ -37,7 +37,7 @@ use studio_core::time::FrameRange;
 
 pub use keyframes::KeyframeRef;
 pub use layer_time::LayerTimeEdit;
-pub use viewer::ScaleHandle;
+pub use viewer::{ANCHOR_POINTS, ScaleHandle};
 
 /// The view range never shrinks below this many frames, so zooming in stops at a readable level.
 pub const MIN_VIEW_FRAMES: f64 = 10.0;
@@ -203,6 +203,8 @@ pub struct EditorState {
     pub scale_linked: bool,
     /// When on, a shape's width and height change together.
     pub shape_size_linked: bool,
+    /// Whether anchor points snap to their layer's corners, edge middles and center in the viewer.
+    pub viewer_snapping: bool,
     playback: Option<PlaybackClock>,
     keyframe_drag: Option<keyframes::KeyframeDrag>,
     /// Whether the main track keeps its clips packed together from frame 0, as in CapCut.
@@ -244,6 +246,7 @@ impl EditorState {
             align_target: AlignTarget::Composition,
             scale_linked: true,
             shape_size_linked: false,
+            viewer_snapping: true,
             playback: None,
             keyframe_drag: None,
             layer_time_drag: None,

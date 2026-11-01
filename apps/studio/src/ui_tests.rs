@@ -1525,8 +1525,10 @@ fn the_viewer_bar_lines_up_with_the_project_footer(cx: &mut TestAppContext) {
 
 // Shape styling and the color wheel ------------------------------------------------------------
 
-/// Adds a 300 px shape of `kind` and selects it, so Properties shows its settings.
+/// Adds a 300 px shape of `kind` and selects it, so Properties shows its settings (in a tall
+/// window, so all of them are on screen).
 fn add_shape(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, kind: studio_core::model::ShapeKind) -> Id {
+    tall_window(visual);
     let layer = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         let layer = ws.state.begin_shape_draw(kind, Vec2::new(960.0, 540.0)).unwrap();
         ws.state.end_viewer_drag();
@@ -1665,6 +1667,7 @@ fn shapes_size_by_width_and_height_or_by_radius(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_text_fill_chip_opens_the_color_picker(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
+    tall_window(visual);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.state.select_layer(TITLE, false);
         cx.notify();
@@ -1730,6 +1733,7 @@ fn a_library_color_links_and_changing_it_updates_the_shape(cx: &mut TestAppConte
 fn the_pickers_libraries_tab_links_a_color(cx: &mut TestAppContext) {
     use studio_core::model::{Paint, Rgba, ShapeKind};
     let (workspace, visual) = open(cx);
+    tall_window(visual);
     let brand = make_brand(&workspace, visual, "Brand A");
     let primary = visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.add_library_color(brand, Rgba::hex(0x2d8ceb)).unwrap()));
     let layer = add_shape(&workspace, visual, ShapeKind::Star);
@@ -1801,4 +1805,82 @@ fn library_items_and_whole_brands_delete(cx: &mut TestAppContext) {
     click_label(visual, "Delete");
     render(visual);
     visual.update(|_, cx| assert!(workspace.read(cx).state.libraries.brands.is_empty()));
+}
+
+// Anchor points, effect visibility and the timeline toolbar -------------------------------------
+
+fn anchor_of(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, layer: Id) -> Vec2 {
+    visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().transform.as_ref().unwrap().anchor_point.value_at(0.0))
+}
+
+#[gpui_kit::test]
+fn the_anchor_drags_in_the_viewer_and_snaps_to_corners_unless_turned_off(cx: &mut TestAppContext) {
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    let corners = visual.update(|_, cx| studio_core::transform::layer_corners(workspace.read(cx).state.composition(), layer, 0.0).unwrap());
+    let handle = ElementId::Name(format!("anchor-handle:{}", layer.0).into());
+    // Drop it a few pixels from the top left corner: it snaps onto the corner.
+    let from = center_of(visual, handle.clone());
+    let near_corner = screen_point(&workspace, visual, corners[0] + Vec2::new(6.0, 5.0));
+    visual.update(|window, cx| window.drag(from, near_corner, cx));
+    render(visual);
+    assert_eq!(anchor_of(&workspace, visual, layer), Vec2::new(0.0, 0.0));
+    let after = visual.update(|_, cx| studio_core::transform::layer_corners(workspace.read(cx).state.composition(), layer, 0.0).unwrap());
+    for (a, b) in corners.iter().zip(after) {
+        assert!((a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01, "the shape stays where it was: {corners:?} vs {after:?}");
+    }
+    // With snapping off, it lands where it is dropped.
+    visual.update(|window, cx| window.click("viewer-snapping", cx));
+    render(visual);
+    let from = center_of(visual, handle);
+    let inside = screen_point(&workspace, visual, corners[0] + Vec2::new(40.0, 30.0));
+    visual.update(|window, cx| window.drag(from, inside, cx));
+    render(visual);
+    let anchor = anchor_of(&workspace, visual, layer);
+    assert!((anchor.x - 40.0).abs() < 3.0 && (anchor.y - 30.0).abs() < 3.0, "not snapped: {anchor:?}");
+}
+
+#[gpui_kit::test]
+fn the_anchor_grid_moves_the_anchor_to_a_corner(cx: &mut TestAppContext) {
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let layer = add_shape(&workspace, visual, ShapeKind::Ellipse);
+    visual.update(|window, cx| window.click(("anchor-grid", 8usize), cx));
+    render(visual);
+    assert_eq!(anchor_of(&workspace, visual, layer), Vec2::new(300.0, 300.0), "the bottom right corner");
+}
+
+#[gpui_kit::test]
+fn the_eye_turns_an_effect_off_and_on(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let effect = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        ws.state.add_effect(TITLE, "Gaussian Blur");
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 1);
+        cx.notify();
+        ws.state.composition().layer(TITLE).unwrap().effects[0].id
+    }));
+    render(visual);
+    let enabled = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects[0].enabled);
+    visual.update(|window, cx| window.click(ElementId::Name(format!("fx-on:{}", effect.0).into()), cx));
+    render(visual);
+    assert!(!enabled(visual));
+    visual.update(|window, cx| window.click(ElementId::Name(format!("fx-on:{}", effect.0).into()), cx));
+    render(visual);
+    assert!(enabled(visual));
+}
+
+#[gpui_kit::test]
+fn a_long_composition_name_does_not_move_the_timeline_transport(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let play = center_of(visual, "tracks-play");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let settings = studio_core::edit::CompositionSettings { name: "A Much Longer Composition Name For The Client Review".into(), ..ws.state.composition_settings() };
+        ws.state.update_composition(&settings).unwrap();
+        cx.notify();
+    }));
+    render(visual);
+    assert_eq!(center_of(visual, "tracks-play"), play);
 }
