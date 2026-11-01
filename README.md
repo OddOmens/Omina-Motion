@@ -52,7 +52,11 @@ Inside `apps/studio/src`:
 - `panels/libraries.rs`, `state/library.rs`, `library_store.rs`: Libraries (brands holding shared colors and
   text styles, linked wherever they are used; the model and syncing are in `studio-core/src/library.rs`).
   They are stored in Studio's settings folder as `libraries.json`, with backups in `Library Backups`.
-- `panels/templates.rs`: the Templates panel. The 100 templates (20 animated layouts, each in 16:9, 4:5 and
+- `panels/analysis.rs`: background jobs that study a clip first: Remove Silences (`studio-core/src/silence.rs`),
+  Mark Beats (`studio-media/src/beats.rs`; markers snap), Track Motion (`studio-media/src/track.rs`) and Auto
+  Reframe (follows the subject with the background-removal model). Speed, reverse and ramps are in
+  `studio-core/src/speed.rs`; the mixer plays sped-up sound, ducks music under a voice, and gates noise.
+- `panels/templates.rs`: the Templates panel (with a brand menu that applies a Library brand's colors and font). The 100 templates (20 animated layouts, each in 16:9, 4:5 and
   9:16) are in `studio-core/src/templates/`; `catalog.rs` holds their words, colors and fonts.
   `TEMPLATE_SHEET=/path.png cargo test -p studio-render --test render template_sheet -- --ignored` renders
   them all into one picture to check.

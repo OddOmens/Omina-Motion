@@ -237,6 +237,102 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
     section
 }
 
+/// Duck Under: another layer with sound that this one gets quieter under (music under a voice).
+fn duck_row(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let composition = workspace.state.composition();
+    let mut choices: Vec<(String, bool, Option<Id>)> = vec![("Nothing".to_owned(), layer.audio.duck_under.is_none(), None)];
+    choices.extend(composition.layers.iter().filter(|other| other.id != id && workspace.state.has_sound(other.id)).map(|other| (other.name.clone(), layer.audio.duck_under == Some(other.id), Some(other.id))));
+    let current = layer.audio.duck_under.and_then(|under| composition.layer(under)).map_or("Nothing".to_owned(), |under| under.name.clone());
+    labeled_row("Duck Under", choice_menu("duck-under", current, choices, move |this, under| this.state.set_duck_under(id, under), cx.weak_entity()))
+}
+
+/// Speed, for footage: a constant speed or a ramp, playing backwards, and making a version in
+/// another shape that follows the subject (Auto Reframe).
+fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let target = cx.weak_entity();
+    let ramped = layer.time.constant_factor().is_none();
+    let speed = if ramped {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(div().text_color(hsla(color::VALUE)).child("Ramping"))
+            .child(Button::new("speed-unramp").ghost().xsmall().label("Steady 100%").on_click(cx.listener(move |this, _, _, cx| {
+                this.state.set_speed(id, 100.0);
+                cx.notify();
+            })))
+            .into_any_element()
+    } else {
+        value_field(FieldTarget::Speed { layer: id }, workspace, cx).into_any_element()
+    };
+    let ramps = studio_core::speed::Ramp::ALL.iter().map(|&ramp| (ramp.name().to_owned(), false, ramp)).collect();
+    let busy = workspace.ui.analysis_job.is_some();
+    div()
+        .child(divider())
+        .child(section("Speed", None))
+        .child(labeled_row("Speed", speed))
+        .child(labeled_row("Ramp", choice_menu("speed-ramp", "Choose a ramp…".to_owned(), ramps, move |this, ramp| this.state.apply_speed_ramp(id, ramp), target.clone())))
+        .child(
+            div().py_1().child(Checkbox::new("speed-reverse").label("Play backwards").checked(layer.time.reverse).on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                this.state.set_reverse(id, *checked);
+                cx.notify();
+            }))),
+        )
+        .when(ramped || layer.time.reverse, |section| section.child(hint("Sound is silent while a clip plays backwards or ramps.")))
+        .child(divider())
+        .child(section("Auto Reframe", None))
+        .child(hint("Makes a new composition in another shape, moving the clip to keep its subject in frame. Background-removal clicks pick the subject; otherwise it follows what is in the middle."))
+        .child(div().py_1().child(if busy {
+            div().text_color(hsla(color::MUTED)).child("Another analysis is running.").into_any_element()
+        } else {
+            reframe_menu(id, cx).into_any_element()
+        }))
+}
+
+/// Whether a layer can be pinned to moving video: graphics and text, not footage or sound.
+fn trackable(layer: &Layer) -> bool {
+    layer.transform.is_some() && !matches!(layer.content, LayerContent::Footage { .. } | LayerContent::Audio { .. } | LayerContent::Adjustment)
+}
+
+/// Track Motion: pin this layer to a point that moves in a video below it.
+fn track_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
+    let picking = workspace.ui.track_pick == Some(id);
+    let busy = workspace.ui.analysis_job.is_some();
+    div()
+        .child(divider())
+        .child(section("Track Motion", None))
+        .child(hint(if picking { "Now click the point to follow in the video, at the playhead." } else { "Pins this layer to something moving in a video: its position follows the point you click." }))
+        .child(
+            div().py_1().child(
+                Button::new("track-motion")
+                    .small()
+                    .label(if picking { "Cancel" } else { "Track Motion" })
+                    .map(|button| if picking { button.primary() } else { button.outline() })
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ui.track_pick = if this.ui.track_pick == Some(id) { None } else { Some(id) };
+                        cx.notify();
+                    })),
+            ),
+        )
+}
+
+/// The Auto Reframe menu: one shape per item; choosing one starts the job.
+fn reframe_menu(id: Id, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let target = cx.weak_entity();
+    Button::new("auto-reframe").outline().small().label("Reframe to…").dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+        studio_core::templates::Format::ALL.into_iter().fold(menu, |menu, format| {
+            let target = target.clone();
+            menu.item(PopupMenuItem::new(format!("{} ({}×{})", format.label(), format.size().0, format.size().1)).on_click(move |_, window, cx: &mut App| {
+                target.update(cx, |this, cx| super::analysis::auto_reframe(this, id, format, window, cx)).ok();
+            }))
+        })
+    })
+}
+
 /// A layer's sound: whether its picture shows and its sound plays (separately), its volume and
 /// fades, and for a video clip, moving its sound onto a clip of its own.
 fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -249,6 +345,9 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
         }))
     };
     let is_video = matches!(layer.content, LayerContent::Footage { .. });
+    let busy = workspace.ui.analysis_job.is_some();
+    let normal_speed = layer.time.is_normal();
+    let has_markers = !workspace.state.composition().markers.is_empty();
     div()
         .child(divider())
         .child(section("Audio", None))
@@ -263,6 +362,40 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
         .child(labeled_row("Volume", field(AudioSetting::Volume, cx)))
         .child(labeled_row("Fade In", field(AudioSetting::FadeIn, cx)))
         .child(labeled_row("Fade Out", field(AudioSetting::FadeOut, cx)))
+        .child(labeled_row("Noise Gate", field(AudioSetting::NoiseGate, cx)))
+        .child(duck_row(layer, workspace, cx))
+        .when(layer.audio.duck_under.is_some(), |section| section.child(labeled_row("Duck By", field(AudioSetting::DuckAmount, cx))))
+        .child(
+            div()
+                .py_1()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    Button::new("remove-silences")
+                        .outline()
+                        .small()
+                        .label("Remove Silences")
+                        .tooltip("Cut the pauses out and close the gaps (jump cuts)")
+                        .disabled(busy || !normal_speed)
+                        .on_click(cx.listener(move |this, _, window, cx| super::analysis::remove_silences(this, id, window, cx))),
+                )
+                .child(
+                    Button::new("mark-beats")
+                        .outline()
+                        .small()
+                        .label("Mark Beats")
+                        .tooltip("Put a marker on every beat; cuts and moves snap to them")
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, window, cx| super::analysis::mark_beats(this, id, window, cx))),
+                )
+                .when(has_markers, |row| {
+                    row.child(Button::new("clear-markers").ghost().small().label("Clear Markers").on_click(cx.listener(|this, _, _, cx| {
+                        this.state.clear_markers();
+                        cx.notify();
+                    })))
+                }),
+        )
         .when(is_video, |section| {
             section.child(
                 div().py_1().child(
@@ -735,6 +868,8 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(divider())
         .child(transform)
         .children(text)
+        .children(studio_core::speed::has_speed(&layer.content).then(|| speed_section(layer, workspace, cx)))
+        .children(trackable(layer).then(|| track_section(layer, workspace, cx)))
         .children(studio_core::cutout::can_cut_out(layer).then(|| cutout_section(layer, workspace, cx)))
         .children(workspace.state.has_sound(layer.id).then(|| audio_section(layer, workspace, cx)))
         .into_any_element()

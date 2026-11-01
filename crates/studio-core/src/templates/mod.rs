@@ -155,6 +155,71 @@ pub struct Template {
     pub seconds: f64,
 }
 
+impl Template {
+    /// The template in a brand's look: its first color becomes the accent; a second, the
+    /// background; a third, the text. Its first text style sets the font. Colors and text styles
+    /// it doesn't have keep the template's own.
+    pub fn branded(&self, brand: &crate::library::Brand) -> Template {
+        let hex = |color: Rgba| color.to_rgba_u32() >> 8;
+        let colors: Vec<u32> = brand.colors.iter().map(|item| hex(item.color)).collect();
+        let mut palette = self.palette;
+        if let Some(&accent) = colors.first() {
+            palette.accent = accent;
+            palette.on_accent = readable_on(accent);
+        }
+        if let Some(&background) = colors.get(1) {
+            palette.background = background;
+            palette.background_2 = shade(background);
+            let text = colors.get(2).copied().unwrap_or_else(|| readable_on(background));
+            palette.text = text;
+            palette.muted = blend(text, background);
+        }
+        let font = brand.text_styles.first().map_or(self.font, |style| (leak(style.font_family.clone()), style.font_weight));
+        Template { palette, font, ..*self }
+    }
+}
+
+/// A font name kept for the rest of the run: templates hold `&'static str`, and a branded
+/// template is built at once and dropped. Each distinct name is stored once.
+fn leak(name: String) -> &'static str {
+    use std::sync::Mutex;
+    static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut names = NAMES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(&known) = names.iter().find(|known| **known == name) {
+        return known;
+    }
+    let stored: &'static str = Box::leak(name.into_boxed_str());
+    names.push(stored);
+    stored
+}
+
+fn channels(hex: u32) -> [f32; 3] {
+    [((hex >> 16) & 0xff) as f32, ((hex >> 8) & 0xff) as f32, (hex & 0xff) as f32]
+}
+
+fn from_channels([r, g, b]: [f32; 3]) -> u32 {
+    let byte = |value: f32| value.round().clamp(0.0, 255.0) as u32;
+    (byte(r) << 16) | (byte(g) << 8) | byte(b)
+}
+
+/// Black or white, whichever reads better on `hex`.
+fn readable_on(hex: u32) -> u32 {
+    let [r, g, b] = channels(hex);
+    if 0.2126 * r + 0.7152 * g + 0.0722 * b > 150.0 { 0x111111 } else { 0xffffff }
+}
+
+/// A second background color: a little darker (or lighter, for dark colors).
+fn shade(hex: u32) -> u32 {
+    let dark = readable_on(hex) == 0xffffff;
+    from_channels(channels(hex).map(|value| if dark { value + (255.0 - value) * 0.18 } else { value * 0.86 }))
+}
+
+/// Halfway between two colors, for quieter text.
+fn blend(a: u32, b: u32) -> u32 {
+    let (a, b) = (channels(a), channels(b));
+    from_channels([0, 1, 2].map(|index| a[index] * 0.6 + b[index] * 0.4))
+}
+
 /// Templates' frame rate.
 const FPS: u32 = 30;
 
@@ -451,6 +516,20 @@ mod tests {
         for category in Category::ALL {
             assert!(TEMPLATES.iter().filter(|template| template.category == category).count() >= 5, "{} has few templates", category.name());
         }
+    }
+
+    #[test]
+    fn a_brand_sets_a_templates_colors_and_font() {
+        let mut libraries = crate::library::Libraries::default();
+        let brand = libraries.add_brand("Acme");
+        libraries.add_color(brand, "Orange", Rgba::hex(0xff6600));
+        libraries.add_color(brand, "Navy", Rgba::hex(0x0a1a3a));
+        let branded = TEMPLATES[0].branded(libraries.brand(brand).unwrap());
+        assert_eq!((branded.palette.accent, branded.palette.background), (0xff6600, 0x0a1a3a));
+        assert_eq!(branded.palette.text, 0xffffff, "light text on the dark brand color");
+        assert_eq!(branded.font, TEMPLATES[0].font, "no text style: the template's own font");
+        let mut project = Project::new(Vec::new(), Vec::new());
+        assert!(build(&mut project, &branded, Format::Vertical).is_some());
     }
 
     #[test]

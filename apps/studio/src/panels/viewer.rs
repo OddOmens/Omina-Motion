@@ -4,6 +4,7 @@
 //! resolution on high-density screens to keep up (After Effects' "Auto" resolution).
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, CursorStyle, DragMoveEvent, ElementId, ImageSource, InteractiveElement, RenderImage, img,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled, TestSupportExt as _,
@@ -482,6 +483,23 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         cx.notify();
         return;
     }
+    // Track Motion: the click picks the point of the video to follow.
+    if let Some(target) = workspace.ui.track_pick.take() {
+        let frame = workspace.state.current_frame;
+        let composition = workspace.state.composition();
+        let footage = composition
+            .layers
+            .iter()
+            .filter(|layer| layer.id != target && layer.switches.visible && layer.is_active_at(frame) && matches!(layer.content, studio_core::model::LayerContent::Footage { .. }))
+            .find(|layer| studio_core::transform::layer_contains(composition, layer.id, point, frame as f64))
+            .map(|layer| layer.id);
+        match footage {
+            Some(footage) => super::analysis::track_motion(workspace, target, footage, point, window, cx),
+            None => window.push_notification("Click a point on a video to follow.", cx),
+        }
+        cx.notify();
+        return;
+    }
     // Picking a subject to cut out: clicks mark what to keep (Option: what to leave out), and
     // each one updates the mask.
     if let Some(layer) = picking_layer(workspace) {
@@ -823,6 +841,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .when(workspace.ui.tool == Tool::Type, |viewer| viewer.cursor_text())
         .when(matches!(workspace.ui.tool, Tool::Shape | Tool::Pen) || picking_layer(workspace).is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.tool == Tool::Hand, |viewer| viewer.cursor_grab())
+        .when(workspace.ui.track_pick.is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.color_picker.as_ref().is_some_and(|picker| picker.sampling), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.tool == Tool::Zoom, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.tool == Tool::Rotate, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))

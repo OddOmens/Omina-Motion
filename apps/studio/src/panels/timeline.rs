@@ -176,6 +176,14 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
     let work = state.work_area;
     let (work_left, work_right) = (fraction(work.start, view), fraction(work.end, view));
     let playhead = fraction(state.current_frame as f64, view);
+    let markers: Vec<_> = state
+        .composition()
+        .markers
+        .iter()
+        .map(|marker| fraction(marker.frame as f64, view))
+        .filter(|at| (0.0..=1.0).contains(at))
+        .map(|at| div().absolute().top(px(1.0)).left(relative(at)).ml(px(-3.0)).size(px(6.0)).rounded_full().bg(hsla(color::SNAP)))
+        .collect();
 
     let edge = |id: &'static str, drag: TimelineDrag, cx: &mut Context<Workspace>| {
         div()
@@ -228,6 +236,8 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                 }))
                 .on_drag(TimelineDrag::Scrub, |_, _, _, cx| cx.new(|_| EmptyDragView))
                 .children(ticks)
+                // Markers (beats, say): small accent marks along the top of the ruler.
+                .children(markers)
                 .child(
                     div()
                         .absolute()

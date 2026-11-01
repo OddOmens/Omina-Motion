@@ -22,9 +22,22 @@ pub struct AudioClip {
     /// Seconds of fade up from silence after `start_seconds`, and down to it before `end_seconds`.
     pub fade_in: f64,
     pub fade_out: f64,
+    /// How fast the sound plays (1 is normal). Faster or slower sound changes pitch, as a
+    /// tape played faster does.
+    pub speed: f64,
+    /// The clip whose sound this one gets quieter under, and by how many decibels.
+    pub duck_under: Option<Id>,
+    pub duck_db: f32,
+    /// How strongly background sound is turned down between louder sound, 0 to 100.
+    pub noise_gate: f32,
 }
 
 impl AudioClip {
+    /// A clip at normal speed, without ducking or a noise gate.
+    pub fn plain(layer: Id, path: PathBuf, offset_seconds: f64, start_seconds: f64, end_seconds: f64) -> Self {
+        Self { layer, path, offset_seconds, start_seconds, end_seconds, gain: 1.0, fade_in: 0.0, fade_out: 0.0, speed: 1.0, duck_under: None, duck_db: 0.0, noise_gate: 0.0 }
+    }
+
     /// How loud the clip is at `seconds` of composition time, from its volume and fades.
     pub fn level_at(&self, seconds: f64) -> f32 {
         let rising = if self.fade_in > 0.0 { ((seconds - self.start_seconds) / self.fade_in).clamp(0.0, 1.0) } else { 1.0 };
@@ -35,7 +48,8 @@ impl AudioClip {
 
 /// The sound of every audible layer in `composition`: footage and audio layers that have
 /// audio and the audio switch on. As in After Effects, soloing any layer silences every
-/// layer that is not soloed.
+/// layer that is not soloed. Footage playing backwards or ramping its speed is silent: only
+/// sound at a steady speed can be played.
 pub fn composition_audio(project: &Project, composition: &Composition) -> Vec<AudioClip> {
     let fps = composition.frame_rate.fps();
     let any_solo = composition.layers.iter().any(|layer| layer.switches.solo);
@@ -43,6 +57,7 @@ pub fn composition_audio(project: &Project, composition: &Composition) -> Vec<Au
         .layers
         .iter()
         .filter(|layer| layer.has_audio && layer.switches.audio && (!any_solo || layer.switches.solo))
+        .filter(|layer| !layer.time.reverse && layer.time.constant_factor().is_some())
         .filter_map(|layer| {
             let item = match layer.content {
                 LayerContent::Footage { item } | LayerContent::Audio { item } => item,
@@ -59,6 +74,11 @@ pub fn composition_audio(project: &Project, composition: &Composition) -> Vec<Au
                 gain: layer.audio.gain(),
                 fade_in: f64::from(layer.audio.fade_in.max(0.0)),
                 fade_out: f64::from(layer.audio.fade_out.max(0.0)),
+                speed: layer.time.constant_factor().unwrap_or(1.0),
+                // Only under another layer of this composition that has sound.
+                duck_under: layer.audio.duck_under.filter(|&under| under != layer.id && composition.layer(under).is_some_and(|other| other.has_audio)),
+                duck_db: layer.audio.duck_db.clamp(crate::model::LayerAudio::DUCK_RANGE.0, crate::model::LayerAudio::DUCK_RANGE.1),
+                noise_gate: layer.audio.noise_gate.clamp(0.0, 100.0),
             })
         })
         .collect()

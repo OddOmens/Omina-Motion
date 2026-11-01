@@ -2449,3 +2449,93 @@ fn the_captions_panel_lists_clips_with_sound_and_restyles_captions(cx: &mut Test
     let per_phrase = visual.update(|_, cx| workspace.read(cx).state.caption_style(captions).unwrap().words_per_phrase);
     assert_eq!(per_phrase, 1);
 }
+
+/// A clip of `tone.wav` (a second of silence, then a second of tone) at frame 0, selected.
+fn add_tone_clip(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> Id {
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/tone.wav");
+        ws.state.import_files(vec![path]);
+        let item = ws.state.selected_item.unwrap();
+        ws.state.add_layer_from_item(item, 0, 0);
+        let clip = ws.state.selected_layers[0];
+        cx.notify();
+        clip
+    }))
+}
+
+/// Lets a background analysis finish: its thread works in real time, and the editor checks on
+/// it with a timer.
+fn wait_for_analysis(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) {
+    for _ in 0..200 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        visual.executor().advance_clock(std::time::Duration::from_millis(200));
+        visual.run_until_parked();
+        if visual.update(|_, cx| workspace.read(cx).ui.analysis_job.is_none()) {
+            return;
+        }
+    }
+    panic!("the analysis did not finish");
+}
+
+#[gpui_kit::test]
+fn remove_silences_cuts_the_quiet_start_of_a_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    add_tone_clip(&workspace, visual);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("remove-silences", cx));
+    wait_for_analysis(&workspace, visual);
+    // The silent first second is gone: what is left starts on the tone, at the clip's old start.
+    let (in_frame, source_seconds) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let composition = state.composition();
+        // The clip's sound is the only audio layer from that file.
+        let piece = composition.layers.iter().filter(|layer| matches!(layer.content, LayerContent::Audio { .. })).min_by_key(|layer| layer.in_frame).expect("what is left of the clip");
+        (piece.in_frame, (piece.in_frame - piece.start_frame) as f64 / composition.frame_rate.fps())
+    });
+    assert_eq!(in_frame, 0);
+    assert!((0.8..1.0).contains(&source_seconds), "starts just before the tone: {source_seconds} s into the file");
+}
+
+#[gpui_kit::test]
+fn speed_and_reverse_change_a_footage_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let clip = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().layers.iter().find(|layer| matches!(layer.content, LayerContent::Footage { .. })).unwrap().id
+    });
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(clip, false);
+        cx.notify();
+    }));
+    tall_window(visual);
+    let length = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).map(|layer| layer.out_frame - layer.in_frame).unwrap());
+    let before = length(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let target = crate::panels::fields::FieldTarget::Speed { layer: clip };
+        target.write(&mut ws.state, 200.0);
+        cx.notify();
+    }));
+    render(visual);
+    assert_eq!(length(visual), (before + 1) / 2, "twice as fast, half as long");
+    visual.update(|window, cx| window.click("speed-reverse", cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().time.reverse));
+    // Track Motion is offered for graphics, not for the footage itself.
+    assert!(visual.update(|window, _| window.try_find("track-motion")).is_none());
+}
+
+#[gpui_kit::test]
+fn track_motion_waits_for_a_click_on_a_video(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    tall_window(visual);
+    visual.update(|window, cx| window.click("track-motion", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.track_pick), Some(TITLE));
+    visual.update(|window, cx| window.click("track-motion", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.track_pick), None, "and can be called off");
+}

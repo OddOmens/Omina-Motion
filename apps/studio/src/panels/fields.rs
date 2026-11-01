@@ -26,6 +26,8 @@ pub enum FieldTarget {
     Audio { layer: Id, setting: AudioSetting },
     /// How far along its path a text layer set on one starts.
     TextPathStart { layer: Id },
+    /// A footage layer's constant speed, as a percentage.
+    Speed { layer: Id },
 }
 
 /// How a field's number is shown and how fast it scrubs.
@@ -81,8 +83,14 @@ impl FieldTarget {
                 let (step, decimals, unit) = match setting {
                     AudioSetting::Volume => (0.1, 1, " dB"),
                     AudioSetting::FadeIn | AudioSetting::FadeOut => (0.01, 2, " s"),
+                    AudioSetting::DuckAmount => (0.1, 0, " dB"),
+                    AudioSetting::NoiseGate => (0.5, 0, "%"),
                 };
                 Some((value, FieldFormat { step, decimals, unit, rotation: false }))
+            }
+            Self::Speed { layer } => {
+                let speed = state.speed_of(layer)?;
+                Some((speed, FieldFormat { step: 0.5, decimals: 0, unit: "%", rotation: false }))
             }
             Self::TextPathStart { layer } => {
                 let start = state.composition().layer(layer)?.text_path?.start;
@@ -98,6 +106,7 @@ impl FieldTarget {
             Self::Shape { layer, setting } => state.set_shape_setting(layer, setting, value),
             Self::Audio { layer, setting } => state.set_audio_setting(layer, setting, value),
             Self::TextPathStart { layer } => state.set_text_path_start(layer, value),
+            Self::Speed { layer } => state.set_speed(layer, value),
         }
     }
 

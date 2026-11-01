@@ -53,6 +53,7 @@ fn layer(id: u64, name: &str, label: LabelColor, content: LayerContent, size: Ve
         effects: Vec::new(),
         has_audio: false,
         audio: Default::default(),
+        time: Default::default(),
     }
 }
 
@@ -147,6 +148,7 @@ pub fn sample_project() -> Project {
         duration_frames: 240,
         background: Rgba::TRANSPARENT,
         layers: vec![title, grade, logo, b_roll, a_cam, background],
+        markers: Vec::new(),
     };
 
     let footage = Some(ids::FOOTAGE_FOLDER);

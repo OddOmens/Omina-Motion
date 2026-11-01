@@ -60,6 +60,7 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         effects: Vec::new(),
         has_audio: item.has_audio,
         audio: Default::default(),
+        time: Default::default(),
         content,
     })
 }
@@ -135,6 +136,11 @@ pub fn set_layer_audio(composition: &mut Composition, layer_id: Id, edit: impl F
     audio.volume_db = finite(audio.volume_db).clamp(crate::model::LayerAudio::VOLUME_RANGE.0, crate::model::LayerAudio::VOLUME_RANGE.1);
     audio.fade_in = finite(audio.fade_in).clamp(0.0, length);
     audio.fade_out = finite(audio.fade_out).clamp(0.0, length);
+    audio.duck_db = finite(audio.duck_db).clamp(crate::model::LayerAudio::DUCK_RANGE.0, crate::model::LayerAudio::DUCK_RANGE.1);
+    audio.noise_gate = finite(audio.noise_gate).clamp(0.0, 100.0);
+    if audio.duck_under == Some(layer_id) {
+        audio.duck_under = None;
+    }
 }
 
 /// Whether composition `outer` is, or holds somewhere inside it, composition `inner`.
@@ -260,6 +266,9 @@ pub fn delete_layers(composition: &mut Composition, ids: &[Id]) -> usize {
         if layer.text_path.is_some_and(|on| ids.contains(&on.layer)) {
             layer.text_path = None;
         }
+        if layer.audio.duck_under.is_some_and(|under| ids.contains(&under)) {
+            layer.audio.duck_under = None;
+        }
     }
     // Tracks left empty go away.
     crate::tracks::normalize(composition);
@@ -373,6 +382,7 @@ pub fn new_composition(project: &mut Project, settings: &CompositionSettings) ->
         duration_frames: settings.duration_frames,
         background: settings.background,
         layers: Vec::new(),
+        markers: Vec::new(),
     });
     project.items.push(ProjectItem {
         id,
@@ -528,6 +538,22 @@ pub fn set_text_path(composition: &mut Composition, text_layer: Id, text_path: O
     true
 }
 
+/// Replaces the markers labeled `label` with ones at `frames` (inside the composition), keeping
+/// any others. Markers stay in frame order. Returns how many were added.
+pub fn replace_markers(composition: &mut Composition, label: &str, frames: &[i64]) -> usize {
+    composition.markers.retain(|marker| marker.label != label);
+    let duration = composition.duration_frames;
+    let mut added = 0;
+    for &frame in frames.iter().filter(|frame| (0..duration).contains(*frame)) {
+        if !composition.markers.iter().any(|marker| marker.frame == frame) {
+            composition.markers.push(crate::model::Marker { frame, label: label.to_owned() });
+            added += 1;
+        }
+    }
+    composition.markers.sort_by_key(|marker| marker.frame);
+    added
+}
+
 /// Which part of a path point is being moved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathPart {
@@ -579,6 +605,7 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
             effects: Vec::new(),
             has_audio: false,
             audio: Default::default(),
+            time: Default::default(),
         },
     );
     crate::tracks::normalize(composition);

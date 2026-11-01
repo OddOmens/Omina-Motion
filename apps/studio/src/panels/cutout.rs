@@ -78,10 +78,9 @@ fn lock(report: &Mutex<Report>) -> std::sync::MutexGuard<'_, Report> {
 
 /// Downloads the model with the system's `curl` to a temporary name, checks it is the file
 /// published (its SHA-256), and only then puts it in place.
-fn download_model(folder: &Path, report: &Mutex<Report>) -> Result<(), String> {
+pub fn fetch_model(folder: &Path) -> Result<(), String> {
     use sha2::Digest as _;
     std::fs::create_dir_all(folder).map_err(|error| format!("could not make the model folder: {error}"))?;
-    lock(report).stage = "Downloading the cut-out model".into();
     let destination = folder.join(studio_cutout::MODEL_FILE);
     let partial = destination.with_extension("part");
     let status = std::process::Command::new("curl").args(["-sSfL", "-o"]).arg(&partial).arg(studio_cutout::MODEL_URL).status().map_err(|error| format!("could not start the download: {error}"))?;
@@ -116,7 +115,8 @@ fn read_image(path: &Path) -> Result<Picture, String> {
 fn run(request: &Request, report: &Mutex<Report>, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     let model = &request.model;
     if !studio_cutout::model_present(model) {
-        download_model(model, report)?;
+        lock(report).stage = "Downloading the cut-out model".into();
+        fetch_model(model)?;
     }
     lock(report).stage = "Loading".into();
     let segmenter = Segmenter::load(model).map_err(|error| error.to_string())?;

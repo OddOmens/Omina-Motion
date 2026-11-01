@@ -22,7 +22,13 @@ pub fn source_frames(project: &Project, composition: &Composition, layer: &Layer
     if !matches!(item.kind, ProjectItemKind::Footage | ProjectItemKind::Audio | ProjectItemKind::Composition) {
         return None;
     }
-    item.duration_seconds.map(|seconds| composition.frame_rate.seconds_to_frames(seconds).max(1))
+    // At a constant speed other than normal, the source covers more (or fewer) frames. While
+    // the speed ramps, its length can't be told without playing it through: no limit then.
+    let factor = match layer.content {
+        LayerContent::Footage { .. } => layer.time.constant_factor()?,
+        _ => 1.0,
+    };
+    item.duration_seconds.map(|seconds| composition.frame_rate.seconds_to_frames(seconds / factor).max(1))
 }
 
 /// The room a trim has on the layer's track: the out point of the clip before it, and the in

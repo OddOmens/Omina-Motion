@@ -768,7 +768,7 @@ fn filmstrip(layer: &Layer, source: &studio_core::model::ProjectItem, left: f32,
     let graph_width = workspace.ui.timeline.graph.get().width.max(1.0);
     let clip_left_px = left * graph_width;
     let frames = (layer.out_frame - layer.in_frame).max(1) as f32;
-    let fps = workspace.state.composition().frame_rate.fps();
+    let comp_rate = workspace.state.composition().frame_rate;
     let media = &workspace.ui.timeline.media;
     let count = (clip_px / tile).ceil().clamp(1.0, 400.0) as usize;
     let tiles = (0..count).filter_map(|index| {
@@ -779,7 +779,8 @@ fn filmstrip(layer: &Layer, source: &studio_core::model::ProjectItem, left: f32,
         }
         // The source moment at the tile's middle.
         let frame = layer.in_frame as f64 + f64::from((offset + tile * 0.5) / clip_px.max(1.0) * frames);
-        let seconds = if still { 0.0 } else { (frame - layer.start_frame as f64) / fps };
+        // Following the clip's speed, so a slowed or reversed clip shows what plays there.
+        let seconds = if still { 0.0 } else { layer.source_seconds(frame.round() as i64, comp_rate) };
         let picture = media.thumbnails.thumbnail(path, seconds.max(0.0))?;
         let image = media.image(&picture);
         Some(img(ImageSource::Render(image)).absolute().left(px(offset)).top_0().w(px(tile)).h(px(height)).into_any_element())
@@ -792,6 +793,8 @@ fn waveform(layer: &Layer, peaks: Option<Arc<Peaks>>, height: f32, ink: u32, wor
     let Some(peaks) = peaks else { return div().h(px(height)).into_any_element() };
     let fps = workspace.state.composition().frame_rate.fps();
     let (in_frame, out_frame, start_frame) = (layer.in_frame, layer.out_frame, layer.start_frame);
+    // At another steady speed the sound covers more (or less) of the file per frame.
+    let speed = layer.time.constant_factor().unwrap_or(1.0);
     let color = rgba((ink << 8) | 0xcc);
     canvas(|_, _, _| (), move |bounds, _, window, _| {
         let width = f32::from(bounds.size.width);
@@ -801,7 +804,7 @@ fn waveform(layer: &Layer, peaks: Option<Arc<Peaks>>, height: f32, ink: u32, wor
         let mut x = 0.0;
         while x < width {
             let frame = in_frame as f32 + x / width.max(1.0) * span;
-            let seconds = (f64::from(frame) - start_frame as f64) / fps;
+            let seconds = (f64::from(frame) - start_frame as f64) / fps * speed;
             let bucket = (seconds * f64::from(peaks.per_second)).floor();
             let level = (bucket >= 0.0).then(|| peaks.values.get(bucket as usize).copied()).flatten().unwrap_or(0.0);
             // Quiet sounds still show; full scale fills the strip.

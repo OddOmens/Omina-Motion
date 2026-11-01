@@ -317,6 +317,8 @@ pub struct UiState {
     /// The Templates panel's chosen shape and category, and the pictures made of templates.
     pub template_format: studio_core::templates::Format,
     pub template_category: Option<studio_core::templates::Category>,
+    /// The brand whose colors and font templates take, if one is chosen.
+    pub template_brand: Option<studio_core::model::LinkId>,
     pub template_pictures: HashMap<(usize, studio_core::templates::Format), Arc<gpui_kit::RenderImage>>,
     /// The Project panel's preview of the selected item.
     pub preview: panels::project::Preview,
@@ -334,6 +336,10 @@ pub struct UiState {
     pub effect_drop_layer: Option<Id>,
     /// Captions being made in the background, if any.
     pub caption_job: Option<panels::captions::CaptionJob>,
+    /// Silence removal, beat finding, tracking or reframing running in the background, if any.
+    pub analysis_job: Option<panels::analysis::AnalysisJob>,
+    /// The layer waiting for a click on a video to track (Track Motion).
+    pub track_pick: Option<Id>,
     /// Background removal running in the background, if any.
     pub cutout_job: Option<panels::cutout::CutoutJob>,
     /// The layer whose subject is being picked: clicks in the viewer go to its cut-out.
@@ -554,6 +560,7 @@ impl Workspace {
                 preview: Default::default(),
                 template_format: studio_core::templates::Format::Vertical,
                 template_category: None,
+                template_brand: None,
                 template_pictures: HashMap::new(),
                 preview_bounds: Default::default(),
                 timeline: timeline_ui,
@@ -564,6 +571,8 @@ impl Workspace {
                 color_picker: None,
                 caption_job: None,
                 cutout_job: None,
+                analysis_job: None,
+                track_pick: None,
                 cutout_pick: None,
                 effect_drop_layer: None,
                 quit_after_export: false,

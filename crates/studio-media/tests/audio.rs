@@ -34,16 +34,7 @@ fn read_all(decoder: &mut AudioDecoder) -> Vec<f32> {
 }
 
 fn tone_clip(layer: u64, offset_seconds: f64) -> AudioClip {
-    AudioClip {
-        layer: Id(layer),
-        path: fixture("tone.wav"),
-        offset_seconds,
-        start_seconds: offset_seconds,
-        end_seconds: offset_seconds + 2.0,
-        gain: 1.0,
-        fade_in: 0.0,
-        fade_out: 0.0,
-    }
+    AudioClip::plain(Id(layer), fixture("tone.wav"), offset_seconds, offset_seconds, offset_seconds + 2.0)
 }
 
 #[test]
@@ -155,4 +146,60 @@ fn a_missing_file_is_silence_not_a_failure() {
     let mut out = vec![1.0; 4800 * CHANNELS];
     assert_eq!(mixer.mix(&[missing], &mut out), 4800);
     assert!(out.iter().all(|sample| *sample == 0.0));
+}
+
+#[test]
+fn double_speed_plays_the_tone_half_a_second_in() {
+    let fast = AudioClip { speed: 2.0, end_seconds: 1.0, ..tone_clip(1, 0.0) };
+    let mut mixer = Mixer::new(RATE, MixRange { start: 0, end: 48_000, looping: false }, 0);
+    let mut out = vec![0.0; 48_000 * CHANNELS];
+    mixer.mix(&[fast], &mut out);
+    assert!(loudness(&out, 1000..20_000) < 0.01, "the silent second goes by in half a second");
+    assert!(loudness(&out, 28_000..46_000) > 0.05, "then the tone");
+}
+
+#[test]
+fn ducking_turns_a_clip_down_while_the_other_sounds() {
+    // The "music" plays the tone from the start; the "voice" is the same file, so it is silent
+    // for a second and then sounds.
+    let voice = tone_clip(1, 0.0);
+    let music = AudioClip { duck_under: Some(Id(1)), duck_db: 20.0, ..tone_clip(2, 0.0) };
+    let music_alone = tone_clip(2, 0.0);
+    let mut ducked = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 0);
+    let mut out = vec![0.0; 96_000 * CHANNELS];
+    // Small blocks, as the sound card asks for.
+    for block in out.chunks_mut(1024 * CHANNELS) {
+        ducked.mix(&[voice.clone(), music.clone()], block);
+    }
+    let mut plain = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 0);
+    let mut both = vec![0.0; 96_000 * CHANNELS];
+    for block in both.chunks_mut(1024 * CHANNELS) {
+        plain.mix(&[voice.clone(), music_alone.clone()], block);
+    }
+    // While the voice sounds, the mix is the voice plus a much quieter copy: well under double.
+    let (with, without) = (loudness(&out, 72_000..90_000), loudness(&both, 72_000..90_000));
+    assert!(with < without * 0.7, "ducked {with} vs {without}");
+}
+
+#[test]
+fn the_noise_gate_leaves_a_loud_tone_alone() {
+    let gated = AudioClip { noise_gate: 60.0, ..tone_clip(1, 0.0) };
+    let mut mixer = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 0);
+    let mut out = vec![0.0; 96_000 * CHANNELS];
+    mixer.mix(&[gated], &mut out);
+    let mut plain = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 0);
+    let mut reference = vec![0.0; 96_000 * CHANNELS];
+    plain.mix(&[tone_clip(1, 0.0)], &mut reference);
+    let ratio = loudness(&out, 60_000..90_000) / loudness(&reference, 60_000..90_000);
+    assert!(ratio > 0.97, "the tone passes: {ratio}");
+}
+
+#[test]
+fn the_noise_gate_turns_quiet_hiss_down() {
+    // Quiet noise (about -50 dB) alone: the gate should cut most of it.
+    let mut samples: Vec<f32> = (0..48_000 * CHANNELS).map(|index| (((index * 7919) % 1000) as f32 / 1000.0 - 0.5) * 0.006).collect();
+    let before = loudness(&samples, 10_000..40_000);
+    studio_media::gate_for_tests(&mut samples, 60.0, RATE);
+    let after = loudness(&samples, 10_000..40_000);
+    assert!(after < before * 0.2, "hiss {before} → {after}");
 }

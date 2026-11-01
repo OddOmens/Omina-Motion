@@ -34,6 +34,7 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         effects: Vec::new(),
         has_audio: false,
         audio: Default::default(),
+        time: Default::default(),
     }
 }
 
@@ -52,6 +53,7 @@ fn project(layers: Vec<Layer>) -> Project {
         duration_frames: 10,
         background: Rgba::hex(0x000000),
         layers,
+        markers: Vec::new(),
     };
     Project::new(Vec::new(), vec![composition])
 }
@@ -739,6 +741,7 @@ fn clear_comp(id: u64, layers: Vec<Layer>) -> Composition {
         duration_frames: 10,
         background: Rgba::TRANSPARENT,
         layers,
+        markers: Vec::new(),
     }
 }
 

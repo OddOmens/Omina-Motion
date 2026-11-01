@@ -76,6 +76,10 @@ pub enum AudioSetting {
     /// In seconds.
     FadeIn,
     FadeOut,
+    /// How far it ducks under another layer, in decibels.
+    DuckAmount,
+    /// 0 to 100.
+    NoiseGate,
 }
 
 /// Numeric shape settings that the Properties panel edits.
@@ -585,9 +589,14 @@ impl EditorState {
 
     /// Adds template `index` (of `studio_core::templates::TEMPLATES`) in `format` as a new
     /// composition, opens it and selects it in the Project panel.
-    pub fn add_template(&mut self, index: usize, format: studio_core::templates::Format) -> Option<Id> {
+    /// With `brand`, the template takes the brand's colors and font (see `Template::branded`).
+    pub fn add_template(&mut self, index: usize, format: studio_core::templates::Format, brand: Option<studio_core::model::LinkId>) -> Option<Id> {
         let template = studio_core::templates::TEMPLATES.get(index)?;
-        let comp = studio_core::templates::build(&mut self.project, template, format)?;
+        let template = match brand.and_then(|brand| self.libraries.brand(brand)) {
+            Some(brand) => template.branded(brand),
+            None => *template,
+        };
+        let comp = studio_core::templates::build(&mut self.project, &template, format)?;
         self.open_composition(comp);
         self.selected_item = Some(comp);
         Some(comp)
@@ -795,6 +804,8 @@ impl EditorState {
             AudioSetting::Volume => audio.volume_db,
             AudioSetting::FadeIn => audio.fade_in,
             AudioSetting::FadeOut => audio.fade_out,
+            AudioSetting::DuckAmount => audio.duck_db,
+            AudioSetting::NoiseGate => audio.noise_gate,
         })
     }
 
@@ -803,7 +814,38 @@ impl EditorState {
             AudioSetting::Volume => audio.volume_db = value,
             AudioSetting::FadeIn => audio.fade_in = value,
             AudioSetting::FadeOut => audio.fade_out = value,
+            AudioSetting::DuckAmount => audio.duck_db = value,
+            AudioSetting::NoiseGate => audio.noise_gate = value,
         });
+    }
+
+    /// Removes every marker from the open composition.
+    pub fn clear_markers(&mut self) {
+        self.composition_mut().markers.clear();
+    }
+
+    /// Makes `layer` duck under `under`'s sound (or stop ducking, with `None`).
+    pub fn set_duck_under(&mut self, layer: Id, under: Option<Id>) {
+        edit::set_layer_audio(self.composition_mut(), layer, |audio| audio.duck_under = under);
+    }
+
+    /// A footage layer's constant speed, as a percentage (`None` while it ramps).
+    pub fn speed_of(&self, layer: Id) -> Option<f32> {
+        let layer = self.composition().layer(layer)?;
+        studio_core::speed::has_speed(&layer.content).then_some(())?;
+        layer.time.constant_factor().map(|factor| (factor * 100.0) as f32)
+    }
+
+    pub fn set_speed(&mut self, layer: Id, percent: f32) {
+        studio_core::speed::set_speed(self.composition_mut(), layer, percent);
+    }
+
+    pub fn set_reverse(&mut self, layer: Id, reverse: bool) {
+        studio_core::speed::set_reverse(self.composition_mut(), layer, reverse);
+    }
+
+    pub fn apply_speed_ramp(&mut self, layer: Id, ramp: studio_core::speed::Ramp) {
+        studio_core::speed::apply_ramp(self.composition_mut(), layer, ramp);
     }
 
     /// Moves a video clip's sound onto its own audio clip, and selects that.

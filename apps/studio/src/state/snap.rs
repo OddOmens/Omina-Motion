@@ -30,6 +30,8 @@ impl EditorState {
     fn snap_targets(&self, exclude: SnapExclusions) -> Vec<i64> {
         let composition = self.composition();
         let mut targets = vec![0, composition.duration_frames, self.work_area.start as i64, self.work_area.end as i64];
+        // Markers (beats, say), so cuts and moves land on them.
+        targets.extend(composition.markers.iter().map(|marker| marker.frame));
         if !exclude.playhead {
             targets.push(self.current_frame);
         }

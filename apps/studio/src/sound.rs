@@ -74,7 +74,7 @@ impl Sound {
     pub fn play_preview(&mut self, path: &std::path::Path, from_seconds: f64, length: f64) {
         self.preview = None;
         let Some(output) = self.output.as_ref() else { return };
-        let clip = AudioClip { layer: Id(0), path: path.to_path_buf(), offset_seconds: 0.0, start_seconds: 0.0, end_seconds: length, gain: 1.0, fade_in: 0.0, fade_out: 0.0 };
+        let clip = AudioClip::plain(Id(0), path.to_path_buf(), 0.0, 0.0, length);
         let timeline = AudioTimeline { clips: vec![clip], start_seconds: from_seconds, range_seconds: (0.0, length), looping: false };
         self.preview = Some(output.play(timeline));
     }

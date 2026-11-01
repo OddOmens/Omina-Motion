@@ -627,6 +627,57 @@ pub struct Layer {
     /// Volume and fades, for layers with sound.
     #[serde(default)]
     pub audio: LayerAudio,
+    /// How fast (and which way) footage plays.
+    #[serde(default, skip_serializing_if = "LayerTime::is_normal")]
+    pub time: LayerTime,
+}
+
+/// How fast a footage layer's source plays, and whether backwards.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LayerTime {
+    /// Speed as a percentage (100 is normal, 50 is slow motion, 200 is double). Keyframes
+    /// make a speed ramp.
+    pub speed: Animated<f32>,
+    /// Plays the same part of the source backwards.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+impl Default for LayerTime {
+    fn default() -> Self {
+        Self { speed: Animated::constant(100.0), reverse: false }
+    }
+}
+
+impl LayerTime {
+    /// The slowest and fastest speeds offered, as percentages.
+    pub const SPEED_RANGE: (f32, f32) = (5.0, 2000.0);
+
+    pub fn is_normal(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// A speed as a fraction (1 is normal), kept in range.
+    fn factor(percent: f32) -> f64 {
+        let percent = if percent.is_finite() { percent.clamp(Self::SPEED_RANGE.0, Self::SPEED_RANGE.1) } else { 100.0 };
+        f64::from(percent) / 100.0
+    }
+
+    /// The constant speed as a fraction, or `None` while it ramps.
+    pub fn constant_factor(&self) -> Option<f64> {
+        (!self.speed.is_animated()).then(|| Self::factor(self.speed.value))
+    }
+
+    /// Seconds of source played from `from` to `to` (composition frames), at `fps`: the
+    /// speed summed frame by frame, so ramps play the right amount.
+    fn source_seconds_between(&self, from: i64, to: i64, fps: f64) -> f64 {
+        if let Some(factor) = self.constant_factor() {
+            return (to - from) as f64 / fps * factor;
+        }
+        let (low, high, sign) = if to >= from { (from, to, 1.0) } else { (to, from, -1.0) };
+        let total: f64 = (low..high).map(|frame| Self::factor(self.speed.value_at(frame as f64 + 0.5))).sum();
+        sign * total / fps
+    }
 }
 
 /// Text set along a pen path: each letter sits on the path, turned to follow it. The path is
@@ -711,7 +762,7 @@ impl Cutout {
 }
 
 /// A layer's sound settings.
-#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayerAudio {
     /// Volume in decibels: 0 leaves it as it is; -6 is about half as loud.
     pub volume_db: f32,
@@ -719,11 +770,33 @@ pub struct LayerAudio {
     pub fade_in: f32,
     /// Seconds over which it falls to silence before the out point.
     pub fade_out: f32,
+    /// Another layer whose sound this one gets quieter under (music under a voice), and by
+    /// how many decibels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duck_under: Option<Id>,
+    #[serde(default = "LayerAudio::default_duck_db")]
+    pub duck_db: f32,
+    /// How strongly quiet background sound (hiss, hum, room noise) is turned down between
+    /// louder sound, 0 (off) to 100.
+    #[serde(default)]
+    pub noise_gate: f32,
+}
+
+impl Default for LayerAudio {
+    fn default() -> Self {
+        Self { volume_db: 0.0, fade_in: 0.0, fade_out: 0.0, duck_under: None, duck_db: Self::default_duck_db(), noise_gate: 0.0 }
+    }
 }
 
 impl LayerAudio {
     /// The volume range offered, in decibels.
     pub const VOLUME_RANGE: (f32, f32) = (-60.0, 12.0);
+    /// How far ducking can lower the sound, in decibels.
+    pub const DUCK_RANGE: (f32, f32) = (0.0, 40.0);
+
+    fn default_duck_db() -> f32 {
+        14.0
+    }
 
     /// The volume as a factor to multiply samples by.
     pub fn gain(self) -> f32 {
@@ -753,8 +826,20 @@ impl Layer {
     /// frame `frame`: time since the source's start (which trimming and slipping move),
     /// converted to the source's rate.
     pub fn source_frame(&self, frame: i64, comp_rate: FrameRate, source_rate: FrameRate) -> i64 {
-        let seconds = (frame - self.start_frame) as f64 / comp_rate.fps();
-        (seconds * source_rate.fps() + 1e-6).floor() as i64
+        (self.source_seconds(frame, comp_rate) * source_rate.fps() + 1e-6).floor() as i64
+    }
+
+    /// Seconds into a time-based source at composition frame `frame`, following the layer's
+    /// speed (and ramps) from where the source starts. Reversed, the layer plays the same part
+    /// of the source backwards: its in point shows what its last frame would have.
+    pub fn source_seconds(&self, frame: i64, comp_rate: FrameRate) -> f64 {
+        let fps = comp_rate.fps();
+        let forward = |frame: i64| self.time.source_seconds_between(self.start_frame, frame, fps);
+        if self.time.reverse {
+            forward(self.in_frame) + forward(self.out_frame - 1) - forward(frame)
+        } else {
+            forward(frame)
+        }
     }
 }
 
@@ -769,6 +854,17 @@ pub struct Composition {
     pub background: Rgba,
     /// Stacking order: index 0 is the top layer.
     pub layers: Vec<Layer>,
+    /// Points marked on the timeline (such as the beats of a song), in frame order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+}
+
+/// A point marked on a composition's timeline. Moves and trims snap to markers.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Marker {
+    pub frame: i64,
+    /// What it marks ("Beat", say); shown on hover.
+    pub label: String,
 }
 
 impl Composition {

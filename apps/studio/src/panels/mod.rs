@@ -1,6 +1,7 @@
 //! The editor's panels. Each module renders one panel from the workspace state.
 
 pub mod align;
+pub mod analysis;
 pub mod captions;
 pub mod cutout;
 pub mod chrome;

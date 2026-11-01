@@ -46,8 +46,8 @@ pub fn make_pictures(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
     // At twice the card's size, for sharp pictures on high-density screens.
     let (width, height) = ((CARD_WIDTH * 2.0) as u32, (card_height(format) * 2.0) as u32);
     for &index in missing.iter().take(PICTURES_PER_FRAME) {
-        let template = &TEMPLATES[index];
-        if let Some(picture) = workspace.render.template_picture(template, format, picture_seconds(template.seconds), width, height) {
+        let template = branded(workspace, index);
+        if let Some(picture) = workspace.render.template_picture(&template, format, picture_seconds(template.seconds), width, height) {
             workspace.ui.template_pictures.insert((index, format), picture);
         } else {
             // Without a GPU there is nothing to show; stop asking.
@@ -57,6 +57,41 @@ pub fn make_pictures(workspace: &mut Workspace, window: &mut Window, cx: &mut Co
     if missing.len() > PICTURES_PER_FRAME {
         cx.on_next_frame(window, |_, _, cx| cx.notify());
     }
+}
+
+/// Template `index`, in the chosen brand's look if one is chosen.
+fn branded(workspace: &Workspace, index: usize) -> studio_core::templates::Template {
+    match workspace.ui.template_brand.and_then(|brand| workspace.state.libraries.brand(brand)) {
+        Some(brand) => TEMPLATES[index].branded(brand),
+        None => TEMPLATES[index],
+    }
+}
+
+/// The brand menu: the template's own look, or a Library brand's colors and font.
+fn brand_menu(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::Button;
+    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+    let current = workspace.ui.template_brand;
+    let brands: Vec<(studio_core::model::LinkId, String)> = workspace.state.libraries.brands.iter().map(|brand| (brand.id, brand.name.clone())).collect();
+    let label = current.and_then(|id| brands.iter().find(|(brand, _)| *brand == id)).map_or_else(|| "Template colors".to_owned(), |(_, name)| name.clone());
+    let target = cx.weak_entity();
+    Button::new("template-brand").outline().xsmall().label(label).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+        let choices = std::iter::once((None, "Template colors".to_owned())).chain(brands.iter().map(|(id, name)| (Some(*id), name.clone())));
+        choices.fold(menu, |menu, (brand, name)| {
+            let target = target.clone();
+            menu.item(PopupMenuItem::new(name).checked(brand == current).on_click(move |_, _, cx| {
+                target
+                    .update(cx, |this, cx| {
+                        this.ui.template_brand = brand;
+                        // The pictures show the old look: make them again.
+                        this.ui.template_pictures.clear();
+                        cx.notify();
+                    })
+                    .ok();
+            }))
+        })
+    })
 }
 
 fn chip(id: impl Into<gpui_kit::ElementId>, label: &'static str, active: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
@@ -103,6 +138,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             .test_support()
     }));
     let height = card_height(format);
+    let brand = brand_menu(workspace, cx);
     let cards = shown(workspace).into_iter().map(|index| {
         let template = &TEMPLATES[index];
         let picture = workspace.ui.template_pictures.get(&(index, format)).cloned();
@@ -114,7 +150,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             .gap_1()
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
-                if this.state.add_template(index, this.ui.template_format).is_some() {
+                if this.state.add_template(index, this.ui.template_format, this.ui.template_brand).is_some() {
                     cx.notify();
                 }
             }))
@@ -142,7 +178,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .flex()
         .flex_col()
         .gap_2()
-        .child(formats)
+        .child(div().flex().items_center().justify_between().gap_2().child(formats).child(brand))
         .child(div().flex().flex_wrap().gap_1().children(categories))
         .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Click a template to add it as a new composition. Gray boxes are where your footage and photos go."))
         .child(div().flex().flex_wrap().gap_2().children(cards));
