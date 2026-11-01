@@ -97,7 +97,7 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
     }
 }
 
-/// The bar under the viewer, in one row: magnification and frame size on the left, the play
+/// The bar under the viewer (the panel's footer), in one row: magnification and frame size on the left, the play
 /// and frame-stepping controls in the middle, and the current timecode on the right.
 fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let playing = workspace.state.is_playing();
@@ -159,14 +159,12 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
             this.state.loop_playback = !this.state.loop_playback;
             cx.notify();
         })));
+    // Drawn in the panel's footer, so it lines up with the Project panel's footer beside it.
     div()
-        .h(px(36.0))
-        .flex_none()
+        .size_full()
         .flex()
         .items_center()
-        .px_3()
-        .border_t_1()
-        .border_color(hsla(color::HAIRLINE))
+        .px_1()
         .child(info)
         .child(controls)
         .child(timecode)
@@ -385,8 +383,8 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
     panel(
         PanelId::Composition,
         &[title.as_str()],
-        None,
-        div().size_full().flex().flex_col().child(viewer).child(transport(workspace, scale, cx)),
+        Some(transport(workspace, scale, cx).into_any_element()),
+        div().size_full().flex().flex_col().child(viewer),
         workspace,
         cx,
     )

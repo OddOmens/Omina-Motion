@@ -339,8 +339,8 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
             None => "Frame Render Time: –".to_owned(),
         }));
 
-    let comp_name = workspace.state.composition().name.clone();
-    panel(PanelId::Timeline, &[comp_name.as_str()], Some(footer.into_any_element()), body, workspace, cx)
+    // The composition's name is in the toolbar row, beside the transport.
+    panel(PanelId::Timeline, &[], Some(footer.into_any_element()), body, workspace, cx)
 }
 
 /// Zooms the visible range by `factor`, centered on the playhead.

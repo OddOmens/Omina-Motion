@@ -17,7 +17,8 @@ use crate::theme::{color, hsla, size};
 use crate::workspace::{PanelId, Workspace};
 
 /// A panel's frame: a header with its tab(s) and menu, the body, and an optional footer.
-/// With several tabs, clicking one switches the panel to it (see `UiState::tab`).
+/// With several tabs, clicking one switches the panel to it (see `UiState::tab`). With no tabs
+/// there is no header, for panels that show their title in their own toolbar.
 /// Pressing anywhere inside makes it the active panel (which decides what Delete acts on).
 pub fn panel(
     id: PanelId,
@@ -74,7 +75,7 @@ pub fn panel(
                 cx.notify();
             }
         }))
-        .child(header)
+        .when(!tabs.is_empty(), |panel| panel.child(header))
         .child(div().flex_1().min_h_0().relative().child(body))
         .children(footer.map(|footer| {
             div()

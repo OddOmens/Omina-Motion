@@ -340,21 +340,25 @@ impl Workspace {
         .detach();
         // The proxy builder signals here as a proxy's status changes (queued, progress, ready,
         // failed): refresh the Project panel, which shows it, and the viewer, which can then
-        // switch to the finished proxy.
-        let (proxy_changed, proxies_changed) = async_channel::bounded::<()>(1);
-        render.proxies.set_on_change(move || {
-            let _ = proxy_changed.try_send(());
-        });
-        let project_panel = panels.project.entity_id();
-        cx.spawn(async move |_, cx| {
-            while proxies_changed.recv().await.is_ok() {
-                cx.update(|cx| {
-                    cx.notify(project_panel);
-                    cx.notify(viewer);
-                });
-            }
-        })
-        .detach();
+        // switch to the finished proxy. (Headless tests leave this out: their scheduler refuses
+        // wake-ups from the proxy builder's thread.)
+        #[cfg(not(test))]
+        {
+            let (proxy_changed, proxies_changed) = async_channel::bounded::<()>(1);
+            render.proxies.set_on_change(move || {
+                let _ = proxy_changed.try_send(());
+            });
+            let project_panel = panels.project.entity_id();
+            cx.spawn(async move |_, cx| {
+                while proxies_changed.recv().await.is_ok() {
+                    cx.update(|cx| {
+                        cx.notify(project_panel);
+                        cx.notify(viewer);
+                    });
+                }
+            })
+            .detach();
+        }
         // Thumbnails and waveforms decoded in the background redraw the timeline as they arrive.
         // (Headless tests leave this out: their scheduler refuses wake-ups from other threads.)
         #[cfg(not(test))]

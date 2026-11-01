@@ -206,6 +206,19 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
         .items_center()
         .gap_1()
         .px_2()
+        .child(
+            div()
+                .id("timeline-comp-name")
+                .max_w(px(220.0))
+                .truncate()
+                .pl_1()
+                .pr_2()
+                .text_color(hsla(color::TEXT))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(state.composition().name.clone())
+                .test_support(),
+        )
+        .child(div().w(px(1.0)).h(px(16.0)).mr_1().bg(hsla(color::HAIRLINE)))
         .child(icon_button("tracks-start", IconName::SkipBack, "Go to Start (Home)", false, cx.listener(|this, _, _, cx| {
             let start = this.state.work_area.start as i64;
             this.go_to(start, cx);

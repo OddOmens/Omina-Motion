@@ -1511,3 +1511,14 @@ fn an_expanded_folder_shows_as_open(cx: &mut TestAppContext) {
     visual.update(|_, cx| assert!(workspace.read(cx).ui.collapsed_folders.contains(&folder)));
     assert!(visual.update(|window, _| window.try_find(("project-item", studio_core::sample::ids::A_CAM.0 as usize))).is_none());
 }
+
+#[gpui_kit::test]
+fn the_viewer_bar_lines_up_with_the_project_footer(cx: &mut TestAppContext) {
+    let (_workspace, visual) = open(cx);
+    let bounds = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.find(id).bounds());
+    let (folder, play) = (bounds(visual, "new-folder"), bounds(visual, "play"));
+    assert!((folder.center().y - play.center().y).abs() < px(1.0), "same row: {folder:?} vs {play:?}");
+    // The timeline has no separate title row: the name shares the row with its transport.
+    let (name, start) = (bounds(visual, "timeline-comp-name"), bounds(visual, "tracks-start"));
+    assert!((name.center().y - start.center().y).abs() < px(1.0), "name beside the controls: {name:?} vs {start:?}");
+}
