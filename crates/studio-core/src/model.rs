@@ -39,6 +39,176 @@ impl Rgba {
     }
 }
 
+impl Rgba {
+    /// Hue (0–360°), saturation and value (0–1), for the color wheel.
+    pub fn to_hsv(self) -> (f32, f32, f32) {
+        let (r, g, b) = (self.r.clamp(0.0, 1.0), self.g.clamp(0.0, 1.0), self.b.clamp(0.0, 1.0));
+        let max = r.max(g).max(b);
+        let delta = max - r.min(g).min(b);
+        let hue = if delta <= f32::EPSILON {
+            0.0
+        } else if max == r {
+            60.0 * ((g - b) / delta).rem_euclid(6.0)
+        } else if max == g {
+            60.0 * ((b - r) / delta + 2.0)
+        } else {
+            60.0 * ((r - g) / delta + 4.0)
+        };
+        let saturation = if max <= f32::EPSILON { 0.0 } else { delta / max };
+        (hue, saturation, max)
+    }
+
+    /// An opaque color from hue (degrees), saturation and value (0–1).
+    pub fn from_hsv(hue: f32, saturation: f32, value: f32) -> Self {
+        let (s, v) = (saturation.clamp(0.0, 1.0), value.clamp(0.0, 1.0));
+        let h = hue.rem_euclid(360.0) / 60.0;
+        let chroma = v * s;
+        let x = chroma * (1.0 - (h % 2.0 - 1.0).abs());
+        let (r, g, b) = match h as u32 {
+            0 => (chroma, x, 0.0),
+            1 => (x, chroma, 0.0),
+            2 => (0.0, chroma, x),
+            3 => (0.0, x, chroma),
+            4 => (x, 0.0, chroma),
+            _ => (chroma, 0.0, x),
+        };
+        let m = v - chroma;
+        Self { r: r + m, g: g + m, b: b + m, a: 1.0 }
+    }
+
+    /// The color as "#RRGGBB".
+    pub fn to_hex(self) -> String {
+        format!("#{:06X}", self.to_rgba_u32() >> 8)
+    }
+
+    /// Reads "#RGB" or "#RRGGBB" (the "#" is optional).
+    pub fn parse_hex(text: &str) -> Option<Self> {
+        let digits = text.trim().trim_start_matches('#');
+        if !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let value = u32::from_str_radix(digits, 16).ok()?;
+        match digits.len() {
+            6 => Some(Self::hex(value)),
+            3 => {
+                let expand = |nibble: u32| (nibble & 0xf) * 0x11;
+                Some(Self::hex((expand(value >> 8) << 16) | (expand(value >> 4) << 8) | expand(value)))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// How an area is filled: one color, or a two-color gradient across the layer's box.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "PaintFile")]
+pub enum Paint {
+    Solid(Rgba),
+    /// From `start` to `end` along `angle` degrees (0 runs left to right, 90 top to bottom).
+    Linear { start: Rgba, end: Rgba, angle: f32 },
+    /// From `inner` at the center to `outer` at the edge of the box.
+    Radial { inner: Rgba, outer: Rgba },
+}
+
+/// How `Paint` is read from a file: shape fills were saved as a plain color at first.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PaintFile {
+    Color(Rgba),
+    Paint(PaintTagged),
+}
+
+#[derive(serde::Deserialize)]
+enum PaintTagged {
+    Solid(Rgba),
+    Linear { start: Rgba, end: Rgba, angle: f32 },
+    Radial { inner: Rgba, outer: Rgba },
+}
+
+impl From<PaintFile> for Paint {
+    fn from(file: PaintFile) -> Self {
+        match file {
+            PaintFile::Color(color) | PaintFile::Paint(PaintTagged::Solid(color)) => Self::Solid(color),
+            PaintFile::Paint(PaintTagged::Linear { start, end, angle }) => Self::Linear { start, end, angle },
+            PaintFile::Paint(PaintTagged::Radial { inner, outer }) => Self::Radial { inner, outer },
+        }
+    }
+}
+
+/// Which kind of paint, for the fill type menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaintKind {
+    Solid,
+    Linear,
+    Radial,
+}
+
+impl PaintKind {
+    pub const ALL: [PaintKind; 3] = [Self::Solid, Self::Linear, Self::Radial];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Solid => "Solid Color",
+            Self::Linear => "Linear Gradient",
+            Self::Radial => "Radial Gradient",
+        }
+    }
+}
+
+impl Paint {
+    pub fn kind(self) -> PaintKind {
+        match self {
+            Self::Solid(_) => PaintKind::Solid,
+            Self::Linear { .. } => PaintKind::Linear,
+            Self::Radial { .. } => PaintKind::Radial,
+        }
+    }
+
+    /// The colors it is made of: one for a solid, start and end for a gradient.
+    pub fn colors(self) -> Vec<Rgba> {
+        match self {
+            Self::Solid(color) => vec![color],
+            Self::Linear { start, end, .. } => vec![start, end],
+            Self::Radial { inner, outer } => vec![inner, outer],
+        }
+    }
+
+    /// The same paint with color number `index` (see `colors`) replaced.
+    pub fn with_color(self, index: usize, color: Rgba) -> Self {
+        match (self, index) {
+            (Self::Solid(_), _) => Self::Solid(color),
+            (Self::Linear { end, angle, .. }, 0) => Self::Linear { start: color, end, angle },
+            (Self::Linear { start, angle, .. }, _) => Self::Linear { start, end: color, angle },
+            (Self::Radial { outer, .. }, 0) => Self::Radial { inner: color, outer },
+            (Self::Radial { inner, .. }, _) => Self::Radial { inner, outer: color },
+        }
+    }
+
+    /// Changes to another kind of paint, keeping its colors: a solid becomes a gradient from its
+    /// color to black, and a gradient becomes a solid of its first color.
+    pub fn into_kind(self, kind: PaintKind) -> Self {
+        let colors = self.colors();
+        let first = colors[0];
+        let second = colors.get(1).copied().unwrap_or(Rgba::hex(0x000000));
+        match kind {
+            PaintKind::Solid => Self::Solid(first),
+            PaintKind::Linear => Self::Linear { start: first, end: second, angle: if let Self::Linear { angle, .. } = self { angle } else { 0.0 } },
+            PaintKind::Radial => Self::Radial { inner: first, outer: second },
+        }
+    }
+}
+
+/// An outline drawn along a shape's edge, centered on it as in After Effects.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Stroke {
+    pub paint: Paint,
+    /// In layer pixels.
+    pub width: f32,
+}
+
+/// The widest stroke allowed, in layer pixels.
+pub const MAX_STROKE_WIDTH: f32 = 1000.0;
+
 /// Color tags for layers and project items, using the After Effects default label palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LabelColor {
@@ -285,12 +455,25 @@ impl ShapeKind {
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShapeStyle {
     pub kind: ShapeKind,
-    pub fill: Rgba,
+    /// `None` draws no fill (an outline only, with a stroke).
+    pub fill: Option<Paint>,
+    #[serde(default)]
+    pub stroke: Option<Stroke>,
     /// Radius of the rounded corners, in layer pixels. Ignored for ellipses.
     pub corner_radius: f32,
     /// Sides of a polygon, or points of a star (3 to `MAX_SHAPE_POINTS`).
     pub points: u32,
+    /// A star's inner radius as a fraction of its outer radius (After Effects' Inner Radius).
+    #[serde(default = "default_inner_radius")]
+    pub inner_radius: f32,
 }
+
+fn default_inner_radius() -> f32 {
+    0.5
+}
+
+/// The range a star's inner radius (a fraction of the outer one) is kept in.
+pub const INNER_RADIUS_RANGE: (f32, f32) = (0.05, 1.0);
 
 /// The most sides or points a polygon or star can have.
 pub const MAX_SHAPE_POINTS: u32 = 64;
@@ -299,7 +482,7 @@ impl ShapeStyle {
     /// A shape of `kind` in the default fill, with square corners.
     pub fn new(kind: ShapeKind) -> Self {
         let points = if kind == ShapeKind::Star { 5 } else { 6 };
-        Self { kind, fill: Rgba::hex(0x8b5cf6), corner_radius: 0.0, points }
+        Self { kind, fill: Some(Paint::Solid(Rgba::hex(0x8b5cf6))), stroke: None, corner_radius: 0.0, points, inner_radius: default_inner_radius() }
     }
 
     /// The largest corner radius that makes sense in a box of `size`: half its shorter side.
@@ -536,6 +719,29 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colors_round_trip_through_hsv_and_hex() {
+        for hex in [0xff0000, 0x00ff00, 0x0000ff, 0x8b5cf6, 0x808080, 0x000000, 0xffffff, 0x123456] {
+            let color = Rgba::hex(hex);
+            let (h, s, v) = color.to_hsv();
+            assert_eq!(Rgba::from_hsv(h, s, v).to_rgba_u32(), color.to_rgba_u32(), "{hex:06x}");
+            assert_eq!(Rgba::parse_hex(&color.to_hex()), Some(color));
+        }
+        assert_eq!(Rgba::parse_hex("#f0a").map(|c| c.to_hex()), Some("#FF00AA".to_owned()));
+        assert_eq!(Rgba::parse_hex("+12345"), None);
+        assert_eq!(Rgba::parse_hex("#12345"), None);
+    }
+
+    #[test]
+    fn paints_change_kind_keeping_their_colors() {
+        let red = Rgba::hex(0xff0000);
+        let gradient = Paint::Solid(red).into_kind(PaintKind::Linear);
+        assert_eq!(gradient.colors(), vec![red, Rgba::hex(0x000000)]);
+        let blue = Rgba::hex(0x0000ff);
+        assert_eq!(gradient.with_color(1, blue).into_kind(PaintKind::Radial), Paint::Radial { inner: red, outer: blue });
+        assert_eq!(Paint::Radial { inner: red, outer: blue }.into_kind(PaintKind::Solid), Paint::Solid(red));
+    }
 
     #[test]
     fn colors_round_trip_through_hex() {

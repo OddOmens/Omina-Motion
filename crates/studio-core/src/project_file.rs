@@ -226,7 +226,7 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
                 return damaged(&format!("layer \"{}\" has an id too large to use", layer.name));
             }
             if let crate::model::LayerContent::Shape { style } = &layer.content
-                && !(style.corner_radius.is_finite() && style.corner_radius >= 0.0 && (3..=crate::model::MAX_SHAPE_POINTS).contains(&style.points))
+                && !shape_is_sound(style)
             {
                 return damaged(&format!("shape layer \"{}\" has impossible corners or points", layer.name));
             }
@@ -239,6 +239,21 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Whether a shape's numbers are ones the renderer can draw (finite, and in range).
+fn shape_is_sound(style: &crate::model::ShapeStyle) -> bool {
+    use crate::model::{INNER_RADIUS_RANGE, MAX_SHAPE_POINTS, MAX_STROKE_WIDTH, Paint};
+    let paint_ok = |paint: &Paint| match paint {
+        Paint::Linear { angle, .. } => angle.is_finite(),
+        Paint::Solid(_) | Paint::Radial { .. } => true,
+    };
+    style.corner_radius.is_finite()
+        && style.corner_radius >= 0.0
+        && (3..=MAX_SHAPE_POINTS).contains(&style.points)
+        && (INNER_RADIUS_RANGE.0..=INNER_RADIUS_RANGE.1).contains(&style.inner_radius)
+        && style.fill.as_ref().is_none_or(paint_ok)
+        && style.stroke.as_ref().is_none_or(|stroke| paint_ok(&stroke.paint) && (0.0..=MAX_STROKE_WIDTH).contains(&stroke.width))
 }
 
 /// Files from before tracks: each layer gets its own track in its stacking order, so the file
@@ -303,6 +318,26 @@ mod tests {
 
     fn view() -> EditorView {
         EditorView { active_composition: ids::MAIN_COMP, current_frame: 42, work_area: FrameRange::new(24.0, 120.0) }
+    }
+
+    #[test]
+    fn shapes_with_gradients_and_strokes_round_trip_and_old_fills_still_open() {
+        use crate::model::{Paint, Rgba, ShapeKind, ShapeStyle, Stroke};
+        let mut project = sample_project();
+        let style = ShapeStyle {
+            fill: Some(Paint::Linear { start: Rgba::hex(0xff0000), end: Rgba::hex(0x0000ff), angle: 45.0 }),
+            stroke: Some(Stroke { paint: Paint::Radial { inner: Rgba::hex(0xffffff), outer: Rgba::hex(0x000000) }, width: 6.0 }),
+            ..ShapeStyle::new(ShapeKind::Star)
+        };
+        edit::add_shape_layer(&mut project, ids::MAIN_COMP, style, crate::animation::Vec2::new(200.0, 200.0), crate::animation::Vec2::new(500.0, 500.0), 0).unwrap();
+        let text = to_text(&project, view()).unwrap();
+        let (opened, _) = from_text(&text).unwrap();
+        assert_eq!(opened, project);
+
+        // A shape from before gradients: the fill is a bare color, with no stroke or inner radius.
+        let old: ShapeStyle = serde_json::from_str(r#"{"kind":"Star","fill":{"r":1.0,"g":0.0,"b":0.0,"a":1.0},"corner_radius":0.0,"points":5}"#).unwrap();
+        assert_eq!(old.fill, Some(Paint::Solid(Rgba::hex(0xff0000))));
+        assert_eq!((old.stroke, old.inner_radius), (None, 0.5));
     }
 
     #[test]

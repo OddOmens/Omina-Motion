@@ -1522,3 +1522,147 @@ fn the_viewer_bar_lines_up_with_the_project_footer(cx: &mut TestAppContext) {
     let (name, start) = (bounds(visual, "timeline-comp-name"), bounds(visual, "tracks-start"));
     assert!((name.center().y - start.center().y).abs() < px(1.0), "name beside the controls: {name:?} vs {start:?}");
 }
+
+// Shape styling and the color wheel ------------------------------------------------------------
+
+/// Adds a 300 px shape of `kind` and selects it, so Properties shows its settings.
+fn add_shape(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, kind: studio_core::model::ShapeKind) -> Id {
+    let layer = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let layer = ws.state.begin_shape_draw(kind, Vec2::new(960.0, 540.0)).unwrap();
+        ws.state.end_viewer_drag();
+        cx.notify();
+        layer
+    }));
+    render(visual);
+    layer
+}
+
+fn shape_style(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, layer: Id) -> studio_core::model::ShapeStyle {
+    visual.update(|_, cx| *workspace.read(cx).state.shape_of(layer).unwrap())
+}
+
+#[gpui_kit::test]
+fn the_color_wheel_picks_a_shapes_fill(cx: &mut TestAppContext) {
+    use studio_core::model::{Paint, ShapeKind};
+    let (workspace, visual) = open(cx);
+    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    visual.update(|window, cx| window.click("shape-fill-color:0", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("color-wheel")).is_some(), "the chip opens the wheel");
+    // The right edge of the wheel is red, at full saturation.
+    let wheel = visual.update(|window, _| window.find("color-wheel").bounds());
+    let offset = point(wheel.size.width - px(2.0), wheel.size.height / 2.0);
+    visual.update(|window, cx| window.click_with_options("color-wheel", gpui_kit::test::ClickOptions::new().with_offset(offset), cx));
+    render(visual);
+    let Some(Paint::Solid(color)) = shape_style(&workspace, visual, layer).fill else { panic!("still a solid fill") };
+    assert!(color.r > 0.8 && color.g < 0.2 && color.b < 0.2, "picked red: {color:?}");
+    // The brightness bar's left end is black.
+    visual.update(|window, cx| window.click_with_options("color-brightness", gpui_kit::test::ClickOptions::new().with_offset(point(px(1.0), px(7.0))), cx));
+    render(visual);
+    let Some(Paint::Solid(color)) = shape_style(&workspace, visual, layer).fill else { panic!() };
+    assert!(color.r < 0.05, "darkened to black: {color:?}");
+    // A swatch sets it outright.
+    visual.update(|window, cx| window.click(("color-swatch", 0usize), cx));
+    render(visual);
+    assert_eq!(shape_style(&workspace, visual, layer).fill, Some(Paint::Solid(studio_core::model::Rgba::hex(0xffffff))));
+}
+
+#[gpui_kit::test]
+fn dragging_on_the_wheel_is_one_undo_step(cx: &mut TestAppContext) {
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    let layer = add_shape(&workspace, visual, ShapeKind::Ellipse);
+    let before = shape_style(&workspace, visual, layer).fill;
+    visual.update(|window, cx| window.click("shape-fill-color:0", cx));
+    render(visual);
+    let wheel = visual.update(|window, _| window.find("color-wheel").bounds());
+    visual.update(|window, cx| window.drag(wheel.center(), point(wheel.center().x + px(60.0), wheel.center().y + px(30.0)), cx));
+    render(visual);
+    assert_ne!(shape_style(&workspace, visual, layer).fill, before);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.undo();
+        cx.notify();
+    }));
+    render(visual);
+    assert_eq!(shape_style(&workspace, visual, layer).fill, before, "one undo puts the color back");
+}
+
+#[gpui_kit::test]
+fn fills_become_gradients_and_strokes_turn_on(cx: &mut TestAppContext) {
+    use studio_core::model::{Paint, ShapeKind};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let layer = add_shape(&workspace, visual, ShapeKind::Star);
+    visual.update(|window, cx| window.click("shape-fill-type", cx));
+    render(visual);
+    click_label(visual, "Linear Gradient");
+    render(visual);
+    assert!(matches!(shape_style(&workspace, visual, layer).fill, Some(Paint::Linear { .. })));
+    // A gradient has two colors to pick, and an angle.
+    assert!(visual.update(|window, _| window.try_find("shape-fill-color:1")).is_some());
+    visual.update(|window, cx| window.click("shape-fill-type", cx));
+    render(visual);
+    click_label(visual, "Radial Gradient");
+    render(visual);
+    assert!(matches!(shape_style(&workspace, visual, layer).fill, Some(Paint::Radial { .. })));
+
+    visual.update(|window, cx| window.click("shape-stroke-on", cx));
+    render(visual);
+    let stroke = shape_style(&workspace, visual, layer).stroke.expect("the stroke is on");
+    assert_eq!(stroke.width, 4.0);
+    visual.update(|window, cx| window.click("shape-fill-on", cx));
+    render(visual);
+    assert_eq!(shape_style(&workspace, visual, layer).fill, None, "an outline only");
+}
+
+#[gpui_kit::test]
+fn shapes_size_by_width_and_height_or_by_radius(cx: &mut TestAppContext) {
+    use crate::state::ShapeSetting;
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    let rectangle = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    // Rectangles show W and H; polygons and stars show radii instead.
+    let has = |visual: &mut VisualTestContext, setting: ShapeSetting, layer: Id| {
+        visual.update(|window, _| window.try_find(field_id(FieldTarget::Shape { layer, setting }))).is_some()
+    };
+    assert!(has(visual, ShapeSetting::Width, rectangle) && !has(visual, ShapeSetting::OuterRadius, rectangle));
+    visual.update(|window, cx| window.click("shape-size-link", cx));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_shape_setting(rectangle, ShapeSetting::Width, 600.0);
+        cx.notify();
+    }));
+    render(visual);
+    let size = visual.update(|_, cx| workspace.read(cx).state.composition().layer(rectangle).unwrap().size);
+    assert_eq!(size, Vec2::new(600.0, 600.0), "linked, the height followed");
+
+    let star = add_shape(&workspace, visual, ShapeKind::Star);
+    assert!(has(visual, ShapeSetting::OuterRadius, star) && has(visual, ShapeSetting::InnerRadius, star) && !has(visual, ShapeSetting::Width, star));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_shape_setting(star, ShapeSetting::OuterRadius, 200.0);
+        ws.state.set_shape_setting(star, ShapeSetting::InnerRadius, 50.0);
+        cx.notify();
+    }));
+    render(visual);
+    let (size, inner) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.composition().layer(star).unwrap().size, state.shape_of(star).unwrap().inner_radius)
+    });
+    assert_eq!(size, Vec2::new(400.0, 400.0));
+    assert_eq!(inner, 0.25, "an inner radius of 50 px on a 200 px star");
+}
+
+#[gpui_kit::test]
+fn the_text_fill_chip_opens_the_color_wheel(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("fill-color", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("color-swatch", 3usize), cx));
+    render(visual);
+    let fill = visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().1.fill);
+    assert_eq!(fill, Some(studio_core::model::Rgba::hex(0xe5484d)), "the red swatch");
+}

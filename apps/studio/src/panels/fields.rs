@@ -63,11 +63,15 @@ impl FieldTarget {
             }
             Self::Shape { layer, setting } => {
                 let style = state.shape_of(layer)?;
-                let (step, unit) = match setting {
-                    ShapeSetting::CornerRadius => (0.5, "px"),
-                    ShapeSetting::Points => (0.1, ""),
+                let size = state.composition().layer(layer)?.size;
+                let (step, decimals, unit) = match setting {
+                    ShapeSetting::Width | ShapeSetting::Height | ShapeSetting::OuterRadius | ShapeSetting::InnerRadius => (1.0, 0, "px"),
+                    ShapeSetting::CornerRadius => (0.5, 0, "px"),
+                    ShapeSetting::StrokeWidth => (0.1, 1, "px"),
+                    ShapeSetting::Points => (0.1, 0, ""),
+                    ShapeSetting::FillAngle | ShapeSetting::StrokeAngle => (1.0, 0, "°"),
                 };
-                Some((setting.get(style), FieldFormat { step, decimals: 0, unit, rotation: false }))
+                Some((setting.get(style, size), FieldFormat { step, decimals, unit, rotation: false }))
             }
         }
     }

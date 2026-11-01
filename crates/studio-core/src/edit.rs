@@ -4,8 +4,8 @@
 use crate::animation::Vec2;
 use crate::transform::Affine;
 use crate::model::{
-    BlendMode, Composition, Id, Layer, LayerContent, LayerSwitches, MAX_SHAPE_POINTS, Project, ProjectItem, ProjectItemKind,
-    Rgba, ShapeStyle, TextStyle, TrackMatte, Transform,
+    BlendMode, Composition, INNER_RADIUS_RANGE, Id, Layer, LayerContent, LayerSwitches, MAX_SHAPE_POINTS, MAX_STROKE_WIDTH, Paint,
+    Project, ProjectItem, ProjectItemKind, Rgba, ShapeStyle, TextStyle, TrackMatte, Transform,
 };
 use crate::time::FrameRate;
 
@@ -324,16 +324,26 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
 }
 
 /// Changes a shape layer's style with `edit`, keeping the values in range: corner radius from
-/// 0 to half the shorter side, and 3 to `MAX_SHAPE_POINTS` sides or points. Returns whether
-/// the layer is a shape.
+/// 0 to half the shorter side, 3 to `MAX_SHAPE_POINTS` sides or points, a star's inner radius
+/// within `INNER_RADIUS_RANGE`, and strokes up to `MAX_STROKE_WIDTH`. Returns whether the layer
+/// is a shape.
 pub fn edit_shape(composition: &mut Composition, layer_id: Id, edit: impl FnOnce(&mut ShapeStyle)) -> bool {
     let Some(layer) = composition.layer_mut(layer_id) else { return false };
     let size = layer.size;
     let LayerContent::Shape { style } = &mut layer.content else { return false };
     edit(style);
-    let radius = if style.corner_radius.is_finite() { style.corner_radius } else { 0.0 };
-    style.corner_radius = radius.clamp(0.0, ShapeStyle::max_corner_radius(size));
+    let finite_or = |value: f32, fallback: f32| if value.is_finite() { value } else { fallback };
+    style.corner_radius = finite_or(style.corner_radius, 0.0).clamp(0.0, ShapeStyle::max_corner_radius(size));
     style.points = style.points.clamp(3, MAX_SHAPE_POINTS);
+    style.inner_radius = finite_or(style.inner_radius, 0.5).clamp(INNER_RADIUS_RANGE.0, INNER_RADIUS_RANGE.1);
+    if let Some(stroke) = style.stroke.as_mut() {
+        stroke.width = finite_or(stroke.width, 1.0).clamp(0.0, MAX_STROKE_WIDTH);
+    }
+    for paint in style.fill.iter_mut().chain(style.stroke.as_mut().map(|stroke| &mut stroke.paint)) {
+        if let Paint::Linear { angle, .. } = paint {
+            *angle = finite_or(*angle, 0.0).rem_euclid(360.0);
+        }
+    }
     true
 }
 
@@ -413,13 +423,34 @@ pub fn set_text_box(composition: &mut Composition, layer_id: Id, size: Vec2) -> 
     if !matches!(layer.content, LayerContent::Text { .. }) || (layer.size - size).x.abs() + (layer.size - size).y.abs() < 0.01 {
         return false;
     }
+    resize_box(layer, size);
+    true
+}
+
+/// The largest shape box side, in layer pixels (the same limit as a composition's frame).
+pub const MAX_SHAPE_SIZE: f32 = 30_000.0;
+
+/// Sets a shape layer's size, from 1 to `MAX_SHAPE_SIZE` pixels a side. The anchor point keeps
+/// its relative spot, so a centered shape grows from its center. Returns whether it is a shape.
+pub fn set_shape_size(composition: &mut Composition, layer_id: Id, size: Vec2) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    if !matches!(layer.content, LayerContent::Shape { .. }) {
+        return false;
+    }
+    let side = |value: f32| if value.is_finite() { value.clamp(1.0, MAX_SHAPE_SIZE) } else { 1.0 };
+    resize_box(layer, Vec2::new(side(size.x), side(size.y)));
+    // A smaller box may no longer fit the corner radius.
+    edit_shape(composition, layer_id, |_| {})
+}
+
+/// Changes a layer's box to `size`, keeping its anchor point in the same relative spot.
+fn resize_box(layer: &mut Layer, size: Vec2) {
     if let Some(transform) = layer.transform.as_mut() {
         let anchor = transform.anchor_point.value;
         let relative = Vec2::new(anchor.x / layer.size.x.max(1.0), anchor.y / layer.size.y.max(1.0));
         transform.anchor_point.value = Vec2::new(relative.x * size.x, relative.y * size.y);
     }
     layer.size = size;
-    true
 }
 
 /// Changes a text layer's text and/or style, keeping its size (and so its bounds) in step.

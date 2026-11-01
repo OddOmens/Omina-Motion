@@ -10,14 +10,15 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::{
     AnyElement, App, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px, rgba,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px,
 };
-use studio_core::model::{BlendMode, Id, Layer, LayerContent, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
+use studio_core::model::{BlendMode, Id, Layer, LayerContent, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 
 use super::chrome::{divider, hint, icon_button, panel, section};
+use super::color_picker;
 use super::fields::{FieldTarget, property_row, value_field};
-use crate::state::{ShapeSetting, Switch, TextSetting};
+use crate::state::{ColorTarget, PaintSlot, ShapeSetting, Switch, TextSetting};
 use crate::theme::{color, hsla};
 use crate::workspace::{EditTarget, PanelId, Workspace};
 
@@ -37,20 +38,6 @@ const FONT_WEIGHTS: &[(u16, &str)] = &[
     (700, "Bold"),
     (800, "Extra Bold"),
     (900, "Black"),
-];
-
-/// Swatches offered for text fill and stroke.
-const SWATCHES: &[(&str, u32)] = &[
-    ("White", 0xffffff),
-    ("Black", 0x000000),
-    ("Gray", 0x808080),
-    ("Red", 0xe5484d),
-    ("Orange", 0xf76b15),
-    ("Yellow", 0xffe629),
-    ("Green", 0x30a46c),
-    ("Blue", 0x2d8ceb),
-    ("Purple", 0x8e4ec6),
-    ("Pink", 0xe93d82),
 ];
 
 /// The offered font families that are installed. Asking the OS is slow, so this runs once at startup.
@@ -183,52 +170,34 @@ fn setting_field(icon: IconName, tooltip: &'static str, layer: Id, setting: Text
         .child(value_field(FieldTarget::Text { layer, setting }, workspace, cx))
 }
 
-/// A fill or stroke row: on/off checkbox, color swatch with a palette menu, and its label.
+/// A text fill or stroke row: an on/off checkbox, its color (which opens the color wheel), and its label.
 fn paint_row(
     id: &'static str,
     label: &'static str,
     paint: Option<Rgba>,
+    target: ColorTarget,
     set: impl Fn(&mut Workspace, Option<Rgba>) + Clone + 'static,
     cx: &mut Context<Workspace>,
 ) -> Div {
     let workspace = cx.weak_entity();
-    let enabled = paint.is_some();
     let last = paint.unwrap_or(Rgba::hex(0xffffff));
-    let toggle = {
-        let set = set.clone();
-        let workspace = workspace.clone();
-        Checkbox::new(ElementId::Name(format!("{id}-on").into())).checked(enabled).on_click(move |checked: &bool, _, cx: &mut App| {
-            let (set, checked) = (set.clone(), *checked);
-            workspace
-                .update(cx, |this, cx| {
-                    set(this, checked.then_some(last));
-                    cx.notify();
-                })
-                .ok();
-        })
-    };
-    let swatches = SWATCHES
-        .iter()
-        .map(|(name, hex)| ((*name).to_owned(), paint.is_some_and(|p| p.to_rgba_u32() == Rgba::hex(*hex).to_rgba_u32()), Rgba::hex(*hex)))
-        .collect();
-    let set_color = move |this: &mut Workspace, color: Rgba| set(this, Some(color));
-
+    let toggle = Checkbox::new(ElementId::Name(format!("{id}-on").into())).checked(paint.is_some()).on_click(move |checked: &bool, _, cx: &mut App| {
+        let (set, checked) = (set.clone(), *checked);
+        workspace
+            .update(cx, |this, cx| {
+                set(this, checked.then_some(last));
+                cx.notify();
+            })
+            .ok();
+    });
     div()
         .flex()
         .items_center()
         .gap_2()
-        .h(px(28.0))
+        .h(px(30.0))
         .child(toggle)
-        .child(
-            div()
-                .size(px(18.0))
-                .rounded(px(2.0))
-                .border_1()
-                .border_color(hsla(color::HAIRLINE))
-                .bg(rgba(paint.map_or(0x00000000, |p| p.to_rgba_u32()))),
-        )
-        .child(div().w(px(44.0)).child(label))
-        .child(div().w(px(110.0)).child(choice_menu(ElementId::Name(format!("{id}-color").into()), "Color".into(), swatches, set_color, workspace)))
+        .child(color_picker::swatch(ElementId::Name(format!("{id}-color").into()), target, paint, cx))
+        .child(div().child(label))
 }
 
 fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -287,8 +256,8 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
                 .child(setting_field(IconName::MoveHorizontal, "Tracking", id, TextSetting::Tracking, workspace, cx))
                 .children(style.stroke.is_some().then(|| setting_field(IconName::PenLine, "Stroke", id, TextSetting::StrokeWidth, workspace, cx))),
         )
-        .child(paint_row("fill", "Fill", style.fill, move |this, fill| this.state.set_text_fill(id, fill), cx))
-        .child(paint_row("stroke", "Stroke", style.stroke.map(|(color, _)| color), move |this, color| this.state.set_text_stroke(id, color.map(|color| (color, stroke_width))), cx))
+        .child(paint_row("fill", "Fill", style.fill, ColorTarget::TextFill(id), move |this, fill| this.state.set_text_fill(id, fill), cx))
+        .child(paint_row("stroke", "Stroke", style.stroke.map(|(color, _)| color), ColorTarget::TextStroke(id), move |this, color| this.state.set_text_stroke(id, color.map(|color| (color, stroke_width))), cx))
         .child(divider())
         .child(section("Paragraph", None))
         .child(
@@ -301,24 +270,103 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
         )
 }
 
-/// A shape layer's settings: which shape, its fill, and (where it has them) rounded corners
-/// and the number of sides or points.
+/// One of a shape's paints (fill or stroke): on or off, solid or gradient, its colors (each
+/// opens the color wheel), and the gradient's angle or the stroke's width.
+fn shape_paint_rows(id: Id, slot: PaintSlot, paint: Option<Paint>, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let weak = cx.weak_entity();
+    let (label, key, angle, default) = match slot {
+        PaintSlot::Fill => ("Fill", "fill", ShapeSetting::FillAngle, Paint::Solid(Rgba::hex(0x8b5cf6))),
+        PaintSlot::Stroke => ("Stroke", "stroke", ShapeSetting::StrokeAngle, Paint::Solid(Rgba::hex(0xffffff))),
+    };
+    let toggle = {
+        let weak = weak.clone();
+        Checkbox::new(ElementId::Name(format!("shape-{key}-on").into())).checked(paint.is_some()).on_click(move |checked: &bool, _, cx: &mut App| {
+            let checked = *checked;
+            weak.update(cx, |this, cx| {
+                this.state.set_shape_paint(id, slot, checked.then_some(default));
+                cx.notify();
+            })
+            .ok();
+        })
+    };
+    let kind = paint.map(Paint::kind);
+    let kinds = PaintKind::ALL.iter().map(|&choice| (choice.name().to_owned(), Some(choice) == kind, choice)).collect();
+    let menu = choice_menu(
+        ElementId::Name(format!("shape-{key}-type").into()),
+        kind.map_or("None", PaintKind::name).to_owned(),
+        kinds,
+        move |this, choice: PaintKind| {
+            let current = this.state.shape_paint(id, slot).unwrap_or(default);
+            this.state.set_shape_paint(id, slot, Some(current.into_kind(choice)));
+        },
+        weak,
+    );
+    let mut rows = div().child(labeled_row(label, div().flex().items_center().gap_2().child(toggle).child(div().flex_1().child(menu))));
+    if let Some(paint) = paint {
+        let colors = paint.colors();
+        let last = colors.len() - 1;
+        let mut controls = div().flex().items_center().gap_1p5();
+        for (stop, color) in colors.into_iter().enumerate() {
+            let target = ColorTarget::Shape { layer: id, slot, stop };
+            controls = controls.child(color_picker::swatch(ElementId::Name(format!("shape-{key}-color:{stop}").into()), target, Some(color), cx));
+            if stop < last {
+                controls = controls.child(Icon::new(IconName::ArrowRight).size(px(12.0)).text_color(hsla(color::MUTED)));
+            }
+        }
+        if paint.kind() == PaintKind::Linear {
+            controls = controls.child(div().pl_2().text_color(hsla(color::MUTED)).child("Angle")).child(value_field(FieldTarget::Shape { layer: id, setting: angle }, workspace, cx));
+        }
+        if slot == PaintSlot::Stroke {
+            controls = controls.child(div().pl_2().text_color(hsla(color::MUTED)).child("Width")).child(value_field(FieldTarget::Shape { layer: id, setting: ShapeSetting::StrokeWidth }, workspace, cx));
+        }
+        rows = rows.child(labeled_row("", controls));
+    }
+    rows
+}
+
+/// A shape layer's settings, laid out like After Effects': which shape, its size (or, for
+/// polygons and stars, outer and inner radius), corners, points, fill and stroke.
 fn shape_section(layer: &Layer, style: &ShapeStyle, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
     let id = layer.id;
     let weak = cx.weak_entity();
     let kinds = ShapeKind::ALL.iter().map(|&kind| (kind.name().to_owned(), kind == style.kind, kind)).collect();
-    let fill = style.fill;
-    let swatches = SWATCHES.iter().map(|(name, hex)| ((*name).to_owned(), fill.to_rgba_u32() == Rgba::hex(*hex).to_rgba_u32(), Rgba::hex(*hex))).collect();
-    let swatch = div().size(px(18.0)).flex_none().rounded(px(4.0)).border_1().border_color(hsla(color::HAIRLINE)).bg(rgba(fill.to_rgba_u32()));
     let field = |setting: ShapeSetting, cx: &mut Context<Workspace>| value_field(FieldTarget::Shape { layer: id, setting }, workspace, cx);
     let points_label = if style.kind == ShapeKind::Star { "Points" } else { "Sides" };
+    let linked = workspace.state.shape_size_linked;
+    let link = icon_button("shape-size-link", if linked { IconName::Link } else { IconName::Unlink }, "Keep proportions", linked, cx.listener(|this, _, _, cx| {
+        this.state.shape_size_linked = !this.state.shape_size_linked;
+        cx.notify();
+    }));
+    let size_row = labeled_row(
+        "Size",
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(muted_label("W"))
+            .child(field(ShapeSetting::Width, cx))
+            .child(link)
+            .child(muted_label("H"))
+            .child(field(ShapeSetting::Height, cx)),
+    );
+    // Polygons and stars are sized by radius, as in After Effects.
+    let radial = style.kind.has_points();
     div()
         .child(divider())
         .child(section("Shape", None))
-        .child(labeled_row("Shape", choice_menu("shape-kind", style.kind.name().to_owned(), kinds, move |this, kind| this.state.set_shape_kind(id, kind), weak.clone())))
-        .child(labeled_row("Fill", div().flex().items_center().gap_2().child(swatch).child(div().flex_1().child(choice_menu("shape-fill", "Color".into(), swatches, move |this, color| this.state.set_shape_fill(id, color), weak)))))
+        .child(labeled_row("Shape", choice_menu("shape-kind", style.kind.name().to_owned(), kinds, move |this, kind| this.state.set_shape_kind(id, kind), weak)))
+        .when(!radial, |section| section.child(size_row))
+        .when(radial, |section| section.child(labeled_row("Outer Radius", field(ShapeSetting::OuterRadius, cx))))
+        .when(style.kind == ShapeKind::Star, |section| section.child(labeled_row("Inner Radius", field(ShapeSetting::InnerRadius, cx))))
+        .when(radial, |section| section.child(labeled_row(points_label, field(ShapeSetting::Points, cx))))
         .when(style.kind.has_corners(), |section| section.child(labeled_row("Corner Radius", field(ShapeSetting::CornerRadius, cx))))
-        .when(style.kind.has_points(), |section| section.child(labeled_row(points_label, field(ShapeSetting::Points, cx))))
+        .child(shape_paint_rows(id, PaintSlot::Fill, style.fill, workspace, cx))
+        .child(shape_paint_rows(id, PaintSlot::Stroke, style.stroke.map(|stroke| stroke.paint), workspace, cx))
+}
+
+/// A small muted label beside a field, such as "W" or "H".
+fn muted_label(text: &'static str) -> Div {
+    div().text_color(hsla(color::MUTED)).child(text)
 }
 
 fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {

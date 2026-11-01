@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use studio_core::animation::Vec2;
 use studio_core::media::{VideoFrame, VideoSource};
-use studio_core::model::{Id, Layer, LayerContent, Project, Rgba, ShapeKind, ShapeStyle, TextStyle};
+use studio_core::model::{Id, Layer, LayerContent, Paint, Project, Rgba, ShapeKind, ShapeStyle, TextStyle};
 use studio_core::transform::{Affine, world_transform};
 use wgpu::util::DeviceExt as _;
 
@@ -98,8 +98,20 @@ enum Source<'a> {
     Texture(&'a wgpu::TextureView),
     /// Media that is not decoded yet: a checker in this premultiplied linear color.
     Placeholder([f32; 4]),
-    /// A shape filling the layer's box, in a premultiplied linear color.
-    Shape([f32; 4], ShapeStyle),
+    /// A shape filling the layer's box (`Vec2` is the box size; the drawn rectangle is larger by
+    /// the stroke width, so a stroke centered on the edge is not cut off).
+    Shape(ShapeStyle, Vec2),
+}
+
+/// A paint as `layer.wgsl` takes it: mode (1 solid, 2 linear, 3 radial), angle in radians, and
+/// two premultiplied linear colors.
+fn paint_uniform(paint: Option<Paint>) -> (f32, f32, [f32; 4], [f32; 4]) {
+    match paint {
+        None => (0.0, 0.0, [0.0; 4], [0.0; 4]),
+        Some(Paint::Solid(color)) => (1.0, 0.0, linear(color), linear(color)),
+        Some(Paint::Linear { start, end, angle }) => (2.0, angle.to_radians(), linear(start), linear(end)),
+        Some(Paint::Radial { inner, outer }) => (3.0, 0.0, linear(inner), linear(outer)),
+    }
 }
 
 /// The shape number `layer.wgsl` expects for each kind.
@@ -425,23 +437,36 @@ impl Renderer {
             Source::Solid(color) => (0.0, *color, &self.blank, 0.0),
             Source::Texture(view) => (1.0, [0.0; 4], *view, 0.0),
             Source::Placeholder(color) => (2.0, *color, &self.blank, 40.0),
-            Source::Shape(color, _) => (3.0, *color, &self.blank, 0.0),
-        };
-        let shape = match source {
-            Source::Shape(_, style) => [shape_code(style.kind), style.corner_radius, style.points as f32, 0.0],
-            _ => [0.0; 4],
+            Source::Shape(..) => (3.0, [0.0; 4], &self.blank, 0.0),
         };
         let (origin, size) = rect;
+        // For shapes: the outline, where its box sits in the drawn rectangle, and the paints.
+        let (shape, shape_box, stroke_width, fill, stroke) = match source {
+            Source::Shape(style, box_size) => (
+                [shape_code(style.kind), style.corner_radius, style.points as f32, style.inner_radius],
+                [origin.x, origin.y, box_size.x, box_size.y],
+                style.stroke.map_or(0.0, |stroke| stroke.width),
+                paint_uniform(style.fill),
+                paint_uniform(style.stroke.map(|stroke| stroke.paint)),
+            ),
+            _ => ([0.0; 4], [0.0; 4], 0.0, paint_uniform(None), paint_uniform(None)),
+        };
         // Source pixels → composition pixels → output pixels → clip space (y up).
         let to_clip = Affine { a: 2.0 * scale / width, b: 0.0, c: 0.0, d: -2.0 * scale / height, tx: -1.0, ty: 1.0 };
         let matrix = Affine::translate(origin).then(world).then(to_clip);
-        let uniform: [f32; 20] = [
+        let mut uniform: Vec<f32> = vec![
             matrix.a, matrix.b, matrix.c, matrix.d, //
             matrix.tx, matrix.ty, size.x, size.y, //
             color[0], color[1], color[2], color[3], //
-            mode, cell, 0.0, 0.0, //
-            shape[0], shape[1], shape[2], shape[3],
+            mode, cell, stroke_width, 0.0,
         ];
+        uniform.extend(shape);
+        uniform.extend(shape_box);
+        uniform.extend(fill.2);
+        uniform.extend(fill.3);
+        uniform.extend(stroke.2);
+        uniform.extend(stroke.3);
+        uniform.extend([fill.0, fill.1, stroke.0, stroke.1]);
         let buffer = self.uniform(bytemuck::cast_slice(&uniform));
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("layer"),
@@ -825,7 +850,10 @@ impl Renderer {
         match &layer.content {
             LayerContent::Solid { color } => self.draw_source(encoder, targets, target, world, scale, &Source::Solid(linear(*color)), full),
             LayerContent::Shape { style } => {
-                self.draw_source(encoder, targets, target, world, scale, &Source::Shape(linear(style.fill), *style), full);
+                // Grow the drawn rectangle by the stroke, which is centered on the edge.
+                let grow = style.stroke.map_or(0.0, |stroke| stroke.width * 0.5 + 1.0);
+                let rect = (Vec2::new(-grow, -grow), Vec2::new(layer.size.x + grow * 2.0, layer.size.y + grow * 2.0));
+                self.draw_source(encoder, targets, target, world, scale, &Source::Shape(*style, layer.size), rect);
             }
             LayerContent::Text { .. } => {
                 if let Some((key, measured, pad)) = text_keys.get(&layer.id) {

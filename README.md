@@ -12,7 +12,7 @@ crates/studio-core   Data model, frame-exact time, keyframes, playback timing, e
 crates/studio-render GPU compositor (wgpu: Metal, Vulkan, DirectX 12). Renders a composition frame without a
                      window: transforms and parenting, blend modes, track mattes, adjustment layers, effects
                      (WGSL shaders), text with real fonts, and shapes drawn from signed distances (smooth
-                     edges at any size, rounded corners). Used by the viewer, and later export and render nodes.
+                     edges at any size, rounded corners, solid or gradient fills, centered strokes). Used by the viewer, and later export and render nodes.
 crates/studio-media  Media probing and video decoding with FFmpeg (hardware or software, whichever measures
                      faster per clip), a frame server that decodes on background threads, and proxies:
                      all-intra ProRes Proxy copies built in the background so scrubbing is instant.
@@ -32,6 +32,8 @@ Inside `apps/studio/src`:
   per row, thumbnails and waveforms, and each clip's keyframe rows when it is opened.
 - `panels/toolbar.rs`: the top bar and the rail on the left: the side panel (Media or Effects), the tools
   (Select, Text, Shape, Cut) and import. Holding the Shape button opens the shape menu.
+- `panels/color_picker.rs`: the color wheel that every color chip opens (hue around, saturation outward,
+  brightness bar, hex field, swatches).
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout.
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).

@@ -14,11 +14,21 @@ struct LayerUniform {
     translate_size: vec4<f32>,
     // Premultiplied linear color for solids and the placeholder tint.
     color: vec4<f32>,
-    // x: mode (0 solid, 1 texture, 2 placeholder, 3 shape), y: checker cell size in source pixels.
+    // x: mode (0 solid, 1 texture, 2 placeholder, 3 shape), y: checker cell size in source
+    // pixels, z: shape stroke width in source pixels.
     params: vec4<f32>,
     // For shapes: x kind (0 rectangle, 1 ellipse, 2 triangle, 3 polygon, 4 star),
-    // y corner radius in source pixels, z sides or points.
+    // y corner radius in source pixels, z sides or points, w a star's inner radius (fraction).
     shape: vec4<f32>,
+    // The shape's box within the drawn rectangle (which is larger by the stroke): origin, size.
+    shape_box: vec4<f32>,
+    // Fill and stroke paints: two premultiplied linear colors each (one for a solid).
+    fill_a: vec4<f32>,
+    fill_b: vec4<f32>,
+    stroke_a: vec4<f32>,
+    stroke_b: vec4<f32>,
+    // x fill mode, z stroke mode (0 none, 1 solid, 2 linear, 3 radial); y, w their angles in radians.
+    paint: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: LayerUniform;
@@ -66,15 +76,43 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         return vec4(u.color.rgb * shade, 1.0);
     }
     if (mode == 3u) {
-        let d = shape_distance(in.uv * u.translate_size.zw - u.translate_size.zw * 0.5, u.translate_size.zw * 0.5);
+        let half = u.shape_box.zw * 0.5;
+        let p = in.uv * u.translate_size.zw + u.shape_box.xy - half;
+        let d = shape_distance(p, half);
         // About one output pixel of soft edge, whatever the layer's scale.
-        let coverage = clamp(0.5 - d / max(fwidth(d), 1e-4), 0.0, 1.0);
-        return u.color * coverage;
+        let edge = max(fwidth(d), 1e-4);
+        var out = vec4(0.0);
+        if (u.paint.x > 0.5) {
+            out = paint_at(p, half, u32(u.paint.x), u.paint.y, u.fill_a, u.fill_b) * clamp(0.5 - d / edge, 0.0, 1.0);
+        }
+        let width = u.params.z;
+        if (u.paint.z > 0.5 && width > 0.0) {
+            // Centered on the outline, drawn over the fill.
+            let band = abs(d) - width * 0.5;
+            let stroke = paint_at(p, half, u32(u.paint.z), u.paint.w, u.stroke_a, u.stroke_b) * clamp(0.5 - band / edge, 0.0, 1.0);
+            out = stroke + out * (1.0 - stroke.a);
+        }
+        return out;
     }
     return u.color;
 }
 
 const PI: f32 = 3.14159265;
+
+// A paint's color at `p` (pixels from the box center): one color, or a gradient across the box.
+// Linear gradients run along `angle` (0 left to right) from edge to edge of the box; radial ones
+// from the center to the box's edge.
+fn paint_at(p: vec2<f32>, half: vec2<f32>, mode: u32, angle: f32, a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+    if (mode == 2u) {
+        let direction = vec2(cos(angle), sin(angle));
+        let reach = abs(direction.x) * half.x + abs(direction.y) * half.y;
+        return mix(a, b, clamp(0.5 + dot(p, direction) / max(2.0 * reach, 1e-4), 0.0, 1.0));
+    }
+    if (mode == 3u) {
+        return mix(a, b, clamp(length(p / max(half, vec2(1e-4))), 0.0, 1.0));
+    }
+    return a;
+}
 
 // Signed distance to the layer's shape at `p` (source pixels from the box center), for a box
 // with half size `half`.
@@ -107,7 +145,8 @@ fn shape_distance(p: vec2<f32>, half: vec2<f32>) -> f32 {
         let apothem = r * cos(PI / points);
         return regular_polygon(q, max(apothem - radius, 0.0), points) - radius;
     }
-    return star(q, max(r - radius, 0.0), points) - radius;
+    let outer = max(r - radius, 0.0);
+    return star(q, outer, outer * clamp(u.shape.w, 0.05, 1.0), points) - radius;
 }
 
 fn cross2(a: vec2<f32>, b: vec2<f32>) -> f32 {
@@ -156,17 +195,19 @@ fn regular_polygon(p: vec2<f32>, apothem: f32, sides: f32) -> f32 {
     return length(q - nearest) * sign(q.y - apothem);
 }
 
-// Signed distance to a star with `points` points of outer radius `r`, point on top (after Inigo Quilez).
-fn star(p_in: vec2<f32>, r: f32, points: f32) -> f32 {
-    let an = PI / points;
-    // How deep the notches between points are: a classic five-pointed star.
-    let en = PI / max(points * 0.6, 2.0);
-    let acs = vec2(cos(an), sin(an));
-    let ecs = vec2(cos(en), sin(en));
-    let angle = atan2(p_in.x, p_in.y);
-    let bn = angle - 2.0 * an * floor(angle / (2.0 * an)) - an;
-    var p = length(p_in) * vec2(cos(bn), abs(sin(bn)));
-    p = p - r * acs;
-    p = p + ecs * clamp(-dot(p, ecs), 0.0, r * acs.y / ecs.y);
-    return length(p) * sign(p.x);
+// Signed distance to a star with `points` points between radii `outer` and `inner`, a point on
+// top. `p` has y pointing up. By symmetry only one half-point matters: the edge from a notch
+// (on the y axis after folding) out to the tip beside it.
+fn star(p: vec2<f32>, outer: f32, inner: f32, points: f32) -> f32 {
+    let half_sector = PI / points;
+    let angle = atan2(p.x, p.y);
+    let folded = angle - 2.0 * half_sector * floor(angle / (2.0 * half_sector));
+    let b = abs(folded - half_sector);
+    let q = length(p) * vec2(sin(b), cos(b));
+    let notch = vec2(0.0, inner);
+    let tip = outer * vec2(sin(half_sector), cos(half_sector));
+    let edge = tip - notch;
+    let along = clamp(dot(q - notch, edge) / dot(edge, edge), 0.0, 1.0);
+    let outside = cross2(edge, q - notch);
+    return length(q - notch - edge * along) * sign(outside);
 }

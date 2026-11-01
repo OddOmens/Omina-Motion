@@ -241,6 +241,8 @@ pub struct UiState {
     /// The Export dialog's choices, and the export running now, if any.
     pub export_choice: panels::export::ExportChoice,
     pub export_job: Option<panels::export::ExportJob>,
+    /// The color picker, while it is open.
+    pub color_picker: Option<panels::color_picker::Picker>,
     /// Keeps the open dialog's field links alive (Composition Settings' locked aspect ratio).
     pub dialog_subscriptions: Vec<Subscription>,
     /// Set when the user chose to quit while exporting: quit once the export has stopped.
@@ -425,6 +427,7 @@ impl Workspace {
                 export_choice: Default::default(),
                 export_job: None,
                 dialog_subscriptions: Vec::new(),
+                color_picker: None,
                 quit_after_export: false,
             },
             focus,
@@ -623,7 +626,8 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Every edit redraws the workspace, so this is where edits become undo steps, and where
         // manual stops (moving the playhead) and changes such as muting a layer reach the sound.
-        self.state.record_history(cx.has_active_drag());
+        let picking = self.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
+        self.state.record_history(cx.has_active_drag() || picking);
         // A dialog closed with OK leaves nothing focused, which would silence every shortcut
         // until the next click; give focus back to the editor.
         if window.focused(cx).is_none() && !window.has_active_dialog(cx) {
@@ -763,6 +767,9 @@ impl Render for Workspace {
                 this.ui.field_anchor = None;
                 this.ui.viewer_anchor = None;
                 this.ui.shape_press = false;
+                if let Some(picker) = this.ui.color_picker.as_mut() {
+                    picker.pressed = false;
+                }
                 // Redraw so the finished drag is recorded as one undo step right away, rather
                 // than merging with whatever edit comes next.
                 cx.notify();
@@ -786,6 +793,7 @@ impl Render for Workspace {
                     .child(panels::toolbar::rail(self, cx))
                     .child(div().flex_1().min_w_0().pr(gutter).pb(gutter).child(workspace)),
             )
+            .children(panels::color_picker::popover(self, cx))
     }
 }
 

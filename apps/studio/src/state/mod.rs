@@ -25,7 +25,8 @@ use studio_core::align::{AlignTarget, Alignment, Distribution, align_layers, dis
 use studio_core::animation::Vec2;
 use studio_core::edit::{self, CompositionSettings, ItemDeletion};
 use studio_core::model::{
-    BlendMode, Composition, Id, LayerContent, LayerSwitches, Project, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte,
+    BlendMode, Composition, Id, LayerContent, LayerSwitches, Paint, Project, Rgba, ShapeKind, ShapeStyle, Stroke, TextAlign, TextStyle,
+    TrackMatte,
 };
 use studio_core::playback::{playback_position, playback_start_frame};
 use studio_core::project_file::{self, EditorSettings, EditorView};
@@ -65,29 +66,71 @@ impl Switch {
 /// Numeric shape settings that the Properties panel edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeSetting {
+    Width,
+    Height,
+    /// A polygon's or star's outer radius: half its box (which it keeps square).
+    OuterRadius,
+    /// A star's inner radius, in pixels (stored as a fraction of the outer radius).
+    InnerRadius,
     CornerRadius,
     /// Sides of a polygon, or points of a star.
     Points,
+    StrokeWidth,
+    /// The direction of a linear gradient, in degrees.
+    FillAngle,
+    StrokeAngle,
+}
+
+/// Which of a shape's paints: its fill or its stroke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PaintSlot {
+    Fill,
+    Stroke,
+}
+
+/// A color the color picker edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorTarget {
+    /// Color `stop` of a shape's fill or stroke (0 for a solid; 0 or 1 along a gradient).
+    Shape { layer: Id, slot: PaintSlot, stop: usize },
+    TextFill(Id),
+    TextStroke(Id),
+}
+
+/// A paint's angle, if it is a linear gradient.
+fn paint_angle(paint: Option<Paint>) -> f32 {
+    match paint {
+        Some(Paint::Linear { angle, .. }) => angle,
+        _ => 0.0,
+    }
+}
+
+/// Sets a linear gradient's angle (other paints have none).
+fn set_angle(paint: &mut Paint, value: f32) {
+    if let Paint::Linear { angle, .. } = paint {
+        *angle = value;
+    }
 }
 
 impl ShapeSetting {
-    pub fn get(self, style: &ShapeStyle) -> f32 {
+    /// The setting's value for a shape of `style` in a box of `size`.
+    pub fn get(self, style: &ShapeStyle, size: Vec2) -> f32 {
+        let outer = size.x.min(size.y) * 0.5;
         match self {
+            Self::Width => size.x,
+            Self::Height => size.y,
+            Self::OuterRadius => outer,
+            Self::InnerRadius => style.inner_radius * outer,
             Self::CornerRadius => style.corner_radius,
             Self::Points => style.points as f32,
-        }
-    }
-
-    /// Sets the value; `edit::edit_shape` then keeps it in range.
-    fn set(self, style: &mut ShapeStyle, value: f32) {
-        match self {
-            Self::CornerRadius => style.corner_radius = value,
-            Self::Points => style.points = value.round().clamp(0.0, u32::MAX as f32) as u32,
+            Self::StrokeWidth => style.stroke.map_or(0.0, |stroke| stroke.width),
+            Self::FillAngle => paint_angle(style.fill),
+            Self::StrokeAngle => paint_angle(style.stroke.map(|stroke| stroke.paint)),
         }
     }
 }
 
-/// Numeric text settings that the Properties panel edits.
+/// Numeric text settings that the Properties panel edits./// Numeric text settings that the Properties panel edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextSetting {
     FontSize,
@@ -155,6 +198,8 @@ pub struct EditorState {
     pub align_target: AlignTarget,
     /// When on, editing one scale component changes the other proportionally.
     pub scale_linked: bool,
+    /// When on, a shape's width and height change together.
+    pub shape_size_linked: bool,
     playback: Option<PlaybackClock>,
     keyframe_drag: Option<keyframes::KeyframeDrag>,
     /// Whether the main track keeps its clips packed together from frame 0, as in CapCut.
@@ -192,6 +237,7 @@ impl EditorState {
             expanded_rows: HashSet::new(),
             align_target: AlignTarget::Composition,
             scale_linked: true,
+            shape_size_linked: false,
             playback: None,
             keyframe_drag: None,
             layer_time_drag: None,
@@ -535,12 +581,84 @@ impl EditorState {
         }
     }
 
+    /// Sets a shape setting. Sizes keep the shape centered on its anchor; with
+    /// `shape_size_linked`, width and height change together.
     pub fn set_shape_setting(&mut self, layer: Id, setting: ShapeSetting, value: f32) {
-        edit::edit_shape(self.composition_mut(), layer, |style| setting.set(style, value));
+        if self.shape_of(layer).is_none() {
+            return;
+        }
+        let Some(size) = self.composition().layer(layer).map(|layer| layer.size) else { return };
+        let ratio = size.y / size.x.max(1.0);
+        let new_size = match setting {
+            ShapeSetting::Width if self.shape_size_linked => Some(Vec2::new(value, value * ratio)),
+            ShapeSetting::Height if self.shape_size_linked => Some(Vec2::new(value / ratio.max(f32::EPSILON), value)),
+            ShapeSetting::Width => Some(Vec2::new(value, size.y)),
+            ShapeSetting::Height => Some(Vec2::new(size.x, value)),
+            ShapeSetting::OuterRadius => Some(Vec2::new(value * 2.0, value * 2.0)),
+            _ => None,
+        };
+        if let Some(new_size) = new_size {
+            edit::set_shape_size(self.composition_mut(), layer, new_size);
+            return;
+        }
+        let outer = size.x.min(size.y) * 0.5;
+        edit::edit_shape(self.composition_mut(), layer, |style| match setting {
+            ShapeSetting::InnerRadius => style.inner_radius = value / outer.max(1.0),
+            ShapeSetting::CornerRadius => style.corner_radius = value,
+            ShapeSetting::Points => style.points = value.round().clamp(0.0, u32::MAX as f32) as u32,
+            ShapeSetting::StrokeWidth => {
+                if let Some(stroke) = style.stroke.as_mut() {
+                    stroke.width = value;
+                }
+            }
+            ShapeSetting::FillAngle => style.fill.iter_mut().for_each(|paint| set_angle(paint, value)),
+            ShapeSetting::StrokeAngle => style.stroke.iter_mut().for_each(|stroke| set_angle(&mut stroke.paint, value)),
+            ShapeSetting::Width | ShapeSetting::Height | ShapeSetting::OuterRadius => {}
+        });
     }
 
-    pub fn set_shape_fill(&mut self, layer: Id, fill: studio_core::model::Rgba) {
-        edit::edit_shape(self.composition_mut(), layer, |style| style.fill = fill);
+    /// Sets a shape's fill or stroke paint; `None` turns it off. A stroke turned on starts 4 px wide.
+    pub fn set_shape_paint(&mut self, layer: Id, slot: PaintSlot, paint: Option<Paint>) {
+        edit::edit_shape(self.composition_mut(), layer, |style| match slot {
+            PaintSlot::Fill => style.fill = paint,
+            PaintSlot::Stroke => {
+                let width = style.stroke.map_or(4.0, |stroke| stroke.width);
+                style.stroke = paint.map(|paint| Stroke { paint, width });
+            }
+        });
+    }
+
+    /// The color a picker target has now, if it has one.
+    pub fn color_of(&self, target: ColorTarget) -> Option<Rgba> {
+        match target {
+            ColorTarget::Shape { layer, slot, stop } => self.shape_paint(layer, slot)?.colors().get(stop).copied(),
+            ColorTarget::TextFill(layer) => self.text_of(layer)?.1.fill,
+            ColorTarget::TextStroke(layer) => self.text_of(layer)?.1.stroke.map(|(color, _)| color),
+        }
+    }
+
+    /// Sets a picker target's color, turning the fill or stroke on if it was off.
+    pub fn set_color(&mut self, target: ColorTarget, color: Rgba) {
+        match target {
+            ColorTarget::Shape { layer, slot, stop } => {
+                let paint = self.shape_paint(layer, slot).map_or(Paint::Solid(color), |paint| paint.with_color(stop, color));
+                self.set_shape_paint(layer, slot, Some(paint));
+            }
+            ColorTarget::TextFill(layer) => self.set_text_fill(layer, Some(color)),
+            ColorTarget::TextStroke(layer) => {
+                let width = self.text_of(layer).and_then(|(_, style)| style.stroke).map_or(2.0, |(_, width)| width);
+                self.set_text_stroke(layer, Some((color, width)));
+            }
+        }
+    }
+
+    /// A shape's fill or stroke paint.
+    pub fn shape_paint(&self, layer: Id, slot: PaintSlot) -> Option<Paint> {
+        let style = self.shape_of(layer)?;
+        match slot {
+            PaintSlot::Fill => style.fill,
+            PaintSlot::Stroke => style.stroke.map(|stroke| stroke.paint),
+        }
     }
 
     /// Changes which shape a shape layer draws, keeping its box, colour and corners.

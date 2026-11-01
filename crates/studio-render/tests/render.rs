@@ -3,7 +3,7 @@
 use studio_core::animation::{Animated, Vec2};
 use studio_core::effects;
 use studio_core::model::{
-    BlendMode, Composition, Id, LabelColor, Layer, LayerContent, LayerSwitches, Project, Rgba, ShapeKind, ShapeStyle, TextStyle,
+    BlendMode, Composition, Id, LabelColor, Layer, LayerContent, LayerSwitches, Project, Paint, Rgba, ShapeKind, ShapeStyle, Stroke, TextStyle,
     TrackMatte, Transform,
 };
 use studio_core::sample::{ids, sample_project};
@@ -257,7 +257,7 @@ fn every_rendered_effect_is_fast_at_1080p() {
 /// An 80 × 80 white shape in the middle of the frame, over black.
 fn shape_frame(kind: ShapeKind, corner_radius: f32) -> studio_render::RenderedFrame {
     let mut layer = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
-    layer.content = LayerContent::Shape { style: ShapeStyle { fill: Rgba::hex(0xffffff), corner_radius, ..ShapeStyle::new(kind) } };
+    layer.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Solid(Rgba::hex(0xffffff))), corner_radius, ..ShapeStyle::new(kind) } };
     render(&project(vec![layer]))
 }
 
@@ -587,23 +587,72 @@ fn an_image_changed_on_disk_is_shown_as_it_is_now() {
     std::fs::remove_file(&path).unwrap();
 }
 
-/// Saves every shape, sharp and rounded, to `SHAPE_SHEET` as a PNG for a visual check.
+/// Draws `style` in an 80 × 80 box in the middle of the frame, over black.
+fn styled_shape(style: ShapeStyle) -> studio_render::RenderedFrame {
+    let mut layer = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
+    layer.content = LayerContent::Shape { style };
+    render(&project(vec![layer]))
+}
+
+#[test]
+fn gradients_run_across_the_box() {
+    let (red, blue) = (Rgba::hex(0xff0000), Rgba::hex(0x0000ff));
+    let linear = styled_shape(ShapeStyle { fill: Some(Paint::Linear { start: red, end: blue, angle: 0.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) });
+    let (left, right) = (pixel(&linear, 12, 50), pixel(&linear, 88, 50));
+    assert!(left[0] > 200 && left[2] < 60 && right[2] > 200 && right[0] < 60, "red on the left, blue on the right: {left:?} {right:?}");
+    let down = styled_shape(ShapeStyle { fill: Some(Paint::Linear { start: red, end: blue, angle: 90.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) });
+    assert!(pixel(&down, 50, 12)[0] > 200 && pixel(&down, 50, 88)[2] > 200, "90° runs top to bottom");
+    let radial = styled_shape(ShapeStyle { fill: Some(Paint::Radial { inner: red, outer: blue }), ..ShapeStyle::new(ShapeKind::Ellipse) });
+    let (center, edge) = (pixel(&radial, 50, 50), pixel(&radial, 50, 13));
+    assert!(center[0] > 200 && center[2] < 40 && edge[2] > edge[0], "red in the middle, bluer at the edge: {center:?} {edge:?}");
+}
+
+#[test]
+fn a_stroke_outlines_the_shape_centered_on_its_edge() {
+    let style = ShapeStyle {
+        fill: None,
+        stroke: Some(Stroke { paint: Paint::Solid(Rgba::hex(0xffffff)), width: 8.0 }),
+        ..ShapeStyle::new(ShapeKind::Rectangle)
+    };
+    let frame = styled_shape(style);
+    // The box edge is at x = 10; the stroke covers 6..14.
+    assert!(pixel(&frame, 8, 50)[0] > 200, "outside the edge");
+    assert!(pixel(&frame, 12, 50)[0] > 200, "inside the edge");
+    assert!(pixel(&frame, 50, 50)[0] < 20, "no fill, so the middle is empty");
+    assert!(pixel(&frame, 3, 50)[0] < 20, "and nothing beyond the stroke");
+}
+
+#[test]
+fn a_stars_inner_radius_sets_how_deep_its_notches_go() {
+    let star = |inner_radius| styled_shape(ShapeStyle { fill: Some(Paint::Solid(Rgba::hex(0xffffff))), inner_radius, ..ShapeStyle::new(ShapeKind::Star) });
+    let filled = |frame: &studio_render::RenderedFrame| (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).filter(|&(x, y)| pixel(frame, x, y)[0] > 128).count();
+    let (thin, fat) = (filled(&star(0.25)), filled(&star(0.8)));
+    assert!(thin * 2 < fat, "a small inner radius makes a spiky star: {thin} vs {fat}");
+}
+
+/// Saves every shape (sharp, rounded, then with gradients, strokes and inner radii) to
+/// `SHAPE_SHEET` as a PNG for a visual check.
 /// Run with `SHAPE_SHEET=/path/shapes.png cargo test -p studio-render --test render shape_sheet -- --ignored`.
 #[test]
 #[ignore = "writes an image for a visual check"]
 fn shape_sheet() {
     let path = std::env::var("SHAPE_SHEET").expect("set SHAPE_SHEET to the PNG to write");
     let (cell, gap) = (200.0, 20.0);
+    let violet = Paint::Solid(Rgba::hex(0x8b5cf6));
+    let gradient = Paint::Linear { start: Rgba::hex(0xf472b6), end: Rgba::hex(0x60a5fa), angle: 45.0 };
+    let radial = Paint::Radial { inner: Rgba::hex(0xfde047), outer: Rgba::hex(0xea580c) };
+    let outline = Stroke { paint: Paint::Solid(Rgba::hex(0xffffff)), width: 10.0 };
+    let rows: [(f32, Option<Paint>, Option<Stroke>, f32); 4] = [(0.0, Some(violet), None, 0.5), (30.0, Some(violet), None, 0.5), (12.0, Some(gradient), Some(outline), 0.35), (0.0, Some(radial), None, 0.75)];
     let mut layers = Vec::new();
-    for (row, radius) in [0.0, 30.0].into_iter().enumerate() {
+    for (row, (radius, fill, stroke, inner_radius)) in rows.into_iter().enumerate() {
         for (column, kind) in ShapeKind::ALL.into_iter().enumerate() {
             let center = Vec2::new(gap + cell * 0.5 + column as f32 * (cell + gap), gap + cell * 0.5 + row as f32 * (cell + gap));
             let mut layer = solid((10 + row * 5 + column) as u64, 0, Vec2::new(cell, cell * if column == 0 { 0.7 } else { 1.0 }), center);
-            layer.content = LayerContent::Shape { style: ShapeStyle { fill: Rgba::hex(0x8b5cf6), corner_radius: radius, ..ShapeStyle::new(kind) } };
+            layer.content = LayerContent::Shape { style: ShapeStyle { fill, stroke, corner_radius: radius, inner_radius, ..ShapeStyle::new(kind) } };
             layers.push(layer);
         }
     }
-    let (width, height) = (5 * 220 + 20, 2 * 220 + 20);
+    let (width, height) = (5 * 220 + 20, 4 * 220 + 20);
     let mut scene = project(layers);
     (scene.compositions[0].width, scene.compositions[0].height) = (width, height);
     let mut renderer = Renderer::new().unwrap();

@@ -2,6 +2,7 @@
 
 pub mod align;
 pub mod chrome;
+pub mod color_picker;
 pub mod composition_settings;
 pub mod effect_controls;
 pub mod effects;
