@@ -911,11 +911,14 @@ fn template_sheet() {
         Format::Portrait => (216, 270),
         Format::Vertical => (180, 320),
     };
+    // `TEMPLATE_FROM` starts partway through the list (to look at new ones).
+    let from: usize = std::env::var("TEMPLATE_FROM").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let shown = &TEMPLATES[from.min(TEMPLATES.len())..];
     let columns = 10u32;
-    let rows = (TEMPLATES.len() as u32).div_ceil(columns);
+    let rows = (shown.len() as u32).div_ceil(columns);
     let mut sheet = image::RgbaImage::from_pixel(cell_w * columns, cell_h * rows, image::Rgba([40, 40, 40, 255]));
     let mut renderer = Renderer::new().unwrap();
-    for (index, template) in TEMPLATES.iter().enumerate() {
+    for (index, template) in shown.iter().enumerate() {
         let mut project = Project::new(Vec::new(), Vec::new());
         let comp = build(&mut project, template, format).unwrap();
         let frame = (seconds * 30.0) as i64;

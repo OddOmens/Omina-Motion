@@ -1963,6 +1963,9 @@ fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppCont
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-,", cx));
     render(visual);
+    // Appearance is the second page.
+    visual.update(|window, cx| window.click(("settings-section", 1_usize), cx));
+    render(visual);
     visual.update(|window, cx| window.click(("theme", crate::theme::ThemeName::Light as usize), cx));
     visual.update(|window, cx| window.click(("accent", crate::theme::Accent::Green as usize), cx));
     render(visual);
@@ -1975,7 +1978,7 @@ fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppCont
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("old-proxy.mov"), vec![0u8; 1000]).unwrap();
     // The cache has its own section in the menu on the left.
-    visual.update(|window, cx| window.click(("settings-section", 3_usize), cx));
+    visual.update(|window, cx| window.click(("settings-section", 6_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("cache-clear", cx));
     render(visual);
@@ -2355,7 +2358,7 @@ fn settings_choose_the_project_panels_columns(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-,", cx));
     render(visual);
-    visual.update(|window, cx| window.click(("settings-section", 1_usize), cx));
+    visual.update(|window, cx| window.click(("settings-section", 4_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("column-type", cx));
     visual.update(|window, cx| window.click("column-duration", cx));
@@ -2369,7 +2372,7 @@ fn settings_choose_the_project_panels_columns(cx: &mut TestAppContext) {
 fn a_new_project_starts_with_the_default_folders_and_imports_are_sorted_into_them(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
-        ws.state.new_project(&["Footage".to_owned(), "Music".to_owned()]);
+        ws.state.new_project(&["Footage".to_owned(), "Music".to_owned()], crate::app_settings::NewComposition::default());
         ws.state.import_folders = crate::app_settings::ImportFolders { video: Some("Footage".into()), image: Some("Images".into()), audio: Some("Music".into()) };
         let tone = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/tone.m4a");
         ws.state.import_files(vec![tone]);
@@ -2538,4 +2541,22 @@ fn track_motion_waits_for_a_click_on_a_video(cx: &mut TestAppContext) {
     visual.update(|window, cx| window.click("track-motion", cx));
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.track_pick), None, "and can be called off");
+}
+
+#[gpui_kit::test]
+fn settings_switches_change_what_the_panels_show(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    // Timeline & Viewer is the fourth page.
+    visual.update(|window, cx| window.click(("settings-section", 3_usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("timeline-render-time", cx));
+    render(visual);
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.settings.show_render_time));
+    assert!(!crate::app_settings::load().show_render_time, "remembered");
+    // General: new compositions take the chosen frame rate.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.settings.new_composition.fps = 60));
+    let made = crate::state::new_composition_settings(visual.update(|_, cx| workspace.read(cx).ui.settings.new_composition));
+    assert_eq!(made.frame_rate, studio_core::time::FrameRate::new(60, 1));
 }

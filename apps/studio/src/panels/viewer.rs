@@ -778,7 +778,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
     // Render at display resolution when paused; at half resolution on high-density screens while playing.
     let scale = viewer_scale(workspace);
     let (comp_width, comp_height) = (workspace.state.composition().width as f32, workspace.state.composition().height as f32);
-    let density = if workspace.state.is_playing() { window.scale_factor().min(1.0) } else { window.scale_factor() };
+    let density = if workspace.state.is_playing() { workspace.ui.settings.playback_quality.density(window.scale_factor()) } else { window.scale_factor() };
     // Zoomed in past 100%, the frame is rendered at full size and shown larger, as in After
     // Effects: rendering more pixels than the composition has would add nothing but time.
     let render_scale = scale.min(1.0);
@@ -806,7 +806,14 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .w(px(composition.width as f32 * scale))
         .h(px(composition.height as f32 * scale))
         // Only the grid is clipped to the frame: selection handles may reach past its edges.
-        .child(div().absolute().size_full().overflow_hidden().child(gpui_kit::StyledImage::object_fit(img(transparency_grid()).size_full(), gpui_kit::ObjectFit::Cover)))
+        .child(match workspace.ui.settings.transparency {
+            crate::app_settings::Transparency::Checkerboard => div().absolute().size_full().overflow_hidden().child(gpui_kit::StyledImage::object_fit(img(transparency_grid()).size_full(), gpui_kit::ObjectFit::Cover)),
+            solid => div().absolute().size_full().bg(gpui_kit::rgb(match solid {
+                crate::app_settings::Transparency::Black => 0x000000,
+                crate::app_settings::Transparency::White => 0xffffff,
+                _ => 0x808080,
+            })),
+        })
         .child(workspace.ui.frame_bounds.probe())
         .children(picture)
         .children(problem)

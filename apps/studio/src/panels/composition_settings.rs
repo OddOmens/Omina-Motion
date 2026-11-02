@@ -186,7 +186,9 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
     // New compositions start transparent, as in After Effects: set a color here, or add a
     // solid or shape layer, to fill them.
     let base = if create {
-        CompositionSettings { name: format!("Comp {}", workspace.state.project.compositions.len() + 1), background: Rgba::TRANSPARENT, ..base }
+        // The size, rate and length new compositions start with are set in Settings.
+        let defaults = crate::state::new_composition_settings(workspace.ui.settings.new_composition);
+        CompositionSettings { name: format!("Comp {}", workspace.state.project.compositions.len() + 1), ..defaults }
     } else {
         base
     };

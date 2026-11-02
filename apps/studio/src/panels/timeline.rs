@@ -344,10 +344,12 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
         .items_center()
         .w_full()
         // Measured around the viewer's last render.
-        .child(div().px_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(match workspace.render.last_render_ms {
-            Some(ms) => format!("Frame Render Time: {ms:.1} ms"),
-            None => "Frame Render Time: –".to_owned(),
-        }));
+        .when(workspace.ui.settings.show_render_time, |footer| {
+            footer.child(div().px_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(match workspace.render.last_render_ms {
+                Some(ms) => format!("Frame Render Time: {ms:.1} ms"),
+                None => "Frame Render Time: –".to_owned(),
+            }))
+        });
 
     // The composition's name is in the toolbar row, beside the transport.
     panel(PanelId::Timeline, &[], Some(footer.into_any_element()), body, workspace, cx)

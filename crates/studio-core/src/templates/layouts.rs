@@ -14,6 +14,10 @@ pub(super) fn words_needed(layout: Layout) -> usize {
         Layout::List => 5,
         Layout::Quote | Layout::Countdown | Layout::Review | Layout::BigStat | Layout::BeforeAfter | Layout::Announcement | Layout::Podcast | Layout::EndCard => 3,
         Layout::LowerThird | Layout::Hook | Layout::BrandIntro | Layout::Collage | Layout::Marquee => 2,
+        Layout::Chat => 5,
+        Layout::Notification | Layout::PostCard | Layout::Quiz | Layout::KineticStack | Layout::Coupon => 4,
+        Layout::ThisOrThat | Layout::PhoneMockup | Layout::Progress => 3,
+        Layout::Meme | Layout::Typewriter | Layout::Neon | Layout::Confetti | Layout::Polaroid | Layout::NowPlaying | Layout::MapPin | Layout::GlitchTitle => 2,
     }
 }
 
@@ -39,11 +43,28 @@ pub(super) fn build(b: &mut Builder) {
         Layout::Collage => collage(b),
         Layout::Marquee => marquee(b),
         Layout::EndCard => end_card(b),
+        Layout::Chat => super::fun::chat(b),
+        Layout::Notification => super::fun::notification(b),
+        Layout::PostCard => super::fun::post_card(b),
+        Layout::ThisOrThat => super::fun::this_or_that(b),
+        Layout::Meme => super::fun::meme(b),
+        Layout::Typewriter => super::fun::typewriter(b),
+        Layout::Neon => super::fun::neon(b),
+        Layout::Confetti => super::fun::confetti(b),
+        Layout::PhoneMockup => super::fun::phone_mockup(b),
+        Layout::Polaroid => super::fun::polaroid(b),
+        Layout::Quiz => super::fun::quiz(b),
+        Layout::NowPlaying => super::fun::now_playing(b),
+        Layout::Progress => super::fun::progress(b),
+        Layout::KineticStack => super::fun::kinetic_stack(b),
+        Layout::MapPin => super::fun::map_pin(b),
+        Layout::Coupon => super::fun::coupon(b),
+        Layout::GlitchTitle => super::fun::glitch_title(b),
     }
 }
 
 /// A pill-shaped button with words on it, popping in at `at`.
-fn button(b: &mut Builder, words: &str, center: Vec2, at: f64) {
+pub(super) fn button(b: &mut Builder, words: &str, center: Vec2, at: f64) {
     let p = b.palette();
     let width = (words.chars().count() as f32 * 26.0 + 120.0).max(280.0);
     let pill = b.block(Vec2::new(width, 104.0), center, p.accent, 52.0, at, "Button");
@@ -547,7 +568,7 @@ fn marquee(b: &mut Builder) {
     for row in 0..rows {
         let y = (row as f32 + 0.5) / rows as f32;
         let color = if row % 2 == 0 { p.accent } else { p.muted };
-        let line = b.text(&repeated, b.at(0.5, y), 110.0, color, b.heavy(), 0.0);
+        let line = b.text_unfitted(&repeated, b.at(0.5, y), 110.0, color, b.heavy(), 0.0, TextAlign::Center);
         b.transform(line).opacity.value = if row % 2 == 0 { 90.0 } else { 35.0 };
         // Alternate rows scroll opposite ways.
         let shift = if row % 2 == 0 { -600.0 } else { 600.0 } * b.unit();

@@ -1,4 +1,4 @@
-//! The 100 templates: five for each layout, each with its own words, colors and font.
+//! The 185 templates: five for each layout, each with its own words, colors and font.
 //! Words are short on purpose, so they fit the narrow formats; line breaks are written in.
 
 use super::{Category, Layout, Palette, Template};
@@ -17,9 +17,16 @@ const CORAL: Palette = Palette { background: 0xfff1ec, background_2: 0xffd8c9, a
 const GOLD: Palette = Palette { background: 0x111111, background_2: 0x2b2416, accent: 0xe8b44a, text: 0xfff8e7, muted: 0xbfa77a, on_accent: 0x111111 };
 const SKY: Palette = Palette { background: 0xeff6ff, background_2: 0xbfdbfe, accent: 0x2563eb, text: 0x0f172a, muted: 0x475569, on_accent: 0xffffff };
 const RED: Palette = Palette { background: 0x1a0505, background_2: 0x450a0a, accent: 0xef4444, text: 0xffffff, muted: 0xfca5a5, on_accent: 0xffffff };
+const NEON_NIGHT: Palette = Palette { background: 0x07021a, background_2: 0x1a0b3d, accent: 0xff2bd6, text: 0xffffff, muted: 0xb8a6ff, on_accent: 0x1a0026 };
+const CANDY: Palette = Palette { background: 0xfff0f6, background_2: 0xffd6e7, accent: 0xff4d8d, text: 0x3a0d22, muted: 0x9b5874, on_accent: 0xffffff };
+const MINT: Palette = Palette { background: 0xecfdf5, background_2: 0xa7f3d0, accent: 0x059669, text: 0x064e3b, muted: 0x3f7d66, on_accent: 0xffffff };
+const SUNNY: Palette = Palette { background: 0xfffbeb, background_2: 0xfde68a, accent: 0xf59e0b, text: 0x451a03, muted: 0x92400e, on_accent: 0x1c1917 };
+const PARTY: Palette = Palette { background: 0x2e1065, background_2: 0x7c3aed, accent: 0xfacc15, text: 0xffffff, muted: 0xddd6fe, on_accent: 0x2e1065 };
+const CHAT_LIGHT: Palette = Palette { background: 0xffffff, background_2: 0xe9e9eb, accent: 0x0a84ff, text: 0x111111, muted: 0x6b6b6b, on_accent: 0xffffff };
+const CHAT_DARK: Palette = Palette { background: 0x000000, background_2: 0x26252a, accent: 0x0a84ff, text: 0xffffff, muted: 0x8e8e93, on_accent: 0xffffff };
 
 /// Every template, grouped by layout.
-pub static TEMPLATES: [Template; 100] = [
+pub static TEMPLATES: [Template; 185] = [
     Template { name: "Launch Day", category: Category::Marketing, layout: Layout::Headline, copy: &["INTRODUCING", "Meet the\nNew Standard", "Built for teams that move fast", "Learn More"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 12.0 },
     Template { name: "Big Idea", category: Category::Brand, layout: Layout::Headline, copy: &["OUR MISSION", "Make Every\nDay Count", "Simple tools for busy people", "Join Us"], palette: CREAM, font: ("Georgia", 700), seconds: 12.0 },
     Template { name: "Webinar Invite", category: Category::Events, layout: Layout::Headline, copy: &["FREE WEBINAR", "Grow Your\nAudience", "Live Thursday · 12 PM", "Save My Seat"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 12.0 },
@@ -120,4 +127,89 @@ pub static TEMPLATES: [Template; 100] = [
     Template { name: "Shop the Look", category: Category::Ugc, layout: Layout::EndCard, copy: &["Shop This\nLook", "@yourstore", "Shop Now"], palette: BLUSH, font: ("Avenir Next", 800), seconds: 10.0 },
     Template { name: "Thanks for Watching", category: Category::Social, layout: Layout::EndCard, copy: &["Thanks for\nWatching!", "@yourhandle", "Like & Share"], palette: CREAM, font: ("Georgia", 700), seconds: 10.0 },
     Template { name: "Book a Call", category: Category::Brand, layout: Layout::EndCard, copy: &["Ready to\nGrow?", "yourwebsite.com", "Book a Call"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Group Chat", category: Category::Fun, layout: Layout::Chat, copy: &["Bestie", "did you see the\nnew drop??", "omg YES", "we need it", "already ordered"], palette: CHAT_DARK, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "Support Chat", category: Category::Testimonials, layout: Layout::Chat, copy: &["Studio Support", "my order hasn't\narrived yet", "on its way! here's\nyour tracking link", "you guys are\nthe best", "anytime! enjoy"], palette: CHAT_LIGHT, font: ("Helvetica Neue", 700), seconds: 12.0 },
+    Template { name: "Date Night", category: Category::Fun, layout: Layout::Chat, copy: &["Sam", "dinner tonight?", "only if it's tacos", "obviously", "see you at 7"], palette: CANDY, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Teaser Chat", category: Category::Product, layout: Layout::Chat, copy: &["Unknown", "psst... it's\nalmost ready", "what is??", "tomorrow. 9 AM.", "setting an alarm"], palette: CHAT_DARK, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "Mom Texts", category: Category::Fun, layout: Layout::Chat, copy: &["Mom", "how do I send\na video", "just tap the +", "ok i sent the\nwhole album", "mom."], palette: CHAT_LIGHT, font: ("Helvetica Neue", 700), seconds: 12.0 },
+    Template { name: "Order Shipped", category: Category::Product, layout: Layout::Notification, copy: &["SHOP", "Your order shipped!", "Arrives Thursday", "Track It Live"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "New Follower", category: Category::Social, layout: Layout::Notification, copy: &["SOCIAL", "New follower", "@you, say hi back!", "Grow With Us"], palette: NEON_NIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Sale Alert", category: Category::Sales, layout: Layout::Notification, copy: &["DEALS", "Flash sale is live", "Up to 50% off, 24 hours", "Don't Miss It"], palette: CORAL, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Meeting Reminder", category: Category::Events, layout: Layout::Notification, copy: &["CALENDAR", "Webinar in 10 minutes", "Grab a coffee and join", "See You There"], palette: MINT, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Payment Received", category: Category::Marketing, layout: Layout::Notification, copy: &["BANK", "Payment received", "+$2,400 from a client", "Get Paid Faster"], palette: GOLD, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Viral Post", category: Category::Social, layout: Layout::PostCard, copy: &["Alex Rivera", "@alexmakes", "nobody:\nme at 2 AM: one more edit", "24.8K"], palette: MONO, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Hot Take", category: Category::Fun, layout: Layout::PostCard, copy: &["Jordan", "@jordanlee", "Vertical video is\nthe new TV.", "9,412"], palette: NEON_NIGHT, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Customer Shoutout", category: Category::Testimonials, layout: Layout::PostCard, copy: &["Priya S.", "@priya.designs", "Best purchase I made\nall year. Period.", "1,206"], palette: SKY, font: ("Helvetica Neue", 700), seconds: 10.0 },
+    Template { name: "Big News Post", category: Category::Brand, layout: Layout::PostCard, copy: &["Northwind", "@northwind", "We're opening a\nsecond studio!", "3,580"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Tip Post", category: Category::Education, layout: Layout::PostCard, copy: &["Daily Tips", "@dailytips", "Cut on the action,\nnot after it.", "12.1K"], palette: MINT, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Coffee or Tea", category: Category::Fun, layout: Layout::ThisOrThat, copy: &["Which one?", "Coffee", "Tea"], palette: CANDY, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Beach or Mountains", category: Category::Social, layout: Layout::ThisOrThat, copy: &["Your pick?", "Beach", "Mountains"], palette: OCEAN, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Which Look", category: Category::Product, layout: Layout::ThisOrThat, copy: &["Which look?", "Look A", "Look B"], palette: BLUSH, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Pizza or Tacos", category: Category::Fun, layout: Layout::ThisOrThat, copy: &["Dinner vote", "Pizza", "Tacos"], palette: SUNNY, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Old or New", category: Category::Marketing, layout: Layout::ThisOrThat, copy: &["Which logo?", "Old", "New"], palette: MIDNIGHT, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Monday Meme", category: Category::Fun, layout: Layout::Meme, copy: &["ME ON MONDAY", "ME ON FRIDAY"], palette: MONO, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Render Meme", category: Category::Fun, layout: Layout::Meme, copy: &["WHEN THE RENDER", "FINISHES FIRST TRY"], palette: MONO, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Package Meme", category: Category::Ugc, layout: Layout::Meme, copy: &["WAITING FOR\nMY PACKAGE", "THE PACKAGE"], palette: MONO, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Gym Meme", category: Category::Fun, layout: Layout::Meme, copy: &["DAY 1", "DAY 365"], palette: MONO, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Small Biz Meme", category: Category::Brand, layout: Layout::Meme, copy: &["SMALL BUSINESS OWNERS", "WHEN SOMEONE\nSAYS 'CUTE!'"], palette: MONO, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Coming Soon Type", category: Category::Marketing, layout: Layout::Typewriter, copy: &["Something new is coming...", "Stay tuned"], palette: MONO, font: ("American Typewriter", 700), seconds: 10.0 },
+    Template { name: "Dear Customer", category: Category::Brand, layout: Layout::Typewriter, copy: &["Dear customer, thank you.", "From all of us at Corner Cafe"], palette: CREAM, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Hello World", category: Category::Education, layout: Layout::Typewriter, copy: &["Hello, world.", "Learn to code in 30 days"], palette: LIME, font: ("Menlo", 700), seconds: 10.0 },
+    Template { name: "Plot Twist", category: Category::Fun, layout: Layout::Typewriter, copy: &["Plot twist:", "It was free all along"], palette: NEON_NIGHT, font: ("Courier New", 700), seconds: 10.0 },
+    Template { name: "Founder Note", category: Category::Brand, layout: Layout::Typewriter, copy: &["It started in a garage.", "Our story, 2015 to today"], palette: GOLD, font: ("American Typewriter", 700), seconds: 10.0 },
+    Template { name: "Open Late", category: Category::Brand, layout: Layout::Neon, copy: &["OPEN", "Late night menu till 2 AM"], palette: NEON_NIGHT, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Party Sign", category: Category::Celebrations, layout: Layout::Neon, copy: &["PARTY", "Saturday · 10 PM"], palette: PARTY, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Neon Sale", category: Category::Sales, layout: Layout::Neon, copy: &["SALE", "Tonight only"], palette: NEON_NIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "On Air", category: Category::Events, layout: Layout::Neon, copy: &["LIVE", "The Night Shift, on stage now"], palette: NEON_NIGHT, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Good Vibes", category: Category::Social, layout: Layout::Neon, copy: &["vibes", "Good ones only"], palette: NEON_NIGHT, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Happy Birthday", category: Category::Celebrations, layout: Layout::Confetti, copy: &["Happy\nBirthday!", "Make a wish"], palette: PARTY, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "We Did It Party", category: Category::Celebrations, layout: Layout::Confetti, copy: &["We Did It!", "Thank you, team"], palette: SUNNY, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Congrats Grad", category: Category::Celebrations, layout: Layout::Confetti, copy: &["Congrats,\nGrad!", "Class of 2026"], palette: MIDNIGHT, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Happy New Year", category: Category::Celebrations, layout: Layout::Confetti, copy: &["Happy\nNew Year", "Here's to 2027"], palette: GOLD, font: ("Didot", 700), seconds: 10.0 },
+    Template { name: "Giveaway Winner", category: Category::Social, layout: Layout::Confetti, copy: &["We Have a\nWinner!", "Check your DMs"], palette: CANDY, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "App Launch Phone", category: Category::Product, layout: Layout::PhoneMockup, copy: &["Meet Focus", "The timer that keeps\nyou in the zone", "Download"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Dark Mode Phone", category: Category::Product, layout: Layout::PhoneMockup, copy: &["Now with\nDark Mode", "Easy on the eyes", "Update Now"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "Shop Online", category: Category::Marketing, layout: Layout::PhoneMockup, copy: &["Shop Online", "Free delivery over $50", "Visit Us"], palette: MINT, font: ("Avenir Next", 700), seconds: 12.0 },
+    Template { name: "Train Anywhere", category: Category::Ugc, layout: Layout::PhoneMockup, copy: &["Train\nAnywhere", "Workouts in your pocket", "Start Free"], palette: RED, font: ("Impact", 400), seconds: 12.0 },
+    Template { name: "Recipe App", category: Category::Education, layout: Layout::PhoneMockup, copy: &["Dinner in\n20 Minutes", "500+ easy recipes", "Get Cooking"], palette: SUNNY, font: ("Georgia", 700), seconds: 12.0 },
+    Template { name: "Summer Memories", category: Category::Social, layout: Layout::Polaroid, copy: &["summer '26", "The best days"], palette: SUNNY, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Wedding Day", category: Category::Celebrations, layout: Layout::Polaroid, copy: &["Mr & Mrs", "June 21 · Forever"], palette: CREAM, font: ("Didot", 700), seconds: 10.0 },
+    Template { name: "Behind the Scenes", category: Category::Ugc, layout: Layout::Polaroid, copy: &["BTS", "How we made it"], palette: MONO, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Road Trip", category: Category::Fun, layout: Layout::Polaroid, copy: &["road trip!", "2,000 miles later"], palette: OCEAN, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Meet the Team", category: Category::Brand, layout: Layout::Polaroid, copy: &["the team", "The people behind it all"], palette: CORAL, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Trivia Time", category: Category::Education, layout: Layout::Quiz, copy: &["Fastest land animal?", "Lion", "Cheetah", "Horse"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Brand Quiz", category: Category::Marketing, layout: Layout::Quiz, copy: &["Our first product?", "A mug", "A tote bag", "A hat"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Space Quiz", category: Category::Fun, layout: Layout::Quiz, copy: &["Biggest planet?", "Saturn", "Jupiter", "Neptune"], palette: NEON_NIGHT, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Guess the Price", category: Category::Sales, layout: Layout::Quiz, copy: &["Guess the price!", "$49", "$29", "$99"], palette: SUNNY, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Octopus Quiz", category: Category::Education, layout: Layout::Quiz, copy: &["How many hearts?", "One", "Three", "Two"], palette: MINT, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Now Playing", category: Category::Social, layout: Layout::NowPlaying, copy: &["Midnight Drive", "The Night Shift"], palette: MIDNIGHT, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "Focus Playlist", category: Category::Podcast, layout: Layout::NowPlaying, copy: &["Focus Mix", "Lo-fi beats to edit to"], palette: LIME, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "New Single", category: Category::Events, layout: Layout::NowPlaying, copy: &["Neon Hearts", "New single out now"], palette: NEON_NIGHT, font: ("Futura", 700), seconds: 12.0 },
+    Template { name: "Episode Player", category: Category::Podcast, layout: Layout::NowPlaying, copy: &["Ep. 42: Pricing", "Small Biz Hour"], palette: GOLD, font: ("Futura", 700), seconds: 12.0 },
+    Template { name: "Workout Mix", category: Category::Fun, layout: Layout::NowPlaying, copy: &["Beast Mode", "Gym playlist"], palette: RED, font: ("Impact", 400), seconds: 12.0 },
+    Template { name: "Fundraiser Goal", category: Category::Events, layout: Layout::Progress, copy: &["Fundraiser Goal", "75%", "$7,500 of $10,000 raised"], palette: MINT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Course Progress", category: Category::Education, layout: Layout::Progress, copy: &["Course Progress", "60%", "12 of 20 lessons done"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Almost Ready", category: Category::Product, layout: Layout::Progress, copy: &["Building v2.0", "90%", "Almost ready..."], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Road to 10K", category: Category::Social, layout: Layout::Progress, copy: &["Road to 10K", "82%", "Help us get there!"], palette: CANDY, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Stock Left", category: Category::Sales, layout: Layout::Progress, copy: &["Stock Left", "15%", "Going fast"], palette: CORAL, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Big Bold Loud", category: Category::Marketing, layout: Layout::KineticStack, copy: &["BIG", "BOLD", "LOUD", "NOW"], palette: MONO, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Eat Sleep Edit", category: Category::Fun, layout: Layout::KineticStack, copy: &["EAT", "SLEEP", "EDIT", "REPEAT"], palette: LIME, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Launch Hype", category: Category::Product, layout: Layout::KineticStack, copy: &["NEW", "FAST", "SIMPLE", "YOURS"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Wake Work Win", category: Category::Social, layout: Layout::KineticStack, copy: &["WAKE", "WORK", "WIN", "REPEAT"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Shop Save Smile", category: Category::Sales, layout: Layout::KineticStack, copy: &["SHOP", "SAVE", "SMILE", "TODAY"], palette: SUNNY, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "We've Moved", category: Category::Brand, layout: Layout::MapPin, copy: &["We've Moved!", "45 Oak Street, Austin"], palette: CREAM, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Find Us", category: Category::Brand, layout: Layout::MapPin, copy: &["Corner Cafe", "Open 7 AM to 7 PM"], palette: MINT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Event Location", category: Category::Events, layout: Layout::MapPin, copy: &["The Venue", "Grand Hall · Downtown"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Now Open Nearby", category: Category::Marketing, layout: Layout::MapPin, copy: &["Now Open", "123 Main Street"], palette: CORAL, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Next Stop", category: Category::Social, layout: Layout::MapPin, copy: &["Lisbon", "Our next stop"], palette: OCEAN, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Welcome Coupon", category: Category::Sales, layout: Layout::Coupon, copy: &["Welcome Gift", "15%", "WELCOME15", "For your first order"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Birthday Coupon", category: Category::Celebrations, layout: Layout::Coupon, copy: &["Happy Birthday!", "$10", "BDAY10", "Valid all month"], palette: CANDY, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Free Coffee", category: Category::Brand, layout: Layout::Coupon, copy: &["On Us", "FREE", "COFFEE", "Any size, today only"], palette: CREAM, font: ("Georgia", 700), seconds: 10.0 },
+    Template { name: "Loyalty Reward", category: Category::Marketing, layout: Layout::Coupon, copy: &["Thank You", "20%", "LOYAL20", "Ends Sunday"], palette: GOLD, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Referral Code", category: Category::Social, layout: Layout::Coupon, copy: &["Share & Save", "$20", "FRIEND20", "For you and a friend"], palette: MINT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "System On", category: Category::Brand, layout: Layout::GlitchTitle, copy: &["SYSTEM ON", "Welcome back"], palette: NEON_NIGHT, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Game Night", category: Category::Events, layout: Layout::GlitchTitle, copy: &["GAME NIGHT", "Friday · 8 PM"], palette: ELECTRIC, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Version Two", category: Category::Product, layout: Layout::GlitchTitle, copy: &["V2.0", "The update you asked for"], palette: MIDNIGHT, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Breaking", category: Category::Social, layout: Layout::GlitchTitle, copy: &["BREAKING", "You won't believe this"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Error 404", category: Category::Fun, layout: Layout::GlitchTitle, copy: &["ERROR 404", "Motivation not found"], palette: LIME, font: ("Menlo", 700), seconds: 10.0 },
 ];

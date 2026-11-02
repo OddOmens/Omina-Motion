@@ -257,9 +257,25 @@ pub struct EditorState {
     file: Option<PathBuf>,
 }
 
+/// Composition settings from the new-composition defaults in Settings: transparent, as new
+/// compositions start, and kept within what compositions allow.
+pub fn new_composition_settings(size: crate::app_settings::NewComposition) -> edit::CompositionSettings {
+    let rate = studio_core::time::FrameRate::new(size.fps.clamp(1, 240), 1);
+    edit::CompositionSettings {
+        name: "Comp".into(),
+        width: size.width.clamp(16, 8192),
+        height: size.height.clamp(16, 8192),
+        frame_rate: rate,
+        duration_frames: (i64::from(size.seconds.clamp(1, 3600)) * i64::from(size.fps.clamp(1, 240))).max(1),
+        background: studio_core::model::Rgba::TRANSPARENT,
+    }
+}
+
 impl EditorState {
     pub fn new() -> Self {
         let project = sample_project();
+        // Starting choices from Settings (tests start from the defaults).
+        let settings = if cfg!(test) { crate::app_settings::AppSettings::default() } else { crate::app_settings::load() };
         let duration = project.composition(ids::MAIN_COMP).map_or(240, |comp| comp.duration_frames) as f64;
         Self {
             active_comp: ids::MAIN_COMP,
@@ -267,16 +283,16 @@ impl EditorState {
             current_frame: 0,
             work_area: FrameRange::new(0.0, duration),
             view_range: FrameRange::new(0.0, duration),
-            loop_playback: true,
+            loop_playback: settings.loop_playback,
             selected_layers: Vec::new(),
             selected_keyframes: Vec::new(),
             expanded_rows: HashSet::new(),
             align_target: AlignTarget::Composition,
             scale_linked: true,
             shape_size_linked: false,
-            viewer_snapping: true,
+            viewer_snapping: settings.anchor_snapping,
             // Tests import into the top level unless they say otherwise.
-            import_folders: if cfg!(test) { crate::app_settings::ImportFolders { video: None, image: None, audio: None } } else { crate::app_settings::load().import_folders },
+            import_folders: if cfg!(test) { crate::app_settings::ImportFolders { video: None, image: None, audio: None } } else { settings.import_folders.clone() },
             pen: None,
             playback: None,
             keyframe_drag: None,
@@ -284,7 +300,7 @@ impl EditorState {
             layer_time_base: None,
             magnetic_main_track: true,
             clip_drag: None,
-            snapping: true,
+            snapping: settings.snapping,
             snap_threshold: 0,
             snap_line: None,
             viewer_drag: None,
@@ -604,16 +620,10 @@ impl EditorState {
 
     /// Starts a new, empty project: one 1920 × 1080, 30 fps, 10-second composition, and the
     /// folders new projects start with. It has no file until it is saved.
-    pub fn new_project(&mut self, folders: &[String]) {
+    pub fn new_project(&mut self, folders: &[String], size: crate::app_settings::NewComposition) {
         let mut project = Project::new(Vec::new(), Vec::new());
-        let settings = edit::CompositionSettings {
-            name: "Main Comp".into(),
-            width: 1920,
-            height: 1080,
-            frame_rate: studio_core::time::FrameRate::new(30, 1),
-            duration_frames: 300,
-            background: studio_core::model::Rgba::TRANSPARENT,
-        };
+        let settings = edit::CompositionSettings { name: "Main Comp".into(), ..new_composition_settings(size) };
+        let duration = settings.duration_frames as f64;
         let Ok(comp) = edit::new_composition(&mut project, &settings) else { return };
         studio_core::folders::add_default_folders(&mut project, folders);
         self.end_keyframe_drag();
@@ -623,8 +633,8 @@ impl EditorState {
         self.open_composition(comp);
         self.selected_item = Some(comp);
         self.current_frame = 0;
-        self.work_area = FrameRange::new(0.0, 300.0);
-        self.set_view_range(FrameRange::new(0.0, 300.0));
+        self.work_area = FrameRange::new(0.0, duration);
+        self.set_view_range(FrameRange::new(0.0, duration));
         self.history = history::History::new(&self.project);
         self.file = None;
     }

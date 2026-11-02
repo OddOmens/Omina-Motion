@@ -42,6 +42,100 @@ pub struct AppSettings {
     pub default_folders: Vec<String>,
     /// Which folder imported files go into, by kind (`None` leaves them at the top).
     pub import_folders: ImportFolders,
+    /// Whether the last project opens again when Studio starts.
+    pub reopen_last_project: bool,
+    /// How often unsaved work is copied aside for recovery, in seconds (0: never).
+    pub recovery_seconds: u32,
+    /// What new compositions (and new projects) start as.
+    pub new_composition: NewComposition,
+    /// How sharp the viewer is while playing.
+    pub playback_quality: PlaybackQuality,
+    /// Whether playback starts over at the end of the work area, for new sessions.
+    pub loop_playback: bool,
+    /// Whether snapping starts on.
+    pub snapping: bool,
+    /// Whether the viewer's anchor points start snapping to their layer's corners and middle.
+    pub anchor_snapping: bool,
+    /// What shows behind the transparent parts of a composition in the viewer.
+    pub transparency: Transparency,
+    /// Pictures and waveforms drawn on timeline clips.
+    pub clip_thumbnails: bool,
+    pub clip_waveforms: bool,
+    /// The frame render time under the timeline.
+    pub show_render_time: bool,
+}
+
+/// What new compositions start as.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NewComposition {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub seconds: u32,
+}
+
+impl Default for NewComposition {
+    fn default() -> Self {
+        Self { width: 1920, height: 1080, fps: 30, seconds: 10 }
+    }
+}
+
+/// How sharp the viewer is while playing; paused frames are always full quality.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaybackQuality {
+    /// Half resolution on high-density screens, full elsewhere.
+    #[default]
+    Auto,
+    Full,
+    Half,
+    Quarter,
+}
+
+impl PlaybackQuality {
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Full, Self::Half, Self::Quarter];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Full => "Full",
+            Self::Half => "Half",
+            Self::Quarter => "Quarter",
+        }
+    }
+
+    /// Device pixels per screen point to render at while playing, on a screen of `density`.
+    pub fn density(self, density: f32) -> f32 {
+        match self {
+            Self::Auto => density.min(1.0),
+            Self::Full => density,
+            Self::Half => density * 0.5,
+            Self::Quarter => density * 0.25,
+        }
+    }
+}
+
+/// What shows behind transparent parts of a composition in the viewer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Transparency {
+    #[default]
+    Checkerboard,
+    Black,
+    Gray,
+    White,
+}
+
+impl Transparency {
+    pub const ALL: [Self; 4] = [Self::Checkerboard, Self::Black, Self::Gray, Self::White];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Checkerboard => "Checkerboard",
+            Self::Black => "Black",
+            Self::Gray => "Gray",
+            Self::White => "White",
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -58,6 +152,17 @@ impl Default for AppSettings {
             project_columns: ProjectColumns::default(),
             default_folders: ["Footage", "Images", "Music", "Sound Effects", "Voice Over"].map(String::from).to_vec(),
             import_folders: ImportFolders::default(),
+            reopen_last_project: true,
+            recovery_seconds: 30,
+            new_composition: NewComposition::default(),
+            playback_quality: PlaybackQuality::default(),
+            loop_playback: true,
+            snapping: true,
+            anchor_snapping: true,
+            transparency: Transparency::default(),
+            clip_thumbnails: true,
+            clip_waveforms: true,
+            show_render_time: true,
         }
     }
 }

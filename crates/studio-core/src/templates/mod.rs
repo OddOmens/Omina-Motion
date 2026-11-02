@@ -1,4 +1,4 @@
-//! Ready-made, animated compositions for social media and marketing: 100 templates, each in
+//! Ready-made, animated compositions for social media and marketing: 185 templates, each in
 //! three shapes (16:9, 4:5 and 9:16), about 10 to 15 seconds long.
 //!
 //! A template is a layout (one of `Layout`'s twenty animated designs) filled with its own words,
@@ -7,6 +7,7 @@
 //! Gray boxes named "Drop your … here" mark where footage or images go.
 
 mod catalog;
+mod fun;
 mod layouts;
 
 use crate::animation::{Animated, CubicBezier, EaseMode, Easing, Keyframe, Vec2};
@@ -60,10 +61,12 @@ pub enum Category {
     Education,
     Podcast,
     Brand,
+    Fun,
+    Celebrations,
 }
 
 impl Category {
-    pub const ALL: [Self; 10] = [Self::Marketing, Self::Sales, Self::Product, Self::Ugc, Self::Social, Self::Testimonials, Self::Events, Self::Education, Self::Podcast, Self::Brand];
+    pub const ALL: [Self; 12] = [Self::Marketing, Self::Sales, Self::Product, Self::Ugc, Self::Social, Self::Fun, Self::Celebrations, Self::Testimonials, Self::Events, Self::Education, Self::Podcast, Self::Brand];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -77,6 +80,8 @@ impl Category {
             Self::Education => "Tips & How-To",
             Self::Podcast => "Podcast & Quotes",
             Self::Brand => "Brand",
+            Self::Fun => "Fun & Memes",
+            Self::Celebrations => "Celebrations",
         }
     }
 }
@@ -140,6 +145,40 @@ pub enum Layout {
     Marquee,
     /// Headline, handle, button: an end card asking to follow.
     EndCard,
+    /// Contact, then four messages (theirs, yours, theirs, yours): a text-message chat.
+    Chat,
+    /// App, title, message, headline: a phone notification sliding down.
+    Notification,
+    /// Name, handle, post, likes: a social post card.
+    PostCard,
+    /// Question, one option, the other: a This-or-That poll with results.
+    ThisOrThat,
+    /// Top line, bottom line: a meme over a photo.
+    Meme,
+    /// Line, line under it: text typed out with a blinking cursor.
+    Typewriter,
+    /// Word, line under it: a flickering neon sign.
+    Neon,
+    /// Headline, line under it: confetti falling.
+    Confetti,
+    /// Headline, line under it, button: an app on a phone.
+    PhoneMockup,
+    /// Caption, line under it: instant photos dropping onto a pile.
+    Polaroid,
+    /// Question, three answers (the second is right): a quiz with a timer.
+    Quiz,
+    /// Song, artist: a music player card.
+    NowPlaying,
+    /// Title, a percentage ("75%"), line under it: a goal bar filling.
+    Progress,
+    /// Four words: big words stacking up one by one.
+    KineticStack,
+    /// Place, address: a pin dropping on a map.
+    MapPin,
+    /// Title, amount, code, expiry: a coupon.
+    Coupon,
+    /// Title, line under it: a glitching title.
+    GlitchTitle,
 }
 
 /// One template: its layout filled with words, colors and a font.
@@ -303,6 +342,16 @@ impl Builder<'_> {
 
     #[allow(clippy::too_many_arguments)]
     fn text_aligned(&mut self, text: &str, at: Vec2, size: f32, color: u32, weight: u16, from: f64, align: TextAlign) -> Id {
+        // Words wider than the frame (long lines in the narrow shapes) are made smaller to fit.
+        let room = self.width - 90.0 * self.unit();
+        let wide = TextStyle { font_size: size * self.unit(), ..TextStyle::default() }.estimate_size(text).x;
+        let fit = if wide > room { room / wide } else { 1.0 };
+        self.text_unfitted(text, at, size * fit, color, weight, from, align)
+    }
+
+    /// A text layer at exactly `size`, even if it runs past the frame (scrolling text).
+    #[allow(clippy::too_many_arguments)]
+    fn text_unfitted(&mut self, text: &str, at: Vec2, size: f32, color: u32, weight: u16, from: f64, align: TextAlign) -> Id {
         let size = size * self.unit();
         let style = TextStyle {
             font_family: self.template.font.0.into(),
@@ -469,6 +518,14 @@ impl Builder<'_> {
         Self::keys(&mut self.transform(id).position, keys);
     }
 
+    /// Keyframes setting `index` of the last effect added to a layer: (seconds, value) pairs.
+    fn animate_effect(&mut self, id: Id, index: usize, keys: &[(f64, f32, Easing)]) {
+        let keys: Vec<Keyframe<f32>> = keys.iter().map(|&(at, value, easing)| self.key(at, value, easing)).collect();
+        if let Some(property) = self.layer(id).effects.last_mut().and_then(|effect| effect.properties.get_mut(index)) {
+            property.value = Animated::keyframed(keys);
+        }
+    }
+
     /// Adds a catalog effect with some of its settings changed, by position.
     fn effect(&mut self, id: Id, name: &str, settings: &[(usize, f32)]) {
         let comp = self.comp;
@@ -505,8 +562,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn there_are_a_hundred_templates_with_words_for_their_layouts() {
-        assert_eq!(TEMPLATES.len(), 100);
+    fn every_template_has_words_for_its_layout() {
+        assert_eq!(TEMPLATES.len(), 185);
         let mut names = std::collections::HashSet::new();
         for template in &TEMPLATES {
             assert!(names.insert(template.name), "{} is named twice", template.name);

@@ -762,7 +762,8 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
 /// a still image (`still`), its one picture. Only tiles that are on screen are asked for.
 #[allow(clippy::too_many_arguments)]
 fn filmstrip(layer: &Layer, source: &studio_core::model::ProjectItem, left: f32, clip_px: f32, height: f32, still: bool, workspace: &Workspace) -> AnyElement {
-    let Some(path) = source.path.as_ref() else { return div().into_any_element() };
+    // Settings can turn the pictures off.
+    let Some(path) = source.path.as_ref().filter(|_| workspace.ui.settings.clip_thumbnails) else { return div().h(px(height)).into_any_element() };
     let aspect = source.size.map_or(16.0 / 9.0, |size| size.x / size.y.max(1.0));
     let tile = (height * aspect).max(16.0);
     let graph_width = workspace.ui.timeline.graph.get().width.max(1.0);
@@ -790,7 +791,8 @@ fn filmstrip(layer: &Layer, source: &studio_core::model::ProjectItem, left: f32,
 
 /// A waveform across a clip: one bar per two pixels, from the source's peak levels at that time.
 fn waveform(layer: &Layer, peaks: Option<Arc<Peaks>>, height: f32, ink: u32, workspace: &Workspace) -> AnyElement {
-    let Some(peaks) = peaks else { return div().h(px(height)).into_any_element() };
+    // Settings can turn waveforms off.
+    let Some(peaks) = peaks.filter(|_| workspace.ui.settings.clip_waveforms) else { return div().h(px(height)).into_any_element() };
     let fps = workspace.state.composition().frame_rate.fps();
     let (in_frame, out_frame, start_frame) = (layer.in_frame, layer.out_frame, layer.start_frame);
     // At another steady speed the sound covers more (or less) of the file per frame.

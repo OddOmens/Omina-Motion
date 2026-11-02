@@ -324,6 +324,8 @@ pub struct UiState {
     pub preview: panels::project::Preview,
     /// Where the preview box is on screen, for scrubbing.
     pub preview_bounds: panels::chrome::MeasuredBounds,
+    /// Settings the panels read as they draw (kept in step by the Settings dialog).
+    pub settings: crate::app_settings::AppSettings,
     /// Which columns the Project panel shows (from Settings).
     pub project_columns: crate::app_settings::ProjectColumns,
     pub timeline: panels::timeline::TimelineUi,
@@ -515,7 +517,13 @@ impl Workspace {
             cx.defer_in(window, |this, window, cx| this.restore_session(window, cx));
             cx.spawn(async move |this, cx| {
                 loop {
-                    cx.background_executor().timer(crate::project_files::RECOVERY_INTERVAL).await;
+                    // As often as Settings says; checked again each time, so a change applies.
+                    let seconds = crate::app_settings::load().recovery_seconds;
+                    let wait = if seconds == 0 { crate::project_files::RECOVERY_INTERVAL } else { std::time::Duration::from_secs(u64::from(seconds)) };
+                    cx.background_executor().timer(wait).await;
+                    if seconds == 0 {
+                        continue;
+                    }
                     if this.update(cx, |this, _| this.keep_recovery_copy()).is_err() {
                         break;
                     }
@@ -557,6 +565,7 @@ impl Workspace {
                 graph_editor: None,
                 font_families: panels::properties::installed_font_families(cx),
                 project_columns: crate::app_settings::load().project_columns,
+                settings: crate::app_settings::load(),
                 preview: Default::default(),
                 template_format: studio_core::templates::Format::Vertical,
                 template_category: None,

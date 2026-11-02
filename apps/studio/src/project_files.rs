@@ -87,7 +87,7 @@ impl Workspace {
             .detach();
             return;
         }
-        if let Some(last) = settings.last_project.filter(|path| path.exists()) {
+        if let Some(last) = settings.last_project.filter(|path| path.exists() && settings.reopen_last_project) {
             self.open_file(last, window, cx);
         }
     }
@@ -211,7 +211,8 @@ impl Workspace {
     /// Starts a new, empty project, after offering to save unsaved changes.
     pub fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.unless_cancelled(window, cx, Box::new(|this, _, cx| {
-            this.state.new_project(&app_settings::load().default_folders);
+            let settings = app_settings::load();
+            this.state.new_project(&settings.default_folders, settings.new_composition);
             app_settings::update(|app| app.last_project = None);
             cx.notify();
         }));
