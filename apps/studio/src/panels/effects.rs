@@ -15,7 +15,7 @@ use studio_core::model::{Id, LayerContent};
 
 use super::chrome::panel;
 use crate::theme::{color, hsla, size};
-use crate::workspace::{EffectDrag, PanelId, Workspace};
+use crate::workspace::{EffectDrag, PanelId, TransitionDrag, Workspace};
 
 /// What follows the pointer while an effect is dragged.
 struct EffectDragPreview(String);
@@ -63,6 +63,39 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         clips => format!("Effects for {} clips", clips.len()),
     }));
 
+    // Transitions first: dragged onto the start or end of a clip, they go on that cut.
+    let pictures = selected.iter().all(|(_, _, content)| !matches!(content, LayerContent::Audio { .. }));
+    if pictures {
+        let open = !workspace.ui.closed_effect_categories.contains("Transitions");
+        list = list.child(
+            div()
+                .id("transitions-category")
+                .h(px(size::ROW_HEIGHT + 4.0))
+                .mx_1()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .rounded(px(6.0))
+                .text_color(hsla(color::MUTED))
+                .hover(|style| style.bg(hsla(color::HOVER)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !this.ui.closed_effect_categories.remove("Transitions") {
+                        this.ui.closed_effect_categories.insert("Transitions");
+                    }
+                    cx.notify();
+                }))
+                .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)))
+                .child("Transitions")
+                .test_support(),
+        );
+        if open {
+            for (index, transition) in studio_core::transitions::Transition::ALL.into_iter().enumerate() {
+                list = list.child(transition_row(index, transition, !selected.is_empty(), cx));
+            }
+        }
+    }
+
     let mut shown = 0;
     for (category_index, category) in CATEGORIES.iter().enumerate() {
         let effects: Vec<&'static str> = category
@@ -109,6 +142,49 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         list = list.child(note("Audio clips have no picture, so no effects apply to them.".to_owned()));
     }
     panel(PanelId::Effects, &tabs, None, list, workspace, cx)
+}
+
+/// How long transitions added from the panel take, in seconds.
+const TRANSITION_SECONDS: f32 = 0.6;
+
+/// One transition: drag it onto the start or end of a clip, or press + to put it at the start
+/// of the selected clips.
+fn transition_row(index: usize, transition: studio_core::transitions::Transition, can_apply: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let apply = div()
+        .id(("transition-apply", index))
+        .size(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.0))
+        .text_color(hsla(color::MUTED))
+        .hover(|style| style.bg(hsla(color::RAISED)).text_color(hsla(color::TEXT)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            for layer in this.state.selected_layers.clone() {
+                this.state.add_transition(layer, true, transition, TRANSITION_SECONDS);
+            }
+            cx.notify();
+        }))
+        .child(Icon::new(IconName::Plus).size(px(14.0)))
+        .test_support();
+    div()
+        .id(("transition", index))
+        .h(px(size::ROW_HEIGHT + 4.0))
+        .mx_1()
+        .flex()
+        .items_center()
+        .gap_2()
+        .pl(px(26.0))
+        .pr_1()
+        .rounded(px(6.0))
+        .cursor_grab()
+        .hover(|style| style.bg(hsla(color::HOVER)))
+        .on_drag(TransitionDrag { transition }, |drag, _, _, cx| cx.new(|_| EffectDragPreview(drag.transition.name().to_owned())))
+        .child(Icon::new(IconName::Blend).size(px(12.0)).text_color(hsla(color::MUTED)))
+        .child(div().flex_1().child(transition.name()))
+        .when(can_apply, |row| row.child(apply))
+        .test_support()
 }
 
 /// One effect: drag it onto a clip, or press + to add it to the selected clips.

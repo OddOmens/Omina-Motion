@@ -617,6 +617,13 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 this.state.add_effect(id, &drag.name);
                 cx.notify();
             }))
+            // A transition dropped on a clip goes on the cut nearer the pointer: its start or end.
+            .drag_over::<crate::workspace::TransitionDrag>(|style, _, _, _| style.border_color(hsla(0xffffff)))
+            .on_drop(cx.listener(move |this, drag: &crate::workspace::TransitionDrag, window, cx| {
+                let frame = pointer_frame(this, window.mouse_position().x);
+                this.state.add_transition(id, frame * 2 < in_frame + out_frame, drag.transition, 0.6);
+                cx.notify();
+            }))
             .child(header)
             .children(inside)
             .children(fades.into_iter().flatten())

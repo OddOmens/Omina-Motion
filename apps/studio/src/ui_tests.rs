@@ -1381,6 +1381,9 @@ fn the_plus_button_adds_an_effect_to_the_selected_clip(cx: &mut TestAppContext) 
     // With nothing selected there is nothing to apply to, so there is no + button.
     assert!(visual.update(|window, _| window.try_find("effect-apply:Sharpen")).is_none());
     visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.select_layer(TITLE, false); cx.notify(); }));
+    // Transitions are listed first; fold them away so Sharpen is in view.
+    render(visual);
+    visual.update(|window, cx| window.click("transitions-category", cx));
     render(visual);
     visual.update(|window, cx| window.click("effect-apply:Sharpen", cx));
     render(visual);
@@ -2245,7 +2248,7 @@ fn picking_a_subject_places_clicks_on_the_picture_and_asks_before_downloading(cx
             layer
         })
     });
-    render(visual);
+    tall_window(visual);
     visual.update(|window, cx| window.click("cutout-pick", cx));
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.cutout_pick), Some(layer));
@@ -2559,4 +2562,88 @@ fn settings_switches_change_what_the_panels_show(cx: &mut TestAppContext) {
     visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.settings.new_composition.fps = 60));
     let made = crate::state::new_composition_settings(visual.update(|_, cx| workspace.read(cx).ui.settings.new_composition));
     assert_eq!(made.frame_rate, studio_core::time::FrameRate::new(60, 1));
+}
+
+#[gpui_kit::test]
+fn the_animate_section_shows_for_a_layer_and_presets_land_on_it(cx: &mut TestAppContext) {
+    use studio_core::presets::{Loop, Motion, Phase};
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    tall_window(visual);
+    assert!(visual.update(|window, _| window.try_find("animate-in")).is_some(), "In, Out and Loop menus are offered");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_layer_motion(TITLE, Phase::In, Some(Motion::Pop), 0.5);
+        ws.state.set_layer_loop(TITLE, Some(Loop::Float));
+        cx.notify();
+    }));
+    render(visual);
+    let animation = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().animation);
+    assert_eq!(animation.enter.map(|(motion, _)| motion), Some(Motion::Pop));
+    assert_eq!(animation.looping, Some(Loop::Float));
+    // The length menu appears once an In motion is chosen.
+    assert!(visual.update(|window, _| window.try_find("animate-in-length")).is_some());
+}
+
+#[gpui_kit::test]
+fn a_transitions_plus_puts_it_on_the_selected_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    // Cross Dissolve is the first; the title has nothing touching it, so it fades in.
+    visual.update(|window, cx| window.click(("transition-apply", 0_usize), cx));
+    render(visual);
+    let enter = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().animation.enter);
+    assert_eq!(enter.map(|(motion, _)| motion), Some(studio_core::presets::Motion::Fade));
+}
+
+#[gpui_kit::test]
+fn an_element_click_adds_it_selected_in_the_middle(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    visual.update(|window, cx| window.click("rail-elements", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("element", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let composition = state.composition();
+        assert!(composition.layers.len() > before);
+        let added = state.selected_layers[0];
+        let bounds = studio_core::align::layer_bounds(composition, added, state.current_frame).unwrap();
+        let middle = (bounds.min + bounds.max) * 0.5;
+        assert!((middle.x - composition.width as f32 * 0.5).abs() < 2.0 && (middle.y - composition.height as f32 * 0.5).abs() < 2.0, "{bounds:?}");
+    });
+}
+
+#[gpui_kit::test]
+fn magic_resize_makes_the_ticked_sizes_and_opens_the_last(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let (source, count) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.composition().id, state.project.compositions.len())
+    });
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::MagicResize), cx));
+    render(visual);
+    // The three social shapes start ticked; untick 4:5.
+    visual.update(|window, cx| window.click(("resize-size", 1_usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("resize-ok", cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.project.compositions.len(), count + 2);
+        let open = state.composition();
+        assert_ne!(open.id, source);
+        assert_eq!((open.width, open.height), (1080, 1080));
+        assert!(open.name.ends_with("1:1"), "{}", open.name);
+        assert!(state.project.compositions.iter().any(|comp| (comp.width, comp.height) == (1080, 1920)));
+    });
+    assert_eq!(crate::panels::resize::short_label("Vertical 9:16 · Reels, TikTok, Shorts"), "9:16");
 }

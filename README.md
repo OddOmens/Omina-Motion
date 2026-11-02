@@ -60,6 +60,14 @@ Inside `apps/studio/src`:
   9:16) are in `studio-core/src/templates/`; `catalog.rs` holds their words, colors and fonts.
   `TEMPLATE_SHEET=/path.png cargo test -p studio-render --test render template_sheet -- --ignored` renders
   them all into one picture to check.
+- `panels/elements.rs`: the Elements panel (shapes, arrows, badges, frames, social buttons and emoji
+  stickers, defined in `studio-core/src/elements.rs`). `ELEMENT_SHEET=/path.png cargo test -p studio-render
+  --test render element_sheet -- --ignored` renders them all into one picture.
+- Animation presets (In, Out and Loop, in the Properties panel's Animate section) are in
+  `studio-core/src/presets.rs`; transitions between clips (the Effects panel's Transitions, dragged onto a
+  cut) are in `studio-core/src/transitions.rs`.
+- `panels/resize.rs`: Magic Resize (Composition menu): copies of the open composition in other sizes, with
+  the layers rearranged by `studio-core/src/resize.rs`.
 - `panels/captions.rs`, `state/captions.rs`: the Captions panel and Generate Captions (download the model, transcribe in the
   background) and caption layers; their timing and animations are in `studio-core/src/captions.rs`.
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.

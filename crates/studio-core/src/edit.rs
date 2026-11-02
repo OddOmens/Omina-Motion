@@ -61,6 +61,7 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         has_audio: item.has_audio,
         audio: Default::default(),
         time: Default::default(),
+        animation: Default::default(),
         content,
     })
 }
@@ -606,6 +607,7 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
             has_audio: false,
             audio: Default::default(),
             time: Default::default(),
+            animation: Default::default(),
         },
     );
     crate::tracks::normalize(composition);

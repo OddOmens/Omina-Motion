@@ -829,6 +829,52 @@ impl EditorState {
         });
     }
 
+    /// Sets (or removes, with `None`) how a layer comes in or goes out.
+    pub fn set_layer_motion(&mut self, layer: Id, phase: studio_core::presets::Phase, motion: Option<studio_core::presets::Motion>, seconds: f32) {
+        let comp = self.active_comp;
+        studio_core::presets::set_motion(&mut self.project, comp, layer, phase, motion, seconds);
+    }
+
+    /// Sets (or removes) what a layer does between coming in and going out.
+    pub fn set_layer_loop(&mut self, layer: Id, looping: Option<studio_core::presets::Loop>) {
+        let comp = self.active_comp;
+        studio_core::presets::set_loop(&mut self.project, comp, layer, looping);
+    }
+
+    /// Puts a transition on the cut at the start (or end) of `layer`: between it and the clip
+    /// touching it there on its track, or on its own if nothing touches.
+    pub fn add_transition(&mut self, layer: Id, at_start: bool, transition: studio_core::transitions::Transition, seconds: f32) -> bool {
+        let comp = self.active_comp;
+        let Some(found) = self.composition().layer(layer) else { return false };
+        let neighbor = studio_core::transitions::touching(self.composition(), found, at_start);
+        let (before, after) = if at_start { (neighbor, Some(layer)) } else { (Some(layer), neighbor) };
+        studio_core::transitions::apply(&mut self.project, comp, before, after, transition, seconds)
+    }
+
+    /// Adds element `index` (of `studio_core::elements::ELEMENTS`) in the middle of the open
+    /// composition at the playhead, and selects it.
+    pub fn add_element(&mut self, index: usize) -> Vec<Id> {
+        let (comp, frame) = (self.active_comp, self.current_frame);
+        let center = Vec2::new(self.composition().width as f32 * 0.5, self.composition().height as f32 * 0.5);
+        let added = studio_core::elements::add(&mut self.project, comp, index, center, frame);
+        self.clear_selection();
+        for &id in &added {
+            self.select_layer(id, true);
+        }
+        added
+    }
+
+    /// Makes a copy of the open composition in another size, rearranged to suit it (Magic
+    /// Resize), and opens it.
+    pub fn magic_resize(&mut self, width: u32, height: u32, label: &str) -> Option<Id> {
+        let comp = self.active_comp;
+        let name = format!("{} {label}", self.composition().name);
+        let made = studio_core::resize::resize_composition(&mut self.project, comp, width, height, &name)?;
+        self.open_composition(made);
+        self.selected_item = Some(made);
+        Some(made)
+    }
+
     /// Removes every marker from the open composition.
     pub fn clear_markers(&mut self) {
         self.composition_mut().markers.clear();

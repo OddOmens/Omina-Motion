@@ -53,6 +53,7 @@ actions!(studio, [
     OpenSettings,
     Precompose,
     CompositionSettings,
+    MagicResize,
     NewComposition,
     NewProject,
     Import,
@@ -170,7 +171,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::separator(),
             MenuItem::action("Snapping", ToggleSnapping),
         ]),
-        Menu::new("Composition").items([MenuItem::action("Composition Settings…", CompositionSettings)]),
+        Menu::new("Composition").items([MenuItem::action("Composition Settings…", CompositionSettings), MenuItem::action("Magic Resize…", MagicResize)]),
     ]
 }
 
@@ -187,6 +188,8 @@ pub enum LeftPanel {
     Templates,
     /// Making captions from speech, and caption looks.
     Captions,
+    /// Ready-made graphics: shapes, arrows, badges, frames and stickers.
+    Elements,
 }
 
 /// Panels that can hold focus; the focused one gets a blue outline.
@@ -203,6 +206,7 @@ pub enum PanelId {
     Align,
     Templates,
     Captions,
+    Elements,
 }
 
 /// The editing tools on the rail.
@@ -245,6 +249,12 @@ pub struct ProjectItemDrag {
 #[derive(Clone, Debug)]
 pub struct EffectDrag {
     pub name: String,
+}
+
+/// A transition dragged from the Effects panel onto a cut in the timeline.
+#[derive(Clone, Debug)]
+pub struct TransitionDrag {
+    pub transition: studio_core::transitions::Transition,
 }
 
 /// What an in-place text input is editing.
@@ -320,6 +330,8 @@ pub struct UiState {
     /// The brand whose colors and font templates take, if one is chosen.
     pub template_brand: Option<studio_core::model::LinkId>,
     pub template_pictures: HashMap<(usize, studio_core::templates::Format), Arc<gpui_kit::RenderImage>>,
+    /// Pictures made of the Elements panel's elements, by index.
+    pub element_pictures: HashMap<usize, Arc<gpui_kit::RenderImage>>,
     /// The Project panel's preview of the selected item.
     pub preview: panels::project::Preview,
     /// Where the preview box is on screen, for scrubbing.
@@ -383,6 +395,7 @@ struct Panels {
     align: Entity<PanelView>,
     templates: Entity<PanelView>,
     captions: Entity<PanelView>,
+    elements: Entity<PanelView>,
     clock: Entity<PlaybackClock>,
 }
 
@@ -394,10 +407,10 @@ impl Panels {
             (view(PanelKind::Toolbar), view(PanelKind::Project), view(PanelKind::Viewer), view(PanelKind::Timeline));
         let (properties, effects, align) = (view(PanelKind::Properties), view(PanelKind::Effects), view(PanelKind::Align));
         let libraries = view(PanelKind::Libraries);
-        let (templates, captions) = (view(PanelKind::Templates), view(PanelKind::Captions));
+        let (templates, captions, elements) = (view(PanelKind::Templates), view(PanelKind::Captions), view(PanelKind::Elements));
         let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id()];
         let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed, project.entity_id()));
-        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, templates, captions, clock }
+        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, templates, captions, elements, clock }
     }
 }
 
@@ -405,9 +418,9 @@ impl Panels {
 impl Workspace {
     /// How many times each panel has rendered, in `PanelKind` order: toolbar, project, viewer,
     /// timeline, properties, effects, libraries, align.
-    pub fn panel_render_counts(&self, cx: &App) -> [usize; 10] {
+    pub fn panel_render_counts(&self, cx: &App) -> [usize; 11] {
         let p = &self.panels;
-        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions].map(|view| view.read(cx).renders)
+        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions, &p.elements].map(|view| view.read(cx).renders)
     }
 }
 
@@ -571,6 +584,7 @@ impl Workspace {
                 template_category: None,
                 template_brand: None,
                 template_pictures: HashMap::new(),
+                element_pictures: HashMap::new(),
                 preview_bounds: Default::default(),
                 timeline: timeline_ui,
                 window_title: String::new(),
@@ -850,6 +864,9 @@ impl Render for Workspace {
         if self.ui.left_panel == LeftPanel::Templates {
             panels::templates::make_pictures(self, window, cx);
         }
+        if self.ui.left_panel == LeftPanel::Elements {
+            panels::elements::make_pictures(self, window, cx);
+        }
         let picking = self.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
         let dragging = cx.has_active_drag() || picking;
         self.state.record_history(dragging);
@@ -889,6 +906,7 @@ impl Render for Workspace {
                                                 LeftPanel::Libraries => cached(&panels.libraries),
                                                 LeftPanel::Templates => cached(&panels.templates),
                                                 LeftPanel::Captions => cached(&panels.captions),
+                                                LeftPanel::Elements => cached(&panels.elements),
                                             }),
                                     )
                                     .child(resizable_panel().child(cached(&panels.viewer))),
@@ -1007,6 +1025,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CompositionSettings, window, cx| {
                 panels::composition_settings::open(this, false, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &MagicResize, window, cx| panels::resize::open(this, window, cx)))
             .on_action(cx.listener(|this, _: &Import, window, cx| this.import(window, cx)))
             // Offered only when there is something to undo or redo, so the Edit menu greys them out otherwise.
             .when(self.state.can_undo(), |root| root.on_action(cx.listener(|this, _: &Undo, _, cx| this.undo_or_redo(false, cx))))

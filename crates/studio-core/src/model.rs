@@ -630,6 +630,9 @@ pub struct Layer {
     /// How fast (and which way) footage plays.
     #[serde(default, skip_serializing_if = "LayerTime::is_normal")]
     pub time: LayerTime,
+    /// The one-click animations chosen for the layer (see `presets`).
+    #[serde(default, skip_serializing_if = "crate::presets::LayerAnimation::is_none")]
+    pub animation: crate::presets::LayerAnimation,
 }
 
 /// How fast a footage layer's source plays, and whether backwards.

@@ -85,6 +85,33 @@ impl ViewerRender {
 }
 
 impl ViewerRender {
+    /// A small picture of an element (see `studio_core::elements`) on a plain square, `size`
+    /// pixels a side, for the Elements panel.
+    pub fn element_picture(&mut self, index: usize, size: u32) -> Option<Arc<RenderImage>> {
+        let renderer = self.renderer.as_mut().ok()?;
+        let mut project = studio_core::model::Project::new(Vec::new(), Vec::new());
+        let settings = studio_core::edit::CompositionSettings { name: "Element".into(), width: 640, height: 640, frame_rate: studio_core::time::FrameRate::new(30, 1), duration_frames: 1, background: studio_core::model::Rgba::TRANSPARENT };
+        let comp = studio_core::edit::new_composition(&mut project, &settings).ok()?;
+        studio_core::elements::add(&mut project, comp, index, Vec2::new(320.0, 320.0), 0);
+        // Fit what was added into the square: elements are sized for a 1080-pixel frame.
+        let measured = renderer.render(&project, comp, 0, size, size, &studio_core::media::NoVideo).ok()?;
+        for (layer, text_size) in measured.text_sizes {
+            studio_core::edit::set_text_box(project.composition_mut(comp)?, layer, text_size);
+        }
+        let picture = renderer.render(&project, comp, 0, size, size, &studio_core::media::NoVideo).ok()?;
+        let bgra: Vec<u8> = picture
+            .bgra
+            .chunks(4)
+            .flat_map(|pixel| {
+                let a = f32::from(pixel[3]) / 255.0;
+                let over = |c: u8| (f32::from(c) * a + 46.0 * (1.0 - a)) as u8;
+                [over(pixel[0]), over(pixel[1]), over(pixel[2]), 255]
+            })
+            .collect();
+        let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(size, size, bgra)?;
+        Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+    }
+
     /// A small picture of a template, for the Templates panel: built into a scratch project and
     /// rendered `seconds` in, `width` × `height` pixels. Drawn twice, as the app does, so text
     /// boxes fit their measured words.

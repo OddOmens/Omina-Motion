@@ -54,6 +54,7 @@ fn layer(id: u64, name: &str, label: LabelColor, content: LayerContent, size: Ve
         has_audio: false,
         audio: Default::default(),
         time: Default::default(),
+        animation: Default::default(),
     }
 }
 

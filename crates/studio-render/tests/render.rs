@@ -35,6 +35,7 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         has_audio: false,
         audio: Default::default(),
         time: Default::default(),
+        animation: Default::default(),
     }
 }
 
@@ -935,6 +936,50 @@ fn template_sheet() {
             let a = f32::from(pixel[3]) / 255.0;
             let over = |c: u8| (f32::from(c) * a + 60.0 * (1.0 - a)) as u8;
             sheet.put_pixel(x0 + x, y0 + y, image::Rgba([over(pixel[2]), over(pixel[1]), over(pixel[0]), 255]));
+        }
+    }
+    sheet.save(path).unwrap();
+}
+
+#[test]
+fn emoji_keep_their_own_colors() {
+    let style = TextStyle { font_family: "Apple Color Emoji".into(), font_size: 60.0, line_height: 70.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() };
+    let mut text = solid(2, 0, Vec2::new(70.0, 70.0), Vec2::new(50.0, 50.0));
+    text.content = LayerContent::Text { text: "🔥".into(), style };
+    let frame = render(&project(vec![text]));
+    // A flame is orange and red: plenty of pixels much redder than they are blue. A white
+    // silhouette would have none.
+    let fiery = (0..SIZE).flat_map(|y| (0..SIZE).map(move |x| (x, y))).filter(|&(x, y)| {
+        let [r, _, b] = pixel(&frame, x, y);
+        r > 180 && b < 90
+    });
+    assert!(fiery.count() > 40);
+}
+
+/// Renders every element on a dark square into a contact sheet at `ELEMENT_SHEET`.
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn element_sheet() {
+    use studio_core::elements::{ELEMENTS, add};
+    let path = std::env::var("ELEMENT_SHEET").expect("set ELEMENT_SHEET to the PNG to write");
+    let (cell, columns) = (180u32, 9u32);
+    let rows = (ELEMENTS.len() as u32).div_ceil(columns);
+    let mut sheet = image::RgbaImage::from_pixel(cell * columns, cell * rows, image::Rgba([40, 40, 40, 255]));
+    let mut renderer = Renderer::new().unwrap();
+    for index in 0..ELEMENTS.len() {
+        let mut composition = clear_comp(1, Vec::new());
+        (composition.width, composition.height, composition.background) = (1080, 1080, Rgba::hex(0x3b3b44));
+        composition.duration_frames = 10;
+        let mut project = Project::new(Vec::new(), vec![composition]);
+        add(&mut project, Id(1), index, Vec2::new(540.0, 540.0), 0);
+        let first = renderer.render(&project, Id(1), 0, cell, cell, &studio_core::media::NoVideo).unwrap();
+        for (layer, size) in first.text_sizes {
+            studio_core::edit::set_text_box(project.composition_mut(Id(1)).unwrap(), layer, size);
+        }
+        let picture = renderer.render(&project, Id(1), 0, cell, cell, &studio_core::media::NoVideo).unwrap();
+        let (x0, y0) = ((index as u32 % columns) * cell, (index as u32 / columns) * cell);
+        for (i, pixel) in picture.bgra.chunks(4).enumerate() {
+            sheet.put_pixel(x0 + i as u32 % cell, y0 + i as u32 / cell, image::Rgba([pixel[2], pixel[1], pixel[0], 255]));
         }
     }
     sheet.save(path).unwrap();

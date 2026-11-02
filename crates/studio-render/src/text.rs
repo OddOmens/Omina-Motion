@@ -108,6 +108,8 @@ impl TextRenderer {
         // Glyph coverage, 0-1, and the part of it that is highlighted.
         let mut coverage = vec![0.0_f32; width * height];
         let mut highlighted = vec![0.0_f32; if highlight.is_some() { width * height } else { 0 }];
+        // Color glyphs (emoji) keep their own colors: kept apart, drawn over the rest at the end.
+        let mut colored: Vec<[u8; 4]> = Vec::new();
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let lit = highlight.as_ref().is_some_and(|(range, _)| range.contains(&glyph.start));
@@ -122,12 +124,21 @@ impl TextRenderer {
                             continue;
                         }
                         let index = (gy * glyph_w + gx) as usize;
+                        let at = y as usize * width + x as usize;
+                        if image.content == SwashContent::Color {
+                            if colored.is_empty() {
+                                colored = vec![[0; 4]; width * height];
+                            }
+                            let pixel = &image.data[index * 4..index * 4 + 4];
+                            if pixel[3] > colored[at][3] {
+                                colored[at] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+                            }
+                            continue;
+                        }
                         let alpha = match image.content {
-                            SwashContent::Mask => image.data[index],
-                            SwashContent::Color => image.data[index * 4 + 3],
+                            SwashContent::Mask | SwashContent::Color => image.data[index],
                             SwashContent::SubpixelMask => image.data[index * 3],
                         };
-                        let at = y as usize * width + x as usize;
                         let value = f32::from(alpha) / 255.0;
                         coverage[at] = coverage[at].max(value);
                         if lit {
@@ -138,9 +149,12 @@ impl TextRenderer {
             }
         }
 
-        let stroke_coverage = stroke.map(|(_, stroke_width)| stroke_mask(&coverage, width, height, stroke_width.max(0.0)));
+        // A stroke goes around color glyphs too (a sticker outline).
+        let shape: Vec<f32> = if colored.is_empty() { coverage.clone() } else { coverage.iter().zip(&colored).map(|(&c, pixel)| c.max(f32::from(pixel[3]) / 255.0)).collect() };
+        let stroke_coverage = stroke.map(|(_, stroke_width)| stroke_mask(&shape, width, height, stroke_width.max(0.0)));
         let lit = highlight.map(|(_, color)| (highlighted.as_slice(), color));
-        let pixels = paint(&coverage, stroke_coverage.as_deref(), style.fill, stroke.map(|(color, _)| color), lit);
+        let mut pixels = paint(&coverage, stroke_coverage.as_deref(), style.fill, stroke.map(|(color, _)| color), lit);
+        over(&mut pixels, &colored);
         TextImage { width: width as u32, height: height as u32, pixels, size, scale }
     }
 
@@ -201,6 +215,23 @@ fn stroke_mask(coverage: &[f32], width: usize, height: usize, radius: f32) -> Ve
         }
     }
     distance.iter().zip(coverage).map(|(&d, &c)| (radius + 0.5 - d).clamp(0.0, 1.0).max(c)).collect()
+}
+
+/// Lays straight-alpha `top` pixels over straight-alpha `pixels` (both RGBA), in place.
+fn over(pixels: &mut [u8], top: &[[u8; 4]]) {
+    for (pixel, source) in pixels.chunks_mut(4).zip(top) {
+        let alpha = f32::from(source[3]) / 255.0;
+        if alpha <= 0.0 {
+            continue;
+        }
+        let below = f32::from(pixel[3]) / 255.0;
+        let out = alpha + below * (1.0 - alpha);
+        for channel in 0..3 {
+            let mixed = (f32::from(source[channel]) * alpha + f32::from(pixel[channel]) * below * (1.0 - alpha)) / out.max(1e-6);
+            pixel[channel] = mixed.round().clamp(0.0, 255.0) as u8;
+        }
+        pixel[3] = (out * 255.0).round() as u8;
+    }
 }
 
 /// Fill over stroke, as straight sRGB RGBA bytes.

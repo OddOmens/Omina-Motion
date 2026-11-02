@@ -291,6 +291,37 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
         }))
 }
 
+/// How long an in or out animation can be chosen to take, in seconds.
+const ANIMATION_LENGTHS: [f32; 5] = [0.3, 0.5, 0.8, 1.2, 2.0];
+
+/// Animate: one-click ways for the layer to come in, go out, and move in between.
+fn animate_section(layer: &Layer, cx: &mut Context<Workspace>) -> Div {
+    use studio_core::presets::{Loop, Motion, Phase};
+    let id = layer.id;
+    let target = cx.weak_entity();
+    let animation = layer.animation;
+    let row = |phase: Phase, current: Option<(Motion, f32)>, key: &'static str, label: &'static str| {
+        let mut choices: Vec<(String, bool, Option<Motion>)> = vec![("None".to_owned(), current.is_none(), None)];
+        choices.extend(Motion::ALL.iter().map(|&motion| (motion.name().to_owned(), current.is_some_and(|(chosen, _)| chosen == motion), Some(motion))));
+        let seconds = current.map_or(0.5, |(_, seconds)| seconds);
+        let name = current.map_or("None".to_owned(), |(motion, _)| motion.name().to_owned());
+        let motion_menu = choice_menu(format!("animate-{key}"), name, choices, move |this, motion| this.state.set_layer_motion(id, phase, motion, seconds), target.clone());
+        let lengths = ANIMATION_LENGTHS.iter().map(|&length| (format!("{length} s"), (length - seconds).abs() < 0.01, length)).collect();
+        let chosen = current.map(|(motion, _)| motion);
+        let length_menu = choice_menu(format!("animate-{key}-length"), format!("{seconds} s"), lengths, move |this, length| this.state.set_layer_motion(id, phase, chosen, length), target.clone());
+        labeled_row(label, div().flex().gap_1().child(div().flex_1().child(motion_menu)).when(current.is_some(), |row| row.child(div().w(px(72.0)).child(length_menu))))
+    };
+    let mut loops: Vec<(String, bool, Option<Loop>)> = vec![("None".to_owned(), animation.looping.is_none(), None)];
+    loops.extend(Loop::ALL.iter().map(|&looping| (looping.name().to_owned(), animation.looping == Some(looping), Some(looping))));
+    let loop_name = animation.looping.map_or("None".to_owned(), |looping| looping.name().to_owned());
+    div()
+        .child(divider())
+        .child(section("Animate", None))
+        .child(row(Phase::In, animation.enter, "in", "In"))
+        .child(row(Phase::Out, animation.exit, "out", "Out"))
+        .child(labeled_row("Loop", choice_menu("animate-loop", loop_name, loops, move |this, looping| this.state.set_layer_loop(id, looping), target.clone())))
+}
+
 /// Whether a layer can be pinned to moving video: graphics and text, not footage or sound.
 fn trackable(layer: &Layer) -> bool {
     layer.transform.is_some() && !matches!(layer.content, LayerContent::Footage { .. } | LayerContent::Audio { .. } | LayerContent::Adjustment)
@@ -868,6 +899,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(divider())
         .child(transform)
         .children(text)
+        .children(layer.transform.is_some().then(|| animate_section(layer, cx)))
         .children(studio_core::speed::has_speed(&layer.content).then(|| speed_section(layer, workspace, cx)))
         .children(trackable(layer).then(|| track_section(layer, workspace, cx)))
         .children(studio_core::cutout::can_cut_out(layer).then(|| cutout_section(layer, workspace, cx)))
