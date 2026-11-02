@@ -79,6 +79,11 @@ fn download_model(folder: &std::path::Path, report: &Mutex<Report>, cancelled: &
     Ok(())
 }
 
+/// Downloads the model now (Settings > AI Models), on the calling thread.
+pub fn fetch_model() -> Result<(), String> {
+    download_model(&model_folder(), &Mutex::new(Report::default()), &|| false)
+}
+
 /// The background work: download the model if needed, then listen and transcribe.
 fn run(source: (PathBuf, f64, f64), report: &Mutex<Report>, cancelled: &dyn Fn() -> bool) -> Result<Vec<HeardWord>, String> {
     let folder = model_folder();

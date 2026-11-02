@@ -141,6 +141,8 @@ struct Shown {
     proxy_bytes: u64,
     mask_bytes: u64,
     enhanced_bytes: u64,
+    /// Models being downloaded from the AI Models page, by their row's id.
+    downloading: Vec<&'static str>,
     note: Option<String>,
 }
 
@@ -169,6 +171,13 @@ fn change(shown: &SharedShown, workspace: &WeakEntity<Workspace>, window: &mut W
         .update(cx, |this, cx| {
             this.ui.project_columns = settings.project_columns;
             this.state.import_folders = settings.import_folders.clone();
+            // Hidden AI features let go of anything of theirs that is open.
+            if !settings.ai.captions && this.ui.left_panel == crate::workspace::LeftPanel::Captions {
+                this.ui.left_panel = crate::workspace::LeftPanel::Media;
+            }
+            if !settings.ai.remove_background {
+                this.ui.cutout_pick = None;
+            }
             this.ui.settings = settings;
             cx.notify();
         })
@@ -643,37 +652,89 @@ fn media_cache(shown: &SharedShown, workspace: &WeakEntity<Workspace>, cx: &App)
         .children(note(shown))
 }
 
-/// One downloaded model: what it is for, its size, and removing it.
-fn model_row(id: &'static str, name: &'static str, purpose: &'static str, folder: PathBuf, shown: &SharedShown) -> AnyElement {
+/// One downloadable model: what it is for, its size, and downloading or removing it.
+/// Downloading runs in the background; the page shows it until it finishes.
+fn model_row(id: &'static str, name: &'static str, purpose: &'static str, folder: PathBuf, present: bool, fetch: fn() -> Result<(), String>, shown: &SharedShown) -> AnyElement {
+    let downloading = shown.borrow().downloading.contains(&id);
     let bytes = folder_size(&folder);
-    let present = bytes > 0;
     let remove = {
         let (shown, folder) = (shown.clone(), folder.clone());
-        Button::new(id).outline().small().label("Remove").disabled(!present).on_click(move |_, window, _| {
+        Button::new(id).outline().small().label("Remove").disabled(!present || downloading).on_click(move |_, window, _| {
             let _ = std::fs::remove_dir_all(&folder);
-            shown.borrow_mut().note = Some(format!("Removed {name}. It is downloaded again, after asking, the next time it is needed."));
+            shown.borrow_mut().note = Some(format!("Removed {name}. Download it again here, or it is downloaded after asking the next time it is needed."));
             window.refresh();
         })
     };
+    let download = {
+        let shown = shown.clone();
+        Button::new(gpui_kit::ElementId::Name(format!("{id}-download").into())).primary().small().label(if downloading { "Downloading…" } else { "Download" }).disabled(downloading).on_click(move |_, window, cx| {
+            shown.borrow_mut().downloading.push(id);
+            window.refresh();
+            // The download blocks, so it runs on its own thread; the page checks on it.
+            let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let thread_result = result.clone();
+            std::thread::spawn(move || {
+                let outcome = fetch();
+                *thread_result.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(outcome);
+            });
+            let shown = shown.clone();
+            cx.spawn(async move |cx| {
+                let outcome = loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                    if let Some(outcome) = result.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+                        break outcome;
+                    }
+                };
+                {
+                    let mut shown = shown.borrow_mut();
+                    shown.downloading.retain(|&downloading| downloading != id);
+                    shown.note = Some(match outcome {
+                        Ok(()) => format!("Downloaded {name}."),
+                        Err(message) => format!("{name} could not be downloaded: {message}"),
+                    });
+                }
+                cx.update(|cx| cx.refresh_windows());
+            })
+            .detach();
+        })
+    };
     let size = div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(if present { format_bytes(bytes) } else { "Not downloaded".to_owned() });
-    setting(name, purpose, div().flex().items_center().gap_3().child(size).child(remove))
+    let action = if present { remove.into_any_element() } else { download.into_any_element() };
+    setting(name, purpose, div().flex().items_center().gap_3().child(size).child(action))
+}
+
+/// A model that ships inside the app: nothing to download or remove.
+fn built_in_row(name: &'static str, purpose: &'static str) -> AnyElement {
+    setting(name, purpose, div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Built in"))
 }
 
 fn models(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {
     let folder = crate::app_settings::folder().join("Models");
     let now = shown.borrow().settings.clone();
+    let ai = now.ai;
+    let feature = |id: &'static str, name: &'static str, purpose: &'static str, on: bool, set: fn(&mut AppSettings, bool)| setting(name, purpose, switch(id, on, shown, workspace, set));
     div()
         .child(page(Section::Models))
+        .child(group_title("AI features"))
+        .child(card(vec![
+            feature("ai-all", "Show AI features", "Turn off to hide everything below at once. Hidden features keep what they already made (captions, cut-outs, cleaned sound).", ai.any(), |settings, on| settings.ai = crate::app_settings::AiFeatures::all(on)),
+            feature("ai-captions", "Captions", "Generate Captions, and the Captions panel on the rail.", ai.captions, |settings, on| settings.ai.captions = on),
+            feature("ai-cutout", "Remove Background", "Picking a subject out of footage and images.", ai.remove_background, |settings, on| settings.ai.remove_background = on),
+            feature("ai-reframe", "Auto Reframe", "New shapes of a clip that follow its subject.", ai.auto_reframe, |settings, on| settings.ai.auto_reframe = on),
+            feature("ai-enhance", "Enhance Speech", "Cleaning up voice recordings.", ai.enhance_speech, |settings, on| settings.ai.enhance_speech = on),
+        ]))
         .child(group_title("Background removal"))
         .child(card(vec![setting(
             "Run cooler",
             "Rests the graphics chip between frames, so long clips don't heat the Mac or spin up its fans. Tracking takes about twice as long.",
             switch("cutout-cooler", now.cooler_background_removal, shown, workspace, |settings, on| settings.cooler_background_removal = on),
         )]))
-        .child(group_title("Downloaded"))
+        .child(group_title("Models"))
         .child(card(vec![
-            model_row("model-whisper", "Whisper (tiny)", "Speech to text, for captions. About 150 MB.", super::captions::model_folder(), shown),
-            model_row("model-sam", "MobileSAM", "Finding subjects, for Remove Background and Auto Reframe. About 40 MB.", super::cutout::model_folder(), shown),
+            model_row("model-whisper", "Whisper (tiny)", "Speech to text, for captions. About 150 MB, from huggingface.co.", super::captions::model_folder(), studio_captions::model_present(&super::captions::model_folder()), super::captions::fetch_model, shown),
+            model_row("model-sam", "MobileSAM", "Finding subjects, for Remove Background and Auto Reframe. About 40 MB, from huggingface.co; checked before use.", super::cutout::model_folder(), studio_cutout::model_present(&super::cutout::model_folder()), || super::cutout::fetch_model(&super::cutout::model_folder()), shown),
+            built_in_row("DeepFilterNet3", "Studio noise removal, for Enhance Speech."),
+            built_in_row("RNNoise", "Light noise removal, for Enhance Speech."),
         ]))
         .child(
             div()
@@ -681,7 +742,7 @@ fn models(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::D
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Each is downloaded once, after asking. Nothing you make is uploaded."))
+                .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Models run on this Mac. Nothing you make is uploaded."))
                 .child(Button::new("models-reveal").ghost().small().label("Show in Finder").on_click(move |_, _, cx| {
                     let _ = std::fs::create_dir_all(&folder);
                     cx.reveal_path(&folder);
@@ -815,6 +876,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         proxy_bytes: studio_media::cache_size(&workspace.render.proxies.cache_folder()),
         mask_bytes: folder_size(&super::cutout::cutouts_folder(workspace)),
         enhanced_bytes: folder_size(&super::enhance::enhanced_folder(workspace)),
+        downloading: Vec::new(),
         note: None,
     }));
     let target = cx.weak_entity();

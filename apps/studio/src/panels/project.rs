@@ -16,7 +16,6 @@ use gpui_kit::{
     AnyElement, AppContext as _, Bounds, Context, ImageSource, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderImage,
     StatefulInteractiveElement, Styled, TestSupportExt as _, Window, canvas, div, fill, img, point, prelude::FluentBuilder as _, px, relative, rgb,
 };
-use studio_core::edit::can_add_item;
 use studio_core::model::{Id, ProjectItem, ProjectItemKind};
 
 use super::chrome::{icon_button, label_swatch, panel};
@@ -204,9 +203,12 @@ fn visible_rows<'a>(items: &'a [ProjectItem], is_open: &dyn Fn(Id) -> bool) -> V
         is_open: &dyn Fn(Id) -> bool,
         rows: &mut Vec<(&'a ProjectItem, usize)>,
     ) {
+        // Folders first, in the order they were put in (dragging arranges them); then files by
+        // name, ignoring case. The sort is stable, so folders that compare equal keep their order.
         let mut children: Vec<&ProjectItem> = items.iter().filter(|item| item.parent == parent).collect();
         children.sort_by(|a, b| {
-            (b.kind == ProjectItemKind::Folder).cmp(&(a.kind == ProjectItemKind::Folder)).then(a.name.cmp(&b.name))
+            let (a_folder, b_folder) = (a.kind == ProjectItemKind::Folder, b.kind == ProjectItemKind::Folder);
+            b_folder.cmp(&a_folder).then_with(|| if a_folder { std::cmp::Ordering::Equal } else { a.name.to_lowercase().cmp(&b.name.to_lowercase()) })
         });
         for item in children {
             rows.push((item, depth));
@@ -218,6 +220,43 @@ fn visible_rows<'a>(items: &'a [ProjectItem], is_open: &dyn Fn(Id) -> bool) -> V
     let mut rows = Vec::new();
     visit(items, None, 0, is_open, &mut rows);
     rows
+}
+
+/// Where a dragged project item would go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropPlace {
+    /// Into a folder, or the top level with `None`.
+    Into(Option<Id>),
+    /// Just before or after a folder, among its neighbours (folders only).
+    Before(Id),
+    After(Id),
+}
+
+/// The row under a drag and where the item would go there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectDrop {
+    pub row: Id,
+    pub place: DropPlace,
+}
+
+/// Where the dragged item would go if dropped now, if the pointer is over row `row`: into a
+/// folder's middle, before or after a folder's top or bottom edge (when a folder is dragged, to
+/// reorder), and into the folder that a file row is in.
+fn drop_place(event: &gpui_kit::DragMoveEvent<ProjectItemDrag>, row: Id, row_is_folder: bool, row_parent: Option<Id>, project: &studio_core::model::Project, cx: &gpui_kit::App) -> Option<ProjectDrop> {
+    let position = event.event.position;
+    if !event.bounds.contains(&position) {
+        return None;
+    }
+    let dragged = event.drag(cx).item;
+    let dragging_folder = project.item(dragged).is_some_and(|item| item.kind == ProjectItemKind::Folder);
+    let along = f32::from(position.y - event.bounds.top()) / f32::from(event.bounds.size.height).max(1.0);
+    let place = match (row_is_folder, dragging_folder) {
+        (true, true) if along < 0.3 => DropPlace::Before(row),
+        (true, true) if along > 0.7 => DropPlace::After(row),
+        (true, _) => DropPlace::Into(Some(row)),
+        (false, _) => DropPlace::Into(row_parent),
+    };
+    (row != dragged).then_some(ProjectDrop { row, place })
 }
 
 /// What follows the pointer while a project item is dragged.
@@ -260,7 +299,6 @@ fn type_label(item: &ProjectItem, workspace: &Workspace) -> String {
 
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let project = &workspace.state.project;
-    let composition = workspace.state.composition();
     let selected = workspace.state.selected_item.and_then(|id| project.item(id));
     let columns = workspace.ui.project_columns;
 
@@ -370,9 +408,29 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             })
             .when(columns.frame_rate, |row| row.child(div().w(px(RATE_WIDTH)).pl_2().truncate().text_color(hsla(color::MUTED)).child(item.frame_rate.map(|rate| rate.label()).unwrap_or_default())));
 
-        if can_add_item(item, composition) {
-            let drag = ProjectItemDrag { item: id, name: item.name.clone() };
-            row = row.on_drag(drag, |drag, _offset, _window, cx| cx.new(|_| DragPreview { label: drag.name.clone() }));
+        // Anything can be dragged: into a folder, or onto a track (what can become a layer does).
+        let drag = ProjectItemDrag { item: id, name: item.name.clone() };
+        let parent = item.parent;
+        row = row
+            .on_drag(drag, |drag, _offset, _window, cx| cx.new(|_| DragPreview { label: drag.name.clone() }))
+            .on_drag_move(cx.listener(move |this, event: &gpui_kit::DragMoveEvent<ProjectItemDrag>, _, cx| {
+                let target = drop_place(event, id, is_folder, parent, &this.state.project, cx);
+                if target.is_some() && this.ui.project_drop != target {
+                    this.ui.project_drop = target;
+                    cx.notify();
+                } else if target.is_none() && this.ui.project_drop.is_some_and(|drop| drop.row == id) {
+                    this.ui.project_drop = None;
+                    cx.notify();
+                }
+            }));
+        // Where a drag would land, while one is under way.
+        if let Some(drop) = workspace.ui.project_drop.filter(|drop| drop.row == id && cx.has_active_drag()) {
+            row = match drop.place {
+                DropPlace::Before(_) => row.border_t_2().border_color(hsla(color::ACCENT)),
+                DropPlace::After(_) => row.border_b_2().border_color(hsla(color::ACCENT)),
+                DropPlace::Into(_) if is_folder => row.bg(hsla(color::ROW_SELECTED)).border_1().border_color(hsla(color::ACCENT)),
+                DropPlace::Into(_) => row,
+            };
         }
         row.test_support()
     });
@@ -413,7 +471,29 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             }))
             .child(preview)
             .child(column_header)
-            .child(div().id("project-items").flex_1().min_h_0().overflow_y_scroll().children(rows).test_support()),
+            .child(
+                div()
+                    .id("project-items")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(rows)
+                    // An item dropped here goes where the row under the pointer says, or to the top
+                    // level on the empty space below the rows.
+                    .on_drop(cx.listener(|this, drag: &ProjectItemDrag, _, cx| {
+                        let place = this.ui.project_drop.take().map_or(DropPlace::Into(None), |drop| drop.place);
+                        let moved = match place {
+                            DropPlace::Into(parent) => this.state.move_item(drag.item, parent),
+                            DropPlace::Before(beside) => this.state.place_folder(drag.item, beside, false),
+                            DropPlace::After(beside) => this.state.place_folder(drag.item, beside, true),
+                        };
+                        if moved {
+                            this.ui.reveal_item(&this.state.project, drag.item);
+                        }
+                        cx.notify();
+                    }))
+                    .test_support(),
+            ),
         workspace,
         cx,
     )

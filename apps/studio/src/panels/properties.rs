@@ -155,7 +155,7 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             .when(layer.content.has_picture(), |row| row.child(switch("layer-effects", "Effects", layer.switches.effects_enabled, Switch::EffectsEnabled, cx))),
     )
     // Clips with sound can be captioned.
-    .when(workspace.state.caption_source(id).is_some(), |rows| {
+    .when(workspace.state.caption_source(id).is_some() && workspace.ui.settings.ai.captions, |rows| {
         let busy = workspace.ui.caption_job.is_some();
         rows.child(
             div().py_1().child(
@@ -279,14 +279,17 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             }))),
         )
         .when(ramped || layer.time.reverse, |section| section.child(hint("Sound is silent while a clip plays backwards or ramps.")))
-        .child(divider())
-        .child(section("Auto Reframe", None))
-        .child(hint("Makes a new composition in another shape, moving the clip to keep its subject in frame. Background-removal clicks pick the subject; otherwise it follows what is in the middle."))
-        .child(div().py_1().child(if busy {
-            div().text_color(hsla(color::MUTED)).child("Another analysis is running.").into_any_element()
-        } else {
-            reframe_menu(id, cx).into_any_element()
-        }))
+        .when(workspace.ui.settings.ai.auto_reframe, |section_div| {
+            section_div
+                .child(divider())
+                .child(section("Auto Reframe", None))
+                .child(hint("Makes a new composition in another shape, moving the clip to keep its subject in frame. Background-removal clicks pick the subject; otherwise it follows what is in the middle."))
+                .child(div().py_1().child(if busy {
+                    div().text_color(hsla(color::MUTED)).child("Another analysis is running.").into_any_element()
+                } else {
+                    reframe_menu(id, cx).into_any_element()
+                }))
+        })
 }
 
 /// How long an in or out animation can be chosen to take, in seconds.
@@ -954,9 +957,9 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .children(layer.transform.is_some().then(|| fold("animate", "Animate", None, workspace, cx, |cx| animate_section(layer, cx))))
         .children(studio_core::speed::has_speed(&layer.content).then(|| fold("speed", "Speed", None, workspace, cx, |cx| speed_section(layer, workspace, cx))))
         .children(trackable(layer).then(|| fold("track", "Track Motion", None, workspace, cx, |cx| track_section(layer, workspace, cx))))
-        .children(studio_core::cutout::can_cut_out(layer).then(|| fold("cutout", "Remove Background", None, workspace, cx, |cx| cutout_section(layer, workspace, cx))))
+        .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", None, workspace, cx, |cx| cutout_section(layer, workspace, cx))))
         .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, workspace, cx, |cx| audio_section(layer, workspace, cx))))
-        .children(workspace.state.can_enhance(layer.id).then(|| fold("enhance", "Enhance Speech", None, workspace, cx, |cx| enhance_section(layer, workspace, cx))))
+        .children((workspace.state.can_enhance(layer.id) && workspace.ui.settings.ai.enhance_speech).then(|| fold("enhance", "Enhance Speech", None, workspace, cx, |cx| enhance_section(layer, workspace, cx))))
         .into_any_element()
 }
 

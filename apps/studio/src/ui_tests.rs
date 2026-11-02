@@ -2830,3 +2830,70 @@ fn enhance_speech_makes_a_cleaned_copy_that_plays_instead(cx: &mut TestAppContex
     assert_eq!(heard(visual), cleaned);
     assert!(cleaned.is_file());
 }
+
+#[gpui_kit::test]
+fn project_items_drag_into_out_of_and_between_folders(cx: &mut TestAppContext) {
+    use studio_core::sample::ids;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let parent = |visual: &mut VisualTestContext, item: Id| visual.update(|_, cx| workspace.read(cx).state.project.item(item).unwrap().parent);
+    let solids = visual.update(|_, cx| studio_core::folders::top_folder(&workspace.read(cx).state.project, "Solids").unwrap());
+    // A footage file onto the middle of the Solids folder goes in.
+    let from = center_of(visual, ("project-item", ids::A_CAM.0 as usize));
+    let to = center_of(visual, ("project-item", solids.0 as usize));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+    assert_eq!(parent(visual, ids::A_CAM), Some(solids));
+    // The Footage folder into Solids: folders go in folders.
+    let from = center_of(visual, ("project-item", ids::FOOTAGE_FOLDER.0 as usize));
+    let to = center_of(visual, ("project-item", solids.0 as usize));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+    assert_eq!(parent(visual, ids::FOOTAGE_FOLDER), Some(solids));
+    // And back out, onto the empty space below the rows: the top level.
+    let list = visual.update(|window, _| window.find("project-items").bounds());
+    let from = center_of(visual, ("project-item", ids::FOOTAGE_FOLDER.0 as usize));
+    let below = point(list.center().x, list.bottom() - px(4.0));
+    visual.update(|window, cx| window.drag(from, below, cx));
+    render(visual);
+    assert_eq!(parent(visual, ids::FOOTAGE_FOLDER), None);
+    // A folder dropped on another's top edge goes just before it.
+    let top_level_folders = |visual: &mut VisualTestContext| visual.update(|_, cx| {
+        workspace.read(cx).state.project.items.iter().filter(|item| item.kind == studio_core::model::ProjectItemKind::Folder && item.parent.is_none()).map(|item| item.id).collect::<Vec<_>>()
+    });
+    let first = top_level_folders(visual)[0];
+    let solids_row = visual.update(|window, _| window.find(("project-item", solids.0 as usize)).bounds());
+    let first_row = visual.update(|window, _| window.find(("project-item", first.0 as usize)).bounds());
+    visual.update(|window, cx| window.drag(solids_row.center(), point(first_row.center().x, first_row.top() + px(2.0)), cx));
+    render(visual);
+    assert_eq!(top_level_folders(visual)[0], solids, "Solids is first now");
+    assert_eq!(parent(visual, solids), None);
+}
+
+#[gpui_kit::test]
+fn ai_features_can_be_hidden_and_models_offered_for_download(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let clip = add_tone_clip(&workspace, visual);
+    tall_window(visual);
+    assert!(visual.update(|window, _| window.try_find("rail-captions")).is_some());
+    assert!(visual.update(|window, _| window.try_find("section-enhance")).is_some());
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    // AI Models is the eighth page.
+    visual.update(|window, cx| window.click(("settings-section", 7_usize), cx));
+    render(visual);
+    // The test model folders are empty, so both models offer a download.
+    assert!(visual.update(|window, _| window.try_find("model-whisper-download")).is_some());
+    assert!(visual.update(|window, _| window.try_find("model-sam-download")).is_some());
+    visual.update(|window, cx| window.click("ai-all", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.settings.ai), crate::app_settings::AiFeatures::all(false));
+    assert_eq!(crate::app_settings::load().ai, crate::app_settings::AiFeatures::all(false), "remembered");
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.select_layer(clip, false); cx.notify(); }));
+    render(visual);
+    for hidden in ["rail-captions", "section-enhance", "generate-captions"] {
+        assert!(visual.update(|window, _| window.try_find(hidden)).is_none(), "{hidden} is hidden");
+    }
+}

@@ -302,6 +302,8 @@ pub struct UiState {
     /// Project panel folders and Properties panel sections start closed. These hold the ones the
     /// user turned the other way; see `folder_open` and `section_open`.
     pub toggled_folders: HashSet<Id>,
+    /// Where a project item being dragged in the Project panel would land.
+    pub project_drop: Option<panels::project::ProjectDrop>,
     pub toggled_sections: HashSet<&'static str>,
     /// Whether folders and sections start open instead. Only the UI tests turn this on, so they
     /// can reach controls without unfolding everything first.
@@ -608,6 +610,7 @@ impl Workspace {
                 shape_press: false,
                 tabs: HashMap::new(),
                 toggled_folders: HashSet::new(),
+                project_drop: None,
                 toggled_sections: HashSet::new(),
                 sections_start_open: cfg!(test),
                 closed_effect_categories: HashSet::new(),

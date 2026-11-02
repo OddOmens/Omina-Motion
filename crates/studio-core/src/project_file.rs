@@ -198,6 +198,21 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             return damaged(&format!("\"{}\" has an impossible length", item.name));
         }
     }
+    // Every item sits in a folder that exists, and following folders up always reaches the top
+    // (a loop would hang anything that walks up the folders).
+    for item in &project.items {
+        let mut parent = item.parent;
+        for _ in 0..=project.items.len() {
+            let Some(folder) = parent else { break };
+            match project.item(folder) {
+                Some(found) if found.kind == crate::model::ProjectItemKind::Folder => parent = found.parent,
+                _ => return damaged(&format!("\"{}\" is in a folder that doesn't exist", item.name)),
+            }
+        }
+        if parent.is_some() {
+            return damaged(&format!("\"{}\" is in folders that loop inside each other", item.name));
+        }
+    }
     for comp in &project.compositions {
         let settings = CompositionSettings {
             name: comp.name.clone(),
@@ -519,5 +534,20 @@ mod tests {
         let missing = relink_missing_media(&mut project, Path::new("/new/place"), exists);
         assert_eq!(missing, vec![PathBuf::from("/old/machine/gone.wav")]);
         assert!(project.items.iter().any(|item| item.path.as_deref() == Some(Path::new("/new/place/clip.mp4"))));
+    }
+
+    #[test]
+    fn folders_inside_each_other_in_a_loop_are_refused() {
+        let mut project = crate::sample::sample_project();
+        let a = crate::folders::add_folder(&mut project, "A", None);
+        let b = crate::folders::add_folder(&mut project, "B", Some(a));
+        project.items.iter_mut().find(|item| item.id == a).unwrap().parent = Some(b);
+        let view = EditorView { active_composition: crate::sample::ids::MAIN_COMP, current_frame: 0, work_area: FrameRange::new(0.0, 10.0) };
+        let error = to_text(&project, view).unwrap_err();
+        assert!(error.contains("folder"), "{error}");
+        // So is an item inside something that isn't a folder.
+        let mut project = crate::sample::sample_project();
+        project.items.iter_mut().find(|item| item.id == crate::sample::ids::LOGO).unwrap().parent = Some(crate::sample::ids::A_CAM);
+        assert!(to_text(&project, view).is_err());
     }
 }

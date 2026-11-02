@@ -67,6 +67,36 @@ pub struct AppSettings {
     pub compact_timeline: bool,
     /// Background removal rests the GPU between frames: slower, but cool and quiet.
     pub cooler_background_removal: bool,
+    /// Which AI features are shown (Settings > AI Models).
+    pub ai: AiFeatures,
+}
+
+/// The features that use AI models, each of which can be hidden.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiFeatures {
+    pub captions: bool,
+    pub remove_background: bool,
+    pub auto_reframe: bool,
+    pub enhance_speech: bool,
+}
+
+impl Default for AiFeatures {
+    fn default() -> Self {
+        Self::all(true)
+    }
+}
+
+impl AiFeatures {
+    /// Every feature shown, or every one hidden.
+    pub fn all(on: bool) -> Self {
+        Self { captions: on, remove_background: on, auto_reframe: on, enhance_speech: on }
+    }
+
+    /// Whether any is shown.
+    pub fn any(self) -> bool {
+        self.captions || self.remove_background || self.auto_reframe || self.enhance_speech
+    }
 }
 
 /// What new compositions start as.
@@ -169,6 +199,7 @@ impl Default for AppSettings {
             show_render_time: true,
             compact_timeline: false,
             cooler_background_removal: false,
+            ai: AiFeatures::default(),
         }
     }
 }

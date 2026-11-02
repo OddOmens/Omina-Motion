@@ -600,6 +600,16 @@ impl EditorState {
     }
 
     /// Adds a project folder and selects it.
+    /// Moves a project item into folder `parent` (or to the top level with `None`).
+    pub fn move_item(&mut self, item: Id, parent: Option<Id>) -> bool {
+        studio_core::folders::move_to(&mut self.project, item, parent)
+    }
+
+    /// Puts a folder just before or after another (see `studio_core::folders::place_folder`).
+    pub fn place_folder(&mut self, folder: Id, beside: Id, after: bool) -> bool {
+        studio_core::folders::place_folder(&mut self.project, folder, beside, after)
+    }
+
     pub fn new_folder(&mut self) {
         let count = self.project.items.iter().filter(|item| item.kind == studio_core::model::ProjectItemKind::Folder).count();
         self.selected_item = Some(studio_core::folders::add_folder(&mut self.project, &format!("Folder {}", count + 1), None));
