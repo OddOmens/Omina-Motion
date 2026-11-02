@@ -261,7 +261,9 @@ impl EditorState {
     }
 
     /// Applies the current drag. `delta` is how far the pointer moved since the drag began, in
-    /// composition pixels. With `constrain` (Shift), moves stay on one axis and scaling keeps proportions.
+    /// composition pixels. With `constrain` (Shift), moves stay on one axis. Scaling keeps proportions
+    /// while Scale is linked in the Properties panel; Shift frees them for that drag (or, when
+    /// unlinked, keeps them).
     pub fn drag_in_viewer(&mut self, delta: Vec2, constrain: bool) {
         let frame = self.current_frame;
         let Some(drag) = self.viewer_drag.clone() else { return };
@@ -285,7 +287,7 @@ impl EditorState {
                 let moved = to_local.apply_vector(delta);
                 let ratio = |reach: f32, moved: f32| if reach.abs() > 0.5 { (reach + moved) / reach } else { 1.0 };
                 let (mut x, mut y) = (ratio(reach.x, moved.x), ratio(reach.y, moved.y));
-                if constrain {
+                if self.scale_linked != constrain {
                     let uniform = if (x - 1.0).abs() >= (y - 1.0).abs() { x } else { y };
                     (x, y) = (uniform, uniform);
                 }
@@ -529,5 +531,28 @@ mod tests {
         assert_eq!(layer.property(SCALE, 0).unwrap().value, PropertyValue::Pair(Vec2::new(150.0, 150.0)));
         let bounds = layer_bounds(state.composition(), solid, 0).unwrap();
         assert_eq!(bounds.max, Vec2::new(1920.0 + 480.0, 1080.0 + 270.0));
+    }
+
+    #[test]
+    fn corner_drags_keep_proportions_while_scale_is_linked() {
+        let mut state = EditorState::new();
+        let solid = state.composition().layers[5].id;
+        let scale_after = |state: &mut EditorState, delta: Vec2, shift: bool| {
+            state.begin_scale(solid, ScaleHandle::BottomRight);
+            state.drag_in_viewer(delta, shift);
+            state.end_viewer_drag();
+            let value = state.composition().layer(solid).unwrap().property(SCALE, 0).unwrap().value;
+            state.undo();
+            value
+        };
+        // Linked (the default): pulling the corner only sideways still scales both ways.
+        assert!(state.scale_linked);
+        assert_eq!(scale_after(&mut state, Vec2::new(480.0, 0.0), false), PropertyValue::Pair(Vec2::new(150.0, 150.0)));
+        // Shift frees it for one drag.
+        assert_eq!(scale_after(&mut state, Vec2::new(480.0, 0.0), true), PropertyValue::Pair(Vec2::new(150.0, 100.0)));
+        // Unlinked: free, and Shift keeps proportions.
+        state.scale_linked = false;
+        assert_eq!(scale_after(&mut state, Vec2::new(480.0, 0.0), false), PropertyValue::Pair(Vec2::new(150.0, 100.0)));
+        assert_eq!(scale_after(&mut state, Vec2::new(480.0, 0.0), true), PropertyValue::Pair(Vec2::new(150.0, 150.0)));
     }
 }
