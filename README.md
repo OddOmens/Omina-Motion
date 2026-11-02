@@ -26,6 +26,11 @@ crates/studio-captions Speech to timed words with OpenAI's Whisper (tiny), run l
 crates/studio-cutout Background removal with MobileSAM, run locally with Candle (Metal on macOS): clicks pick
                      out a subject, and video follows it frame to frame. Reads the model from disk; the app
                      downloads it once (40 MB, checked by SHA-256), after asking.
+crates/studio-enhance Speech cleanup, like Adobe Podcast's Enhance Speech: AI noise removal (RNNoise "Light" or
+                     DeepFilterNet3 "Studio", both built in), hum notches, voice EQ, de-essing, compression and
+                     -16 LUFS loudness (BS.1770) with a peak limiter. Offline, on whole recordings.
+                     `ENHANCE_CLEAN=… ENHANCE_NOISY=… ENHANCE_OUT=… cargo test -p studio-enhance --release --test
+                     real_speech -- --ignored --nocapture` measures it on a recording.
 crates/studio-export Exports a composition to a movie: GPU render, audio mix and encode, written under a
                      temporary name and renamed when done. No UI, so it also runs on a headless render machine.
 apps/studio          Desktop app (GPUI + gpui-kit). UI only: panels render EditorState and forward input.
@@ -75,6 +80,9 @@ Inside `apps/studio/src`:
   cut) are in `studio-core/src/transitions.rs`.
 - `panels/resize.rs`: Magic Resize (Composition menu): copies of the open composition in other sizes, with
   the layers rearranged by `studio-core/src/resize.rs`.
+- `panels/enhance.rs`, `state/enhance.rs`: Enhance Speech (Properties): a cleaned copy of a clip's whole sound
+  is made in the background, kept in Studio's cache under `Enhanced`, and played (and exported) instead of the
+  original; settings and the copy are kept in step by `studio-core/src/enhance.rs`.
 - `panels/captions.rs`, `state/captions.rs`: the Captions panel and Generate Captions (download the model, transcribe in the
   background) and caption layers; their timing and animations are in `studio-core/src/captions.rs`.
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.

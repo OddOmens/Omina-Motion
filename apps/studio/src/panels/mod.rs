@@ -11,6 +11,7 @@ pub mod effect_controls;
 pub mod effects;
 pub mod resize;
 pub mod elements;
+pub mod enhance;
 pub mod export;
 pub mod fields;
 pub mod graph_editor;

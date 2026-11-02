@@ -2150,7 +2150,7 @@ fn video_and_sound_switch_separately_and_volume_and_fades_set(cx: &mut TestAppCo
         cx.notify();
     }));
     render(visual);
-    let audio = visual.update(|_, cx| workspace.read(cx).state.composition().layer(video).unwrap().audio);
+    let audio = visual.update(|_, cx| workspace.read(cx).state.composition().layer(video).unwrap().audio.clone());
     assert_eq!((audio.volume_db, audio.fade_in), (-6.0, 0.5));
     assert_eq!(audio.fade_out, 2.0, "no longer than the two-second clip");
     assert!((audio.gain() - 0.501).abs() < 0.01, "-6 dB is about half");
@@ -2771,4 +2771,62 @@ fn compact_tracks_are_shorter_rows(cx: &mut TestAppContext) {
     render(visual);
     assert!(height(visual) < tall * 0.6, "{:?} vs {tall:?}", height(visual));
     assert!(visual.update(|_, cx| workspace.read(cx).ui.settings.compact_timeline));
+}
+
+/// Lets the Enhance Speech job finish (up to 60 s): its thread works in real time, and the
+/// editor checks on it with a timer.
+fn wait_for_enhance(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) {
+    let started = std::time::Instant::now();
+    render(visual);
+    while visual.update(|_, cx| workspace.read(cx).ui.enhance_job.is_some()) {
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "the cleanup never finished");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        visual.executor().advance_clock(std::time::Duration::from_millis(150));
+        visual.run_until_parked();
+    }
+    render(visual);
+}
+
+#[gpui_kit::test]
+fn enhance_speech_makes_a_cleaned_copy_that_plays_instead(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let clip = add_tone_clip(&workspace, visual);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("enhance-start", cx));
+    wait_for_enhance(&workspace, visual);
+    let heard = |visual: &mut VisualTestContext| visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        studio_core::audio::composition_audio(&state.project, state.composition()).into_iter().find(|sound| sound.layer == clip).unwrap().path
+    });
+    let cleaned = heard(visual);
+    assert!(cleaned.to_string_lossy().contains("Enhanced"), "the cleaned copy plays: {cleaned:?}");
+    let (channels, rate) = studio_enhance::read_float_wav(&cleaned).unwrap();
+    assert_eq!((channels.len(), rate), (2, 48_000));
+    assert!((channels[0].len() as f32 / 48_000.0 - 2.0).abs() < 0.05, "as long as the original");
+    assert!(visual.update(|_, cx| workspace.read(cx).state.enhance_of(clip).is_some_and(|enhance| enhance.file.is_some())));
+
+    // Off plays the original again; on brings the copy straight back, without cleaning again.
+    visual.update(|window, cx| window.click("enhance-on", cx));
+    render(visual);
+    assert!(heard(visual).ends_with("tone.wav"));
+    visual.update(|window, cx| window.click("enhance-on", cx));
+    render(visual);
+    assert_eq!(heard(visual), cleaned);
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.enhance_job.is_none()));
+
+    // Removing it is one undoable step, and undo finds the copy again.
+    visual.update(|window, cx| window.click("enhance-remove", cx));
+    render(visual);
+    assert!(heard(visual).ends_with("tone.wav"));
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(heard(visual), cleaned);
+
+    // A copy cleared from the cache is made again, rather than leaving the clip silent.
+    std::fs::remove_file(&cleaned).unwrap();
+    render(visual);
+    assert!(heard(visual).ends_with("tone.wav"), "the original plays meanwhile");
+    wait_for_enhance(&workspace, visual);
+    assert_eq!(heard(visual), cleaned);
+    assert!(cleaned.is_file());
 }

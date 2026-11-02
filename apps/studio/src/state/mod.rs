@@ -13,6 +13,7 @@ mod captions;
 mod clips;
 mod copy;
 mod cutout;
+mod enhance;
 mod history;
 mod keyframes;
 mod layer_time;
@@ -810,7 +811,7 @@ impl EditorState {
     }
 
     pub fn audio_setting(&self, layer: Id, setting: AudioSetting) -> Option<f32> {
-        let audio = self.composition().layer(layer)?.audio;
+        let audio = &self.composition().layer(layer)?.audio;
         Some(match setting {
             AudioSetting::Volume => audio.volume_db,
             AudioSetting::FadeIn => audio.fade_in,

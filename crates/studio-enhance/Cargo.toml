@@ -1,0 +1,18 @@
+[package]
+name = "studio-enhance"
+description = "Speech cleanup for Studio, like Adobe Podcast's Enhance Speech: AI noise removal (RNNoise for a quick pass, DeepFilterNet3 for the best result), hum removal, voice EQ, de-essing and even, podcast-level loudness. Works on whole recordings, offline. No UI and no network: both models are built in."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# RNNoise (Xiph), in pure Rust, with its small model built in.
+nnnoiseless = { version = "0.5.2", default-features = false }
+# DeepFilterNet3 inference, vendored from upstream with the model built in (checked identical to
+# upstream's DeepFilterNet3_onnx.tar.gz at commit d375b2d). Runs on tract, in pure Rust.
+deep-filter-rt = "=0.1.1"
+ndarray = "0.17"
+
+[lints]
+workspace = true

@@ -63,7 +63,9 @@ pub fn composition_audio(project: &Project, composition: &Composition) -> Vec<Au
                 LayerContent::Footage { item } | LayerContent::Audio { item } => item,
                 _ => return None,
             };
-            let path = project.item(item)?.path.clone()?;
+            // A cleaned copy plays in place of the original, once it is made.
+            let cleaned = layer.audio.enhance.as_ref().filter(|enhance| enhance.on).and_then(|enhance| enhance.file.clone());
+            let path = cleaned.or_else(|| project.item(item)?.path.clone())?;
             Some(AudioClip {
                 layer: layer.id,
                 path,

@@ -42,6 +42,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         // Captions, cut-outs and exports running in the background show their progress here.
         .children(super::captions::status(workspace, cx))
         .children(super::cutout::status(workspace, cx))
+        .children(super::enhance::status(workspace, cx))
         .children(super::analysis::status(workspace, cx))
         .children(super::export::status(workspace, cx))
 }

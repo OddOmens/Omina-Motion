@@ -765,7 +765,7 @@ impl Cutout {
 }
 
 /// A layer's sound settings.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayerAudio {
     /// Volume in decibels: 0 leaves it as it is; -6 is about half as loud.
     pub volume_db: f32,
@@ -783,11 +783,62 @@ pub struct LayerAudio {
     /// louder sound, 0 (off) to 100.
     #[serde(default)]
     pub noise_gate: f32,
+    /// Enhance Speech: cleaning up a voice recording (see `SpeechEnhance`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enhance: Option<SpeechEnhance>,
 }
 
 impl Default for LayerAudio {
     fn default() -> Self {
-        Self { volume_db: 0.0, fade_in: 0.0, fade_out: 0.0, duck_under: None, duck_db: Self::default_duck_db(), noise_gate: 0.0 }
+        Self { volume_db: 0.0, fade_in: 0.0, fade_out: 0.0, duck_under: None, duck_db: Self::default_duck_db(), noise_gate: 0.0, enhance: None }
+    }
+}
+
+/// Which model Enhance Speech removes background noise with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EnhanceModel {
+    /// RNNoise: very quick, good on steady noise (fans, hiss).
+    Light,
+    /// DeepFilterNet3: the best result, on any background.
+    #[default]
+    Studio,
+    /// Keep the background; only the voice EQ, de-essing and levelling run.
+    Off,
+}
+
+/// Enhance Speech, like Adobe Podcast's: background noise removed, hum notched out, the voice
+/// EQ'd, de-essed and brought to podcast loudness. The app renders a cleaned copy of the clip's
+/// whole sound once (`file`) and plays that instead of the original, which stays untouched.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpeechEnhance {
+    /// Whether the cleaned sound plays (off compares with the original, without losing it).
+    pub on: bool,
+    pub model: EnhanceModel,
+    /// How much of the cleaned sound is used, 0 to 100; below 100 some of the original is
+    /// mixed back in, for a more natural sound.
+    pub strength: f32,
+    pub remove_hum: bool,
+    pub voice_eq: bool,
+    pub de_ess: bool,
+    /// Compress and bring to -16 LUFS.
+    pub even_out: bool,
+    /// The cleaned copy for these settings, once it has been made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<std::path::PathBuf>,
+}
+
+impl Default for SpeechEnhance {
+    fn default() -> Self {
+        Self { on: true, model: EnhanceModel::Studio, strength: 90.0, remove_hum: true, voice_eq: true, de_ess: true, even_out: true, file: None }
+    }
+}
+
+impl SpeechEnhance {
+    /// Whether `other` asks for the same sound (whether either is on, and which file holds it,
+    /// don't matter).
+    pub fn same_sound(&self, other: &SpeechEnhance) -> bool {
+        let settings = |enhance: &SpeechEnhance| SpeechEnhance { on: true, file: None, ..enhance.clone() };
+        settings(self) == settings(other)
     }
 }
 
@@ -802,7 +853,7 @@ impl LayerAudio {
     }
 
     /// The volume as a factor to multiply samples by.
-    pub fn gain(self) -> f32 {
+    pub fn gain(&self) -> f32 {
         let db = if self.volume_db.is_finite() { self.volume_db.clamp(Self::VOLUME_RANGE.0, Self::VOLUME_RANGE.1) } else { 0.0 };
         if db <= Self::VOLUME_RANGE.0 { 0.0 } else { 10f32.powf(db / 20.0) }
     }

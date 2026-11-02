@@ -358,6 +358,66 @@ fn reframe_menu(id: Id, cx: &mut Context<Workspace>) -> impl IntoElement {
     })
 }
 
+/// Strengths offered for Enhance Speech, in percent.
+const ENHANCE_STRENGTHS: [f32; 5] = [50.0, 70.0, 80.0, 90.0, 100.0];
+
+/// Enhance Speech: cleaning up a voice recording like Adobe Podcast does. The cleaned copy is
+/// made in the background (see `panels::enhance`); until it is ready the original plays.
+fn enhance_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    use studio_core::model::{EnhanceModel, SpeechEnhance};
+    let id = layer.id;
+    let Some(settings) = layer.audio.enhance.clone() else {
+        return div()
+            .child(hint("Removes background noise and hum, then EQs, de-esses and evens out the voice to podcast loudness. Runs on this Mac; the original file is untouched."))
+            .child(div().py_1().child(Button::new("enhance-start").small().primary().icon(Icon::new(IconName::WandSparkles)).label("Enhance Speech").on_click(cx.listener(move |this, _, _, cx| {
+                this.state.set_enhance(id, Some(SpeechEnhance::default()));
+                cx.notify();
+            }))));
+    };
+    let target = cx.weak_entity();
+    let models = [(EnhanceModel::Studio, "Studio (best)"), (EnhanceModel::Light, "Light (fastest)"), (EnhanceModel::Off, "Off (keep background)")];
+    let model_name = models.iter().find(|(model, _)| *model == settings.model).map_or("Studio (best)", |(_, name)| name);
+    let model_choices = models.iter().map(|&(model, name)| (name.to_owned(), model == settings.model, model)).collect();
+    let strengths = ENHANCE_STRENGTHS.iter().map(|&strength| (format!("{strength}%"), (strength - settings.strength).abs() < 0.5, strength)).collect();
+    let toggle = |name: &'static str, label: &'static str, on: bool, change: fn(&mut SpeechEnhance, bool), cx: &mut Context<Workspace>| {
+        Checkbox::new(name).label(label).checked(on).on_click(cx.listener(move |this, checked: &bool, _, cx| {
+            let checked = *checked;
+            this.state.edit_enhance(id, |settings| change(settings, checked));
+            cx.notify();
+        }))
+    };
+    let job = workspace.ui.enhance_job.as_ref().filter(|job| job.layer == id);
+    let skipped = workspace.ui.enhance_skipped.iter().any(|(layer, made_for)| *layer == id && made_for.same_sound(&settings));
+    let status = if !settings.on {
+        div().child(hint("Off: the original plays. Turn it on again to hear the cleaned sound."))
+    } else if settings.file.is_some() {
+        div().child(hint("Cleaned. This is what plays and exports."))
+    } else if let Some(job) = job {
+        div().p_2p5().text_color(hsla(color::MUTED)).child(format!("{} · {}% (the original plays until it's done)", job.stage, (job.fraction * 100.0) as i64))
+    } else if skipped {
+        div().flex().items_center().gap_2().child(hint("Not cleaned (stopped or failed).")).child(Button::new("enhance-retry").ghost().xsmall().label("Try Again").on_click(cx.listener(move |this, _, _, cx| {
+            this.ui.enhance_skipped.retain(|(layer, _)| *layer != id);
+            cx.notify();
+        })))
+    } else {
+        div().child(hint("Waiting for another clip to finish…"))
+    };
+    div()
+        .child(div().py_0p5().child(toggle("enhance-on", "On (turn off to compare with the original)", settings.on, |settings, on| settings.on = on, cx)))
+        .child(labeled_row("Noise removal", choice_menu("enhance-model", model_name.to_owned(), model_choices, move |this, model| { this.state.edit_enhance(id, |settings| settings.model = model); }, target.clone())))
+        .child(labeled_row("Strength", choice_menu("enhance-strength", format!("{}%", settings.strength), strengths, move |this, strength| { this.state.edit_enhance(id, |settings| settings.strength = strength); }, target.clone())))
+        .child(div().flex().flex_col().gap_1().py_1()
+            .child(toggle("enhance-hum", "Remove hum", settings.remove_hum, |settings, on| settings.remove_hum = on, cx))
+            .child(toggle("enhance-eq", "Voice EQ", settings.voice_eq, |settings, on| settings.voice_eq = on, cx))
+            .child(toggle("enhance-deess", "Soften harsh \"s\" sounds", settings.de_ess, |settings, on| settings.de_ess = on, cx))
+            .child(toggle("enhance-level", "Even out loudness (-16 LUFS)", settings.even_out, |settings, on| settings.even_out = on, cx)))
+        .child(status)
+        .child(div().py_1().child(Button::new("enhance-remove").ghost().small().label("Remove Enhance Speech").on_click(cx.listener(move |this, _, _, cx| {
+            this.state.set_enhance(id, None);
+            cx.notify();
+        }))))
+}
+
 /// A layer's sound: whether its picture shows and its sound plays (separately), its volume and
 /// fades, and for a video clip, moving its sound onto a clip of its own.
 fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -896,6 +956,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .children(trackable(layer).then(|| fold("track", "Track Motion", None, workspace, cx, |cx| track_section(layer, workspace, cx))))
         .children(studio_core::cutout::can_cut_out(layer).then(|| fold("cutout", "Remove Background", None, workspace, cx, |cx| cutout_section(layer, workspace, cx))))
         .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, workspace, cx, |cx| audio_section(layer, workspace, cx))))
+        .children(workspace.state.can_enhance(layer.id).then(|| fold("enhance", "Enhance Speech", None, workspace, cx, |cx| enhance_section(layer, workspace, cx))))
         .into_any_element()
 }
 

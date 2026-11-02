@@ -364,6 +364,10 @@ pub struct UiState {
     pub track_pick: Option<Id>,
     /// Background removal running in the background, if any.
     pub cutout_job: Option<panels::cutout::CutoutJob>,
+    /// The Enhance Speech copy being made, and the layers (with the settings they had) whose
+    /// copy failed or was cancelled, which aren't tried again until their settings change.
+    pub enhance_job: Option<panels::enhance::EnhanceJob>,
+    pub enhance_skipped: Vec<(Id, studio_core::model::SpeechEnhance)>,
     /// The layer whose subject is being picked: clicks in the viewer go to its cut-out.
     pub cutout_pick: Option<Id>,
     /// The color picker, while it is open.
@@ -637,6 +641,8 @@ impl Workspace {
                 color_picker: None,
                 caption_job: None,
                 cutout_job: None,
+                enhance_job: None,
+                enhance_skipped: Vec::new(),
                 analysis_job: None,
                 track_pick: None,
                 cutout_pick: None,
@@ -914,6 +920,8 @@ impl Render for Workspace {
         if self.ui.left_panel == LeftPanel::Elements {
             panels::elements::make_pictures(self, window, cx);
         }
+        // Layers set to Enhance Speech get their cleaned copies made, one at a time.
+        panels::enhance::keep_going(self, window, cx);
         let picking = self.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
         let dragging = cx.has_active_drag() || picking;
         self.state.record_history(dragging);

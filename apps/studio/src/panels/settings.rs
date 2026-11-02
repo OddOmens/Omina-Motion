@@ -140,6 +140,7 @@ struct Shown {
     /// Bytes on disk, measured when the dialog opened and after each change.
     proxy_bytes: u64,
     mask_bytes: u64,
+    enhanced_bytes: u64,
     note: Option<String>,
 }
 
@@ -506,6 +507,7 @@ fn measure(shown: &SharedShown, workspace: &WeakEntity<Workspace>, cx: &App) {
     let mut shown = shown.borrow_mut();
     shown.proxy_bytes = studio_media::cache_size(&proxies);
     shown.mask_bytes = folder_size(&masks);
+    shown.enhanced_bytes = folder_size(&super::enhance::enhanced_folder(workspace));
 }
 
 /// Moves the cache to `root` (or back to the platform's, with `None`), from now on.
@@ -604,7 +606,24 @@ fn media_cache(shown: &SharedShown, workspace: &WeakEntity<Workspace>, cx: &App)
             window.refresh();
         })
     };
-    let (proxy_bytes, mask_bytes) = (now.proxy_bytes, now.mask_bytes);
+    let clear_enhanced = {
+        let (shown, workspace) = (shown.clone(), workspace.clone());
+        Button::new("cache-clear-enhanced").outline().small().label("Clear Cleaned Sound").on_click(move |_, window, cx| {
+            let Some(entity) = workspace.upgrade() else { return };
+            if entity.read(cx).ui.enhance_job.is_some() {
+                shown.borrow_mut().note = Some("Enhance Speech is running. Wait for it, or cancel it, first.".into());
+                window.refresh();
+                return;
+            }
+            let folder = super::enhance::enhanced_folder(entity.read(cx));
+            let freed = folder_size(&folder);
+            let _ = std::fs::remove_dir_all(&folder);
+            measure(&shown, &workspace, cx);
+            shown.borrow_mut().note = Some(format!("Freed {}. Enhanced clips are cleaned again the next time they are open.", format_bytes(freed)));
+            window.refresh();
+        })
+    };
+    let (proxy_bytes, mask_bytes, enhanced_bytes) = (now.proxy_bytes, now.mask_bytes, now.enhanced_bytes);
     drop(now);
 
     div()
@@ -619,6 +638,8 @@ fn media_cache(shown: &SharedShown, workspace: &WeakEntity<Workspace>, cx: &App)
         ]))
         .child(group_title("Background removal"))
         .child(card(vec![setting(format!("{} of masks", format_bytes(mask_bytes)), "One picture per frame for each cut-out. Cleared cut-outs show the whole picture until made again.", clear_masks)]))
+        .child(group_title("Enhance Speech"))
+        .child(card(vec![setting(format!("{} of cleaned sound", format_bytes(enhanced_bytes)), "A cleaned copy of each enhanced clip's sound. Cleared clips play their original sound until cleaned again, which happens by itself.", clear_enhanced)]))
         .children(note(shown))
 }
 
@@ -793,6 +814,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         // Measured from the workspace directly: it is being updated, so it can't be read back.
         proxy_bytes: studio_media::cache_size(&workspace.render.proxies.cache_folder()),
         mask_bytes: folder_size(&super::cutout::cutouts_folder(workspace)),
+        enhanced_bytes: folder_size(&super::enhance::enhanced_folder(workspace)),
         note: None,
     }));
     let target = cx.weak_entity();

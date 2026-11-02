@@ -13,6 +13,7 @@ studio-media = { path = "../../crates/studio-media" }
 studio-export = { path = "../../crates/studio-export" }
 studio-captions = { path = "../../crates/studio-captions" }
 studio-cutout = { path = "../../crates/studio-cutout" }
+studio-enhance = { path = "../../crates/studio-enhance" }
 # Checks downloaded models are the files published.
 sha2 = "0.10"
 # Wakes the UI thread when a background decoder has a frame ready.
