@@ -68,6 +68,7 @@ actions!(studio, [
     SplitLayer,
     RippleDelete,
     ToggleSnapping,
+    Dismiss,
     Quit
 ]);
 
@@ -85,6 +86,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("pageup", PreviousFrame, Some(NOT_TYPING)),
         KeyBinding::new("shift-pagedown", NextTenFrames, Some(NOT_TYPING)),
         KeyBinding::new("shift-pageup", PreviousTenFrames, Some(NOT_TYPING)),
+        KeyBinding::new("escape", Dismiss, Some(NOT_TYPING)),
         KeyBinding::new("home", FirstFrame, Some(NOT_TYPING)),
         KeyBinding::new("end", LastFrame, Some(NOT_TYPING)),
         KeyBinding::new("delete", Delete, Some(NOT_TYPING)),
@@ -343,6 +345,8 @@ pub struct UiState {
     /// The brand whose colors and font templates take, if one is chosen.
     pub template_brand: Option<studio_core::model::LinkId>,
     pub template_pictures: HashMap<(usize, studio_core::templates::Format), Arc<gpui_kit::RenderImage>>,
+    /// Whether the View All gallery of every template is open.
+    pub template_gallery: bool,
     /// Pictures made of the Elements panel's elements, by index.
     pub element_pictures: HashMap<usize, Arc<gpui_kit::RenderImage>>,
     /// The Project panel's preview of the selected item.
@@ -650,6 +654,7 @@ impl Workspace {
                 template_category: None,
                 template_brand: None,
                 template_pictures: HashMap::new(),
+                template_gallery: false,
                 element_pictures: HashMap::new(),
                 preview_bounds: Default::default(),
                 timeline: timeline_ui,
@@ -988,7 +993,7 @@ impl Render for Workspace {
             self.ui.preview.seconds = 0.0;
         }
         // The Templates panel's pictures are made here, a few per frame, as it needs them.
-        if self.ui.left_panel == LeftPanel::Templates {
+        if self.ui.left_panel == LeftPanel::Templates || self.ui.template_gallery {
             panels::templates::make_pictures(self, window, cx);
         }
         if self.ui.left_panel == LeftPanel::Elements {
@@ -1062,6 +1067,13 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &PreviousFrame, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &NextTenFrames, _, cx| this.step(10, cx)))
             .on_action(cx.listener(|this, _: &PreviousTenFrames, _, cx| this.step(-10, cx)))
+            // Escape closes the template gallery.
+            .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+                if this.ui.template_gallery {
+                    this.ui.template_gallery = false;
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &FirstFrame, _, cx| this.go_to(0, cx)))
             .on_action(cx.listener(|this, _: &LastFrame, _, cx| {
                 let last = this.state.composition().duration_frames - 1;
@@ -1227,6 +1239,7 @@ impl Render for Workspace {
                     .child(div().flex_1().min_w_0().pr(gutter).pb(gutter).child(workspace)),
             )
             .children(panels::color_picker::popover(self, cx))
+            .children(panels::templates::gallery(self, cx))
             .children(panels::importing::popup(self, cx))
     }
 }

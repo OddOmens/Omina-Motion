@@ -1,6 +1,8 @@
-//! The Templates panel, opened from the rail: 100 animated templates for social media and
+//! The Templates panel, opened from the rail: 225 animated templates for social media and
 //! marketing (see `studio_core::templates`), browsed by shape (16:9, 4:5, 9:16) and by what
 //! they are for. Clicking one adds it to the project as a new composition and opens it.
+//! View All opens a gallery over the editor with every template at a larger size, grouped by
+//! what they are for.
 //!
 //! Each card shows the template itself, rendered a few at a time so the panel opens at once.
 
@@ -112,64 +114,190 @@ fn chip(id: impl Into<gpui_kit::ElementId>, label: &'static str, active: bool) -
         .child(label)
 }
 
-pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+/// The 16:9, 4:5 and 9:16 chips. `prefix` keeps the panel's and the gallery's ids apart.
+fn format_chips(workspace: &Workspace, prefix: &'static str, cx: &mut Context<Workspace>) -> gpui_kit::Div {
     let format = workspace.ui.template_format;
-    let formats = div().flex().gap_1().children(Format::ALL.into_iter().enumerate().map(|(index, choice)| {
-        chip(("template-format", index), choice.label(), choice == format)
+    div().flex().gap_1().children(Format::ALL.into_iter().enumerate().map(|(index, choice)| {
+        chip((prefix, index), choice.label(), choice == format)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.ui.template_format = choice;
                 cx.notify();
             }))
             .test_support()
-    }));
+    }))
+}
+
+/// "All" and a chip per category. `prefix` keeps the panel's and the gallery's ids apart.
+fn category_chips(workspace: &Workspace, prefix: &'static str, cx: &mut Context<Workspace>) -> Vec<gpui_kit::AnyElement> {
     let current = workspace.ui.template_category;
-    let mut categories = vec![chip("template-category-all", "All", current.is_none())
+    let mut categories = vec![chip((prefix, usize::MAX), "All", current.is_none())
         .on_click(cx.listener(|this, _, _, cx| {
             this.ui.template_category = None;
             cx.notify();
         }))
-        .test_support()];
+        .test_support()
+        .into_any_element()];
     categories.extend(Category::ALL.into_iter().enumerate().map(|(index, category)| {
-        chip(("template-category", index), category.name(), current == Some(category))
+        chip((prefix, index), category.name(), current == Some(category))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.ui.template_category = Some(category);
                 cx.notify();
             }))
             .test_support()
+            .into_any_element()
     }));
-    let height = card_height(format);
-    let brand = brand_menu(workspace, cx);
-    let cards = shown(workspace).into_iter().map(|index| {
-        let template = &TEMPLATES[index];
-        let picture = workspace.ui.template_pictures.get(&(index, format)).cloned();
-        div()
-            .id(("template", index))
-            .w(px(CARD_WIDTH))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.state.add_template(index, this.ui.template_format, this.ui.template_brand).is_some() {
-                    cx.notify();
+    categories
+}
+
+/// One template's card, `width` points wide: its picture, name, and what it is for. Clicking it
+/// adds the template (and closes the gallery, for `in_gallery` cards).
+fn card(workspace: &Workspace, index: usize, width: f32, in_gallery: bool, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let format = workspace.ui.template_format;
+    let template = &TEMPLATES[index];
+    let picture = workspace.ui.template_pictures.get(&(index, format)).cloned();
+    let height = card_height(format) * width / CARD_WIDTH;
+    div()
+        .id((if in_gallery { "gallery-template" } else { "template" }, index))
+        .w(px(width))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if this.state.add_template(index, this.ui.template_format, this.ui.template_brand).is_some() {
+                if in_gallery {
+                    this.ui.template_gallery = false;
                 }
-            }))
-            .child(
+                cx.notify();
+            }
+        }))
+        .child(
+            div()
+                .w(px(width))
+                .h(px(height))
+                .rounded(px(6.0))
+                .overflow_hidden()
+                .bg(hsla(color::INSET))
+                .border_1()
+                .border_color(hsla(color::HAIRLINE))
+                .hover(|style| style.border_color(hsla(color::ACCENT)))
+                .children(picture.map(|picture| img(ImageSource::Render(picture)).size_full())),
+        )
+        .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).truncate().child(template.name))
+        .child(div().text_size(px(10.0)).text_color(hsla(color::MUTED)).child(format!("{} · {:.0}s", template.category.name(), template.seconds)))
+        .test_support()
+}
+
+/// Card width in the gallery, in points.
+const GALLERY_CARD_WIDTH: f32 = 168.0;
+
+/// Every template at once, over the editor: the panel's shape, category and brand choices,
+/// with the templates grouped under their categories. Clicking one adds it and closes the
+/// gallery; the close button, a click outside it, or Escape closes it.
+pub fn gallery(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<gpui_kit::AnyElement> {
+    use gpui_kit::assets::IconName;
+    use gpui_kit::component::Icon;
+    use gpui_kit::{IntoElement as _, black, deferred};
+    if !workspace.ui.template_gallery {
+        return None;
+    }
+    let shown = shown(workspace);
+    let close = div()
+        .id("gallery-close")
+        .size(px(28.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .cursor_pointer()
+        .text_color(hsla(color::MUTED))
+        .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.ui.template_gallery = false;
+            cx.notify();
+        }))
+        .child(Icon::new(IconName::X).size(px(16.0)))
+        .test_support();
+    let header = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .gap_2()
+                .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("All Templates"))
+                .child(div().text_color(hsla(color::MUTED)).child(format!("{} templates", shown.len()))),
+        )
+        .child(div().flex().items_center().gap_2().child(format_chips(workspace, "gallery-format", cx)).child(brand_menu(workspace, cx)).child(close));
+    let categories = div().flex().flex_wrap().gap_1().children(category_chips(workspace, "gallery-category", cx));
+    // Grouped under their categories, in the order the chips list them.
+    let groups: Vec<_> = Category::ALL
+        .into_iter()
+        .filter_map(|category| {
+            let members: Vec<usize> = shown.iter().copied().filter(|&index| TEMPLATES[index].category == category).collect();
+            (!members.is_empty()).then(|| {
+                let cards: Vec<_> = members.iter().map(|&index| card(workspace, index, GALLERY_CARD_WIDTH, true, cx)).collect();
                 div()
-                    .w(px(CARD_WIDTH))
-                    .h(px(height))
-                    .rounded(px(6.0))
-                    .overflow_hidden()
-                    .bg(hsla(color::INSET))
-                    .border_1()
-                    .border_color(hsla(color::HAIRLINE))
-                    .hover(|style| style.border_color(hsla(color::ACCENT)))
-                    .children(picture.map(|picture| img(ImageSource::Render(picture)).size_full())),
-            )
-            .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).truncate().child(template.name))
-            .child(div().text_size(px(10.0)).text_color(hsla(color::MUTED)).child(format!("{} · {:.0}s", template.category.name(), template.seconds)))
-            .test_support()
-    });
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(format!("{} · {}", category.name(), members.len())))
+                    .child(div().flex().flex_wrap().gap_3().children(cards))
+            })
+        })
+        .collect();
+    let list = div().id("gallery-list").flex_1().min_h_0().overflow_y_scroll().pr_2().flex().flex_col().gap_5().children(groups);
+    let sheet = div()
+        .id("template-gallery")
+        .size_full()
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .rounded(px(12.0))
+        .bg(hsla(color::POPOVER))
+        .border_1()
+        .border_color(hsla(color::HAIRLINE))
+        .shadow_lg()
+        .text_size(px(size::TEXT))
+        .text_color(hsla(color::TEXT))
+        // Clicks inside stay inside; a click on the dimmed edge closes it.
+        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(header)
+        .child(categories)
+        .child(list)
+        .test_support();
+    let backdrop = div()
+        .id("gallery-backdrop")
+        .absolute()
+        .inset_0()
+        .p(px(40.0))
+        .bg(black().opacity(0.5))
+        .occlude()
+        .on_mouse_down(gpui_kit::MouseButton::Left, cx.listener(|this, _, _, cx| {
+            this.ui.template_gallery = false;
+            cx.notify();
+        }))
+        .child(sheet);
+    Some(deferred(backdrop).with_priority(3).into_any_element())
+}
+
+pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let formats = format_chips(workspace, "template-format", cx);
+    let categories = category_chips(workspace, "template-category", cx);
+    let brand = brand_menu(workspace, cx);
+    let cards: Vec<_> = shown(workspace).into_iter().map(|index| card(workspace, index, CARD_WIDTH, false, cx)).collect();
+    let view_all = {
+        use gpui_kit::component::Sizable as _;
+        use gpui_kit::component::button::{Button, ButtonVariants as _};
+        Button::new("templates-view-all").ghost().xsmall().label("View All Templates").on_click(cx.listener(|this, _, _, cx| {
+            this.ui.template_gallery = true;
+            cx.notify();
+        }))
+    };
     let body = div()
         .id("templates-list")
         .size_full()
@@ -182,5 +310,13 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .child(div().flex().flex_wrap().gap_1().children(categories))
         .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Click a template to add it as a new composition. Gray boxes are where your footage and photos go."))
         .child(div().flex().flex_wrap().gap_2().children(cards));
-    panel(PanelId::Templates, &["Templates"], None, body, workspace, cx)
+    // View All along the bottom, always in sight however far the list is scrolled.
+    let footer = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .w_full()
+        .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("{} templates", TEMPLATES.len())))
+        .child(view_all);
+    panel(PanelId::Templates, &["Templates"], Some(footer.into_any_element()), body, workspace, cx)
 }

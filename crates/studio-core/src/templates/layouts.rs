@@ -1,4 +1,4 @@
-//! The twenty animated designs (see `Layout`). Each places its layers by fractions of the frame,
+//! The first twenty animated designs (see `Layout`; `fun` and `social` have the rest). Each places its layers by fractions of the frame,
 //! choosing a stacked arrangement for the tall formats and a side-by-side one for 16:9 where
 //! that reads better, and times everything in seconds from the start.
 
@@ -18,6 +18,9 @@ pub(super) fn words_needed(layout: Layout) -> usize {
         Layout::Notification | Layout::PostCard | Layout::Quiz | Layout::KineticStack | Layout::Coupon => 4,
         Layout::ThisOrThat | Layout::PhoneMockup | Layout::Progress => 3,
         Layout::Meme | Layout::Typewriter | Layout::Neon | Layout::Confetti | Layout::Polaroid | Layout::NowPlaying | Layout::MapPin | Layout::GlitchTitle => 2,
+        Layout::ProfileIntro => 6,
+        Layout::StoryFrame => 4,
+        Layout::AskMeAnything | Layout::NameReveal | Layout::CommentReply | Layout::FloatingHearts | Layout::OutlineStack | Layout::VlogTitle => 3,
     }
 }
 
@@ -60,6 +63,14 @@ pub(super) fn build(b: &mut Builder) {
         Layout::MapPin => super::fun::map_pin(b),
         Layout::Coupon => super::fun::coupon(b),
         Layout::GlitchTitle => super::fun::glitch_title(b),
+        Layout::ProfileIntro => super::social::profile_intro(b),
+        Layout::AskMeAnything => super::social::ask_me_anything(b),
+        Layout::NameReveal => super::social::name_reveal(b),
+        Layout::StoryFrame => super::social::story_frame(b),
+        Layout::CommentReply => super::social::comment_reply(b),
+        Layout::FloatingHearts => super::social::floating_hearts(b),
+        Layout::OutlineStack => super::social::outline_stack(b),
+        Layout::VlogTitle => super::social::vlog_title(b),
     }
 }
 

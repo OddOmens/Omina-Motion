@@ -1,7 +1,7 @@
-//! Ready-made, animated compositions for social media and marketing: 185 templates, each in
+//! Ready-made, animated compositions for social media and marketing: 225 templates, each in
 //! three shapes (16:9, 4:5 and 9:16), about 10 to 15 seconds long.
 //!
-//! A template is a layout (one of `Layout`'s twenty animated designs) filled with its own words,
+//! A template is a layout (one of `Layout`'s 45 animated designs) filled with its own words,
 //! colors and font (see `catalog`). Making one builds an ordinary composition from text, shape
 //! and solid layers with keyframes and effects, so everything in it can be edited afterwards.
 //! Gray boxes named "Drop your … here" mark where footage or images go.
@@ -9,6 +9,7 @@
 mod catalog;
 mod fun;
 mod layouts;
+mod social;
 
 use crate::animation::{Animated, CubicBezier, EaseMode, Easing, Keyframe, Vec2};
 use crate::edit::{self, CompositionSettings};
@@ -63,10 +64,11 @@ pub enum Category {
     Brand,
     Fun,
     Celebrations,
+    Intros,
 }
 
 impl Category {
-    pub const ALL: [Self; 12] = [Self::Marketing, Self::Sales, Self::Product, Self::Ugc, Self::Social, Self::Fun, Self::Celebrations, Self::Testimonials, Self::Events, Self::Education, Self::Podcast, Self::Brand];
+    pub const ALL: [Self; 13] = [Self::Marketing, Self::Sales, Self::Product, Self::Ugc, Self::Social, Self::Intros, Self::Fun, Self::Celebrations, Self::Testimonials, Self::Events, Self::Education, Self::Podcast, Self::Brand];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -82,6 +84,7 @@ impl Category {
             Self::Brand => "Brand",
             Self::Fun => "Fun & Memes",
             Self::Celebrations => "Celebrations",
+            Self::Intros => "Intros",
         }
     }
 }
@@ -101,7 +104,7 @@ pub struct Palette {
     pub on_accent: u32,
 }
 
-/// The twenty animated designs templates are built from. Each takes its words from the
+/// The animated designs templates are built from. Each takes its words from the
 /// template's `copy`, in the order its description gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -179,6 +182,22 @@ pub enum Layout {
     Coupon,
     /// Title, line under it: a glitching title.
     GlitchTitle,
+    /// Greeting, name, handle, three facts: a "meet me" card with a round photo.
+    ProfileIntro,
+    /// Header, question, answer: a question sticker over footage, then the answer.
+    AskMeAnything,
+    /// Kicker, name, line under it: the name dropping in letter by letter.
+    NameReveal,
+    /// Name, time, caption, reply field: a story with its progress bars.
+    StoryFrame,
+    /// Handle, comment, caption: a "reply to a comment" sticker over footage.
+    CommentReply,
+    /// Headline, name, line under it: a greeting with hearts rising.
+    FloatingHearts,
+    /// Three words: huge outlines over a photo, filling in one by one.
+    OutlineStack,
+    /// Word, line under it, date: a bouncy outlined title with a date sticker.
+    VlogTitle,
 }
 
 /// One template: its layout filled with words, colors and a font.
@@ -456,9 +475,11 @@ impl Builder<'_> {
         Self::keys(&mut self.transform(id).opacity, keys);
     }
 
-    /// Opacity down to 0 over `length` seconds, ending at `at`.
+    /// Opacity down to 0 over `length` seconds, ending at `at`, from whatever it is then.
     fn fade_out(&mut self, id: Id, at: f64, length: f64) {
-        let keys = vec![self.key(at - length, 100.0, EASE_IN_OUT), self.key(at, 0.0, Easing::Linear)];
+        let from = self.frame(at - length) as f64;
+        let before = self.transform(id).opacity.value_at(from);
+        let keys = vec![self.key(at - length, before, EASE_IN_OUT), self.key(at, 0.0, Easing::Linear)];
         Self::keys(&mut self.transform(id).opacity, keys);
     }
 
@@ -563,7 +584,7 @@ mod tests {
 
     #[test]
     fn every_template_has_words_for_its_layout() {
-        assert_eq!(TEMPLATES.len(), 185);
+        assert_eq!(TEMPLATES.len(), 225);
         let mut names = std::collections::HashSet::new();
         for template in &TEMPLATES {
             assert!(names.insert(template.name), "{} is named twice", template.name);

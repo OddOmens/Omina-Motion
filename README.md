@@ -68,8 +68,11 @@ Inside `apps/studio/src`:
   Mark Beats (`studio-media/src/beats.rs`; markers snap), Track Motion (`studio-media/src/track.rs`) and Auto
   Reframe (follows the subject with the background-removal model). Speed, reverse and ramps are in
   `studio-core/src/speed.rs`; the mixer plays sped-up sound, ducks music under a voice, and gates noise.
-- `panels/templates.rs`: the Templates panel (with a brand menu that applies a Library brand's colors and font). The 185 templates (37 animated layouts, each in 16:9, 4:5 and
-  9:16) are in `studio-core/src/templates/`; `catalog.rs` holds their words, colors and fonts.
+- `panels/templates.rs`: the Templates panel (with a brand menu that applies a Library brand's colors and font) and
+  its View All gallery, which shows every template at once, grouped by category. The 225 templates (45 animated
+  layouts, each in 16:9, 4:5 and 9:16) are in `studio-core/src/templates/`; `catalog.rs` holds their words, colors and
+  fonts, and `social.rs` the intro and social layouts (profile card, Ask Me Anything, name reveal, story, comment
+  reply, greeting, outlined words, vlog title).
   `TEMPLATE_SHEET=/path.png cargo test -p studio-render --test render template_sheet -- --ignored` renders
   them all into one picture to check.
 - `panels/elements.rs`: the Elements panel (shapes, arrows, badges, frames, social buttons and emoji

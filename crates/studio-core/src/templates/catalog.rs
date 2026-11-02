@@ -1,4 +1,4 @@
-//! The 185 templates: five for each layout, each with its own words, colors and font.
+//! The 225 templates: five for each layout, each with its own words, colors and font.
 //! Words are short on purpose, so they fit the narrow formats; line breaks are written in.
 
 use super::{Category, Layout, Palette, Template};
@@ -26,7 +26,7 @@ const CHAT_LIGHT: Palette = Palette { background: 0xffffff, background_2: 0xe9e9
 const CHAT_DARK: Palette = Palette { background: 0x000000, background_2: 0x26252a, accent: 0x0a84ff, text: 0xffffff, muted: 0x8e8e93, on_accent: 0xffffff };
 
 /// Every template, grouped by layout.
-pub static TEMPLATES: [Template; 185] = [
+pub static TEMPLATES: [Template; 225] = [
     Template { name: "Launch Day", category: Category::Marketing, layout: Layout::Headline, copy: &["INTRODUCING", "Meet the\nNew Standard", "Built for teams that move fast", "Learn More"], palette: MIDNIGHT, font: ("Avenir Next", 800), seconds: 12.0 },
     Template { name: "Big Idea", category: Category::Brand, layout: Layout::Headline, copy: &["OUR MISSION", "Make Every\nDay Count", "Simple tools for busy people", "Join Us"], palette: CREAM, font: ("Georgia", 700), seconds: 12.0 },
     Template { name: "Webinar Invite", category: Category::Events, layout: Layout::Headline, copy: &["FREE WEBINAR", "Grow Your\nAudience", "Live Thursday · 12 PM", "Save My Seat"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 12.0 },
@@ -212,4 +212,45 @@ pub static TEMPLATES: [Template; 185] = [
     Template { name: "Version Two", category: Category::Product, layout: Layout::GlitchTitle, copy: &["V2.0", "The update you asked for"], palette: MIDNIGHT, font: ("Helvetica Neue", 800), seconds: 10.0 },
     Template { name: "Breaking", category: Category::Social, layout: Layout::GlitchTitle, copy: &["BREAKING", "You won't believe this"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
     Template { name: "Error 404", category: Category::Fun, layout: Layout::GlitchTitle, copy: &["ERROR 404", "Motivation not found"], palette: LIME, font: ("Menlo", 700), seconds: 10.0 },
+    // Intros and social formats (see `social`).
+    Template { name: "Meet Me", category: Category::Intros, layout: Layout::ProfileIntro, copy: &["Hi, I'm", "Maya", "@mayamakes", "Designer", "Coffee fan", "Dog mom"], palette: BLUSH, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Creator Profile", category: Category::Intros, layout: Layout::ProfileIntro, copy: &["Welcome to my page", "Leo Park", "@leocreates", "Filmmaker", "Travel", "Tutorials"], palette: MIDNIGHT, font: ("Helvetica Neue", 800), seconds: 12.0 },
+    Template { name: "New Team Member", category: Category::Brand, layout: Layout::ProfileIntro, copy: &["Say hello to", "Priya", "Head of Design", "8 years in UX", "Loves hiking", "Plant collector"], palette: SKY, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Student ID", category: Category::Education, layout: Layout::ProfileIntro, copy: &["This is me", "Sam Lee", "Class of 2027", "Robotics", "Chess club", "Night owl"], palette: SUNNY, font: ("Futura", 700), seconds: 12.0 },
+    Template { name: "Gamer Tag", category: Category::Intros, layout: Layout::ProfileIntro, copy: &["Player one", "NOVA", "@novaplays", "FPS", "Streams nightly", "Top 500"], palette: NEON_NIGHT, font: ("Futura", 700), seconds: 12.0 },
+    Template { name: "Ask Me Anything", category: Category::Social, layout: Layout::AskMeAnything, copy: &["ASK ME ANYTHING", "What camera do\nyou film with?", "Just my phone, honestly"], palette: ELECTRIC, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Q and A Friday", category: Category::Ugc, layout: Layout::AskMeAnything, copy: &["Q&A FRIDAY", "How did you\nget started?", "One video a day for a year"], palette: CORAL, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Customer Question", category: Category::Product, layout: Layout::AskMeAnything, copy: &["YOU ASKED", "Does it work\nwith Android?", "Yes, and with iPhone too"], palette: MINT, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Spicy Question", category: Category::Fun, layout: Layout::AskMeAnything, copy: &["UNPOPULAR OPINION?", "Pineapple on\npizza?", "Absolutely yes"], palette: SUNNY, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Ask the Coach", category: Category::Education, layout: Layout::AskMeAnything, copy: &["ASK THE COACH", "How often should\nI train?", "Three days a week to start"], palette: FOREST, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Name Drop", category: Category::Intros, layout: Layout::NameReveal, copy: &["Allow me to introduce", "JORDAN", "Creator · Editor · Dreamer"], palette: LIME, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Channel Opener", category: Category::Intros, layout: Layout::NameReveal, copy: &["Welcome back to", "STUDIO", "New videos every Tuesday"], palette: OCEAN, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Character Intro", category: Category::Fun, layout: Layout::NameReveal, copy: &["The main character", "ALEX", "Lover of chaos"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Brand Name Reveal", category: Category::Brand, layout: Layout::NameReveal, copy: &["Introducing", "LUMEN", "Light for every room"], palette: GOLD, font: ("Didot", 700), seconds: 10.0 },
+    Template { name: "Baby Name", category: Category::Celebrations, layout: Layout::NameReveal, copy: &["Please welcome", "OLIVIA", "Born May 3 · 7 lb 2 oz"], palette: CANDY, font: ("Avenir Next", 800), seconds: 12.0 },
+    Template { name: "Story Post", category: Category::Social, layout: Layout::StoryFrame, copy: &["yourname", "2h", "Sunday reset", "Send message"], palette: CANDY, font: ("Helvetica Neue", 700), seconds: 10.0 },
+    Template { name: "Story Promo", category: Category::Sales, layout: Layout::StoryFrame, copy: &["shopname", "now", "New drop: tap to shop", "Ask about sizes"], palette: CORAL, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Travel Story", category: Category::Ugc, layout: Layout::StoryFrame, copy: &["wanderlust", "5h", "Day 3 in Lisbon", "Reply"], palette: OCEAN, font: ("Avenir Next", 700), seconds: 10.0 },
+    Template { name: "Studio Story", category: Category::Brand, layout: Layout::StoryFrame, copy: &["studio.team", "1h", "Behind the scenes", "Send message"], palette: MONO, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Event Story", category: Category::Events, layout: Layout::StoryFrame, copy: &["citynights", "12m", "Doors open at 8", "Who's coming?"], palette: PARTY, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Comment Reply", category: Category::Social, layout: Layout::CommentReply, copy: &["@jess", "How do you edit\nso fast?", "Okay, here's my secret"], palette: CHAT_LIGHT, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Answering You", category: Category::Ugc, layout: Layout::CommentReply, copy: &["@marco", "Part 2 please!", "You asked, so here it is"], palette: CHAT_DARK, font: ("Avenir Next", 800), seconds: 10.0 },
+    Template { name: "Product Reply", category: Category::Product, layout: Layout::CommentReply, copy: &["@dana", "Is it waterproof?", "Watch this"], palette: SKY, font: ("Helvetica Neue", 800), seconds: 10.0 },
+    Template { name: "Recipe Reply", category: Category::Education, layout: Layout::CommentReply, copy: &["@chefsam", "What's the sauce?", "Three ingredients, that's it"], palette: SUNSET, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Myth Busting", category: Category::Fun, layout: Layout::CommentReply, copy: &["@skeptic", "There's no way\nthat's real", "Let me prove it"], palette: LIME, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Birthday Wishes", category: Category::Celebrations, layout: Layout::FloatingHearts, copy: &["Happy Birthday", "Sophia", "Wishing you your best year yet"], palette: CANDY, font: ("Snell Roundhand", 700), seconds: 12.0 },
+    Template { name: "Anniversary", category: Category::Celebrations, layout: Layout::FloatingHearts, copy: &["Happy Anniversary", "Ana & Tom", "Ten years and counting"], palette: SUNSET, font: ("Didot", 700), seconds: 12.0 },
+    Template { name: "Thank You Note", category: Category::Brand, layout: Layout::FloatingHearts, copy: &["Thank You", "10K friends", "We couldn't do this without you"], palette: BLUSH, font: ("Georgia", 700), seconds: 12.0 },
+    Template { name: "Mother's Day", category: Category::Celebrations, layout: Layout::FloatingHearts, copy: &["Happy Mother's Day", "Mom", "For everything, always"], palette: CREAM, font: ("Baskerville", 700), seconds: 12.0 },
+    Template { name: "Good Morning", category: Category::Social, layout: Layout::FloatingHearts, copy: &["Good Morning", "Sunshine", "Have a lovely day"], palette: SUNNY, font: ("Snell Roundhand", 700), seconds: 10.0 },
+    Template { name: "Photo Dump", category: Category::Social, layout: Layout::OutlineStack, copy: &["15", "PHOTOS", "TRENDING"], palette: SUNNY, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Ok Let's Go", category: Category::Fun, layout: Layout::OutlineStack, copy: &["OK", "LET'S", "GO"], palette: LIME, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Summer Recap", category: Category::Ugc, layout: Layout::OutlineStack, copy: &["SUMMER", "2026", "RECAP"], palette: CORAL, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Game Day", category: Category::Events, layout: Layout::OutlineStack, copy: &["GAME", "DAY", "LIVE"], palette: RED, font: ("Impact", 400), seconds: 10.0 },
+    Template { name: "Now Open", category: Category::Marketing, layout: Layout::OutlineStack, copy: &["NOW", "OPEN", "DAILY"], palette: ELECTRIC, font: ("Futura", 700), seconds: 10.0 },
+    Template { name: "Vlog Intro", category: Category::Intros, layout: Layout::VlogTitle, copy: &["VLOG", "a day in my life", "DAY 12"], palette: SKY, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Weekend Diary", category: Category::Intros, layout: Layout::VlogTitle, copy: &["WEEKEND", "come along with me", "SAT"], palette: CANDY, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Study With Me", category: Category::Education, layout: Layout::VlogTitle, copy: &["STUDY", "2 hours, no breaks", "EXAM WEEK"], palette: MINT, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Cook With Me", category: Category::Ugc, layout: Layout::VlogTitle, copy: &["COOK", "dinner in 20 minutes", "EP. 4"], palette: SUNSET, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
+    Template { name: "Travel Vlog", category: Category::Intros, layout: Layout::VlogTitle, copy: &["TOKYO", "five days, one bag", "PART 1"], palette: PARTY, font: ("Arial Rounded MT Bold", 700), seconds: 10.0 },
 ];

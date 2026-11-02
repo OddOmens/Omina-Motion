@@ -2478,6 +2478,44 @@ fn the_preview_plays_and_pauses_sound(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn view_all_shows_every_template_and_adds_the_one_clicked(cx: &mut TestAppContext) {
+    use studio_core::templates::TEMPLATES;
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("rail-templates", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("templates-view-all", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("template-gallery")).is_some(), "the gallery opens");
+    // Every template has a card, the newest included.
+    let last = TEMPLATES.len() - 1;
+    assert!(visual.update(|window, _| window.try_find(("gallery-template", 0_usize)).is_some() && window.try_find(("gallery-template", last)).is_some()));
+    // Its shape chips change the shape, as the panel's do.
+    visual.update(|window, cx| window.click(("gallery-format", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.template_format, studio_core::templates::Format::Wide));
+    // Escape closes it; View All opens it again.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("template-gallery")).is_none(), "Escape closes it");
+    visual.update(|window, cx| window.click("templates-view-all", cx));
+    render(visual);
+    // A category narrows it down; clicking a card adds that template and closes the gallery.
+    let intros = studio_core::templates::Category::ALL.iter().position(|&category| category == studio_core::templates::Category::Intros).unwrap();
+    visual.update(|window, cx| window.click(("gallery-category", intros), cx));
+    render(visual);
+    let first_intro = TEMPLATES.iter().position(|template| template.category == studio_core::templates::Category::Intros).unwrap();
+    assert!(visual.update(|window, _| window.try_find(("gallery-template", 0_usize)).is_none()), "other categories are hidden");
+    visual.update(|window, cx| window.click(("gallery-template", first_intro), cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("template-gallery")).is_none(), "adding one closes it");
+    visual.update(|_, cx| {
+        let composition = workspace.read(cx).state.composition();
+        assert!(composition.name.starts_with(TEMPLATES[first_intro].name));
+        assert_eq!((composition.width, composition.height), (1920, 1080));
+    });
+}
+
+#[gpui_kit::test]
 fn a_template_click_adds_and_opens_it_in_the_chosen_shape(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.click("rail-templates", cx));
