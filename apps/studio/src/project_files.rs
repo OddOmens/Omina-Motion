@@ -61,6 +61,7 @@ impl Workspace {
     /// On launch: offers back unsaved work if Studio closed without saving it, otherwise
     /// reopens the project that was open last.
     pub fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::panels::export::remove_unfinished_export();
         let settings = app_settings::load();
         let recovery = app_settings::recovery_path();
         if let Ok(text) = std::fs::read_to_string(&recovery) {
@@ -105,17 +106,38 @@ impl Workspace {
         }
     }
 
-    /// Copies unsaved work to the recovery file (run every `RECOVERY_INTERVAL`).
-    pub fn keep_recovery_copy(&self) {
+    /// Copies unsaved work to the recovery file (run every `RECOVERY_INTERVAL`). Returns why it
+    /// couldn't, so the user can be told their work isn't being kept safe.
+    pub fn keep_recovery_copy(&self) -> Result<(), String> {
         if !self.state.has_unsaved_changes() {
             // Back to how it was saved (by undoing, say): an older copy would offer back work
             // that was taken out on purpose.
             clear_stale_recovery();
-            return;
+            return Ok(());
         }
-        match self.state.project_text_with(&self.editor_settings()) {
-            Ok(text) => app_settings::write_recovery(&text, self.state.file()),
-            Err(error) => eprintln!("could not keep a recovery copy: {error}"),
+        let text = self.state.project_text_with(&self.editor_settings())?;
+        app_settings::write_recovery(&text, self.state.file()).map_err(|error| error.to_string())
+    }
+
+    /// Runs every `RECOVERY_INTERVAL`: keeps the recovery copy, saying once if it can't be kept
+    /// (a full or read-only disk), and tries again to save libraries that failed to save.
+    pub fn keep_work_safe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.keep_recovery_copy() {
+            Ok(()) => self.ui.recovery_failing = false,
+            Err(error) if !self.ui.recovery_failing => {
+                self.ui.recovery_failing = true;
+                window.push_notification(format!("Unsaved work can't be kept safe in case Studio closes: {error}. Save your project to keep it.").as_str(), cx);
+            }
+            Err(_) => {}
+        }
+        if let Some(back_up) = self.ui.library_save_failed.take() {
+            // Tests never write the real libraries file.
+            #[cfg(not(test))]
+            if crate::library_store::save(&self.state.libraries, back_up).is_err() {
+                self.ui.library_save_failed = Some(back_up);
+            }
+            #[cfg(test)]
+            let _ = back_up;
         }
     }
 

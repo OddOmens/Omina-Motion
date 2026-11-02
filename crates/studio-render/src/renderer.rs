@@ -127,6 +127,13 @@ fn paint_uniform(paint: Option<Paint>) -> (f32, f32, [f32; 4], [f32; 4]) {
 /// would otherwise never end).
 const MAX_NESTING: u32 = 8;
 
+/// The most nested compositions drawn for one frame. Depth alone doesn't bound the work: a
+/// composition showing many copies of one that shows many copies, and so on, multiplies it.
+const MAX_NESTED_RENDERS: u32 = 64;
+
+/// The largest frame side drawn, in pixels (what GPUs accept everywhere).
+const MAX_SIDE: u32 = 8192;
+
 /// A caption layer's drawing for one frame, from its animation.
 struct CaptionDraw {
     opacity: f32,
@@ -185,6 +192,8 @@ pub struct Renderer {
     nested: HashMap<Id, MediaTexture>,
     /// How deep the composition being rendered is nested (0 for the one asked for).
     depth: u32,
+    /// Nested compositions still allowed this frame (see `MAX_NESTED_RENDERS`).
+    nested_left: u32,
     /// Rasterized pen paths: the texture, and where it sits in the layer's own pixels.
     path_cache: HashMap<u64, (MediaTexture, Vec2)>,
     /// Which cached path raster each path layer on screen draws this frame.
@@ -204,6 +213,9 @@ pub struct Renderer {
     videos: HashMap<Id, VideoTexture>,
     /// The largest texture side the GPU accepts; larger images and text are scaled down to fit.
     max_texture: u32,
+    /// The last error the GPU reported. Without a handler wgpu would panic, which ends the app;
+    /// instead the frame it happened in fails with this message.
+    gpu_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Converts straight-alpha sRGB pixels to premultiplied ones, still sRGB encoded: each color is
@@ -307,6 +319,11 @@ impl Renderer {
         }))
         .map_err(|error| RenderError(format!("could not open the GPU: {error}")))?;
         let max_texture = device.limits().max_texture_dimension_2d;
+        let gpu_error = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = gpu_error.clone();
+        device.on_uncaptured_error(std::sync::Arc::new(move |error: wgpu::Error| {
+            *sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_string());
+        }));
 
         let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -422,6 +439,7 @@ impl Renderer {
             captions: HashMap::new(),
             nested: HashMap::new(),
             depth: 0,
+            nested_left: MAX_NESTED_RENDERS,
             path_cache: HashMap::new(),
             paths: HashMap::new(),
             path_text: HashMap::new(),
@@ -430,6 +448,7 @@ impl Renderer {
             images: HashMap::new(),
             videos: HashMap::new(),
             max_texture,
+            gpu_error,
         })
     }
 
@@ -925,7 +944,13 @@ impl Renderer {
         video: &dyn VideoSource,
     ) -> Result<RenderedFrame, RenderError> {
         let composition = project.composition(comp).ok_or_else(|| RenderError("the composition does not exist".into()))?;
-        let (width, height) = (width.clamp(1, 8192), height.clamp(1, 8192));
+        // Too large a frame is drawn smaller, keeping its shape (clamping each side alone would
+        // squash it).
+        let fit = (MAX_SIDE as f32 / width.max(height) as f32).min(1.0);
+        let (width, height) = (((width as f32 * fit).round() as u32).clamp(1, MAX_SIDE), ((height as f32 * fit).round() as u32).clamp(1, MAX_SIDE));
+        if self.depth == 0 {
+            self.nested_left = MAX_NESTED_RENDERS;
+        }
         let scale = width as f32 / composition.width as f32;
         let at = frame as f64;
         let at_time = at;
@@ -959,7 +984,11 @@ impl Renderer {
                 }
                 // Drawn at the size it appears on screen, so it stays sharp when scaled up.
                 let on_screen = world_transform(composition, layer.id, at_time).map_or(scale, |w| max_scale(w) * scale).clamp(0.01, 8.0);
-                let (inner_width, inner_height) = (((inner.width as f32 * on_screen).round() as u32).clamp(1, 8192), ((inner.height as f32 * on_screen).round() as u32).clamp(1, 8192));
+                let (inner_width, inner_height) = (((inner.width as f32 * on_screen).round() as u32).clamp(1, MAX_SIDE), ((inner.height as f32 * on_screen).round() as u32).clamp(1, MAX_SIDE));
+                if self.nested_left == 0 {
+                    continue;
+                }
+                self.nested_left -= 1;
                 self.depth += 1;
                 let rendered = self.render(project, inner_id, inner_frame, inner_width, inner_height, video);
                 self.depth -= 1;
@@ -1041,7 +1070,9 @@ impl Renderer {
                     let source = project.item(*item).and_then(|source| source.path.clone().zip(source.frame_rate));
                     if let Some((path, rate)) = source {
                         let index = layer.source_frame(frame, composition.frame_rate, rate);
-                        if let Some(picture) = video.frame(&path, index) {
+                        // A picture larger than the GPU accepts is left out (the layer shows its
+                        // placeholder); decoders keep frames within this size.
+                        if let Some(picture) = video.frame(&path, index).filter(|picture| picture.width.max(picture.height) <= self.max_texture) {
                             used_proxy |= picture.from_proxy;
                             self.prepare_video(layer.id, &picture);
                         }
@@ -1148,6 +1179,10 @@ impl Renderer {
         self.device
             .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
             .map_err(|error| RenderError(format!("the GPU did not finish: {error}")))?;
+        if let Some(error) = self.gpu_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+            targets.readback.unmap();
+            return Err(RenderError(format!("the GPU refused part of the frame: {error}")));
+        }
         let mut bgra = Vec::with_capacity((width * height * 4) as usize);
         {
             let mapped = slice.get_mapped_range().map_err(|error| RenderError(format!("could not read the frame back: {error}")))?;

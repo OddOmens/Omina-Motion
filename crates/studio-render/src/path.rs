@@ -61,7 +61,9 @@ pub fn rasterize(path: &ShapePath, style: &ShapeStyle, size: Vec2, scale: f32, m
     let covered = Vec2::new(max.x - min.x + margin * 2.0, max.y - min.y + margin * 2.0);
     // Never larger than the GPU accepts: scale down to fit (it is stretched back when drawn).
     let scale = scale.min(max_side as f32 / covered.x.max(covered.y)).max(1e-3);
-    let (width, height) = (((covered.x * scale).ceil() as u32).max(1), ((covered.y * scale).ceil() as u32).max(1));
+    // The floor on `scale` keeps tiny paths drawable; the sides are still never above the limit.
+    let side = |length: f32| ((length * scale).ceil() as u32).clamp(1, max_side);
+    let (width, height) = (side(covered.x), side(covered.y));
     let mut pixmap = Pixmap::new(width, height)?;
 
     let mut builder = PathBuilder::new();

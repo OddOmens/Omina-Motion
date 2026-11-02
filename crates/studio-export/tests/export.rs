@@ -162,3 +162,25 @@ fn footage_that_cannot_be_read_stops_the_export_with_a_reason() {
     assert!(error.contains("could not be decoded"), "{error}");
     assert!(!path.exists());
 }
+
+/// A video taller than GPUs accept (a 64 × 9000 strip) exports instead of crashing the app.
+#[test]
+fn a_video_taller_than_the_gpu_limit_exports() {
+    let clip = scratch("tall.mp4");
+    let settings = studio_media::MovieSettings::new(MovieFormat::H264, 64, 9000, FrameRate::new(24, 1), None);
+    let mut writer = studio_media::MovieWriter::create(&clip, settings).unwrap();
+    let picture: Vec<u8> = [0u8, 0, 255, 255].iter().copied().cycle().take(64 * 9000 * 4).collect();
+    for _ in 0..4 {
+        writer.write_video(&picture, 64, 9000).unwrap();
+    }
+    writer.finish().unwrap();
+    let mut project = Project::new(Vec::new(), Vec::new());
+    let settings = CompositionSettings { name: "Tall".into(), width: 64, height: 36, frame_rate: FrameRate::new(24, 1), duration_frames: 4, background: Rgba::hex(0x000000) };
+    let comp = edit::new_composition(&mut project, &settings).unwrap();
+    let info = FootageInfo { size: Vec2::new(64.0, 9000.0), duration_seconds: 4.0 / 24.0, frame_rate: FrameRate::new(24, 1), has_audio: false };
+    let footage = edit::import_footage(&mut project, clip, &info);
+    edit::add_layer_from_item(&mut project, comp, footage, 0, 0).unwrap();
+    let path = scratch("tall-out.mp4");
+    export(&project, &ExportRequest::new(comp, 0..4, MovieFormat::H264, path.clone()), &mut |_| {}, &|| false).unwrap();
+    assert!(path.exists());
+}

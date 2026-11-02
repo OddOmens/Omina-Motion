@@ -26,6 +26,21 @@ impl std::fmt::Display for MediaError {
 
 impl std::error::Error for MediaError {}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoded_pictures_fit_within_the_largest_texture_both_ways() {
+        assert_eq!(output_size(1920, 1080, 1280), (1280, 720));
+        assert_eq!(output_size(1920, 1080, 4096), (1920, 1080), "never made larger");
+        // A 64 × 9000 strip: its width fits, but it is far too tall.
+        let (w, h) = output_size(64, 9000, 1920);
+        assert!(h <= MAX_OUTPUT_SIDE && (2..=64).contains(&w), "{w} × {h}");
+        assert_eq!(output_size(1, 1, 1920), (2, 2));
+    }
+}
+
 impl From<ffmpeg::Error> for MediaError {
     fn from(error: ffmpeg::Error) -> Self {
         Self(error.to_string())
@@ -123,6 +138,20 @@ pub struct VideoDecoder {
 /// Jumps shorter than this decode forward instead of seeking, which is faster for small skips.
 const FORWARD_DECODE_LIMIT: i64 = 24;
 
+/// The tallest or widest picture decoders hand out: what GPUs accept everywhere. A very tall
+/// video (a narrow strip, say) is scaled down to fit even when its width is small.
+pub const MAX_OUTPUT_SIDE: u32 = 8192;
+
+/// Decoded size for a `width` × `height` video at most `max_width` wide and `MAX_OUTPUT_SIDE`
+/// tall: the aspect ratio kept, rounded to even sizes, which scalers prefer.
+fn output_size(width: u32, height: u32, max_width: u32) -> (u32, u32) {
+    let (width, height) = (u64::from(width.max(1)), u64::from(height.max(1)));
+    let fit_width = u64::from(max_width.clamp(2, MAX_OUTPUT_SIDE)).min(width);
+    let fit_height = (height * fit_width / width).min(u64::from(MAX_OUTPUT_SIDE));
+    let out_width = (width * fit_height / height).min(fit_width);
+    ((out_width as u32).max(2) & !1, (fit_height as u32).max(2) & !1)
+}
+
 impl VideoDecoder {
     /// Opens `path`, decoding at most `max_width` wide. With `use_hardware`, the GPU's video
     /// decoder is used if the platform has one for this codec.
@@ -145,9 +174,7 @@ impl VideoDecoder {
         if width == 0 || height == 0 {
             return Err(MediaError("the video has no picture size".into()));
         }
-        // Keep the aspect ratio; round to even sizes, which scalers prefer.
-        let out_width = width.min(max_width.max(2)) & !1;
-        let out_height = ((u64::from(height) * u64::from(out_width) / u64::from(width)) as u32).max(2) & !1;
+        let (out_width, out_height) = output_size(width, height, max_width);
         let time_base = f64::from(stream.time_base());
         let start_seconds = if stream.start_time() == ffmpeg::ffi::AV_NOPTS_VALUE { 0.0 } else { stream.start_time() as f64 * time_base };
         let info = probe(path)?;

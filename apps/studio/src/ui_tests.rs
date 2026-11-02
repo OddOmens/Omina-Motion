@@ -1301,7 +1301,7 @@ fn launching_reopens_the_last_project(cx: &mut TestAppContext) {
 fn unsaved_work_is_recovered_after_studio_closes_without_saving(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     make_an_edit(&workspace, visual);
-    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy());
+    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy().unwrap());
     assert!(crate::app_settings::recovery_path().exists(), "unsaved work was copied");
     // As if Studio closed and started again.
     visual.update(|window, cx| workspace.update(cx, |ws, cx| {
@@ -1322,19 +1322,39 @@ fn unsaved_work_is_recovered_after_studio_closes_without_saving(cx: &mut TestApp
 fn undoing_back_to_the_saved_project_removes_the_recovery_copy(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     make_an_edit(&workspace, visual);
-    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy());
+    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy().unwrap());
     assert!(crate::app_settings::recovery_path().exists());
     visual.update(|_, cx| workspace.update(cx, |ws, _| assert!(ws.state.undo())));
     assert!(!has_unsaved_changes(&workspace, visual));
-    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy());
+    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy().unwrap());
     assert!(!crate::app_settings::recovery_path().exists(), "nothing to offer back on the next launch");
+}
+
+#[gpui_kit::test]
+fn a_recovery_copy_that_cant_be_written_is_reported_once(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    // A folder where the recovery file goes, so writing it fails.
+    let blocker = crate::app_settings::recovery_path();
+    let _ = std::fs::remove_file(&blocker);
+    std::fs::create_dir_all(&blocker).unwrap();
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.keep_work_safe(window, cx)));
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.recovery_failing), "the failure is noticed");
+    let count = |visual: &mut VisualTestContext| visual.update(|window, cx| window.notifications(cx).len());
+    let shown = count(visual);
+    assert!(shown >= 1, "and the user is told");
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.keep_work_safe(window, cx)));
+    assert_eq!(count(visual), shown, "but only once");
+    std::fs::remove_dir_all(&blocker).unwrap();
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.keep_work_safe(window, cx)));
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.recovery_failing), "and it recovers once writing works");
 }
 
 #[gpui_kit::test]
 fn discarding_recovered_work_removes_the_copy(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     make_an_edit(&workspace, visual);
-    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy());
+    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy().unwrap());
     visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.restore_session(window, cx)));
     visual.run_until_parked();
     visual.simulate_prompt_answer("Discard");
@@ -2044,16 +2064,19 @@ fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppCont
     assert_ne!(crate::theme::themed(crate::theme::color::PANEL), crate::theme::color::PANEL, "light panels");
     let saved = crate::app_settings::load();
     assert_eq!((saved.theme, saved.accent), (crate::theme::ThemeName::Light, crate::theme::Accent::Green));
-    // Clearing the (test) proxy folder removes what is in it.
+    // Clearing the (test) proxy folder removes the proxies in it, and nothing else.
     let folder = visual.update(|_, cx| workspace.read(cx).render.proxies.cache_folder().to_path_buf());
     std::fs::create_dir_all(&folder).unwrap();
-    std::fs::write(folder.join("old-proxy.mov"), vec![0u8; 1000]).unwrap();
+    std::fs::write(folder.join("0123456789abcdef.mov"), vec![0u8; 1000]).unwrap();
+    std::fs::write(folder.join("notes.txt"), "mine").unwrap();
     // The cache has its own section in the menu on the left.
     visual.update(|window, cx| window.click(("settings-section", 6_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("cache-clear", cx));
     render(visual);
-    assert!(!folder.join("old-proxy.mov").exists());
+    assert!(!folder.join("0123456789abcdef.mov").exists());
+    assert!(folder.join("notes.txt").exists(), "a file that isn't a proxy stays");
+    std::fs::remove_file(folder.join("notes.txt")).unwrap();
     visual.update(|_, cx| crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx));
 }
 

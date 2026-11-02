@@ -306,6 +306,17 @@ pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: 
     run(workspace, project, request, AfterExport::Nothing, window, cx);
 }
 
+/// Removes the unfinished file of an export that Studio didn't live to finish (it quit or
+/// crashed mid-export). Called at launch.
+pub fn remove_unfinished_export() {
+    let Some(target) = crate::app_settings::load().export_in_progress else { return };
+    let unfinished = studio_export::temporary_path(&target);
+    if unfinished.is_file() {
+        let _ = std::fs::remove_file(&unfinished);
+    }
+    crate::app_settings::update(|settings| settings.export_in_progress = None);
+}
+
 /// Exports `project` as `request` says on a background thread, showing progress in the
 /// toolbar, then does what `after` says.
 fn run(workspace: &mut Workspace, project: studio_core::model::Project, request: ExportRequest, after: AfterExport, window: &mut Window, cx: &mut Context<Workspace>) {
@@ -319,6 +330,7 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
     // regularly rather than being woken by it.
     let report = Arc::new(Mutex::new(Report::default()));
     let thread_report = report.clone();
+    crate::app_settings::update(|settings| settings.export_in_progress = Some(path.clone()));
     let spawned = std::thread::Builder::new().name("export".into()).spawn(move || {
         let outcome = studio_export::export(&project, &request, &mut |progress| lock(&thread_report).done = progress.done, &|| {
             cancel.load(Ordering::Relaxed)
@@ -326,6 +338,7 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
         lock(&thread_report).outcome = Some(outcome);
     });
     if let Err(error) = spawned {
+        crate::app_settings::update(|settings| settings.export_in_progress = None);
         workspace.ui.export_job = None;
         window.push_notification(format!("The export could not start: {error}").as_str(), cx);
         return;
@@ -349,6 +362,7 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
                     return true;
                 };
                 this.ui.export_job = None;
+                crate::app_settings::update(|settings| settings.export_in_progress = None);
                 cx.notify();
                 if this.ui.quit_after_export {
                     cx.quit();
@@ -427,4 +441,21 @@ pub fn status(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl
                 cx.notify();
             }))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn an_export_studio_didnt_finish_is_cleaned_up_at_the_next_launch() {
+        let folder = std::env::temp_dir().join(format!("studio-unfinished-export-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let target = folder.join("Promo.mp4");
+        let unfinished = studio_export::temporary_path(&target);
+        std::fs::write(&unfinished, b"half a movie").unwrap();
+        crate::app_settings::update(|settings| settings.export_in_progress = Some(target.clone()));
+        super::remove_unfinished_export();
+        assert!(!unfinished.exists(), "the hidden partial file is gone");
+        assert_eq!(crate::app_settings::load().export_in_progress, None);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
 }

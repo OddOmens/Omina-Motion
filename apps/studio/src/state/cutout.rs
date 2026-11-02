@@ -92,6 +92,7 @@ impl EditorState {
     /// Records masks the background job made from `clicks`. This follows the user's clicks
     /// rather than being an edit of its own, so it is not an undo step.
     pub fn record_cutout_masks(&mut self, comp: Id, layer: Id, clicks: &[CutoutClick], folder: PathBuf, frames: (i64, i64)) -> bool {
+        self.settle_drags();
         let Some(composition) = self.project.composition_mut(comp) else { return false };
         if !cutout::set_masks(composition, layer, clicks, folder.clone(), frames) {
             return false;

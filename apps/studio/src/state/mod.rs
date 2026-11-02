@@ -882,6 +882,7 @@ impl EditorState {
     /// Puts imported movie `item`, a render of `layer` alone, in that layer's place in
     /// composition `comp` (see `studio_core::bake`), and selects it.
     pub fn replace_with_render(&mut self, comp: Id, layer: Id, item: Id) -> Option<Id> {
+        self.settle_drags();
         let clip = studio_core::bake::replace_with_render(&mut self.project, comp, layer, item)?;
         self.selected_layers.retain(|&selected| selected != layer);
         if comp == self.active_comp {
@@ -1212,6 +1213,16 @@ pub fn expand_folders(paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf>
 impl EditorState {
     /// Whether a drag that edits the project (keyframes, a layer in time or in the viewer) is
     /// in progress. Its changes become one undo step when it ends.
+    /// Finishes any drag in progress, as letting go of the mouse would. Results that arrive from
+    /// background jobs call this first: some drags put the composition back as it was when they
+    /// began on every move, which would otherwise throw away what the job just added.
+    pub fn settle_drags(&mut self) {
+        self.end_keyframe_drag();
+        self.end_layer_time_drag();
+        self.end_viewer_drag();
+        self.end_clip_drag();
+    }
+
     pub fn is_dragging(&self) -> bool {
         self.keyframe_drag.is_some() || self.layer_time_drag.is_some() || self.viewer_drag.is_some() || self.clip_drag.is_some()
     }

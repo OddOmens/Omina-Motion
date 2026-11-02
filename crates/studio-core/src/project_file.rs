@@ -240,6 +240,27 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             if layer.id.0 > MAX_ID || layer.effects.iter().any(|effect| effect.id.0 > MAX_ID) {
                 return damaged(&format!("layer \"{}\" has an id too large to use", layer.name));
             }
+            // Sizes the renderer can draw (a pen path is drawn at its size, so a huge one would
+            // need a huge picture).
+            let side_ok = |side: f32| side.is_finite() && (0.0..=crate::model::MAX_LAYER_SIDE).contains(&side);
+            if !(side_ok(layer.size.x) && side_ok(layer.size.y)) {
+                return damaged(&format!("layer \"{}\" has an impossible size", layer.name));
+            }
+            // Text the renderer can lay out.
+            let text_style = match &layer.content {
+                crate::model::LayerContent::Text { style, .. } => Some(style),
+                crate::model::LayerContent::Captions { style, .. } => Some(&style.text),
+                _ => None,
+            };
+            if text_style.is_some_and(|style| !style.is_sound()) {
+                return damaged(&format!("text layer \"{}\" has an impossible font size or spacing", layer.name));
+            }
+            // A composition shown inside itself, however deeply, would be drawn without end.
+            if let crate::model::LayerContent::Composition { composition: inner } = layer.content
+                && crate::edit::contains_composition(project, inner, comp.id)
+            {
+                return damaged(&format!("composition \"{}\" is shown inside itself", comp.name));
+            }
             if let crate::model::LayerContent::Shape { style, .. } = &layer.content
                 && !shape_is_sound(style)
             {
@@ -431,6 +452,11 @@ mod tests {
         &mut file["project"]["compositions"][0]["layers"][0]
     }
 
+    /// The title's text style in a saved file.
+    fn style(file: &mut serde_json::Value) -> &mut serde_json::Value {
+        &mut title(file)["content"]["Text"]["style"]
+    }
+
     /// The sample saved as JSON, changed by `damage`, then opened.
     fn open_damaged(damage: impl FnOnce(&mut serde_json::Value)) -> Result<(Project, EditorView), String> {
         let mut file: serde_json::Value = serde_json::from_str(&to_text(&sample_project(), view()).unwrap()).unwrap();
@@ -455,6 +481,27 @@ mod tests {
         assert!(open_damaged(|file| title(file)["id"] = serde_json::json!(u64::MAX)).is_err());
         assert!(open_damaged(|file| file["project"]["items"][3]["duration_seconds"] = serde_json::json!(1e30)).is_err());
         assert!(open_damaged(|file| title(file)["size"]["x"] = serde_json::json!(1e300)).unwrap_err().contains("too large"));
+    }
+
+    #[test]
+    fn text_sizes_layer_sizes_and_nesting_loops_that_would_stop_the_renderer_are_refused() {
+        // A line height of 0 stops text layout; a negative one never finishes.
+        for line_height in [0.0, -10.0] {
+            assert!(open_damaged(|file| style(file)["line_height"] = serde_json::json!(line_height)).unwrap_err().contains("font size or spacing"));
+        }
+        // A glyph thousands of times the frame.
+        assert!(open_damaged(|file| style(file)["font_size"] = serde_json::json!(200_000.0)).is_err());
+        assert!(open_damaged(|file| style(file)["tracking"] = serde_json::json!(-5000.0)).is_err());
+        // A layer box ten million pixels across.
+        assert!(open_damaged(|file| title(file)["size"] = serde_json::json!([1e7, 1e7])).unwrap_err().contains("impossible size"));
+        // A composition that shows itself.
+        let shown_inside_itself = open_damaged(|file| {
+            let main = file["project"]["compositions"][0]["id"].clone();
+            title(file)["content"] = serde_json::json!({ "Composition": { "composition": main } });
+        });
+        assert!(shown_inside_itself.unwrap_err().contains("inside itself"));
+        // The sample itself is fine.
+        assert!(open_damaged(|_| {}).is_ok());
     }
 
     #[test]

@@ -32,6 +32,7 @@ impl EditorState {
     /// Records a finished cleaned copy, made for `made_for`, on `layer` of composition `comp`. It
     /// is the app's own work, not an edit, so it is not an undo step.
     pub fn record_cleaned(&mut self, comp: Id, layer: Id, made_for: &SpeechEnhance, file: std::path::PathBuf) -> bool {
+        self.settle_drags();
         let Some(composition) = self.project.composition_mut(comp) else { return false };
         if !enhance::record_cleaned(composition, layer, made_for, file.clone()) {
             return false;
@@ -65,6 +66,9 @@ impl EditorState {
                 }
             }
         };
+        if !missing.is_empty() {
+            self.settle_drags();
+        }
         forget(&mut self.project);
         self.history.absorb_everywhere(forget);
         !missing.is_empty()

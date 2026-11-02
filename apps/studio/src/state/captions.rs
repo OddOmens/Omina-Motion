@@ -33,6 +33,7 @@ impl EditorState {
     /// Adds a caption layer for `clip` from words heard in its sound (timed from the start of
     /// the span `caption_source` gave), spanning the clip, and selects it.
     pub fn add_captions(&mut self, clip: Id, heard: &[HeardWord]) -> Option<Id> {
+        self.settle_drags();
         let composition = self.composition();
         let layer = composition.layer(clip)?;
         let fps = composition.frame_rate.fps();

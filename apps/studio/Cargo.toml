@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
+authors.workspace = true
 
 [dependencies]
 studio-core.workspace = true
@@ -24,6 +26,31 @@ serde_json = "1"
 gpui-kit.workspace = true
 # The same image library GPUI uses, for handing it rendered frames and reading image sizes.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[features]
+# FFmpeg built into the app, for releases (see studio-media's feature of the same name).
+bundled-ffmpeg = ["studio-media/bundled-ffmpeg"]
+
+# Packaging into Studio.app and Studio.dmg with cargo-packager; scripts/release-macos.sh builds the
+# release binary (with FFmpeg built in) first, then runs it. Paths are relative to this folder.
+[package.metadata.packager]
+product-name = "Studio"
+identifier = "com.oddomens.studio"
+publisher = "Odd Omens LLC"
+category = "Video"
+description = "One app for compositing and editing: After Effects-style layers and keyframes with Premiere-style editing."
+copyright = "Copyright © 2026 Odd Omens LLC. Free software under the GNU GPL, version 3 or later."
+license-file = "../../LICENSE"
+icons = ["../../assets/icon/studio-512@2x.png", "../../assets/icon/studio-512.png", "../../assets/icon/studio-256@2x.png", "../../assets/icon/studio-256.png", "../../assets/icon/studio-128@2x.png", "../../assets/icon/studio-128.png", "../../assets/icon/studio-32@2x.png", "../../assets/icon/studio-32.png", "../../assets/icon/studio-16@2x.png", "../../assets/icon/studio-16.png"]
+out-dir = "../../target/packages"
+binaries-dir = "../../target/release"
+binaries = [{ path = "studio", main = true }]
+resources = ["../../LICENSE", "../../THIRD_PARTY_NOTICES.md"]
+
+[package.metadata.packager.macos]
+minimum-system-version = "13.0"
+# For signed releases: your Developer ID certificate's name, as Keychain Access shows it.
+# signing-identity = "Developer ID Application: Odd Omens LLC (TEAMID)"
 
 [lints]
 workspace = true

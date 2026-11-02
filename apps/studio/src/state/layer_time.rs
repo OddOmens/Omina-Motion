@@ -336,6 +336,21 @@ mod tests {
     }
 
     #[test]
+    fn captions_that_arrive_during_a_ripple_drag_are_kept() {
+        let mut state = EditorState::new();
+        let title = state.composition().layers[0].id;
+        state.begin_layer_time_drag(title, LayerTimeEdit::Ripple(End::Out));
+        state.drag_layer_time(-20);
+        // The captions job finishes now, mid-drag, as background jobs can.
+        let heard = [crate::state::captions::HeardWord { text: "hello".into(), start: 0.0, end: 0.5 }];
+        let captions = state.add_captions(title, &heard).unwrap();
+        // Further movement (which the drag would apply to the composition as it began) and letting go.
+        state.drag_layer_time(-30);
+        state.end_layer_time_drag();
+        assert!(state.composition().layer(captions).is_some(), "the captions survive the drag");
+    }
+
+    #[test]
     fn a_ripple_drag_applies_afresh_as_the_pointer_moves() {
         let mut state = EditorState::new();
         // The title (24–168) with the logo moved onto its track right after it.

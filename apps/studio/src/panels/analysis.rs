@@ -83,6 +83,7 @@ fn run<T: Send + 'static>(
                     _ if cancel.load(Ordering::Relaxed) => {}
                     Ok(value) => {
                         if let Some(done) = done.take() {
+                            this.state.settle_drags();
                             done(this, value, window, cx);
                         }
                     }
@@ -274,7 +275,7 @@ pub fn auto_reframe(workspace: &mut Workspace, layer: Id, format: Format, window
             "Reframing",
             move |progress, cancelled| {
                 if !studio_cutout::model_present(&model) {
-                    super::cutout::fetch_model(&model)?;
+                    super::cutout::fetch_model(&model, cancelled)?;
                 }
                 follow_subject(&model, &path, &samples, &clicks, progress, cancelled)
             },

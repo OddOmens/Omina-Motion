@@ -1153,3 +1153,34 @@ fn mockup_sheet() {
     }
     sheet.save(path).unwrap();
 }
+
+#[test]
+fn frames_past_the_size_limit_keep_their_shape() {
+    let mut project = project(vec![full(2, 0xff0000)]);
+    project.compositions[0].width = 5120;
+    project.compositions[0].height = 2880;
+    let mut renderer = Renderer::new().unwrap();
+    let frame = renderer.render(&project, Id(1), 0, 10240, 5760, &studio_core::media::NoVideo).unwrap();
+    assert_eq!((frame.width, frame.height), (8192, 4608), "scaled down as a whole, not squashed");
+}
+
+#[test]
+fn many_copies_of_nested_compositions_still_draw_quickly() {
+    // Eight compositions, each showing six copies of the next: millions of nested draws if
+    // nothing limited them.
+    let mut comps = Vec::new();
+    for level in 0..8u64 {
+        let id = 1 + level * 100;
+        let layers = if level == 7 {
+            vec![full(id + 1, 0x00ff00)]
+        } else {
+            (0..6).map(|copy| nested(id + 1 + copy, 1 + (level + 1) * 100)).collect()
+        };
+        comps.push(clear_comp(id, layers));
+    }
+    let project = Project::new(Vec::new(), comps);
+    let started = std::time::Instant::now();
+    let mut renderer = Renderer::new().unwrap();
+    renderer.render(&project, Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "took {:?}", started.elapsed());
+}

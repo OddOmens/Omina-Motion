@@ -38,7 +38,10 @@ impl TextRenderer {
 
     /// Shapes `text` at `scale` × its font size. Returns the buffer and its box (unscaled).
     fn layout(&mut self, text: &str, style: &TextStyle, scale: f32) -> (Buffer, Vec2) {
-        let metrics = Metrics::new(style.font_size * scale, style.line_height * scale);
+        // Kept in the editor's ranges even for a style that slipped past them: a line height of 0
+        // stops the layout, and a negative one never finishes.
+        let (font_size, line_height) = (style.font_size.clamp(1.0, 2000.0), style.line_height.clamp(1.0, 4000.0));
+        let metrics = Metrics::new(font_size * scale, line_height * scale);
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
             .family(Family::Name(&style.font_family))

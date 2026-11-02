@@ -7655,6 +7655,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "ffmpeg-next",
+ "ffmpeg-sys-next",
  "rtrb",
  "studio-core",
 ]

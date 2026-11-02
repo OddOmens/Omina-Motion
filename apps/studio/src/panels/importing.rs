@@ -108,6 +108,7 @@ fn finish(this: &gpui_kit::WeakEntity<Workspace>, cx: &mut gpui_kit::AsyncWindow
     this.update_in(cx, |this, window, cx| {
         let cancelled = this.ui.import_job.take().is_none_or(|job| job.cancelled);
         if let (false, Some((projects, files, then))) = (cancelled, read) {
+            this.state.settle_drags();
             let items = this.add_imported(projects, files, window, cx);
             if let Some(then) = then {
                 then(this, items, window, cx);

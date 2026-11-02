@@ -221,11 +221,20 @@ struct Shared {
     limit: AtomicU64,
 }
 
+/// Whether `name` is one Studio gives proxies (see `proxy_path`): sixteen hex digits, then
+/// `.mov` (or `.partial.mov` while one is written). Only these are counted or deleted, so a
+/// file of the user's that ends up in the cache folder is never removed.
+fn is_proxy_name(name: &str) -> bool {
+    let stem = name.strip_suffix(".mov").map(|stem| stem.strip_suffix(".partial").unwrap_or(stem));
+    stem.is_some_and(|stem| stem.len() == 16 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 /// The proxy files in `folder`, with their sizes and when they were last written.
 fn cache_files(folder: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
     let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
     entries
         .filter_map(Result::ok)
+        .filter(|entry| is_proxy_name(&entry.file_name().to_string_lossy()))
         .filter_map(|entry| {
             let metadata = entry.metadata().ok().filter(|metadata| metadata.is_file())?;
             Some((entry.path(), metadata.len(), metadata.modified().unwrap_or(std::time::UNIX_EPOCH)))
@@ -442,10 +451,14 @@ mod cache_tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
             path
         };
-        let (old, in_use, newest) = (file("old.mov", 100), file("in-use.mov", 100), file("new.mov", 100));
+        let (old, in_use, newest) = (file("00000000000000a1.mov", 100), file("00000000000000b2.mov", 100), file("00000000000000c3.mov", 100));
+        // Someone else's file in the folder is neither counted nor deleted.
+        let theirs = file("thesis.mov", 100);
         assert_eq!(cache_size(&folder), 300);
         assert_eq!(trim_cache(&folder, 150, std::slice::from_ref(&in_use)), 200, "the oldest unused went first, then the next");
         assert!(!old.exists() && in_use.exists() && !newest.exists());
+        assert_eq!(trim_cache(&folder, 0, &[]), 100, "clearing removes the last proxy");
+        assert!(theirs.exists(), "and never the user's file");
         let _ = std::fs::remove_dir_all(&folder);
     }
 }

@@ -406,6 +406,15 @@ pub enum TextAlign {
     Right,
 }
 
+/// Font sizes allowed, in pixels.
+pub const FONT_SIZE_RANGE: (f32, f32) = (1.0, 2000.0);
+/// Line heights allowed, in pixels.
+pub const LINE_HEIGHT_RANGE: (f32, f32) = (1.0, 4000.0);
+/// Letter spacing allowed, in thousandths of the font size.
+pub const TRACKING_RANGE: (f32, f32) = (-1000.0, 10000.0);
+/// The largest a layer's box may be on either side, in pixels.
+pub const MAX_LAYER_SIDE: f32 = 100_000.0;
+
 /// Character and paragraph styling for a text layer.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TextStyle {
@@ -427,6 +436,16 @@ pub struct TextStyle {
 impl TextStyle {
     /// Approximate pixel size of `text` in this style, used for layer bounds until real
     /// text shaping is available. Assumes an average glyph width of 0.58 em.
+    /// Whether the style's numbers are ones the text renderer can lay out: finite and within
+    /// the ranges the editor allows (a line height of 0, say, would stop it).
+    pub fn is_sound(&self) -> bool {
+        let within = |value: f32, (low, high): (f32, f32)| value.is_finite() && (low..=high).contains(&value);
+        within(self.font_size, FONT_SIZE_RANGE)
+            && within(self.line_height, LINE_HEIGHT_RANGE)
+            && within(self.tracking, TRACKING_RANGE)
+            && self.stroke.is_none_or(|(_, width)| width.is_finite() && (0.0..=MAX_STROKE_WIDTH).contains(&width))
+    }
+
     pub fn estimate_size(&self, text: &str) -> Vec2 {
         let lines: Vec<&str> = if text.is_empty() { vec![""] } else { text.lines().collect() };
         let tracking_px = self.tracking / 1000.0 * self.font_size;

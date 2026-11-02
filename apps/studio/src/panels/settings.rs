@@ -141,6 +141,7 @@ struct Shown {
     proxy_bytes: u64,
     mask_bytes: u64,
     enhanced_bytes: u64,
+    imported_bytes: u64,
     /// Models being downloaded from the AI Models page, by their row's id.
     downloading: Vec<&'static str>,
     note: Option<String>,
@@ -517,6 +518,7 @@ fn measure(shown: &SharedShown, workspace: &WeakEntity<Workspace>, cx: &App) {
     shown.proxy_bytes = studio_media::cache_size(&proxies);
     shown.mask_bytes = folder_size(&masks);
     shown.enhanced_bytes = folder_size(&super::enhance::enhanced_folder(workspace));
+    shown.imported_bytes = folder_size(&workspace.imported_folder());
 }
 
 /// Moves the cache to `root` (or back to the platform's, with `None`), from now on.
@@ -632,7 +634,24 @@ fn media_cache(shown: &SharedShown, workspace: &WeakEntity<Workspace>, cx: &App)
             window.refresh();
         })
     };
-    let (proxy_bytes, mask_bytes, enhanced_bytes) = (now.proxy_bytes, now.mask_bytes, now.enhanced_bytes);
+    let clear_imported = {
+        let (shown, workspace) = (shown.clone(), workspace.clone());
+        Button::new("cache-clear-imported").outline().small().label("Clear Imported Images").on_click(move |_, window, cx| {
+            let Some(entity) = workspace.upgrade() else { return };
+            if entity.read(cx).ui.import_job.is_some() {
+                shown.borrow_mut().note = Some("An import is running. Wait for it, or cancel it, first.".into());
+                window.refresh();
+                return;
+            }
+            let folder = entity.read(cx).imported_folder();
+            let freed = folder_size(&folder);
+            let _ = std::fs::remove_dir_all(&folder);
+            measure(&shown, &workspace, cx);
+            shown.borrow_mut().note = Some(format!("Freed {}. Images from imported animations show as missing until the animation is imported again.", format_bytes(freed)));
+            window.refresh();
+        })
+    };
+    let (proxy_bytes, mask_bytes, enhanced_bytes, imported_bytes) = (now.proxy_bytes, now.mask_bytes, now.enhanced_bytes, now.imported_bytes);
     drop(now);
 
     div()
@@ -649,6 +668,8 @@ fn media_cache(shown: &SharedShown, workspace: &WeakEntity<Workspace>, cx: &App)
         .child(card(vec![setting(format!("{} of masks", format_bytes(mask_bytes)), "One picture per frame for each cut-out. Cleared cut-outs show the whole picture until made again.", clear_masks)]))
         .child(group_title("Enhance Speech"))
         .child(card(vec![setting(format!("{} of cleaned sound", format_bytes(enhanced_bytes)), "A cleaned copy of each enhanced clip's sound. Cleared clips play their original sound until cleaned again, which happens by itself.", clear_enhanced)]))
+        .child(group_title("Imported animations"))
+        .child(card(vec![setting(format!("{} of images", format_bytes(imported_bytes)), "Pictures that were inside imported Lottie animations. Projects use them, so clear only when you no longer need those animations.", clear_imported)]))
         .children(note(shown))
 }
 
@@ -732,7 +753,7 @@ fn models(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::D
         .child(group_title("Models"))
         .child(card(vec![
             model_row("model-whisper", "Whisper (tiny)", "Speech to text, for captions. About 150 MB, from huggingface.co.", super::captions::model_folder(), studio_captions::model_present(&super::captions::model_folder()), super::captions::fetch_model, shown),
-            model_row("model-sam", "MobileSAM", "Finding subjects, for Remove Background and Auto Reframe. About 40 MB, from huggingface.co; checked before use.", super::cutout::model_folder(), studio_cutout::model_present(&super::cutout::model_folder()), || super::cutout::fetch_model(&super::cutout::model_folder()), shown),
+            model_row("model-sam", "MobileSAM", "Finding subjects, for Remove Background and Auto Reframe. About 40 MB, from huggingface.co; checked before use.", super::cutout::model_folder(), studio_cutout::model_present(&super::cutout::model_folder()), || super::cutout::fetch_model(&super::cutout::model_folder(), &|| false), shown),
             built_in_row("DeepFilterNet3", "Studio noise removal, for Enhance Speech."),
             built_in_row("RNNoise", "Light noise removal, for Enhance Speech."),
         ]))
@@ -778,6 +799,23 @@ fn shortcuts() -> gpui_kit::Div {
         page_div = page_div.child(div().pt_3().pb_1p5().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(group.to_uppercase())).child(card(rows));
     }
     page_div
+}
+
+/// A document that ships with Studio (`LICENSE`, `THIRD_PARTY_NOTICES.md`): inside the app's
+/// Resources folder in a packaged app, or at the top of the source tree when run from it.
+fn bundled_document(name: &str) -> Option<PathBuf> {
+    let packaged = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|macos| macos.join("../Resources").join(name)));
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(name);
+    [packaged, Some(source)].into_iter().flatten().find(|path| path.is_file())
+}
+
+/// A button that opens a document that ships with Studio, or says it can't be found.
+fn document_button(id: &'static str, label: &'static str, name: &'static str) -> Button {
+    Button::new(id).outline().small().label(label).disabled(bundled_document(name).is_none()).on_click(move |_, _, cx| {
+        if let Some(path) = bundled_document(name) {
+            cx.open_with_system(&path);
+        }
+    })
 }
 
 fn about(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {
@@ -837,6 +875,20 @@ fn about(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Di
             setting("Settings, libraries and models", folder.display().to_string(), reveal),
             setting("Reset settings", "Puts every setting back to how Studio comes. Projects, libraries and caches are not touched.", reset),
         ]))
+        // The legal notices the GPL asks an interactive program to show.
+        .child(group_title("License"))
+        .child(card(vec![
+            setting(
+                "Free software",
+                "Copyright © 2026 Odd Omens LLC. Studio is free software under the GNU General Public License, version 3 or later: you may share and change it under its terms. It comes with no warranty.",
+                document_button("about-license", "License", "LICENSE"),
+            ),
+            setting(
+                "Built with",
+                "FFmpeg, x264, the Lucide icons, RNNoise, DeepFilterNet and the Rust crates listed in the notices, each under its own license.",
+                document_button("about-notices", "Third-Party Notices", "THIRD_PARTY_NOTICES.md"),
+            ),
+        ]))
         .children(note(shown))
 }
 
@@ -890,6 +942,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         proxy_bytes: studio_media::cache_size(&workspace.render.proxies.cache_folder()),
         mask_bytes: folder_size(&super::cutout::cutouts_folder(workspace)),
         enhanced_bytes: folder_size(&super::enhance::enhanced_folder(workspace)),
+        imported_bytes: folder_size(&workspace.imported_folder()),
         downloading: Vec::new(),
         note: None,
     }));
@@ -930,6 +983,16 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_license_and_notices_ship_with_studio() {
+        for name in ["LICENSE", "THIRD_PARTY_NOTICES.md"] {
+            let found = super::bundled_document(name).unwrap_or_else(|| panic!("{name} is missing"));
+            assert!(std::fs::metadata(&found).unwrap().len() > 1000, "{name} has its text");
+        }
+        assert!(super::bundled_document("NOT_A_FILE").is_none());
+    }
+
     use super::*;
 
     #[test]

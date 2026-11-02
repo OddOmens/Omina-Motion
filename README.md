@@ -169,8 +169,56 @@ cargo run -p studio-export --release --example export -- project.studio out.mp4 
 - Rendering works in 16-bit float linear light with premultiplied alpha. Effects not drawn by the
   GPU yet are listed in `studio-render/src/effects.rs` and left out of the UI. Effects that would do nothing
   on a kind of layer (colour correction on text, anything on audio) are decided in `studio_core::effects::suits`.
-- `unsafe` is forbidden workspace-wide, with one audited exception: `studio-media/src/hardware.rs`, which
-  calls FFmpeg's hardware-decoding API directly. Every unsafe block there explains why it is sound.
+- `unsafe` is forbidden workspace-wide, with two audited exceptions in `studio-media`: `hardware.rs` (FFmpeg's
+  hardware-decoding API) and `color.rs` (telling FFmpeg's scaler a video's YUV formula). Every unsafe block
+  explains why it is sound.
+- Project files are untrusted input: `project_file::check` refuses anything the editor or renderer couldn't
+  handle (ids, frames, sizes, text sizes and spacing, parent and nesting loops) with a "damaged" message. The
+  renderer also guards itself (text metrics, path raster sizes, a budget of nested renders per frame, frames
+  scaled down to fit 8192 pixels), and GPU errors fail the frame instead of panicking (release builds abort
+  on panic).
 - Proxies live in the system cache folder (macOS: `~/Library/Caches/Studio/Proxies`) and are named from the
   source's path, size and modification time; deleting them is always safe.
 - GPUI is pinned to an exact version; upgrade deliberately.
+
+## Privacy and security
+
+- **Network.** Studio contacts only: Hugging Face, to download the captions (Whisper) and cut-out (MobileSAM)
+  models, after asking or from Settings > AI Models (pinned files, each checked against its SHA-256 before use;
+  `https` only); and OpenConnect, only at the address set in the Mockups panel. Its token is read from
+  `~/.config/openconnect/token` and handed to `curl` on standard input; plain `http` is allowed only for this
+  computer and the local network. There is no telemetry, analytics or crash reporting.
+- **On disk.** Settings, libraries (and up to 30 backups), downloaded models and the recovery copy of unsaved
+  work live in `~/Library/Application Support/Studio`. Proxies, background-removal masks, cleaned speech and
+  images from imported animations live in `~/Library/Caches/Studio` (or the folder chosen in Settings >
+  Media Cache), and each can be cleared there.
+- **Sharing projects.** A `.studio` file holds the full paths of its media (which include your user name) and
+  of files in Studio's cache; it holds no settings, libraries or OpenConnect details. Exported movies carry
+  only the encoder's tags: no project name, paths or dates.
+
+## Releasing
+
+`scripts/release-macos.sh` makes `target/packages/Studio.app`, a disk image and `SOURCES.txt`. It builds
+x264 and FFmpeg from source (pinned) and links them into the app with the `bundled-ffmpeg` feature, so the
+app needs nothing installed and runs on macOS 13 and later; it stops if the binary still links anything
+outside macOS. Packaging is `cargo-packager` (configured in `apps/studio/Cargo.toml`), which can also make
+Windows and Linux installers later. Everyday builds skip all this and use the system's FFmpeg
+(`brew install ffmpeg`).
+
+- **Needs** (release machine only): Xcode's command-line tools, git, pkg-config and
+  `cargo install cargo-packager --locked`.
+- **Signing and notarizing:** set `signing-identity` in `apps/studio/Cargo.toml` and, for notarizing,
+  `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password) and `APPLE_TEAM_ID`. Unsigned builds work for testing.
+- **Icon:** `python3 scripts/make-icon.py` draws `assets/icon`.
+- **Notices:** `python3 scripts/third-party-notices.py` rewrites `THIRD_PARTY_NOTICES.md` (the release
+  script does this too); it ships inside the app with `LICENSE`.
+- **Dependency advisories:** run `cargo install cargo-audit --locked && cargo audit` before each release.
+- **Models:** Whisper tiny is Apache-2.0 on Hugging Face. MobileSAM is Apache-2.0 upstream, but the copy
+  Studio downloads (`lmz/candle-sam`) states no license: confirm it, or download from a source that does.
+
+## License
+
+Studio is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+License as published by the Free Software Foundation, either version 3 of the License, or (at your option)
+any later version. See `LICENSE`. Release builds include FFmpeg and x264, also under the GPL; see
+`THIRD_PARTY_NOTICES.md`.

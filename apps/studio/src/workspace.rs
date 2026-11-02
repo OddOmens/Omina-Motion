@@ -352,6 +352,10 @@ pub struct UiState {
     pub template_pictures: HashMap<(usize, studio_core::templates::Format), Arc<gpui_kit::RenderImage>>,
     /// Whether the View All gallery of every template is open.
     pub template_gallery: bool,
+    /// Whether the last recovery copy failed (said once, until it works again).
+    pub recovery_failing: bool,
+    /// A library save that failed, to try again (with whether to back up first).
+    pub library_save_failed: Option<bool>,
     /// The Mockups panel's choices, its device pictures and OpenConnect's finishes.
     pub mockups: panels::mockups::MockupsUi,
     /// Pictures made of the Elements panel's elements, by index.
@@ -593,7 +597,7 @@ impl Workspace {
                 }
             });
             cx.defer_in(window, |this, window, cx| this.restore_session(window, cx));
-            cx.spawn(async move |this, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 loop {
                     // As often as Settings says; checked again each time, so a change applies.
                     let seconds = crate::app_settings::load().recovery_seconds;
@@ -602,7 +606,7 @@ impl Workspace {
                     if seconds == 0 {
                         continue;
                     }
-                    if this.update(cx, |this, _| this.keep_recovery_copy()).is_err() {
+                    if this.update_in(cx, |this, window, cx| this.keep_work_safe(window, cx)).is_err() {
                         break;
                     }
                 }
@@ -664,6 +668,8 @@ impl Workspace {
                 template_brand: None,
                 template_pictures: HashMap::new(),
                 template_gallery: false,
+                recovery_failing: false,
+                library_save_failed: None,
                 mockups: Default::default(),
                 element_pictures: HashMap::new(),
                 preview_bounds: Default::default(),
@@ -890,10 +896,15 @@ impl Workspace {
         panels::importing::start(self, paths, then, window, cx);
     }
 
+    /// Where images embedded in imported project files (Lottie animations) are kept, in the cache.
+    pub fn imported_folder(&self) -> std::path::PathBuf {
+        self.render.proxies.cache_folder().parent().map_or_else(std::env::temp_dir, std::path::Path::to_path_buf).join("Imported")
+    }
+
     /// Where images embedded in an imported project file (a Lottie animation's) are written:
     /// a folder of its own in the cache, so importing the same file again reuses it.
     pub fn imported_assets_folder(&self, path: &std::path::Path) -> std::path::PathBuf {
-        self.render.proxies.cache_folder().parent().map_or_else(std::env::temp_dir, std::path::Path::to_path_buf).join("Imported").join(format!("{:x}", {
+        self.imported_folder().join(format!("{:x}", {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             path.hash(&mut hasher);
@@ -1023,6 +1034,8 @@ impl Render for Workspace {
             #[cfg(not(test))]
             if let Err(problem) = crate::library_store::save(&self.state.libraries, back_up) {
                 window.push_notification(problem.as_str(), cx);
+                // Tried again with the recovery copy, and with the next library change.
+                self.ui.library_save_failed = Some(back_up);
             }
             #[cfg(test)]
             let _ = back_up;

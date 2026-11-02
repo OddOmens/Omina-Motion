@@ -793,6 +793,14 @@ fn resize_box(layer: &mut Layer, size: Vec2) {
     layer.size = size;
 }
 
+/// Keeps a text style's size and spacing within the ranges the editor allows.
+fn clamp_text_style(style: &mut TextStyle) {
+    use crate::model::{FONT_SIZE_RANGE, LINE_HEIGHT_RANGE, TRACKING_RANGE};
+    style.font_size = style.font_size.clamp(FONT_SIZE_RANGE.0, FONT_SIZE_RANGE.1);
+    style.line_height = style.line_height.clamp(LINE_HEIGHT_RANGE.0, LINE_HEIGHT_RANGE.1);
+    style.tracking = style.tracking.clamp(TRACKING_RANGE.0, TRACKING_RANGE.1);
+}
+
 /// Changes a text layer's text and/or style, keeping its size (and so its bounds) in step.
 /// Caption layers take the same style edits (font, size, fill, stroke) for all their captions;
 /// their words and box stay as they are.
@@ -800,14 +808,12 @@ pub fn edit_text(composition: &mut Composition, layer_id: Id, edit: impl FnOnce(
     let Some(layer) = composition.layer_mut(layer_id) else { return };
     if let LayerContent::Captions { style, .. } = &mut layer.content {
         edit(&mut String::new(), &mut style.text);
-        style.text.font_size = style.text.font_size.clamp(1.0, 2000.0);
-        style.text.line_height = style.text.line_height.clamp(1.0, 4000.0);
+        clamp_text_style(&mut style.text);
         return;
     }
     if let LayerContent::Text { text, style } = &mut layer.content {
         edit(text, style);
-        style.font_size = style.font_size.clamp(1.0, 2000.0);
-        style.line_height = style.line_height.clamp(1.0, 4000.0);
+        clamp_text_style(style);
         let size = style.estimate_size(text);
         // Keep the anchor in the same relative spot (the center, by default) as the box resizes.
         if let Some(transform) = layer.transform.as_mut() {

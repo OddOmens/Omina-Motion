@@ -180,8 +180,9 @@ pub fn export(
     }
 }
 
-/// A hidden file next to the final one, so the rename at the end is a single, atomic step.
-fn temporary_path(path: &Path) -> PathBuf {
+/// A hidden file next to the final one, so the rename at the end is a single, atomic step. An
+/// app that crashes mid-export can find it here afterwards to clean it up.
+pub fn temporary_path(path: &Path) -> PathBuf {
     let name = path.file_name().map_or_else(|| "export".into(), |name| name.to_string_lossy().into_owned());
     path.with_file_name(format!(".{name}.exporting"))
 }

@@ -154,9 +154,9 @@ fn lock(report: &Mutex<Report>) -> std::sync::MutexGuard<'_, Report> {
 }
 
 /// Downloads the model, checked against the SHA-256 it was published with (see `download`).
-pub fn fetch_model(folder: &Path) -> Result<(), String> {
+pub fn fetch_model(folder: &Path, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     std::fs::create_dir_all(folder).map_err(|error| format!("could not make the model folder: {error}"))?;
-    crate::download::fetch_checked(studio_cutout::MODEL_URL, &folder.join(studio_cutout::MODEL_FILE), studio_cutout::MODEL_SHA256, "the cut-out model")
+    crate::download::fetch_checked(studio_cutout::MODEL_URL, &folder.join(studio_cutout::MODEL_FILE), studio_cutout::MODEL_SHA256, "the cut-out model", cancelled)
 }
 
 /// One source picture as RGBA: an image file, or a decoded video frame.
@@ -178,7 +178,7 @@ fn run(request: &Request, report: &Mutex<Report>, cancelled: &dyn Fn() -> bool) 
     let model = &request.model;
     if !studio_cutout::model_present(model) {
         lock(report).stage = "Downloading the cut-out model".into();
-        fetch_model(model)?;
+        fetch_model(model, cancelled)?;
     }
     lock(report).stage = "Loading".into();
     let segmenter = Segmenter::load(model).map_err(|error| error.to_string())?;

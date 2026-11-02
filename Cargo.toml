@@ -10,6 +10,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 publish = false
+# Studio is open source under the GPL, version 3 or later (see LICENSE). FFmpeg and x264, built
+# into release builds, are GPL too.
+license = "GPL-3.0-or-later"
+authors = ["Odd Omens LLC"]
 
 [workspace.dependencies]
 studio-core = { path = "crates/studio-core" }

@@ -27,9 +27,7 @@ fn token_path() -> Option<std::path::PathBuf> {
 /// Every app's finish from the OpenConnect API at `api` (its address, ending in `/api`).
 pub fn fetch(api: &str) -> Result<Vec<AppFinish>, String> {
     let api = api.trim().trim_end_matches('/');
-    if !(api.starts_with("http://") || api.starts_with("https://")) {
-        return Err("The OpenConnect address should start with http:// or https://.".into());
-    }
+    check_address(api)?;
     let token = token_path().and_then(|path| std::fs::read_to_string(path).ok()).map(|token| token.trim().to_owned()).filter(|token| !token.is_empty());
     let Some(token) = token else { return Err("No OpenConnect token was found in ~/.config/openconnect/token.".into()) };
     // A token with quotes or line breaks would break out of the config line.
@@ -57,6 +55,42 @@ pub fn fetch(api: &str) -> Result<Vec<AppFinish>, String> {
         return Err("OpenConnect has no apps with a device frame yet.".into());
     }
     Ok(finishes)
+}
+
+/// Refuses addresses the token shouldn't go to: anything but a web address, and plain `http`
+/// beyond this computer and the local network, where the token would cross the internet
+/// unencrypted.
+fn check_address(api: &str) -> Result<(), String> {
+    if api.starts_with("https://") {
+        return Ok(());
+    }
+    let Some(rest) = api.strip_prefix("http://") else { return Err("The OpenConnect address should start with http:// or https://.".into()) };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // A user name in the address (user@host) is refused rather than guessed around.
+    if authority.contains('@') {
+        return Err("The OpenConnect address can't contain a user name.".into());
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or(""),
+        None => authority.rsplit_once(':').map_or(authority, |(host, _)| host),
+    };
+    if is_local(host) {
+        Ok(())
+    } else {
+        Err("Use https:// for an OpenConnect beyond your local network (plain http would send its token unencrypted).".into())
+    }
+}
+
+/// Whether `host` is this computer or on the local network.
+fn is_local(host: &str) -> bool {
+    use std::net::IpAddr;
+    let host = host.to_ascii_lowercase();
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        // Loopback, and unique local addresses (fc00::/7).
+        Ok(IpAddr::V6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
+        Err(_) => host == "localhost" || [".local", ".lan", ".home.arpa", ".internal"].iter().any(|suffix| host.ends_with(suffix)),
+    }
 }
 
 /// The finishes in an `/api/data` answer: each app's `style.frame` and its primary background.
@@ -120,5 +154,16 @@ mod tests {
     #[test]
     fn addresses_must_be_web_addresses() {
         assert!(fetch("10.0.0.38:3100/studio/api").unwrap_err().contains("http"));
+    }
+
+    #[test]
+    fn plain_http_is_only_for_this_computer_and_the_local_network() {
+        for local in ["http://10.0.0.38:3100/studio/api", "http://192.168.1.5/api", "http://localhost:3100/api", "http://studio.local/api", "http://[::1]:3100/api", "http://172.20.0.2"] {
+            assert!(check_address(local).is_ok(), "{local}");
+        }
+        for remote in ["http://example.com/api", "http://8.8.8.8/api", "http://172.32.0.1/api", "http://user@10.0.0.38/api", "http://10.0.0.38.example.com/api"] {
+            assert!(check_address(remote).is_err(), "{remote}");
+        }
+        assert!(check_address("https://studio.example.com/api").is_ok(), "https goes anywhere");
     }
 }

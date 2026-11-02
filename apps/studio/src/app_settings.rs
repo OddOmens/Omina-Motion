@@ -72,6 +72,9 @@ pub struct AppSettings {
     /// The OpenConnect studio API (such as `http://host:3100/studio/api`), whose apps' device
     /// frame colors the Mockups panel offers. Its token is read from OpenConnect's own file.
     pub openconnect_api: Option<String>,
+    /// The movie an export was writing when Studio last ran, until it finished: if Studio quit
+    /// or crashed first, its unfinished hidden file is removed on the next launch.
+    pub export_in_progress: Option<PathBuf>,
 }
 
 /// The features that use AI models, each of which can be hidden.
@@ -204,6 +207,7 @@ impl Default for AppSettings {
             cooler_background_removal: false,
             ai: AiFeatures::default(),
             openconnect_api: None,
+            export_in_progress: None,
         }
     }
 }
@@ -324,13 +328,16 @@ pub fn update(change: impl FnOnce(&mut AppSettings)) {
 /// Writes through a temporary file and a rename, so a crash never leaves half a file. The new
 /// text is flushed to the disk before the rename, so a power cut can't leave an empty file in
 /// its place. A symbolic link is written through (the file it points to is replaced), so the
-/// link stays a link.
+/// link stays a link, and the file keeps its permissions (one only its owner may read stays so).
 pub fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     let path = if path.is_symlink() { std::fs::canonicalize(path)? } else { path.to_path_buf() };
     let name = path.file_name().map_or_else(|| "file".into(), |name| name.to_string_lossy().into_owned());
     let temporary = path.with_file_name(format!(".{name}.saving"));
     let written = std::fs::File::create(&temporary).and_then(|mut file| {
+        if let Ok(existing) = std::fs::metadata(&path) {
+            file.set_permissions(existing.permissions())?;
+        }
         file.write_all(text.as_bytes())?;
         file.sync_all()
     });
@@ -346,12 +353,10 @@ pub fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// Keeps a recovery copy of unsaved work, noting which project file it belongs to.
-pub fn write_recovery(text: &str, of: Option<&Path>) {
-    let written = std::fs::create_dir_all(folder()).and_then(|()| write_atomically(&recovery_path(), text));
-    match written {
-        Ok(()) => update(|settings| settings.recovery_of = of.map(Path::to_path_buf)),
-        Err(error) => eprintln!("could not keep a recovery copy: {error}"),
-    }
+pub fn write_recovery(text: &str, of: Option<&Path>) -> std::io::Result<()> {
+    std::fs::create_dir_all(folder()).and_then(|()| write_atomically(&recovery_path(), text))?;
+    update(|settings| settings.recovery_of = of.map(Path::to_path_buf));
+    Ok(())
 }
 
 /// Removes the recovery copy, once the work is saved or deliberately thrown away.
@@ -363,6 +368,20 @@ pub fn clear_recovery() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn saving_keeps_a_files_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let folder = std::env::temp_dir().join(format!("studio-permissions-test-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("private.studio");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomically(&file, "new").unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
 
     #[test]
     #[cfg(unix)]
@@ -407,7 +426,7 @@ mod tests {
         assert_eq!(loaded.last_project.as_deref(), Some(Path::new("/projects/Promo.studio")));
         assert_eq!(loaded.window, Some(placement));
 
-        write_recovery("{\"unsaved\": true}", Some(Path::new("/projects/Promo.studio")));
+        write_recovery("{\"unsaved\": true}", Some(Path::new("/projects/Promo.studio"))).unwrap();
         assert!(recovery_path().exists());
         assert_eq!(load().recovery_of.as_deref(), Some(Path::new("/projects/Promo.studio")));
         clear_recovery();

@@ -68,7 +68,7 @@ fn download_model(folder: &std::path::Path, report: &Mutex<Report>, cancelled: &
         if destination.is_file() {
             continue;
         }
-        crate::download::fetch_checked(url, destination, sha256, "the captions model")?;
+        crate::download::fetch_checked(url, destination, sha256, "the captions model", cancelled)?;
     }
     Ok(())
 }
