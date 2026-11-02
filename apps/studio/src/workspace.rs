@@ -850,6 +850,14 @@ impl Workspace {
     /// Imports files (from the Import dialog, or dropped from the Finder) and returns the new
     /// items. Media is linked where it is on disk, and proxies start building.
     pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Vec<Id> {
+        // After Effects projects and Lottie animations come in as compositions of their own.
+        let (projects, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| ["aep", "aepx", "json"].iter().any(|extension| crate::state::is_extension(path, extension)));
+        for path in projects {
+            self.import_project_file(&path, window, cx);
+        }
+        if paths.is_empty() {
+            return Vec::new();
+        }
         let (imported, skipped) = self.state.import_paths(paths);
         for &item in &imported {
             self.ui.reveal_item(&self.state.project, item);
@@ -862,6 +870,43 @@ impl Workspace {
         }
         cx.notify();
         imported
+    }
+
+    /// Imports an After Effects project or a Lottie animation, then says what came in and
+    /// what was left out.
+    fn import_project_file(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+        let file = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        if crate::state::is_extension(path, "aepx") {
+            window.push_notification(format!("“{file}” is an XML project. In After Effects, save it as .aep, then import that.").as_str(), cx);
+            return;
+        }
+        let assets = self.render.proxies.cache_folder().parent().map_or_else(std::env::temp_dir, std::path::Path::to_path_buf).join("Imported").join(format!("{:x}", {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut hasher);
+            hasher.finish()
+        }));
+        match self.state.import_project_file(path, &assets) {
+            Ok(imported) => {
+                if let Some(folder) = imported.folder {
+                    self.ui.reveal_item(&self.state.project, folder);
+                    if !self.ui.folder_open(folder) {
+                        self.ui.toggle_folder(folder);
+                    }
+                }
+                self.request_proxies();
+                let count = imported.compositions.len();
+                let heading = format!("Imported “{file}”: {count} composition{}.", if count == 1 { "" } else { "s" });
+                if imported.notes.is_empty() {
+                    window.push_notification(heading.as_str(), cx);
+                } else {
+                    let notes = imported.notes.join("\n\n");
+                    window.open_alert_dialog(cx, move |dialog, _, _| dialog.title(heading.clone()).description(notes.clone()));
+                }
+            }
+            Err(message) => window.push_notification(format!("“{file}” couldn't be imported. {message}").as_str(), cx),
+        }
+        cx.notify();
     }
 
     /// Delete key. In the Project panel it asks before deleting the selected item (and the layers

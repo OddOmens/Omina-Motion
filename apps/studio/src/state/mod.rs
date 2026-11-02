@@ -1003,6 +1003,34 @@ impl EditorState {
         self.selected_item = Some(item);
     }
 
+    /// Brings in an After Effects project (`.aep`) or a Lottie animation (`.json`): its
+    /// compositions, footage and layers go in a new folder named after the file, and its main
+    /// composition opens. Embedded Lottie images are written into `asset_folder`. Returns what
+    /// came in, with notes on what didn't.
+    pub fn import_project_file(&mut self, path: &std::path::Path, asset_folder: &std::path::Path) -> Result<studio_core::import::Imported, String> {
+        use studio_core::import::{aep, build, lottie};
+        let bytes = std::fs::read(path).map_err(|error| format!("“{}” couldn't be read: {error}", path.display()))?;
+        let scene = if is_extension(path, "aep") {
+            aep::read(&bytes)?
+        } else {
+            let text = String::from_utf8(bytes).map_err(|_| "This JSON file isn't a Lottie animation.".to_owned())?;
+            lottie::read(&text, path, asset_folder)?
+        };
+        let name = path.file_stem().map_or_else(|| "Imported".into(), |stem| stem.to_string_lossy().into_owned());
+        // Footage moved since the project was saved is looked for beside the project file.
+        let beside = path.parent().map(std::path::Path::to_path_buf);
+        let probe = |media: &std::path::Path| {
+            let found = if media.exists() { Some(media.to_path_buf()) } else { beside.as_ref().zip(media.file_name()).map(|(folder, name)| folder.join(name)).filter(|moved| moved.exists()) };
+            found.and_then(|found| probe_media(&found))
+        };
+        let imported = build(&mut self.project, &scene, &name, &probe)?;
+        if let Some(&main) = imported.compositions.first() {
+            self.open_composition(main);
+            self.selected_item = Some(main);
+        }
+        Ok(imported)
+    }
+
     pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>) -> (Vec<Id>, Vec<std::path::PathBuf>) {
         let (mut imported, mut skipped) = (Vec::new(), Vec::new());
         for path in expand_folders(paths) {
@@ -1096,6 +1124,23 @@ impl EditorState {
 /// The files to import for `paths`: files as they are, and for folders the files inside them
 /// (and their subfolders), sorted by name, skipping hidden ones. At most 1,000 files, so
 /// dropping a huge folder by mistake can't stall the editor.
+/// Whether `path` ends in `extension`, ignoring case.
+pub fn is_extension(path: &std::path::Path, extension: &str) -> bool {
+    path.extension().is_some_and(|found| found.eq_ignore_ascii_case(extension))
+}
+
+/// What a media file is, for importers that bring in projects referring to it.
+fn probe_media(path: &std::path::Path) -> Option<studio_core::import::Probed> {
+    use studio_core::import::Probed;
+    if let Ok((width, height)) = image::image_dimensions(path) {
+        return Some(Probed::Image(Vec2::new(width as f32, height as f32)));
+    }
+    if let Ok(info) = studio_media::probe(path) {
+        return Some(Probed::Footage(edit::FootageInfo { size: Vec2::new(info.width as f32, info.height as f32), duration_seconds: info.duration_seconds, frame_rate: info.frame_rate, has_audio: info.has_audio }));
+    }
+    studio_media::probe_audio(path).ok().map(|info| Probed::Audio(info.duration_seconds))
+}
+
 fn expand_folders(paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
     const LIMIT: usize = 1000;
     let mut files = Vec::new();

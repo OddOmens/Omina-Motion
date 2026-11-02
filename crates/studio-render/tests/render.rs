@@ -984,3 +984,40 @@ fn element_sheet() {
     }
     sheet.save(path).unwrap();
 }
+
+/// Imports an After Effects project or a Lottie file and renders each composition halfway
+/// through into a contact sheet, to check an import by eye.
+/// Run with `IMPORT_FILE=/path/project.aep IMPORT_SHEET=/path/sheet.png cargo test -p studio-render --test render import_sheet -- --ignored`.
+#[test]
+#[ignore = "needs a file to import; writes an image for a visual check"]
+fn import_sheet() {
+    use studio_core::import::{aep, build, lottie};
+    let file = std::path::PathBuf::from(std::env::var("IMPORT_FILE").expect("set IMPORT_FILE"));
+    let sheet_path = std::env::var("IMPORT_SHEET").expect("set IMPORT_SHEET to the PNG to write");
+    let bytes = std::fs::read(&file).unwrap();
+    let scene = if file.extension().is_some_and(|e| e == "aep") { aep::read(&bytes).unwrap() } else { lottie::read(std::str::from_utf8(&bytes).unwrap(), &file, &std::env::temp_dir()).unwrap() };
+    let mut project = Project::new(Vec::new(), Vec::new());
+    let imported = build(&mut project, &scene, "import", &|_| None).unwrap();
+    let (cell_w, cell_h, columns) = (320u32, 180u32, 6u32);
+    let shown: Vec<_> = imported.compositions.iter().take(36).collect();
+    let rows = (shown.len() as u32).div_ceil(columns);
+    let mut sheet = image::RgbaImage::from_pixel(cell_w * columns, cell_h * rows, image::Rgba([40, 40, 40, 255]));
+    let mut renderer = Renderer::new().unwrap();
+    for (index, &&comp) in shown.iter().enumerate() {
+        let (frame, name) = project.composition(comp).map(|c| (c.duration_frames / 2, c.name.clone())).unwrap();
+        let first = renderer.render(&project, comp, frame, cell_w * 2, cell_h * 2, &studio_core::media::NoVideo).unwrap();
+        for (layer, size) in first.text_sizes {
+            studio_core::edit::set_text_box(project.composition_mut(comp).unwrap(), layer, size);
+        }
+        let picture = renderer.render(&project, comp, frame, cell_w, cell_h, &studio_core::media::NoVideo).unwrap();
+        let (x0, y0) = ((index as u32 % columns) * cell_w, (index as u32 / columns) * cell_h);
+        for (i, pixel) in picture.bgra.chunks(4).enumerate() {
+            let (x, y) = (i as u32 % cell_w, i as u32 / cell_w);
+            let a = f32::from(pixel[3]) / 255.0;
+            let over = |c: u8| (f32::from(c) * a + 60.0 * (1.0 - a)) as u8;
+            sheet.put_pixel(x0 + x, y0 + y, image::Rgba([over(pixel[2]), over(pixel[1]), over(pixel[0]), 255]));
+        }
+        println!("{index}: {name}");
+    }
+    sheet.save(sheet_path).unwrap();
+}

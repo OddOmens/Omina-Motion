@@ -2897,3 +2897,30 @@ fn ai_features_can_be_hidden_and_models_offered_for_download(cx: &mut TestAppCon
         assert!(visual.update(|window, _| window.try_find(hidden)).is_none(), "{hidden} is hidden");
     }
 }
+
+#[gpui_kit::test]
+fn importing_a_lottie_file_opens_its_animation(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let folder = scratch_folder("lottie");
+    let file = folder.join("Bounce.json");
+    std::fs::write(&file, r#"{"v":"5.7.0","fr":30,"ip":0,"op":45,"w":640,"h":360,"nm":"Bounce","assets":[],
+        "layers":[{"ty":4,"nm":"Ball","ind":1,"ip":0,"op":45,"st":0,
+            "ks":{"p":{"a":1,"k":[{"t":0,"s":[320,60],"o":{"x":[0.5],"y":[0]},"i":{"x":[0.5],"y":[1]}},{"t":30,"s":[320,300]}]}},
+            "shapes":[{"ty":"el","s":{"a":0,"k":[80,80]},"p":{"a":0,"k":[0,0]}},{"ty":"fl","c":{"a":0,"k":[1,0.5,0,1]},"o":{"a":0,"k":100}}]}]}"#).unwrap();
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| { ws.import_paths(vec![file.clone()], window, cx); }));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let comp = state.composition();
+        assert_eq!((comp.name.as_str(), comp.width, comp.height, comp.duration_frames), ("Bounce", 640, 360, 45), "the animation opened");
+        let ball = comp.layers.iter().find(|layer| layer.name == "Ball").unwrap();
+        assert_eq!(ball.transform.as_ref().unwrap().position.keyframe_frames(), vec![0, 30]);
+        assert!(studio_core::folders::top_folder(&state.project, "Bounce").is_some(), "in a folder named after the file");
+    });
+    // Undo takes the whole import back in one step.
+    let compositions = visual.update(|_, cx| workspace.read(cx).state.project.compositions.len());
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.compositions.len()), compositions - 1);
+    std::fs::remove_dir_all(&folder).ok();
+}

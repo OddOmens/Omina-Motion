@@ -80,6 +80,11 @@ Inside `apps/studio/src`:
   cut) are in `studio-core/src/transitions.rs`.
 - `panels/resize.rs`: Magic Resize (Composition menu): copies of the open composition in other sizes, with
   the layers rearranged by `studio-core/src/resize.rs`.
+- Importing other apps' projects: `studio-core/src/import/` reads After Effects projects (`aep.rs`, from the
+  RIFX chunks; the format isn't published) and Lottie animations (`lottie.rs`) into a `Scene`, which `build`
+  turns into Studio folders, compositions and layers after checking it like a project file. Import (⌘I) and
+  drag and drop take `.aep` and `.json` files. `IMPORT_FILE=… IMPORT_SHEET=sheet.png cargo test -p
+  studio-render --test render import_sheet -- --ignored` renders an import's compositions for a look.
 - `panels/enhance.rs`, `state/enhance.rs`: Enhance Speech (Properties): a cleaned copy of a clip's whole sound
   is made in the background, kept in Studio's cache under `Enhanced`, and played (and exported) instead of the
   original; settings and the copy are kept in step by `studio-core/src/enhance.rs`.
