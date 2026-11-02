@@ -112,6 +112,26 @@ impl ViewerRender {
         Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
     }
 
+    /// A small picture of a device mockup, for the Mockups panel: built into a scratch project
+    /// and drawn once, over a dark gray where it is see-through.
+    pub fn mockup_picture(&mut self, request: &studio_core::mockups::MockupRequest, width: u32, height: u32) -> Option<Arc<RenderImage>> {
+        let renderer = self.renderer.as_mut().ok()?;
+        let mut project = studio_core::model::Project::new(Vec::new(), Vec::new());
+        let made = studio_core::mockups::build(&mut project, request)?;
+        let picture = renderer.render(&project, made.composition, 0, width, height, &studio_core::media::NoVideo).ok()?;
+        let bgra: Vec<u8> = picture
+            .bgra
+            .chunks(4)
+            .flat_map(|pixel| {
+                let a = f32::from(pixel[3]) / 255.0;
+                let over = |c: u8| (f32::from(c) * a + 52.0 * (1.0 - a)) as u8;
+                [over(pixel[0]), over(pixel[1]), over(pixel[2]), 255]
+            })
+            .collect();
+        let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, bgra)?;
+        Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+    }
+
     /// A small picture of a template, for the Templates panel: built into a scratch project and
     /// rendered `seconds` in, `width` × `height` pixels. Drawn twice, as the app does, so text
     /// boxes fit their measured words.

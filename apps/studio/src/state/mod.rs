@@ -630,6 +630,24 @@ impl EditorState {
         Some(comp)
     }
 
+    /// The video or picture selected in the Project panel, which a new mockup puts on its screen.
+    pub fn mockup_footage(&self) -> Option<&studio_core::model::ProjectItem> {
+        use studio_core::model::ProjectItemKind;
+        self.selected_item.and_then(|id| self.project.item(id)).filter(|item| matches!(item.kind, ProjectItemKind::Footage | ProjectItemKind::Image) && item.size.is_some())
+    }
+
+    /// Makes a device mockup (see `studio_core::mockups`) with the selected video or picture on
+    /// its screen, as long as the footage (or 10 seconds without), opens it and selects it.
+    pub fn add_mockup(&mut self, device: studio_core::mockups::Device, orientation: studio_core::mockups::Orientation, format: studio_core::templates::Format, finish: studio_core::mockups::Finish) -> Option<studio_core::mockups::Mockup> {
+        let footage = self.mockup_footage();
+        let seconds = footage.and_then(|item| item.duration_seconds).filter(|seconds| *seconds > 0.0).unwrap_or(10.0);
+        let request = studio_core::mockups::MockupRequest { device, orientation, format, finish, footage: footage.map(|item| item.id), seconds };
+        let made = studio_core::mockups::build(&mut self.project, &request)?;
+        self.open_composition(made.composition);
+        self.selected_item = Some(made.composition);
+        Some(made)
+    }
+
     /// Starts a new, empty project: one 1920 × 1080, 30 fps, 10-second composition, and the
     /// folders new projects start with. It has no file until it is saved.
     pub fn new_project(&mut self, folders: &[String], size: crate::app_settings::NewComposition) {

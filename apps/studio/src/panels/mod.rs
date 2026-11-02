@@ -17,6 +17,7 @@ pub mod fields;
 pub mod graph_editor;
 pub mod importing;
 pub mod libraries;
+pub mod mockups;
 pub mod project;
 pub mod properties;
 pub mod settings;

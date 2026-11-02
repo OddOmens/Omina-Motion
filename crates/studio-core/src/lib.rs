@@ -18,6 +18,7 @@ pub mod enhance;
 pub mod folders;
 pub mod import;
 pub mod library;
+pub mod mockups;
 pub mod model;
 pub mod path;
 pub mod playback;

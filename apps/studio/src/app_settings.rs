@@ -69,6 +69,9 @@ pub struct AppSettings {
     pub cooler_background_removal: bool,
     /// Which AI features are shown (Settings > AI Models).
     pub ai: AiFeatures,
+    /// The OpenConnect studio API (such as `http://host:3100/studio/api`), whose apps' device
+    /// frame colors the Mockups panel offers. Its token is read from OpenConnect's own file.
+    pub openconnect_api: Option<String>,
 }
 
 /// The features that use AI models, each of which can be hidden.
@@ -200,6 +203,7 @@ impl Default for AppSettings {
             compact_timeline: false,
             cooler_background_removal: false,
             ai: AiFeatures::default(),
+            openconnect_api: None,
         }
     }
 }

@@ -192,6 +192,8 @@ pub enum LeftPanel {
     Captions,
     /// Ready-made graphics: shapes, arrows, badges, frames and stickers.
     Elements,
+    /// Device mockups: iPhone, iPhone Duo, iPad and Mac.
+    Mockups,
 }
 
 /// Panels that can hold focus; the focused one gets a blue outline.
@@ -209,6 +211,7 @@ pub enum PanelId {
     Templates,
     Captions,
     Elements,
+    Mockups,
 }
 
 /// The editing tools on the rail.
@@ -270,6 +273,8 @@ pub enum EditTarget {
     CaptionText(Id, usize, usize),
     /// A layer's name (Rename in a clip's right-click menu).
     LayerName(Id),
+    /// The OpenConnect API address (the Mockups panel).
+    OpenConnectApi,
 }
 
 /// The text input currently open over a value, and the subscription that commits it.
@@ -347,6 +352,8 @@ pub struct UiState {
     pub template_pictures: HashMap<(usize, studio_core::templates::Format), Arc<gpui_kit::RenderImage>>,
     /// Whether the View All gallery of every template is open.
     pub template_gallery: bool,
+    /// The Mockups panel's choices, its device pictures and OpenConnect's finishes.
+    pub mockups: panels::mockups::MockupsUi,
     /// Pictures made of the Elements panel's elements, by index.
     pub element_pictures: HashMap<usize, Arc<gpui_kit::RenderImage>>,
     /// The Project panel's preview of the selected item.
@@ -452,6 +459,7 @@ struct Panels {
     templates: Entity<PanelView>,
     captions: Entity<PanelView>,
     elements: Entity<PanelView>,
+    mockups: Entity<PanelView>,
     clock: Entity<PlaybackClock>,
 }
 
@@ -464,9 +472,10 @@ impl Panels {
         let (properties, effects, align) = (view(PanelKind::Properties), view(PanelKind::Effects), view(PanelKind::Align));
         let libraries = view(PanelKind::Libraries);
         let (templates, captions, elements) = (view(PanelKind::Templates), view(PanelKind::Captions), view(PanelKind::Elements));
+        let mockups = view(PanelKind::Mockups);
         let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id()];
         let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed, project.entity_id()));
-        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, templates, captions, elements, clock }
+        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, templates, captions, elements, mockups, clock }
     }
 }
 
@@ -474,9 +483,9 @@ impl Panels {
 impl Workspace {
     /// How many times each panel has rendered, in `PanelKind` order: toolbar, project, viewer,
     /// timeline, properties, effects, libraries, align.
-    pub fn panel_render_counts(&self, cx: &App) -> [usize; 11] {
+    pub fn panel_render_counts(&self, cx: &App) -> [usize; 12] {
         let p = &self.panels;
-        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions, &p.elements].map(|view| view.read(cx).renders)
+        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions, &p.elements, &p.mockups].map(|view| view.read(cx).renders)
     }
 }
 
@@ -655,6 +664,7 @@ impl Workspace {
                 template_brand: None,
                 template_pictures: HashMap::new(),
                 template_gallery: false,
+                mockups: Default::default(),
                 element_pictures: HashMap::new(),
                 preview_bounds: Default::default(),
                 timeline: timeline_ui,
@@ -838,6 +848,7 @@ impl Workspace {
             Some(EditTarget::LibraryName(id)) => self.state.rename_library_item(id, &text),
             Some(EditTarget::CaptionText(layer, start, end)) => self.state.set_caption_text(layer, start..end, &text),
             Some(EditTarget::LayerName(layer)) => self.state.rename_layer(layer, &text),
+            Some(EditTarget::OpenConnectApi) => panels::mockups::set_openconnect_api(self, &text, window, cx),
         }
         // Hand keyboard focus back to the editor so shortcuts work again.
         window.focus(&self.focus, cx);
@@ -996,6 +1007,9 @@ impl Render for Workspace {
         if self.ui.left_panel == LeftPanel::Templates || self.ui.template_gallery {
             panels::templates::make_pictures(self, window, cx);
         }
+        if self.ui.left_panel == LeftPanel::Mockups {
+            panels::mockups::keep_up(self, window, cx);
+        }
         if self.ui.left_panel == LeftPanel::Elements {
             panels::elements::make_pictures(self, window, cx);
         }
@@ -1041,6 +1055,7 @@ impl Render for Workspace {
                                                 LeftPanel::Templates => cached(&panels.templates),
                                                 LeftPanel::Captions => cached(&panels.captions),
                                                 LeftPanel::Elements => cached(&panels.elements),
+                                                LeftPanel::Mockups => cached(&panels.mockups),
                                             }),
                                     )
                                     .child(resizable_panel().child(cached(&panels.viewer))),

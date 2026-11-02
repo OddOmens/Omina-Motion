@@ -2478,6 +2478,69 @@ fn the_preview_plays_and_pauses_sound(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_device_click_makes_a_mockup_with_the_selected_picture_on_its_screen(cx: &mut TestAppContext) {
+    use studio_core::mockups::Device;
+    use studio_core::model::LayerContent;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // A picture in the project, selected. (A still, so no decoder thread runs in the test.)
+    let clip = visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let (items, _) = ws.state.import_paths(vec![fixture("still.png")]);
+        items[0]
+    }));
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.selected_item = Some(clip)));
+    visual.update(|window, cx| window.click("rail-mockups", cx));
+    render(visual);
+    for index in 0..Device::ALL.len() {
+        assert!(visual.update(|window, _| window.try_find(("mockup", index)).is_some()), "device {index} has a card");
+    }
+    // Sideways, 9:16, then the iPhone.
+    visual.update(|window, cx| window.click(("mockup-orientation", 1_usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("mockup-format", 2_usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("mockup", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let mockup = state.composition();
+        assert_eq!((mockup.width, mockup.height), (1080, 1920), "the chosen shape");
+        assert!(mockup.name.starts_with("iPhone Landscape Mockup"));
+        let screen = mockup.layers.iter().find_map(|layer| match layer.content {
+            LayerContent::Composition { composition } => Some(composition),
+            _ => None,
+        });
+        let screen = state.project.composition(screen.unwrap()).unwrap();
+        assert_eq!((screen.width, screen.height), (2868, 1320), "a sideways iPhone screen");
+        assert!(screen.layers.iter().any(|layer| layer.content == LayerContent::Image { item: clip }), "the selected picture is on the screen");
+    });
+}
+
+#[gpui_kit::test]
+fn an_openconnect_address_that_is_not_a_web_address_says_so(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("rail-mockups", cx));
+    render(visual);
+    // The address sits at the bottom of the panel: scroll down to it.
+    visual.update(|window, cx| window.scroll("mockups-list", gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-2000.0))), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("openconnect-address", cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("10.0.0.1:3100", cx);
+        window.press("enter", cx);
+    });
+    visual.run_until_parked();
+    render(visual);
+    visual.update(|_, cx| {
+        let ui = &workspace.read(cx).ui;
+        assert_eq!(ui.settings.openconnect_api.as_deref(), Some("10.0.0.1:3100"));
+        assert!(matches!(&ui.mockups.status, crate::panels::mockups::OpenConnectStatus::Failed(message) if message.contains("http")), "{:?}", ui.mockups.status);
+    });
+}
+
+#[gpui_kit::test]
 fn view_all_shows_every_template_and_adds_the_one_clicked(cx: &mut TestAppContext) {
     use studio_core::templates::TEMPLATES;
     let (workspace, visual) = open(cx);

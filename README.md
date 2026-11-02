@@ -75,6 +75,12 @@ Inside `apps/studio/src`:
   reply, greeting, outlined words, vlog title).
   `TEMPLATE_SHEET=/path.png cargo test -p studio-render --test render template_sheet -- --ignored` renders
   them all into one picture to check.
+- `panels/mockups.rs`: the Mockups panel. Device mockups for iPhone, iPhone Duo, iPad and Mac, drawn as shapes after
+  OpenConnect's device frames (`studio-core/src/mockups.rs`): each makes a Screen composition at the device's own
+  screen size (the selected video or picture fills it) and a mockup showing it through a rounded mask, all hanging off
+  a "Device" null. Finishes are ready-made or read from OpenConnect's apps (`openconnect.rs`; the API address is set
+  in the panel, the token comes from `~/.config/openconnect/token`). `MOCKUP_SHEET=/path.png cargo test -p
+  studio-render --test render mockup_sheet -- --ignored` renders them all into one picture.
 - `panels/elements.rs`: the Elements panel (shapes, arrows, badges, frames, social buttons and emoji
   stickers, defined in `studio-core/src/elements.rs`). `ELEMENT_SHEET=/path.png cargo test -p studio-render
   --test render element_sheet -- --ignored` renders them all into one picture.

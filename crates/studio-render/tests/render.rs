@@ -1101,3 +1101,55 @@ fn an_adjustment_layers_mask_limits_where_it_applies() {
     assert!(close(pixel(&frame, 50, 50), [255, 0, 0]), "hidden inside the mask: {:?}", pixel(&frame, 50, 50));
     assert!(is_gray(pixel(&frame, 5, 5)), "applied outside it: {:?}", pixel(&frame, 5, 5));
 }
+
+/// Every device mockup, upright and on its side, with a bright screen.
+/// Run with `MOCKUP_SHEET=/path/sheet.png cargo test -p studio-render --test render mockup_sheet -- --ignored`
+/// (`MOCKUP_FORMAT=wide|portrait|vertical`, `MOCKUP_FINISH=` a preset's position, `MOCKUP_ZOOM=` 1 to 4).
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn mockup_sheet() {
+    use studio_core::mockups::{Device, Finish, MockupRequest, Orientation, build};
+    use studio_core::templates::Format;
+    let path = std::env::var("MOCKUP_SHEET").expect("set MOCKUP_SHEET to the PNG to write");
+    let format = match std::env::var("MOCKUP_FORMAT").as_deref() {
+        Ok("portrait") => Format::Portrait,
+        Ok("vertical") => Format::Vertical,
+        _ => Format::Wide,
+    };
+    let finish = Finish::presets()[std::env::var("MOCKUP_FINISH").ok().and_then(|s| s.parse().ok()).unwrap_or(0usize).min(3)].1;
+    let zoom: u32 = std::env::var("MOCKUP_ZOOM").ok().and_then(|s| s.parse().ok()).unwrap_or(1).clamp(1, 4);
+    let (cell_w, cell_h) = match format {
+        Format::Wide => (480u32 * zoom, 270u32 * zoom),
+        Format::Portrait => (320 * zoom, 400 * zoom),
+        Format::Vertical => (270 * zoom, 480 * zoom),
+    };
+    let cases: Vec<(Device, Orientation)> = Device::ALL.iter().flat_map(|&device| [(device, Orientation::Portrait), (device, Orientation::Landscape)]).filter(|(device, orientation)| device.turns() || *orientation == Orientation::Portrait).collect();
+    let mut sheet = image::RgbaImage::from_pixel(cell_w * cases.len() as u32, cell_h, image::Rgba([40, 40, 40, 255]));
+    let mut renderer = Renderer::new().unwrap();
+    for (index, &(device, orientation)) in cases.iter().enumerate() {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        let screen_color = project.allocate_id();
+        project.items.push(studio_core::model::ProjectItem {
+            id: screen_color,
+            name: "Screen".into(),
+            kind: studio_core::model::ProjectItemKind::Solid,
+            label: LabelColor::Red,
+            parent: None,
+            size: Some(Vec2::new(100.0, 100.0)),
+            duration_seconds: None,
+            frame_rate: None,
+            has_audio: false,
+            color: Some(Rgba::hex(0xff5a36)),
+            path: None,
+        });
+        let made = build(&mut project, &MockupRequest { device, orientation, format, finish, footage: Some(screen_color), seconds: 10.0 }).unwrap();
+        let picture = renderer.render(&project, made.composition, 0, cell_w, cell_h, &studio_core::media::NoVideo).unwrap();
+        for (i, pixel) in picture.bgra.chunks(4).enumerate() {
+            let (x, y) = (i as u32 % cell_w, i as u32 / cell_w);
+            let a = f32::from(pixel[3]) / 255.0;
+            let over = |c: u8| (f32::from(c) * a + 60.0 * (1.0 - a)) as u8;
+            sheet.put_pixel(index as u32 * cell_w + x, y, image::Rgba([over(pixel[2]), over(pixel[1]), over(pixel[0]), 255]));
+        }
+    }
+    sheet.save(path).unwrap();
+}

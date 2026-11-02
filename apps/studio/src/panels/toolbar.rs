@@ -355,6 +355,7 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
         .child(rail_button("rail-elements", IconName::Sticker, "Elements", side == LeftPanel::Elements, show(LeftPanel::Elements), cx))
         .child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", side == LeftPanel::Templates, show(LeftPanel::Templates), cx))
+        .child(rail_button("rail-mockups", IconName::TabletSmartphone, "Mockups", side == LeftPanel::Mockups, show(LeftPanel::Mockups), cx))
         .when(workspace.ui.settings.ai.captions, |rail| rail.child(rail_button("rail-captions", IconName::Captions, "Captions", side == LeftPanel::Captions, show(LeftPanel::Captions), cx)))
         .child(separator())
         .child(group_button(0, workspace, cx))
