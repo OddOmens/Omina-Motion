@@ -46,7 +46,14 @@ Inside `apps/studio/src`:
 - Pen paths: the model and geometry are in `studio-core/src/path.rs`; drawing and point dragging are in
   `state/viewer.rs` and `panels/viewer.rs`. Masks (`Layer::mask`) let any layer show or hide another.
 - `panels/cutout.rs`, `state/cutout.rs`: Remove Background (pick clicks, the mask job and tracking). Masks
-  are grayscale PNGs per source frame under Studio's cache folder, in `Cutouts`.
+  are grayscale PNGs per source frame under Studio's cache folder, in `Cutouts`. The model only looks at
+  frames the composition shows that have changed (others link the mask before them), edges are refined
+  against the picture (`studio_cutout::Mask::refine`), and Settings > AI Models > Run cooler rests the GPU
+  between frames. `CUTOUT_MODEL=<folder> cargo test -p studio-cutout --release --test speed -- --ignored
+  --nocapture` times each stage.
+- Quick Export (a clip's right-click menu, `panels/export.rs`): renders one layer alone (`studio-core/src/bake.rs`)
+  to ProRes 4444 with transparency in an Exports folder beside the project; Export and Replace imports it
+  into the project's Exports folder and puts it in the layer's place.
 - `panels/color_picker.rs`: the color picker every color chip opens: a saturation/brightness square, hue and
   opacity sliders, hex and opacity fields, the project's colors, paint type for shapes, and a Libraries tab.
 - `panels/libraries.rs`, `state/library.rs`, `library_store.rs`: Libraries (brands holding shared colors and

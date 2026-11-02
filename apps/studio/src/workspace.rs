@@ -266,6 +266,8 @@ pub enum EditTarget {
     LibraryName(studio_core::model::LinkId),
     /// The text of a caption layer's words in a range (one phrase).
     CaptionText(Id, usize, usize),
+    /// A layer's name (Rename in a clip's right-click menu).
+    LayerName(Id),
 }
 
 /// The text input currently open over a value, and the subscription that commits it.
@@ -297,7 +299,13 @@ pub struct UiState {
     pub shape_press: bool,
     /// Active tab index for panels with tabs.
     pub tabs: HashMap<PanelId, usize>,
-    pub collapsed_folders: HashSet<Id>,
+    /// Project panel folders and Properties panel sections start closed. These hold the ones the
+    /// user turned the other way; see `folder_open` and `section_open`.
+    pub toggled_folders: HashSet<Id>,
+    pub toggled_sections: HashSet<&'static str>,
+    /// Whether folders and sections start open instead. Only the UI tests turn this on, so they
+    /// can reach controls without unfolding everything first.
+    pub sections_start_open: bool,
     /// Panels in the right column collapsed to their header.
     pub collapsed_panels: HashSet<PanelId>,
     /// Library brands the user folded away (all are open to begin with).
@@ -369,6 +377,39 @@ pub struct UiState {
 impl UiState {
     pub fn tab(&self, panel: PanelId) -> usize {
         self.tabs.get(&panel).copied().unwrap_or(0)
+    }
+
+    /// Whether the Project panel shows folder `id`'s contents.
+    pub fn folder_open(&self, id: Id) -> bool {
+        self.sections_start_open != self.toggled_folders.contains(&id)
+    }
+
+    pub fn toggle_folder(&mut self, id: Id) {
+        if !self.toggled_folders.remove(&id) {
+            self.toggled_folders.insert(id);
+        }
+    }
+
+    /// Opens every folder `item` is inside, so a newly imported file can be seen.
+    pub fn reveal_item(&mut self, project: &studio_core::model::Project, item: Id) {
+        let mut parent = project.item(item).and_then(|item| item.parent);
+        while let Some(folder) = parent {
+            if !self.folder_open(folder) {
+                self.toggle_folder(folder);
+            }
+            parent = project.item(folder).and_then(|folder| folder.parent);
+        }
+    }
+
+    /// Whether the Properties panel section named `key` is unfolded.
+    pub fn section_open(&self, key: &str) -> bool {
+        self.sections_start_open != self.toggled_sections.contains(key)
+    }
+
+    pub fn toggle_section(&mut self, key: &'static str) {
+        if !self.toggled_sections.remove(key) {
+            self.toggled_sections.insert(key);
+        }
     }
 }
 
@@ -562,7 +603,9 @@ impl Workspace {
                 group_tools: HashMap::new(),
                 shape_press: false,
                 tabs: HashMap::new(),
-                collapsed_folders: HashSet::new(),
+                toggled_folders: HashSet::new(),
+                toggled_sections: HashSet::new(),
+                sections_start_open: cfg!(test),
                 closed_effect_categories: HashSet::new(),
                 closed_brands: HashSet::new(),
                 collapsed_panels: HashSet::new(),
@@ -760,6 +803,7 @@ impl Workspace {
             EditTarget::SourceText(layer) => self.state.set_text(layer, &text),
             EditTarget::LibraryName(id) => self.state.rename_library_item(id, &text),
             EditTarget::CaptionText(layer, start, end) => self.state.set_caption_text(layer, start..end, &text),
+            EditTarget::LayerName(layer) => self.state.rename_layer(layer, &text),
         }
         // Hand keyboard focus back to the editor so shortcuts work again.
         window.focus(&self.focus, cx);
@@ -798,6 +842,9 @@ impl Workspace {
     /// items. Media is linked where it is on disk, and proxies start building.
     pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Vec<Id> {
         let (imported, skipped) = self.state.import_paths(paths);
+        for &item in &imported {
+            self.ui.reveal_item(&self.state.project, item);
+        }
         self.request_proxies();
         if !skipped.is_empty() {
             let names: Vec<String> = skipped.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();

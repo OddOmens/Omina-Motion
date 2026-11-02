@@ -3,7 +3,7 @@
 //! assume for files tagged BT.709. FFmpeg's scaler would pick its default (SD, BT.601)
 //! matrix here, which shifts colors slightly, so the conversion is done here, exactly.
 //!
-//! Chroma is averaged over each 2×1 (4:2:2) or 2×2 (4:2:0) block. Rows are converted in
+//! Chroma is averaged over each 2×1 (4:2:2) or 2×2 (4:2:0) block, or kept per pixel (4:4:4). Rows are converted in
 //! parallel bands on all cores.
 
 /// The YUV layouts exports use.
@@ -13,24 +13,34 @@ pub enum YuvLayout {
     Yuv420p8,
     /// 10-bit little-endian, chroma halved horizontally (ProRes 422).
     Yuv422p10,
+    /// 10-bit little-endian, full chroma (ProRes 4444; its alpha plane is written separately).
+    Yuv444p10,
 }
 
 impl YuvLayout {
     fn ten_bit(self) -> bool {
-        self == Self::Yuv422p10
+        self != Self::Yuv420p8
     }
 
     /// Bytes per row and rows of the luma plane and of each chroma plane, tightly packed.
     pub fn plane_sizes(self, width: usize, height: usize) -> ((usize, usize), (usize, usize)) {
         let bytes = if self.ten_bit() { 2 } else { 1 };
-        ((width * bytes, height), (width.div_ceil(2) * bytes, height.div_ceil(self.rows_per_chroma())))
+        ((width * bytes, height), (width.div_ceil(self.columns_per_chroma()) * bytes, height.div_ceil(self.rows_per_chroma())))
     }
 
     /// Luma rows per chroma row.
     fn rows_per_chroma(self) -> usize {
         match self {
             Self::Yuv420p8 => 2,
-            Self::Yuv422p10 => 1,
+            Self::Yuv422p10 | Self::Yuv444p10 => 1,
+        }
+    }
+
+    /// Luma columns per chroma column.
+    fn columns_per_chroma(self) -> usize {
+        match self {
+            Self::Yuv420p8 | Self::Yuv422p10 => 2,
+            Self::Yuv444p10 => 1,
         }
     }
 }
@@ -83,6 +93,7 @@ pub fn bgra_to_yuv(
 ) {
     let ten_bit = layout.ten_bit();
     let per_chroma = layout.rows_per_chroma();
+    let columns = layout.columns_per_chroma();
     let chroma_rows = out_height.div_ceil(per_chroma);
     // Gamma-encoded components of the source pixel nearest to (x, y), edges repeated.
     let pixel = |x: usize, y: usize| {
@@ -106,7 +117,7 @@ pub fn bgra_to_yuv(
                 for chroma_row in first..(first + band).min(chroma_rows) {
                     let local = chroma_row - first;
                     let (u_row, v_row) = (&mut u_band[local * u_stride..], &mut v_band[local * v_stride..]);
-                    for chroma_x in 0..out_width.div_ceil(2) {
+                    for chroma_x in 0..out_width.div_ceil(columns) {
                         // Average the block's colors, then convert that to chroma.
                         let (mut r, mut g, mut b) = (0.0, 0.0, 0.0);
                         let mut count = 0.0;
@@ -116,8 +127,8 @@ pub fn bgra_to_yuv(
                                 continue;
                             }
                             let y_row = &mut y_band[(local * per_chroma + dy) * y_stride..];
-                            for dx in 0..2 {
-                                let x = chroma_x * 2 + dx;
+                            for dx in 0..columns {
+                                let x = chroma_x * columns + dx;
                                 if x >= out_width {
                                     continue;
                                 }
@@ -134,6 +145,20 @@ pub fn bgra_to_yuv(
             });
         }
     });
+}
+
+/// The alpha of a BGRA image as a tightly packed 10-bit little-endian plane (full range,
+/// 0–1023) of an `out_width × out_height` frame, edges repeated as in `bgra_to_yuv`.
+pub fn alpha_plane(bgra: &[u8], (source_width, source_height): (usize, usize), (out_width, out_height): (usize, usize)) -> Vec<u8> {
+    let mut plane = Vec::with_capacity(out_width * out_height * 2);
+    for y in 0..out_height {
+        for x in 0..out_width {
+            let a = bgra[(y.min(source_height - 1) * source_width + x.min(source_width - 1)) * 4 + 3];
+            let code = (u32::from(a) * 1023 + 127) / 255;
+            plane.extend_from_slice(&(code as u16).to_le_bytes());
+        }
+    }
+    plane
 }
 
 #[cfg(test)]
@@ -173,6 +198,24 @@ mod tests {
     fn ten_bit_uses_the_wider_code_range() {
         assert_eq!(solid([255, 255, 255, 255], YuvLayout::Yuv422p10), (940, 512, 512));
         assert_eq!(solid([0, 0, 0, 255], YuvLayout::Yuv422p10), (64, 512, 512));
+    }
+
+    #[test]
+    fn full_chroma_keeps_each_pixels_own_color() {
+        // Red then blue, side by side: 4:4:4 keeps two different chroma samples.
+        let image = [[0, 0, 255, 255], [255, 0, 0, 255]].concat();
+        let (mut y, mut u, mut v) = (vec![0; 4], vec![0; 4], vec![0; 4]);
+        let planes = [Plane { data: &mut y, stride: 4 }, Plane { data: &mut u, stride: 4 }, Plane { data: &mut v, stride: 4 }];
+        bgra_to_yuv(&image, (2, 1), (2, 1), YuvLayout::Yuv444p10, planes);
+        let read = |plane: &[u8], x: usize| u16::from_le_bytes([plane[x * 2], plane[x * 2 + 1]]);
+        assert_ne!(read(&v, 0), read(&v, 1));
+        assert_eq!(read(&v, 0), 960, "red's Cr at 10 bits");
+    }
+
+    #[test]
+    fn the_alpha_plane_is_ten_bit_full_range() {
+        let alpha = alpha_plane(&[0, 0, 0, 255, 0, 0, 0, 0], (2, 1), (2, 1));
+        assert_eq!(alpha, vec![0xff, 0x03, 0, 0], "1023 and 0");
     }
 
     #[test]

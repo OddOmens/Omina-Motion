@@ -147,7 +147,7 @@ pub fn sample_project() -> Project {
         height: 1080,
         frame_rate: FPS_24,
         duration_frames: 240,
-        background: Rgba::TRANSPARENT,
+        background: Rgba::hex(0x000000),
         layers: vec![title, grade, logo, b_roll, a_cam, background],
         markers: Vec::new(),
     };

@@ -390,6 +390,7 @@ fn timeline(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit:
         .child(card(vec![
             setting("Pictures on clips", "Frames from the footage along each video clip.", switch("timeline-thumbnails", now.clip_thumbnails, shown, workspace, |settings, on| settings.clip_thumbnails = on)),
             setting("Waveforms on clips", "The shape of the sound along clips with sound.", switch("timeline-waveforms", now.clip_waveforms, shown, workspace, |settings, on| settings.clip_waveforms = on)),
+            setting("Compact tracks", "Short rows showing just each clip's name, so more tracks fit. The rows button in the timeline's bar changes it too.", switch("timeline-compact", now.compact_timeline, shown, workspace, |settings, on| settings.compact_timeline = on)),
             setting("Frame render time", "How long the last frame took to draw, under the timeline.", switch("timeline-render-time", now.show_render_time, shown, workspace, |settings, on| settings.show_render_time = on)),
             setting("Snapping starts on", "Moves and trims snap to edges, keyframes, markers and the playhead. Applies from the next start; S turns it on and off now.", switch("timeline-snapping", now.snapping, shown, workspace, |settings, on| settings.snapping = on)),
         ]))
@@ -637,10 +638,17 @@ fn model_row(id: &'static str, name: &'static str, purpose: &'static str, folder
     setting(name, purpose, div().flex().items_center().gap_3().child(size).child(remove))
 }
 
-fn models(shown: &SharedShown) -> gpui_kit::Div {
+fn models(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {
     let folder = crate::app_settings::folder().join("Models");
+    let now = shown.borrow().settings.clone();
     div()
         .child(page(Section::Models))
+        .child(group_title("Background removal"))
+        .child(card(vec![setting(
+            "Run cooler",
+            "Rests the graphics chip between frames, so long clips don't heat the Mac or spin up its fans. Tracking takes about twice as long.",
+            switch("cutout-cooler", now.cooler_background_removal, shown, workspace, |settings, on| settings.cooler_background_removal = on),
+        )]))
         .child(group_title("Downloaded"))
         .child(card(vec![
             model_row("model-whisper", "Whisper (tiny)", "Speech to text, for captions. About 150 MB.", super::captions::model_folder(), shown),
@@ -800,7 +808,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
             Section::ProjectPanel => project_panel(&shown, &target),
             Section::Folders => folders(&shown, &target, &new_folder_name),
             Section::MediaCache => media_cache(&shown, &target, cx),
-            Section::Models => models(&shown),
+            Section::Models => models(&shown, &target),
             Section::Shortcuts => shortcuts(),
             Section::About => about(&shown, &target),
         };

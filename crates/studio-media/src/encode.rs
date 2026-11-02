@@ -31,10 +31,13 @@ pub enum MovieFormat {
     ProResLt,
     ProRes422,
     ProRes422Hq,
+    /// Apple ProRes 4444: full color detail and an alpha channel, so transparent areas stay
+    /// transparent (renders of single layers, graphics for other apps).
+    ProRes4444,
 }
 
 impl MovieFormat {
-    pub const ALL: [Self; 5] = [Self::H264, Self::ProRes422Hq, Self::ProRes422, Self::ProResLt, Self::ProResProxy];
+    pub const ALL: [Self; 6] = [Self::H264, Self::ProRes4444, Self::ProRes422Hq, Self::ProRes422, Self::ProResLt, Self::ProResProxy];
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -43,6 +46,7 @@ impl MovieFormat {
             Self::ProResLt => "ProRes 422 LT (MOV)",
             Self::ProRes422 => "ProRes 422 (MOV)",
             Self::ProRes422Hq => "ProRes 422 HQ (MOV)",
+            Self::ProRes4444 => "ProRes 4444 with transparency (MOV)",
         }
     }
 
@@ -66,6 +70,7 @@ impl MovieFormat {
             Self::ProResProxy => "0",
             Self::ProResLt => "1",
             Self::ProRes422 => "2",
+            Self::ProRes4444 => "4",
             _ => "3",
         }
     }
@@ -74,12 +79,25 @@ impl MovieFormat {
         self.extension()
     }
 
+    /// Whether the movie keeps the picture's transparency.
+    pub const fn has_alpha(self) -> bool {
+        matches!(self, Self::ProRes4444)
+    }
+
     fn layout(self) -> YuvLayout {
-        if self.is_prores() { YuvLayout::Yuv422p10 } else { YuvLayout::Yuv420p8 }
+        match self {
+            Self::H264 => YuvLayout::Yuv420p8,
+            Self::ProRes4444 => YuvLayout::Yuv444p10,
+            _ => YuvLayout::Yuv422p10,
+        }
     }
 
     fn pixel(self) -> Pixel {
-        if self.is_prores() { Pixel::YUV422P10LE } else { Pixel::YUV420P }
+        match self {
+            Self::H264 => Pixel::YUV420P,
+            Self::ProRes4444 => Pixel::YUVA444P10LE,
+            _ => Pixel::YUV422P10LE,
+        }
     }
 }
 
@@ -277,8 +295,17 @@ impl MovieWriter {
         let (luma, chroma) = layout.plane_sizes(out_width as usize, out_height as usize);
         let (mut y, mut u, mut v) = (vec![0; luma.0 * luma.1], vec![0; chroma.0 * chroma.1], vec![0; chroma.0 * chroma.1]);
         let planes = [Plane { data: &mut y, stride: luma.0 }, Plane { data: &mut u, stride: chroma.0 }, Plane { data: &mut v, stride: chroma.0 }];
-        bgra_to_yuv(bgra, (width as usize, height as usize), (out_width as usize, out_height as usize), layout, planes);
-        for (index, (packed, (row_bytes, rows))) in [(&y, luma), (&u, chroma), (&v, chroma)].into_iter().enumerate() {
+        let source = (width as usize, height as usize);
+        let out = (out_width as usize, out_height as usize);
+        bgra_to_yuv(bgra, source, out, layout, planes);
+        // With transparency, alpha goes in a fourth plane. Colors are stored straight (not
+        // multiplied by their alpha), as the renderer hands them over.
+        let alpha = self.format.has_alpha().then(|| crate::yuv::alpha_plane(bgra, source, out));
+        let mut packed_planes = vec![(&y, luma), (&u, chroma), (&v, chroma)];
+        if let Some(alpha) = &alpha {
+            packed_planes.push((alpha, luma));
+        }
+        for (index, (packed, (row_bytes, rows))) in packed_planes.into_iter().enumerate() {
             let stride = picture.stride(index);
             let data = picture.data_mut(index);
             for row in 0..rows {

@@ -14,6 +14,9 @@ pub struct VideoFrame {
     pub rgba: Vec<u8>,
     /// True if this picture came from a low-resolution proxy rather than the original file.
     pub from_proxy: bool,
+    /// True if the file stores transparency (ProRes 4444, say). Its colors are then straight,
+    /// not multiplied by their alpha.
+    pub has_alpha: bool,
 }
 
 /// Supplies decoded video frames to the renderer.

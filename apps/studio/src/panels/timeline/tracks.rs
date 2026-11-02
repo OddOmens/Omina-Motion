@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::{
     AnyElement, AppContext as _, Bounds, Context, Div, DragMoveEvent, ImageSource, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, ParentElement, RenderImage, StatefulInteractiveElement, Styled, TestSupportExt as _, Window, canvas, div, fill,
@@ -32,12 +33,15 @@ use super::{TimelineDrag, fraction, frame_at, zoom_around_playhead};
 use crate::panels::chrome::{EmptyDragView, icon_button};
 use crate::state::{KeyframeRef, LayerTimeEdit, Switch};
 use crate::theme::{color, hsla};
-use crate::workspace::{EffectDrag, ProjectItemDrag, Tool, Workspace};
+use crate::workspace::{EditTarget, EffectDrag, ProjectItemDrag, Tool, Workspace};
 
 /// Row heights: the main track is tallest, as in CapCut; sound tracks are shorter.
 const MAIN_HEIGHT: f32 = 58.0;
 const PICTURE_HEIGHT: f32 = 48.0;
 const SOUND_HEIGHT: f32 = 40.0;
+/// Every row's height with compact tracks (Settings > Timeline & Viewer): room for a clip's
+/// name strip only.
+const COMPACT_HEIGHT: f32 = 28.0;
 /// Each keyframe row under an expanded clip: a small name on top, keyframes on a line below it.
 const PROPERTY_ROW: f32 = 38.0;
 /// Where a property row's keyframe line runs, from the row's top.
@@ -114,8 +118,9 @@ impl TrackMedia {
     }
 }
 
-fn base_height(track: i32) -> f32 {
+fn base_height(track: i32, compact: bool) -> f32 {
     match track {
+        _ if compact => COMPACT_HEIGHT,
         MAIN_TRACK => MAIN_HEIGHT,
         track if track < MAIN_TRACK => SOUND_HEIGHT,
         _ => PICTURE_HEIGHT,
@@ -146,7 +151,7 @@ fn layout(workspace: &Workspace) -> Vec<(i32, f32)> {
                 .map(|layer| animated_properties(layer).len().max(1))
                 .max()
                 .unwrap_or(0);
-            (track, base_height(track) + rows as f32 * PROPERTY_ROW)
+            (track, base_height(track, workspace.ui.settings.compact_timeline) + rows as f32 * PROPERTY_ROW)
         })
         .collect()
 }
@@ -243,6 +248,12 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
         .child(div().pl_2().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)));
     let right = side()
         .justify_end()
+        .child(icon_button("tracks-compact", IconName::Rows3, "Compact Tracks", workspace.ui.settings.compact_timeline, cx.listener(|this, _, _, cx| {
+            let compact = !this.ui.settings.compact_timeline;
+            this.ui.settings.compact_timeline = compact;
+            crate::app_settings::update(|settings| settings.compact_timeline = compact);
+            cx.notify();
+        })))
         .child(icon_button("snapping", IconName::Magnet, "Snapping (S)", state.snapping, cx.listener(|this, _, _, cx| {
             this.state.snapping = !this.state.snapping;
             cx.notify();
@@ -396,6 +407,46 @@ fn clip_toggle(layer: Id, which: &'static str, on: bool, icons: (IconName, IconN
 
 /// One clip, and (when expanded) its keyframe rows underneath, as positioned elements of its
 /// track row.
+/// A clip's name in its header, or a text field while it is being renamed.
+fn clip_name(layer: &Layer, workspace: &Workspace) -> AnyElement {
+    use gpui_kit::component::Sizable as _;
+    if let Some(editing) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::LayerName(layer.id)) {
+        return div()
+            .flex_1()
+            .min_w_0()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(gpui_kit::component::input::Input::new(&editing.input).xsmall())
+            .into_any_element();
+    }
+    div().flex_1().min_w_0().truncate().child(layer.name.clone()).into_any_element()
+}
+
+/// A clip's right-click menu: rename it, or render it on its own (Quick Export), optionally
+/// putting the render in its place.
+fn clip_menu(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let (id, name) = (layer.id, layer.name.clone());
+    let comp = workspace.state.active_comp;
+    let has_picture = layer.content.has_picture();
+    let busy = workspace.ui.export_job.is_some();
+    let depended_on = studio_core::bake::is_depended_on(&workspace.state.project, comp, id);
+    let target = cx.weak_entity();
+    move |menu, _, _| {
+        let rename = {
+            let (target, name) = (target.clone(), name.clone());
+            PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+                target.update(cx, |this, cx| this.begin_edit(EditTarget::LayerName(id), name.clone(), window, cx)).ok();
+            })
+        };
+        let export = |label: &'static str, replace: bool| {
+            let target = target.clone();
+            PopupMenuItem::new(label).disabled(busy || !has_picture || (replace && depended_on)).on_click(move |_, window, cx| {
+                target.update(cx, |this, cx| crate::panels::export::quick_export_layer(this, id, replace, window, cx)).ok();
+            })
+        };
+        menu.item(rename).separator().item(export("Quick Export Layer", false)).item(export("Export and Replace Layer", true))
+    }
+}
+
 fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     let state = &workspace.state;
     let view = state.view_range;
@@ -409,7 +460,8 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     let ink = if dark_ink { 0x111111 } else { 0xffffff };
     let graph_width = workspace.ui.timeline.graph.get().width.max(1.0);
     let clip_px = width * graph_width;
-    let height = base_height(track) - 8.0;
+    let compact = workspace.ui.settings.compact_timeline;
+    let height = base_height(track, compact) - 8.0;
     let cutting = workspace.ui.tool == Tool::Cut;
     let body_tool = matches!(workspace.ui.tool, Tool::Slip | Tool::Slide | Tool::TrackSelect);
     let held = state.clip_drag_target().is_some_and(|(layer, _)| layer == id) || state.slipping_layer() == Some(id);
@@ -419,7 +471,9 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     let mut inside: Vec<AnyElement> = Vec::new();
     let has_strip = matches!(layer.content, LayerContent::Footage { .. }) && layer.has_audio;
     let media_height = height - CLIP_HEADER - if has_strip { CLIP_SOUND_STRIP } else { 0.0 };
+    // Compact clips are just their name strip.
     match &layer.content {
+        _ if compact => {}
         LayerContent::Footage { item } => {
             if let Some(source) = state.project.item(*item) {
                 inside.push(filmstrip(layer, source, left, clip_px, media_height, false, workspace));
@@ -525,7 +579,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 .test_support(),
         )
         .child(Icon::new(kind_icon(layer, is_mask)).size(px(12.0)).text_color(rgba((ink << 8) | 0xdd)))
-        .child(div().flex_1().min_w_0().truncate().child(layer.name.clone()))
+        .child(clip_name(layer, workspace))
         .when(!layer.effects.is_empty(), |header| header.child(div().px_1().rounded(px(3.0)).bg(rgba(0x00000026)).child(format!("fx {}", layer.effects.len()))))
         .when(layer.has_audio, |header| header.child(clip_toggle(id, "clip-mute", switches.audio, (IconName::Volume2, IconName::VolumeX), Switch::Audio, dark_ink, cx)))
         .when(layer.content.has_picture(), |header| header.child(clip_toggle(id, "clip-show", switches.visible, (IconName::Eye, IconName::EyeOff), Switch::Visible, dark_ink, cx)))
@@ -624,8 +678,19 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 this.state.add_transition(id, frame * 2 < in_frame + out_frame, drag.transition, 0.6);
                 cx.notify();
             }))
-            .child(header)
-            .children(inside)
+            // The right-click menu covers the clip's header and body; the trim grips and fade
+            // handles sit on top of it.
+            .child(
+                div()
+                    .id(("clip-body", id.0 as usize))
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(header)
+                    .children(inside)
+                    .test_support()
+                    .context_menu(clip_menu(layer, workspace, cx)),
+            )
             .children(fades.into_iter().flatten())
             .children(cut_line)
             // Trim grips would catch clicks near the ends, so the Cut tool goes without them.
@@ -636,7 +701,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     ];
 
     if expanded {
-        elements.push(property_rows(layer, left, width, base_height(track), head, workspace, cx).into_any_element());
+        elements.push(property_rows(layer, left, width, base_height(track, compact), head, workspace, cx).into_any_element());
     }
     elements
 }

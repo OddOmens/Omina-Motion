@@ -45,6 +45,8 @@ struct Request {
     track: bool,
     /// The folder holding the model.
     model: PathBuf,
+    /// Rest the GPU between frames (Settings > AI Models), so the Mac stays cool and quiet.
+    cooler: bool,
 }
 
 /// What the background thread reports.
@@ -62,6 +64,81 @@ const POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// Frames decoded together when tracking backwards through a clip: video decodes quickly
 /// forwards and slowly backwards, so each run is decoded forwards, then followed in reverse.
 const BACKWARD_CHUNK: i64 = 24;
+/// In the cooler mode, how long the GPU rests after each frame, as a share of the time the
+/// frame took: 1.0 keeps it busy half the time.
+const COOL_REST: f64 = 1.0;
+/// Frames are compared at this size to spot ones that haven't changed.
+const GLANCE: (u32, u32) = (32, 18);
+
+/// Following a subject through a clip, one frame at a time, from the clicked frame outwards.
+/// The model only looks at frames that are shown and have changed; the rest reuse the mask
+/// before them, linked rather than copied, so they cost nothing.
+struct Tracker<'a> {
+    segmenter: &'a Segmenter,
+    request: &'a Request,
+    removes: &'a [Click],
+    cancelled: &'a dyn Fn() -> bool,
+    /// The last mask the model made, the frame it was for, and a glance at that frame.
+    mask: Mask,
+    index: i64,
+    glance: Vec<u8>,
+}
+
+impl Tracker<'_> {
+    fn mask_path(&self, index: i64) -> PathBuf {
+        self.request.folder.join(format!("{index}.png"))
+    }
+
+    /// Masks frame `index`. `picture` is `None` for a frame the composition doesn't show.
+    fn frame(&mut self, index: i64, picture: Option<&Picture>) -> Result<(), String> {
+        if (self.cancelled)() {
+            return Err("cancelled".into());
+        }
+        let glance = picture.map(glance);
+        let unchanged = glance.as_ref().is_none_or(|glance| looks_the_same(glance, &self.glance));
+        if unchanged {
+            let (from, to) = (self.mask_path(self.index), self.mask_path(index));
+            return std::fs::hard_link(&from, &to)
+                .or_else(|_| std::fs::copy(&from, &to).map(|_| ()))
+                .map_err(|error| format!("could not save the mask: {error}"));
+        }
+        let picture = picture.expect("only shown frames are looked at");
+        let started = std::time::Instant::now();
+        let prepared = self.segmenter.prepare(&picture.rgba, picture.width, picture.height).map_err(|error| error.to_string())?;
+        let mask = self.segmenter.follow(&prepared, &self.mask, self.removes).map_err(|error| error.to_string())?.refine(&picture.rgba, picture.width, picture.height);
+        mask.save(&self.mask_path(index)).map_err(|error| error.to_string())?;
+        (self.mask, self.index, self.glance) = (mask, index, glance.unwrap_or_default());
+        if self.request.cooler {
+            rest(started.elapsed().mul_f64(COOL_REST), self.cancelled);
+        }
+        Ok(())
+    }
+}
+
+/// A tiny grayscale copy of a picture, for comparing frames.
+fn glance(picture: &Picture) -> Vec<u8> {
+    let Some(image) = image::RgbaImage::from_raw(picture.width, picture.height, picture.rgba.clone()) else { return Vec::new() };
+    image::imageops::grayscale(&image::imageops::thumbnail(&image, GLANCE.0, GLANCE.1)).into_raw()
+}
+
+/// Whether two glances show the same picture: frozen frames, held titles, a still screen.
+/// Strict, so any real movement is masked afresh.
+fn looks_the_same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() || a.is_empty() {
+        return false;
+    }
+    let differences = a.iter().zip(b).map(|(a, b)| a.abs_diff(*b));
+    let (total, largest) = differences.fold((0u32, 0u8), |(total, largest), d| (total + u32::from(d), largest.max(d)));
+    largest <= 4 && (total as f32 / a.len() as f32) < 0.75
+}
+
+/// Waits `time`, waking early if the job is cancelled.
+fn rest(time: Duration, cancelled: &dyn Fn() -> bool) {
+    let until = std::time::Instant::now() + time;
+    while !cancelled() && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20).min(until.saturating_duration_since(std::time::Instant::now())));
+    }
+}
 
 /// Where the segmentation model is kept: Studio's settings folder, under `Models/mobile-sam`.
 /// Headless tests look in an empty folder of their own, so they never run the real model.
@@ -121,10 +198,8 @@ fn run(request: &Request, report: &Mutex<Report>, cancelled: &dyn Fn() -> bool) 
     lock(report).stage = "Loading".into();
     let segmenter = Segmenter::load(model).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&request.folder).map_err(|error| format!("could not make the mask folder: {error}"))?;
-    let save = |mask: &Mask, index: i64| mask.save(&request.folder.join(format!("{index}.png"))).map_err(|error| error.to_string());
     let clicks: Vec<Click> = request.clicks.iter().map(|click| Click { x: click.at.x, y: click.at.y, keep: click.keep }).collect();
     let removes: Vec<Click> = clicks.iter().filter(|click| !click.keep).copied().collect();
-    let segment = |picture: &Picture| segmenter.prepare(&picture.rgba, picture.width, picture.height).map_err(|error| error.to_string());
 
     lock(report).stage = "Finding the subject".into();
     let mut decoder = match request.source.frames {
@@ -140,11 +215,13 @@ fn run(request: &Request, report: &Mutex<Report>, cancelled: &dyn Fn() -> bool) 
             None => read_image(&request.source.path),
         }
     };
-    let first = segmenter.segment(&segment(&picture_at(request.frame)?)?, &clicks).map_err(|error| error.to_string())?;
+    let first_picture = picture_at(request.frame)?;
+    let prepared = segmenter.prepare(&first_picture.rgba, first_picture.width, first_picture.height).map_err(|error| error.to_string())?;
+    let first = segmenter.segment(&prepared, &clicks).map_err(|error| error.to_string())?.refine(&first_picture.rgba, first_picture.width, first_picture.height);
     if cancelled() {
         return Err("cancelled".into());
     }
-    save(&first, request.frame)?;
+    first.save(&request.folder.join(format!("{}.png", request.frame))).map_err(|error| error.to_string())?;
     lock(report).made = Some((request.frame, request.frame + 1));
     let (Some((start, end)), true) = (request.source.frames, request.track) else { return Ok(()) };
 
@@ -156,34 +233,28 @@ fn run(request: &Request, report: &Mutex<Report>, cancelled: &dyn Fn() -> bool) 
         report.fraction = (made.1 - made.0) as f32 / total;
         report.stage = stage.into();
     };
+    let shown = |index: i64| request.source.shown.as_ref().is_none_or(|shown| shown.contains(&index));
+    let start_glance = glance(&first_picture);
+    let new_tracker = |mask: Mask| Tracker { segmenter: &segmenter, request, removes: &removes, cancelled, mask, index: request.frame, glance: start_glance.clone() };
     // Forwards from the clicked frame.
-    let mut previous = first.clone();
+    let mut tracker = new_tracker(first.clone());
     for index in request.frame + 1..end {
-        if cancelled() {
-            return Err("cancelled".into());
-        }
-        let mask = segmenter.follow(&segment(&picture_at(index)?)?, &previous, &removes).map_err(|error| error.to_string())?;
-        save(&mask, index)?;
+        let picture = if shown(index) { Some(picture_at(index)?) } else { None };
+        tracker.frame(index, picture.as_ref())?;
         made.1 = index + 1;
         progress(made, "Tracking forwards");
-        previous = mask;
     }
     // Backwards to the start, a run of frames at a time.
-    let mut previous = first;
+    let mut tracker = new_tracker(first);
     let mut run_end = request.frame;
     while run_end > start {
         let run_start = (run_end - BACKWARD_CHUNK).max(start);
-        let pictures: Vec<Picture> = (run_start..run_end).map(&mut picture_at).collect::<Result<_, _>>()?;
+        let pictures: Vec<Option<Picture>> = (run_start..run_end).map(|index| if shown(index) { picture_at(index).map(Some) } else { Ok(None) }).collect::<Result<_, _>>()?;
         for (offset, picture) in pictures.iter().enumerate().rev() {
-            if cancelled() {
-                return Err("cancelled".into());
-            }
             let index = run_start + offset as i64;
-            let mask = segmenter.follow(&segment(picture)?, &previous, &removes).map_err(|error| error.to_string())?;
-            save(&mask, index)?;
+            tracker.frame(index, picture.as_ref())?;
             made.0 = index;
             progress(made, "Tracking backwards");
-            previous = mask;
         }
         run_end = run_start;
     }
@@ -214,7 +285,8 @@ pub fn make_masks(workspace: &mut Workspace, layer: Id, track: bool, window: &mu
     if let Some(job) = workspace.ui.cutout_job.take() {
         job.cancel.store(true, Ordering::Relaxed);
     }
-    let request = Request { comp: workspace.state.active_comp, layer, source, clicks: cut.clicks, frame: cut.frame, folder: new_mask_folder(workspace, layer), track, model: model_folder() };
+    let cooler = workspace.ui.settings.cooler_background_removal;
+    let request = Request { comp: workspace.state.active_comp, layer, source, clicks: cut.clicks, frame: cut.frame, folder: new_mask_folder(workspace, layer), track, model: model_folder(), cooler };
     if studio_cutout::model_present(&model_folder()) {
         start(workspace, request, window, cx);
         return;
@@ -343,12 +415,13 @@ mod tests {
         let request = Request {
             comp: Id(1),
             layer: Id(2),
-            source: CutoutSource { path: clip.into(), frames: Some((0, frames)) },
+            source: CutoutSource { path: clip.into(), frames: Some((0, frames)), shown: None },
             clicks: vec![CutoutClick { at: Vec2::new(disc_x, 0.5), keep: true }],
             frame: middle,
             folder: folder.clone(),
             track: true,
             model: model.into(),
+            cooler: false,
         };
         let report = Mutex::new(Report::default());
         let started = std::time::Instant::now();

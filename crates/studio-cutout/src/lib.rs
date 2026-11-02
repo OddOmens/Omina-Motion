@@ -28,6 +28,35 @@ pub const MODEL_BYTES: u64 = 40_613_024;
 pub const WORK_SIZE: u32 = sam::IMAGE_SIZE as u32;
 /// The model's low-resolution mask covers the padded square input at this many cells a side.
 const LOW_RES: usize = 256;
+/// How far (in work-size pixels) edge refinement looks around each pixel, and how much it
+/// smooths: larger smoothing keeps the mask solid over texture inside the subject.
+const REFINE_RADIUS: usize = 6;
+const REFINE_SMOOTHING: f32 = 0.002;
+
+/// The average of `values` (a `width × height` grid) over the square of `radius` around each
+/// cell, smaller at the borders. Uses a summed-area table, so the cost doesn't grow with radius.
+fn box_mean(values: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
+    // Sums in f64: a whole frame of f32 additions would lose precision.
+    let stride = width + 1;
+    let mut sums = vec![0.0f64; stride * (height + 1)];
+    for y in 0..height {
+        let mut row = 0.0;
+        for x in 0..width {
+            row += f64::from(values[y * width + x]);
+            sums[(y + 1) * stride + x + 1] = sums[y * stride + x + 1] + row;
+        }
+    }
+    let mut means = Vec::with_capacity(width * height);
+    for y in 0..height {
+        let (top, bottom) = (y.saturating_sub(radius), (y + radius + 1).min(height));
+        for x in 0..width {
+            let (left, right) = (x.saturating_sub(radius), (x + radius + 1).min(width));
+            let total = sums[bottom * stride + right] - sums[top * stride + right] - sums[bottom * stride + left] + sums[top * stride + left];
+            means.push((total / ((bottom - top) * (right - left)) as f64) as f32);
+        }
+    }
+    means
+}
 
 /// Something that went wrong, in words for the user.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +116,37 @@ impl Mask {
             either += usize::from(a || b);
         }
         if either == 0 { 0.0 } else { both as f32 / either as f32 }
+    }
+
+    /// Makes the mask's edges follow the edges in the picture it was made from, so hair,
+    /// fingers and the outline of clothing are cut along what is really there rather than the
+    /// model's rounded, low-resolution outline. `rgba` is that picture, `width * 4` bytes a
+    /// row; it is scaled to the mask's size first if it differs.
+    ///
+    /// This is a guided filter (He, Sun and Tang, 2010): within each small window the mask is
+    /// fitted as a straight-line function of the picture's brightness, so the mask changes where
+    /// the picture changes, and stays smooth where it doesn't.
+    pub fn refine(&self, rgba: &[u8], width: u32, height: u32) -> Mask {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let Some(picture) = image::RgbaImage::from_raw(width, height, rgba.to_vec()) else { return self.clone() };
+        let picture = if (width, height) == (self.width, self.height) { picture } else { image::imageops::resize(&picture, self.width, self.height, image::imageops::FilterType::Triangle) };
+        let guide: Vec<f32> = picture.pixels().map(|p| (0.299 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.114 * f32::from(p[2])) / 255.0).collect();
+        let kept: Vec<f32> = self.alpha.iter().map(|&a| f32::from(a) / 255.0).collect();
+        let mean = |values: &[f32]| box_mean(values, w, h, REFINE_RADIUS);
+        let product = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(a, b)| a * b).collect::<Vec<f32>>();
+        let (mean_guide, mean_kept) = (mean(&guide), mean(&kept));
+        let (mean_square, mean_cross) = (mean(&product(&guide, &guide)), mean(&product(&guide, &kept)));
+        let mut slope = vec![0.0; w * h];
+        let mut offset = vec![0.0; w * h];
+        for i in 0..w * h {
+            let variance = mean_square[i] - mean_guide[i] * mean_guide[i];
+            let covariance = mean_cross[i] - mean_guide[i] * mean_kept[i];
+            slope[i] = covariance / (variance + REFINE_SMOOTHING);
+            offset[i] = mean_kept[i] - slope[i] * mean_guide[i];
+        }
+        let (slope, offset) = (mean(&slope), mean(&offset));
+        let alpha = (0..w * h).map(|i| ((slope[i] * guide[i] + offset[i]).clamp(0.0, 1.0) * 255.0).round() as u8).collect();
+        Mask { width: self.width, height: self.height, alpha }
     }
 
     /// Saves it as a grayscale PNG.
@@ -293,6 +353,24 @@ mod tests {
         let ys: Vec<f32> = points.iter().map(|point| point.y).collect();
         assert!(ys.iter().cloned().fold(f32::MAX, f32::min) < 0.4 && ys.iter().cloned().fold(0.0, f32::max) > 0.6, "spread top to bottom: {ys:?}");
         assert!(inside_points(&rectangle(50, 50, 0..0, 0..0)).is_empty(), "nothing to follow in an empty mask");
+    }
+
+    #[test]
+    fn refining_moves_a_rough_edge_onto_the_pictures_edge() {
+        // The picture is bright left of x = 50; the rough mask stops at x = 44.
+        let (width, height) = (100u32, 20u32);
+        let picture: Vec<u8> = (0..width * height).flat_map(|i| if i % width < 50 { [230, 230, 230, 255] } else { [20, 20, 20, 255] }).collect();
+        let rough = rectangle(width, height, 0..44, 0..height);
+        let refined = rough.refine(&picture, width, height);
+        assert!(refined.at(47, 10) > rough.at(47, 10) + 60, "kept up to the real edge: {}", refined.at(47, 10));
+        assert!(refined.at(55, 10) < 40, "and not past it: {}", refined.at(55, 10));
+        assert!(refined.at(10, 10) > 240, "the inside stays kept");
+    }
+
+    #[test]
+    fn box_means_average_their_neighbourhood() {
+        let values = [0.0, 0.0, 3.0, 3.0];
+        assert_eq!(box_mean(&values, 4, 1, 1), vec![0.0, 1.0, 2.0, 3.0]);
     }
 
     #[test]

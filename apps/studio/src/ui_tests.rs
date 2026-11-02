@@ -1520,7 +1520,7 @@ fn an_expanded_folder_shows_as_open(cx: &mut TestAppContext) {
     assert!(visual.update(|window, _| window.try_find(("project-item", studio_core::sample::ids::A_CAM.0 as usize))).is_some());
     visual.update(|window, cx| window.double_click(("project-item", folder.0 as usize), cx));
     render(visual);
-    visual.update(|_, cx| assert!(workspace.read(cx).ui.collapsed_folders.contains(&folder)));
+    visual.update(|_, cx| assert!(!workspace.read(cx).ui.folder_open(folder)));
     assert!(visual.update(|window, _| window.try_find(("project-item", studio_core::sample::ids::A_CAM.0 as usize))).is_none());
 }
 
@@ -2346,7 +2346,7 @@ fn the_eyedropper_picks_a_color_from_the_viewer(cx: &mut TestAppContext) {
 fn a_folders_arrow_closes_and_opens_it_with_one_click(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     let folder = visual.update(|_, cx| workspace.read(cx).state.project.items.iter().find(|item| item.kind == studio_core::model::ProjectItemKind::Folder).unwrap().id);
-    let shown = |visual: &mut VisualTestContext| visual.update(|_, cx| !workspace.read(cx).ui.collapsed_folders.contains(&folder));
+    let shown = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.folder_open(folder));
     assert!(shown(visual));
     visual.update(|window, cx| window.click(("folder-twirl", folder.0 as usize), cx));
     render(visual);
@@ -2646,4 +2646,129 @@ fn magic_resize_makes_the_ticked_sizes_and_opens_the_last(cx: &mut TestAppContex
         assert!(state.project.compositions.iter().any(|comp| (comp.width, comp.height) == (1080, 1920)));
     });
     assert_eq!(crate::panels::resize::short_label("Vertical 9:16 · Reels, TikTok, Shorts"), "9:16");
+}
+
+#[gpui_kit::test]
+fn the_quality_menu_beside_fit_sets_playback_quality(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("viewer-quality", cx));
+    render(visual);
+    click_label(visual, "Quarter");
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.settings.playback_quality), crate::app_settings::PlaybackQuality::Quarter);
+    assert_eq!(crate::app_settings::load().playback_quality, crate::app_settings::PlaybackQuality::Quarter, "remembered");
+}
+
+#[gpui_kit::test]
+fn properties_sections_and_project_folders_start_closed(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.sections_start_open = false;
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    // Folded: the headings show, their controls don't.
+    assert!(visual.update(|window, _| window.try_find("section-transform")).is_some());
+    assert!(visual.update(|window, _| window.try_find("scale-link")).is_none());
+    visual.update(|window, cx| window.click("section-transform", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("scale-link")).is_some(), "a click opens it");
+    // Folders start closed too, so the sample's footage is hidden in its folder.
+    let footage = studio_core::sample::ids::A_CAM;
+    assert!(visual.update(|window, _| window.try_find(("project-item", footage.0 as usize))).is_none());
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.folder_open(studio_core::sample::ids::FOOTAGE_FOLDER)));
+}
+
+#[gpui_kit::test]
+fn new_compositions_are_black_and_projects_have_an_exports_folder(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.new_project(&["Footage".to_owned()], crate::app_settings::NewComposition::default())));
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.composition().background, studio_core::model::Rgba::hex(0x000000));
+        assert!(studio_core::folders::top_folder(&state.project, studio_core::folders::EXPORTS_FOLDER).is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn double_clicking_the_shape_tool_adds_a_full_frame_background(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.double_click("tool-shape", cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let composition = state.composition();
+        let background = state.selected_layers[0];
+        assert_eq!(composition.layer(background).unwrap().name, "Background");
+        let bounds = studio_core::align::layer_bounds(composition, background, 0).unwrap();
+        assert_eq!((bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y), (composition.width as f32, composition.height as f32));
+        let bottom = composition.layers.iter().rev().find(|layer| layer.content.has_picture()).unwrap();
+        assert_eq!(bottom.id, background, "behind everything");
+        assert!(!workspace.read(cx).ui.shape_menu, "the shape menu stays shut");
+    });
+}
+
+#[gpui_kit::test]
+fn renaming_a_clip_from_its_right_click_menu(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Rename…");
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("Headline", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().name.clone()), "Headline");
+}
+
+#[gpui_kit::test]
+fn export_and_replace_puts_a_transparent_render_in_the_layers_place(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // A short title keeps the render quick.
+    let (track, in_frame) = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let title = ws.state.composition_mut_for_test().layer_mut(TITLE).unwrap();
+        title.out_frame = title.in_frame + 6;
+        cx.notify();
+        (title.track, title.in_frame)
+    }));
+    render(visual);
+    visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Export and Replace Layer");
+    visual.run_until_parked();
+    wait_for_export(&workspace, visual);
+    render(visual);
+    let (clip, path) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let composition = state.composition();
+        assert!(composition.layer(TITLE).is_none(), "the title was replaced");
+        let clip = composition.layers.iter().find(|layer| layer.name == "Title").expect("by a clip with its name");
+        assert_eq!((clip.track, clip.in_frame, clip.out_frame), (track, in_frame, in_frame + 6));
+        let LayerContent::Footage { item } = clip.content else { panic!("a movie clip") };
+        let item = state.project.item(item).unwrap();
+        let exports = studio_core::folders::top_folder(&state.project, studio_core::folders::EXPORTS_FOLDER);
+        assert_eq!(item.parent, exports, "filed in Exports");
+        (clip.id, item.path.clone().unwrap())
+    });
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.selected_layers.clone()), vec![clip]);
+    let mut decoder = studio_media::VideoDecoder::open(&path, 640, false).unwrap();
+    assert_eq!(decoder.frame_count(), 6);
+    let frame = decoder.frame(2).unwrap();
+    let lowest = frame.rgba.chunks(4).map(|pixel| pixel[3]).min();
+    assert!(frame.has_alpha && lowest == Some(0), "around the text is see-through (alpha in the file: {}, lowest {lowest:?})", frame.has_alpha);
+    std::fs::remove_file(&path).ok();
+}
+
+#[gpui_kit::test]
+fn compact_tracks_are_shorter_rows(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let height = |visual: &mut VisualTestContext| visual.update(|window, _| window.find(("clip", TITLE.0 as usize)).bounds().size.height);
+    let tall = height(visual);
+    visual.update(|window, cx| window.click("tracks-compact", cx));
+    render(visual);
+    assert!(height(visual) < tall * 0.6, "{:?} vs {tall:?}", height(visual));
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.settings.compact_timeline));
 }

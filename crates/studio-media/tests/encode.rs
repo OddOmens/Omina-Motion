@@ -118,3 +118,25 @@ fn odd_sizes_are_rounded_up_to_even() {
     let info = probe(&path).unwrap();
     assert_eq!((info.width, info.height), (64, 36));
 }
+
+#[test]
+fn prores_4444_keeps_transparency() {
+    let path = scratch("alpha.mov");
+    let (width, height) = (64, 36);
+    // Left half see-through, right half opaque red.
+    let picture: Vec<u8> = (0..width * height).flat_map(|i| if i % width < width / 2 { [0, 0, 0, 0] } else { [0, 0, 255, 255] }).collect();
+    let mut writer = MovieWriter::create(&path, MovieSettings::new(MovieFormat::ProRes4444, width, height, FrameRate::new(24, 1), None)).unwrap();
+    for _ in 0..4 {
+        writer.write_video(&picture, width, height).unwrap();
+    }
+    writer.finish().unwrap();
+    assert_eq!(probe(&path).unwrap().codec, "prores");
+    for hardware in [false, true] {
+        let Ok(mut decoder) = VideoDecoder::open(&path, 4096, hardware) else { continue };
+        let frame = decoder.frame(1).unwrap();
+        let alpha = |x: u32| frame.rgba[((height / 2 * frame.width + x) * 4 + 3) as usize];
+        assert!(alpha(4) < 8, "the left stays transparent (hardware: {hardware}, alpha {})", alpha(4));
+        assert!(alpha(width - 4) > 247, "the right stays opaque (hardware: {hardware})");
+        assert!(frame.has_alpha, "the frame says it has transparency");
+    }
+}

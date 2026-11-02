@@ -18,6 +18,10 @@ pub struct CutoutSource {
     /// `None` for an image; for footage, the source frames the layer shows (start, end
     /// exclusive), which tracking covers.
     pub frames: Option<(i64, i64)>,
+    /// The source frames the composition actually shows, which are the only ones worth asking
+    /// the model about (a 60 fps clip in a 30 fps composition shows every other frame). `None`
+    /// means all of them.
+    pub shown: Option<std::collections::BTreeSet<i64>>,
 }
 
 impl EditorState {
@@ -26,13 +30,14 @@ impl EditorState {
         let composition = self.composition();
         let layer = composition.layer(layer)?;
         match layer.content {
-            LayerContent::Image { item } => Some(CutoutSource { path: self.project.item(item)?.path.clone()?, frames: None }),
+            LayerContent::Image { item } => Some(CutoutSource { path: self.project.item(item)?.path.clone()?, frames: None, shown: None }),
             LayerContent::Footage { item } => {
                 let item = self.project.item(item)?;
                 let rate = item.frame_rate?;
                 let first = layer.source_frame(layer.in_frame, composition.frame_rate, rate).max(0);
                 let last = layer.source_frame(layer.out_frame - 1, composition.frame_rate, rate).max(first);
-                Some(CutoutSource { path: item.path.clone()?, frames: Some((first, last + 1)) })
+                let shown = (layer.in_frame..layer.out_frame).map(|frame| layer.source_frame(frame, composition.frame_rate, rate).clamp(first, last)).collect();
+                Some(CutoutSource { path: item.path.clone()?, frames: Some((first, last + 1)), shown: Some(shown) })
             }
             _ => None,
         }

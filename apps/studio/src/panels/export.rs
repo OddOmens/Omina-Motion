@@ -19,6 +19,7 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{Disableable as _, Sizable as _};
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, WeakEntity, Window, div, prelude::FluentBuilder as _, px};
 use studio_core::audio::composition_audio;
+use studio_core::model::Id;
 use studio_core::time::format_timecode as timecode;
 use studio_export::{ExportRequest, Outcome};
 use studio_media::{EncodeSpeed, MovieFormat, VideoQuality};
@@ -220,6 +221,70 @@ fn choose_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
     .detach();
 }
 
+/// What to do once an export finishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterExport {
+    /// Just say it is done.
+    Nothing,
+    /// Say where the file went (a quick export, which asks no questions).
+    Announce,
+    /// Import the movie into the project's Exports folder and put it in place of `layer`.
+    Replace { comp: Id, layer: Id },
+}
+
+/// Where quick exports go: an Exports folder beside the saved project, or in Movies (Videos)
+/// for one not saved yet.
+pub fn exports_folder(project_file: Option<&Path>) -> PathBuf {
+    match project_file.and_then(Path::parent) {
+        Some(folder) => folder.join(studio_core::folders::EXPORTS_FOLDER),
+        // Tests never write into the person's Movies folder.
+        None if cfg!(test) => std::env::temp_dir().join(format!("studio-test-exports-{}", std::process::id())),
+        None => starting_folder(None).join("Studio Exports"),
+    }
+}
+
+/// A file name in `folder` that is not taken yet: `name.extension`, else `name 2.extension`,
+/// and so on. Characters the Finder can't show in names are replaced.
+fn free_path(folder: &Path, name: &str, extension: &str) -> PathBuf {
+    let clean: String = name.chars().map(|c| if matches!(c, '/' | ':' | '\\') || c.is_control() { '-' } else { c }).collect();
+    let clean = if clean.trim().is_empty() { "Layer".to_owned() } else { clean.trim().to_owned() };
+    (1..)
+        .map(|n| folder.join(if n == 1 { format!("{clean}.{extension}") } else { format!("{clean} {n}.{extension}") }))
+        .find(|path| !path.exists())
+        .expect("some numbered name is free")
+}
+
+/// Renders just `layer` of the open composition, with its transparency, to a ProRes 4444 movie
+/// in the Exports folder (see `exports_folder`). With `replace`, the movie is then imported and
+/// takes the layer's place, so playback reads one file instead of working the layer out.
+pub fn quick_export_layer(workspace: &mut Workspace, layer: Id, replace: bool, window: &mut Window, cx: &mut Context<Workspace>) {
+    if workspace.ui.export_job.is_some() {
+        window.push_notification("An export is already running. Cancel it or wait for it to finish.", cx);
+        return;
+    }
+    let comp = workspace.state.active_comp;
+    if replace && studio_core::bake::is_depended_on(&workspace.state.project, comp, layer) {
+        window.push_notification("Other layers use this one (as a parent, mask or text path), so it can't be replaced.", cx);
+        return;
+    }
+    let Some((project, frames)) = studio_core::bake::solo_copy(&workspace.state.project, comp, layer) else {
+        window.push_notification("This layer isn't on screen inside the composition, so there is nothing to export.", cx);
+        return;
+    };
+    let folder = exports_folder(workspace.state.file());
+    if let Err(error) = std::fs::create_dir_all(&folder) {
+        window.push_notification(format!("Could not make the Exports folder: {error}").as_str(), cx);
+        return;
+    }
+    let composition = workspace.state.composition();
+    let layer_name = composition.layer(layer).map_or_else(String::new, |layer| layer.name.clone());
+    let format = MovieFormat::ProRes4444;
+    let path = free_path(&folder, &format!("{} - {layer_name}", composition.name), format.extension());
+    let request = ExportRequest::new(comp, frames, format, path);
+    let after = if replace { AfterExport::Replace { comp, layer } } else { AfterExport::Announce };
+    run(workspace, project, request, after, window, cx);
+}
+
 /// Starts exporting a snapshot of the project to `path` on a background thread.
 pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
     let choice = workspace.ui.export_choice;
@@ -238,8 +303,15 @@ pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: 
         ..ExportRequest::new(state.active_comp, frames, choice.format, path)
     };
     let project = state.project.clone();
+    run(workspace, project, request, AfterExport::Nothing, window, cx);
+}
+
+/// Exports `project` as `request` says on a background thread, showing progress in the
+/// toolbar, then does what `after` says.
+fn run(workspace: &mut Workspace, project: studio_core::model::Project, request: ExportRequest, after: AfterExport, window: &mut Window, cx: &mut Context<Workspace>) {
     let cancel = Arc::new(AtomicBool::new(false));
     let file_name = request.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let path = request.path.clone();
     workspace.ui.export_job = Some(ExportJob { file_name: file_name.clone(), done: 0, total: request.frames.end - request.frames.start, cancel: cancel.clone() });
     cx.notify();
 
@@ -283,7 +355,14 @@ pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: 
                     return false;
                 }
                 match outcome {
-                    Ok(Outcome::Finished) => window.push_notification(format!("Exported “{file_name}”.").as_str(), cx),
+                    Ok(Outcome::Finished) => match after {
+                        AfterExport::Nothing => window.push_notification(format!("Exported “{file_name}”.").as_str(), cx),
+                        AfterExport::Announce => {
+                            let folder = path.parent().map_or_else(String::new, |folder| folder.display().to_string());
+                            window.push_notification(format!("Exported “{file_name}” to {folder}.").as_str(), cx);
+                        }
+                        AfterExport::Replace { comp, layer } => replace_with_movie(this, &path, comp, layer, window, cx),
+                    },
                     Ok(Outcome::Cancelled) => window.push_notification("Export cancelled.", cx),
                     Err(error) => {
                         window.open_alert_dialog(cx, move |dialog, _, _| dialog.title("The export failed").description(error.clone()));
@@ -297,6 +376,18 @@ pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: 
         }
     })
     .detach();
+}
+
+/// Imports the finished movie into the project's Exports folder and puts it in place of
+/// `layer`. If the layer has gone meanwhile, the movie is still imported.
+fn replace_with_movie(workspace: &mut Workspace, path: &Path, comp: Id, layer: Id, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(&item) = workspace.import_paths(vec![path.to_path_buf()], window, cx).first() else { return };
+    workspace.state.file_into_exports(item);
+    workspace.ui.reveal_item(&workspace.state.project, item);
+    if workspace.state.replace_with_render(comp, layer, item).is_none() {
+        window.push_notification("The render was imported into Exports, but the layer it was made from has changed, so it was left in place.", cx);
+    }
+    cx.notify();
 }
 
 /// The report, even if the export thread panicked while holding it.

@@ -327,7 +327,7 @@ mod tests {
     use super::*;
 
     fn frame(index: i64) -> VideoFrame {
-        VideoFrame { width: 2, height: 2, index, rgba: vec![0; 16], from_proxy: false }
+        VideoFrame { width: 2, height: 2, index, rgba: vec![0; 16], from_proxy: false, has_alpha: false }
     }
 
     #[test]
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn small_differences_in_size_are_fitted_exactly() {
-        let source = VideoFrame { width: 4, height: 2, index: 0, rgba: (0..32).collect(), from_proxy: false };
+        let source = VideoFrame { width: 4, height: 2, index: 0, rgba: (0..32).collect(), from_proxy: false, has_alpha: false };
         let fitted = fit(source, (2, 1));
         assert_eq!((fitted.width, fitted.height), (2, 1));
         assert_eq!(fitted.rgba, vec![0, 1, 2, 3, 8, 9, 10, 11]);

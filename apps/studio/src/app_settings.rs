@@ -63,6 +63,10 @@ pub struct AppSettings {
     pub clip_waveforms: bool,
     /// The frame render time under the timeline.
     pub show_render_time: bool,
+    /// Short timeline rows: each clip shows just its name strip, so more tracks fit.
+    pub compact_timeline: bool,
+    /// Background removal rests the GPU between frames: slower, but cool and quiet.
+    pub cooler_background_removal: bool,
 }
 
 /// What new compositions start as.
@@ -163,6 +167,8 @@ impl Default for AppSettings {
             clip_thumbnails: true,
             clip_waveforms: true,
             show_render_time: true,
+            compact_timeline: false,
+            cooler_background_removal: false,
         }
     }
 }

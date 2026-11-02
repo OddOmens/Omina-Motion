@@ -267,7 +267,8 @@ pub fn new_composition_settings(size: crate::app_settings::NewComposition) -> ed
         height: size.height.clamp(16, 8192),
         frame_rate: rate,
         duration_frames: (i64::from(size.seconds.clamp(1, 3600)) * i64::from(size.fps.clamp(1, 240))).max(1),
-        background: studio_core::model::Rgba::TRANSPARENT,
+        // Black, as in After Effects and Premiere; Composition Settings can make it transparent.
+        background: studio_core::model::Rgba::hex(0x000000),
     }
 }
 
@@ -849,6 +850,42 @@ impl EditorState {
         let neighbor = studio_core::transitions::touching(self.composition(), found, at_start);
         let (before, after) = if at_start { (neighbor, Some(layer)) } else { (Some(layer), neighbor) };
         studio_core::transitions::apply(&mut self.project, comp, before, after, transition, seconds)
+    }
+
+    /// Moves project item `item` into the Exports folder (making it if needed).
+    pub fn file_into_exports(&mut self, item: Id) {
+        studio_core::folders::file_into(&mut self.project, item, studio_core::folders::EXPORTS_FOLDER);
+    }
+
+    /// Puts imported movie `item`, a render of `layer` alone, in that layer's place in
+    /// composition `comp` (see `studio_core::bake`), and selects it.
+    pub fn replace_with_render(&mut self, comp: Id, layer: Id, item: Id) -> Option<Id> {
+        let clip = studio_core::bake::replace_with_render(&mut self.project, comp, layer, item)?;
+        self.selected_layers.retain(|&selected| selected != layer);
+        if comp == self.active_comp {
+            self.select_layer(clip, false);
+        }
+        Some(clip)
+    }
+
+    /// Renames a layer. Blank names are ignored.
+    pub fn rename_layer(&mut self, layer: Id, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(target) = self.composition_mut().layer_mut(layer) {
+            target.name = name.to_owned();
+        }
+    }
+
+    /// Adds a white rectangle that fills the frame behind everything (double-clicking the Shape
+    /// tool), and selects it so its fill can be changed straight away.
+    pub fn add_background(&mut self) -> Option<Id> {
+        let comp = self.active_comp;
+        let layer = edit::add_background(&mut self.project, comp, studio_core::model::Rgba::hex(0xffffff))?;
+        self.select_layer(layer, false);
+        Some(layer)
     }
 
     /// Adds element `index` (of `studio_core::elements::ELEMENTS`) in the middle of the open

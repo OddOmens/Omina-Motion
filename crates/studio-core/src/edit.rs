@@ -460,6 +460,27 @@ pub fn add_shape_layer(project: &mut Project, comp_id: Id, style: ShapeStyle, si
     add_top_layer(project, comp_id, name, LayerContent::Shape { style, path: None }, size, position, in_frame)
 }
 
+/// Adds a rectangle the size of the frame, filled with `color`, behind everything else and for
+/// the whole composition: a background that can be recolored like any shape. It goes on the
+/// bottom picture track, moving the clips there up a track if it has any. Returns the layer.
+pub fn add_background(project: &mut Project, comp_id: Id, color: Rgba) -> Option<Id> {
+    let composition = project.composition(comp_id)?;
+    let size = Vec2::new(composition.width as f32, composition.height as f32);
+    let style = ShapeStyle { fill: Some(Paint::Solid(color)), ..ShapeStyle::new(ShapeKind::Rectangle) };
+    let id = add_top_layer(project, comp_id, "Background".to_owned(), LayerContent::Shape { style, path: None }, size, size * 0.5, 0)?;
+    let composition = project.composition_mut(comp_id)?;
+    let main_in_use = composition.layers.iter().any(|layer| layer.id != id && layer.track == crate::tracks::MAIN_TRACK);
+    for layer in &mut composition.layers {
+        if layer.id == id {
+            layer.track = crate::tracks::MAIN_TRACK;
+        } else if main_in_use && layer.track >= crate::tracks::MAIN_TRACK {
+            layer.track += 1;
+        }
+    }
+    crate::tracks::normalize(composition);
+    Some(id)
+}
+
 /// Adds a pen path drawn in composition pixels as a shape layer at the top of the stack. The
 /// layer's box is fitted around the path and anchored at its center, so the shape appears
 /// exactly where it was drawn. An open path gets a stroke and no fill; a closed one is filled.
@@ -1175,5 +1196,20 @@ mod tests {
         assert!(set_layer_mask(comp, layer, Some(LayerMask { layer: mask, mode: MaskMode::Hide })));
         delete_layers(comp, &[mask]);
         assert_eq!(comp.layer(layer).unwrap().mask, None);
+    }
+
+    #[test]
+    fn a_background_fills_the_frame_behind_every_picture_layer() {
+        let mut project = sample::sample_project();
+        let background = add_background(&mut project, ids::MAIN_COMP, Rgba::hex(0xffffff)).unwrap();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        let bottom = comp.layers.iter().rev().find(|layer| !crate::tracks::is_sound_only(layer)).unwrap();
+        assert_eq!(bottom.id, background, "drawn first, under everything");
+        let layer = comp.layer(background).unwrap();
+        assert_eq!((layer.track, layer.in_frame, layer.out_frame), (crate::tracks::MAIN_TRACK, 0, comp.duration_frames));
+        let bounds = crate::align::layer_bounds(comp, background, 0).unwrap();
+        assert_eq!((bounds.min, bounds.max), (Vec2::new(0.0, 0.0), Vec2::new(1920.0, 1080.0)));
+        // Nothing else shares its track.
+        assert_eq!(comp.layers.iter().filter(|other| other.track == crate::tracks::MAIN_TRACK).count(), 1);
     }
 }

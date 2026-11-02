@@ -49,6 +49,9 @@ fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32
     let mut input = ffmpeg::format::input(source)?;
     let in_stream = input.streams().best(Type::Video).ok_or_else(|| MediaError("the file has no video".into()))?;
     let in_index = in_stream.index();
+    // Footage with transparency gets a ProRes 4444 proxy, which keeps it.
+    let alpha = crate::decode::stream_has_alpha(&in_stream)?;
+    let proxy_pixel = if alpha { Pixel::YUVA444P10LE } else { Pixel::YUV422P10LE };
     let in_time_base = in_stream.time_base();
     let mut decoder_context = ffmpeg::codec::context::Context::from_parameters(in_stream.parameters())?;
     decoder_context.set_threading(ffmpeg::codec::threading::Config::kind(ffmpeg::codec::threading::Type::Frame));
@@ -69,7 +72,7 @@ fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32
     let mut encoder = encoder_context.encoder().video()?;
     encoder.set_width(out_width);
     encoder.set_height(out_height);
-    encoder.set_format(Pixel::YUV422P10LE);
+    encoder.set_format(proxy_pixel);
     encoder.set_time_base(in_time_base);
     let rate = info.frame_rate;
     encoder.set_frame_rate(Some(ffmpeg::Rational::new(rate.numerator as i32, rate.denominator as i32)));
@@ -77,8 +80,8 @@ fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32
         encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
     }
     let mut options = ffmpeg::Dictionary::new();
-    // Profile 0 is ProRes 422 Proxy.
-    options.set("profile", "0");
+    // Profile 0 is ProRes 422 Proxy; 4 is 4444.
+    options.set("profile", if alpha { "4" } else { "0" });
     let mut encoder = encoder.open_with(options)?;
     out_stream.set_parameters(&encoder);
     out_stream.set_avg_frame_rate(ffmpeg::Rational::new(rate.numerator as i32, rate.denominator as i32));
@@ -106,7 +109,7 @@ fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32
         while decoder.receive_frame(&mut decoded).is_ok() {
             let source_format = (decoded.format(), decoded.width(), decoded.height());
             if scaler.as_ref().is_none_or(|(_, f, w, h)| (*f, *w, *h) != source_format) {
-                let context = scaling::Context::get(source_format.0, source_format.1, source_format.2, Pixel::YUV422P10LE, out_width, out_height, scaling::Flags::BILINEAR)?;
+                let context = scaling::Context::get(source_format.0, source_format.1, source_format.2, proxy_pixel, out_width, out_height, scaling::Flags::BILINEAR)?;
                 scaler = Some((context, source_format.0, source_format.1, source_format.2));
             }
             let mut scaled = ffmpeg::frame::Video::empty();

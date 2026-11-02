@@ -221,8 +221,9 @@ fn rail_button_look(id: &'static str, icon: IconName, label: &'static str, activ
         .child(label)
 }
 
-/// The Shape button: a click picks the Shape tool; holding it, or right-clicking, opens the
-/// shape menu. A small mark in its corner says there is a menu.
+/// The Shape button: a click picks the Shape tool; a double-click adds a background that fills
+/// the frame; holding it, or right-clicking, opens the shape menu. A small mark in its corner
+/// says there is a menu.
 fn shape_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let kind = workspace.ui.shape_kind;
     let active = workspace.ui.tool == Tool::Shape;
@@ -234,7 +235,13 @@ fn shape_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl Into
         .child(
             rail_button_look("tool-shape", shape_icon(kind), "Shape", active)
                 .relative()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    if event.click_count >= 2 {
+                        this.ui.shape_press = false;
+                        this.state.add_background();
+                        cx.notify();
+                        return;
+                    }
                     this.set_tool(Tool::Shape);
                     this.ui.shape_press = true;
                     cx.notify();

@@ -207,6 +207,36 @@ fn zoom_menu(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
     })
 }
 
+/// The playback quality menu (also in Settings > Playback): how sharp the viewer is while
+/// playing. Paused frames are always full quality.
+fn quality_menu(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    use crate::app_settings::PlaybackQuality;
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+    let current = workspace.ui.settings.playback_quality;
+    let target = cx.weak_entity();
+    Button::new("viewer-quality").ghost().xsmall().label(current.name()).dropdown_caret(true).tooltip("Quality while playing").dropdown_menu(move |menu, _, _| {
+        PlaybackQuality::ALL.into_iter().fold(menu, |menu, quality| {
+            let target = target.clone();
+            menu.item(PopupMenuItem::new(quality.name()).checked(quality == current).on_click(move |_, _, cx| {
+                target
+                    .update(cx, |this, cx| {
+                        set_playback_quality(this, quality);
+                        cx.notify();
+                    })
+                    .ok();
+            }))
+        })
+    })
+}
+
+/// Uses `quality` while playing from now on, and remembers it.
+pub fn set_playback_quality(workspace: &mut Workspace, quality: crate::app_settings::PlaybackQuality) {
+    workspace.ui.settings.playback_quality = quality;
+    crate::app_settings::update(|settings| settings.playback_quality = quality);
+}
+
 /// The bar under the viewer (the panel's footer), in one row: magnification and frame size on the left, the play
 /// and frame-stepping controls in the middle, and the current timecode on the right.
 fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
@@ -221,6 +251,7 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         .gap_2()
         .text_size(px(size::SMALL_TEXT))
         .text_color(hsla(color::MUTED))
+        .child(quality_menu(workspace, cx))
         .child(zoom_menu(workspace, scale, cx))
         .child(format!("{} × {}", composition.width, composition.height))
         .child(icon_button("viewer-snapping", IconName::Magnet, "Snap anchor points to corners, edges and center", workspace.state.viewer_snapping, cx.listener(|this, _, _, cx| {

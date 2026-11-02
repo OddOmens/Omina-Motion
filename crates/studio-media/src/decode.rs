@@ -61,6 +61,12 @@ fn frame_rate_of(rate: ffmpeg::Rational) -> FrameRate {
 }
 
 /// Reads a file's video size, length, frame rate and whether it has audio.
+/// Whether a video stream's pixels carry transparency (four components, or two for gray).
+pub(crate) fn stream_has_alpha(stream: &ffmpeg::Stream<'_>) -> Result<bool, MediaError> {
+    let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?.decoder().video()?;
+    Ok(matches!(decoder.format().descriptor().map(|format| format.nb_components()), Some(2 | 4)))
+}
+
 pub fn probe(path: &Path) -> Result<MediaInfo, MediaError> {
     init()?;
     let input = ffmpeg::format::input(path)?;
@@ -122,6 +128,9 @@ impl VideoDecoder {
         let stream = input.streams().best(Type::Video).ok_or_else(|| MediaError("the file has no video".into()))?;
         let stream_index = stream.index();
         let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
+        // GPU decoders hand back pictures without alpha, so files with transparency are decoded
+        // in software.
+        let use_hardware = use_hardware && !stream_has_alpha(&stream)?;
         let hardware = if use_hardware { crate::hardware::attach(&mut context) } else { None };
         if hardware.is_none() {
             // Software decoding: use all cores.
@@ -345,6 +354,8 @@ impl VideoDecoder {
         for y in 0..height as usize {
             pixels.extend_from_slice(&rgba.data(0)[y * stride..y * stride + row]);
         }
-        Ok(VideoFrame { width, height, index, rgba: pixels, from_proxy: false })
+        // Pixel formats with an alpha component have four components (or two, for gray).
+        let has_alpha = matches!(source.0.descriptor().map(|format| format.nb_components()), Some(2 | 4));
+        Ok(VideoFrame { width, height, index, rgba: pixels, from_proxy: false, has_alpha })
     }
 }

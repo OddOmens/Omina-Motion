@@ -132,9 +132,10 @@ pub fn export(
             if let Some((path, error)) = video.errors().into_iter().next() {
                 return Err(format!("{} could not be decoded ({error}).", path.display()));
             }
-            // Movies have no transparency: a transparent composition is shown over black.
-            let flattened = over_black(&picture.bgra);
-            writer.write_video(&flattened, picture.width, picture.height).map_err(|error| format!("Frame {frame} could not be encoded: {error}"))?;
+            // Most movies have no transparency, so a transparent composition is laid over black;
+            // ProRes 4444 keeps it.
+            let pixels = if request.format.has_alpha() { picture.bgra } else { over_black(&picture.bgra) };
+            writer.write_video(&pixels, picture.width, picture.height).map_err(|error| format!("Frame {frame} could not be encoded: {error}"))?;
             if !clips.is_empty() {
                 let until = to_sample(frame + 1);
                 sound.resize((until - mixed) as usize * CHANNELS, 0.0);

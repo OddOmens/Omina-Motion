@@ -748,7 +748,8 @@ impl Renderer {
     }
 
     /// Uploads a footage layer's decoded frame, reusing its texture when the size is unchanged.
-    /// Video frames are opaque, so they need no premultiplying.
+    /// Most video is opaque and needs no premultiplying; footage with transparency is
+    /// premultiplied like images.
     fn prepare_video(&mut self, layer: Id, picture: &VideoFrame) {
         let size = Vec2::new(picture.width as f32, picture.height as f32);
         let reusable = self.videos.get(&layer).is_some_and(|video| video.texture.size == size);
@@ -769,10 +770,17 @@ impl Renderer {
             let view = texture.create_view(&Default::default());
             self.videos.insert(layer, VideoTexture { texture: MediaTexture { view, size }, raw: texture, index: -1 });
         }
+        let premultiplied;
+        let pixels = if picture.has_alpha {
+            premultiplied = premultiply(&picture.rgba);
+            &premultiplied
+        } else {
+            &picture.rgba
+        };
         let video = self.videos.get_mut(&layer).expect("inserted above");
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo { texture: &video.raw, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &picture.rgba,
+            pixels,
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(picture.width * 4), rows_per_image: Some(picture.height) },
             wgpu::Extent3d { width: picture.width, height: picture.height, depth_or_array_layers: 1 },
         );

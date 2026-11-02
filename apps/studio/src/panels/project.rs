@@ -196,12 +196,12 @@ fn kind_icon(kind: ProjectItemKind) -> IconName {
 }
 
 /// Flattens the folder tree into visible rows with their nesting depth. Folders sort first.
-fn visible_rows<'a>(items: &'a [ProjectItem], collapsed: &std::collections::HashSet<Id>) -> Vec<(&'a ProjectItem, usize)> {
+fn visible_rows<'a>(items: &'a [ProjectItem], is_open: &dyn Fn(Id) -> bool) -> Vec<(&'a ProjectItem, usize)> {
     fn visit<'a>(
         items: &'a [ProjectItem],
         parent: Option<Id>,
         depth: usize,
-        collapsed: &std::collections::HashSet<Id>,
+        is_open: &dyn Fn(Id) -> bool,
         rows: &mut Vec<(&'a ProjectItem, usize)>,
     ) {
         let mut children: Vec<&ProjectItem> = items.iter().filter(|item| item.parent == parent).collect();
@@ -210,13 +210,13 @@ fn visible_rows<'a>(items: &'a [ProjectItem], collapsed: &std::collections::Hash
         });
         for item in children {
             rows.push((item, depth));
-            if item.kind == ProjectItemKind::Folder && !collapsed.contains(&item.id) {
-                visit(items, Some(item.id), depth + 1, collapsed, rows);
+            if item.kind == ProjectItemKind::Folder && is_open(item.id) {
+                visit(items, Some(item.id), depth + 1, is_open, rows);
             }
         }
     }
     let mut rows = Vec::new();
-    visit(items, None, 0, collapsed, &mut rows);
+    visit(items, None, 0, is_open, &mut rows);
     rows
 }
 
@@ -301,11 +301,11 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .when(columns.dimensions, |header| header.child(div().w(px(DIMENSIONS_WIDTH)).pl_2().child("Size")))
         .when(columns.frame_rate, |header| header.child(div().w(px(RATE_WIDTH)).pl_2().child("Rate")));
 
-    let rows = visible_rows(&project.items, &workspace.ui.collapsed_folders).into_iter().map(|(item, depth)| {
+    let rows = visible_rows(&project.items, &|id| workspace.ui.folder_open(id)).into_iter().map(|(item, depth)| {
         let id = item.id;
         let kind = item.kind;
         let is_folder = kind == ProjectItemKind::Folder;
-        let is_open = !workspace.ui.collapsed_folders.contains(&id);
+        let is_open = workspace.ui.folder_open(id);
         let is_selected = workspace.state.selected_item == Some(id);
         // A folder's arrow opens and closes it with one click.
         let twirl = if is_folder {
@@ -319,9 +319,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    if !this.ui.collapsed_folders.remove(&id) {
-                        this.ui.collapsed_folders.insert(id);
-                    }
+                    this.ui.toggle_folder(id);
                     cx.notify();
                 }))
                 .child(Icon::new(if is_open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(hsla(color::MUTED)))
@@ -342,8 +340,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                 this.state.selected_item = Some(id);
                 // Double-click (or Enter) opens folders and compositions.
                 let opens = event.click_count() >= 2 || event.is_keyboard();
-                if opens && is_folder && !this.ui.collapsed_folders.remove(&id) {
-                    this.ui.collapsed_folders.insert(id);
+                if opens && is_folder {
+                    this.ui.toggle_folder(id);
                 }
                 if opens && kind == ProjectItemKind::Composition {
                     this.state.open_composition(id);

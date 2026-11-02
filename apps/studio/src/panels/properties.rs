@@ -118,7 +118,7 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     let id = layer.id;
     let target = cx.weak_entity();
     let composition = workspace.state.composition();
-    let mut rows = div().child(section("Layer", None));
+    let mut rows = div();
     if layer.content.has_picture() {
         let modes = BlendMode::ALL.iter().map(|&mode| (mode.label().to_owned(), mode == layer.blend_mode, mode)).collect();
         rows = rows.child(labeled_row("Blend Mode", choice_menu("layer-blend", layer.blend_mode.label().to_owned(), modes, move |this, mode| this.state.set_blend_mode(id, mode), target.clone())));
@@ -180,7 +180,7 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
     let job = workspace.ui.cutout_job.as_ref().filter(|job| job.layer == id);
     let is_video = matches!(layer.content, LayerContent::Footage { .. });
     let cut = layer.cutout.as_ref();
-    let mut section = div().child(divider()).child(section("Remove Background", None));
+    let mut section = div();
     let pick = Button::new("cutout-pick")
         .small()
         .icon(Icon::new(IconName::WandSparkles))
@@ -270,8 +270,6 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     let ramps = studio_core::speed::Ramp::ALL.iter().map(|&ramp| (ramp.name().to_owned(), false, ramp)).collect();
     let busy = workspace.ui.analysis_job.is_some();
     div()
-        .child(divider())
-        .child(section("Speed", None))
         .child(labeled_row("Speed", speed))
         .child(labeled_row("Ramp", choice_menu("speed-ramp", "Choose a ramp…".to_owned(), ramps, move |this, ramp| this.state.apply_speed_ramp(id, ramp), target.clone())))
         .child(
@@ -315,8 +313,6 @@ fn animate_section(layer: &Layer, cx: &mut Context<Workspace>) -> Div {
     loops.extend(Loop::ALL.iter().map(|&looping| (looping.name().to_owned(), animation.looping == Some(looping), Some(looping))));
     let loop_name = animation.looping.map_or("None".to_owned(), |looping| looping.name().to_owned());
     div()
-        .child(divider())
-        .child(section("Animate", None))
         .child(row(Phase::In, animation.enter, "in", "In"))
         .child(row(Phase::Out, animation.exit, "out", "Out"))
         .child(labeled_row("Loop", choice_menu("animate-loop", loop_name, loops, move |this, looping| this.state.set_layer_loop(id, looping), target.clone())))
@@ -333,8 +329,6 @@ fn track_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     let picking = workspace.ui.track_pick == Some(id);
     let busy = workspace.ui.analysis_job.is_some();
     div()
-        .child(divider())
-        .child(section("Track Motion", None))
         .child(hint(if picking { "Now click the point to follow in the video, at the playhead." } else { "Pins this layer to something moving in a video: its position follows the point you click." }))
         .child(
             div().py_1().child(
@@ -380,8 +374,6 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     let normal_speed = layer.time.is_normal();
     let has_markers = !workspace.state.composition().markers.is_empty();
     div()
-        .child(divider())
-        .child(section("Audio", None))
         .child(
             div()
                 .flex()
@@ -512,8 +504,6 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
     }
 
     div()
-        .child(divider())
-        .child(section("Captions", None))
         .child(labeled_row("Animation", choice_menu("captions-animation", style.animation.name().to_owned(), animations, move |this, animation| this.state.edit_captions(id, |style| style.animation = animation), weak.clone())))
         .child(labeled_row("Words at once", choice_menu("captions-words", format!("{}", style.words_per_phrase), per_phrase, move |this, count| this.state.edit_captions(id, |style| style.words_per_phrase = count), weak.clone())))
         .child(div().py_1().child(uppercase))
@@ -529,21 +519,27 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         .child(transcript)
 }
 
-fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
-    let id = layer.id;
-    let reset = div()
+/// The Reset button in the Layer Transform heading.
+fn transform_reset(id: Id, cx: &mut Context<Workspace>) -> AnyElement {
+    div()
         .id("reset-transform")
         .text_color(hsla(color::VALUE))
         .cursor_pointer()
         .hover(|style| style.text_color(hsla(color::TEXT)))
         .on_click(cx.listener(move |this, _, _, cx| {
+            // The heading folds the section on a click; Reset shouldn't.
+            cx.stop_propagation();
             this.state.reset_transform(id);
             cx.notify();
         }))
         .child("Reset")
-        .into_any_element();
+        .into_any_element()
+}
+
+fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let id = layer.id;
     let linked = workspace.state.scale_linked;
-    let mut rows = div().child(section("Layer Transform", Some(reset)));
+    let mut rows = div();
     for property in TransformProperty::ALL {
         let extra = (property == TransformProperty::Scale).then(|| {
             let icon = if linked { IconName::Link } else { IconName::Unlink };
@@ -690,8 +686,6 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
     let stroke_width = style.stroke.map_or(2.0, |(_, width)| width);
 
     div()
-        .child(divider())
-        .child(section("Text", None))
         .child(div().flex().items_center().gap_2().h(px(28.0)).child(div().w(px(56.0)).child("Source")).child(source_text))
         .child(div().h(px(30.0)).child(choice_menu("font-family", style.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
         .child(div().h(px(30.0)).child(choice_menu("font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
@@ -830,8 +824,6 @@ fn shape_section(layer: &Layer, style: &ShapeStyle, workspace: &Workspace, cx: &
         _ => true,
     };
     div()
-        .child(divider())
-        .child(section("Shape", None))
         // A pen path keeps its own outline; the drawn shapes can switch between each other.
         .when(!is_path, |section| section.child(labeled_row("Shape", choice_menu("shape-kind", style.kind.name().to_owned(), kinds, move |this, kind| this.state.set_shape_kind(id, kind), weak))))
         .when(is_path, |section| {
@@ -865,15 +857,16 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         let message = if selected.is_empty() { "Select a layer to see its properties." } else { "Select a single layer to edit its properties." };
         return hint(message).into_any_element();
     };
+    let id = layer.id;
     let transform = if layer.transform.is_some() {
-        transform_section(layer, workspace, cx)
+        fold("transform", "Layer Transform", Some(transform_reset(id, cx)), workspace, cx, |cx| transform_section(layer, workspace, cx))
     } else {
-        div().child(hint("Audio layers have no transform."))
+        div().child(divider()).child(hint("Audio layers have no transform."))
     };
     let text = match &layer.content {
-        LayerContent::Text { text, style } => Some(text_section(layer, text, style, workspace, cx)),
-        LayerContent::Shape { style, .. } => Some(shape_section(layer, style, workspace, cx)),
-        LayerContent::Captions { words, style } => Some(captions_section(layer, style, words, workspace, cx)),
+        LayerContent::Text { text, style } => Some(fold("text", "Text", None, workspace, cx, |cx| text_section(layer, text, style, workspace, cx))),
+        LayerContent::Shape { style, .. } => Some(fold("shape", "Shape", None, workspace, cx, |cx| shape_section(layer, style, workspace, cx))),
+        LayerContent::Captions { words, style } => Some(fold("captions", "Captions", None, workspace, cx, |cx| captions_section(layer, style, words, workspace, cx))),
         _ => None,
     };
     // Tell the user when an edit will change several keyframes at once.
@@ -895,16 +888,39 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .px_2p5()
         .pb_3()
         .children(mass_edit_note)
-        .child(layer_section(layer, workspace, cx))
-        .child(divider())
+        .child(fold("layer", "Layer", None, workspace, cx, |cx| layer_section(layer, workspace, cx)))
         .child(transform)
         .children(text)
-        .children(layer.transform.is_some().then(|| animate_section(layer, cx)))
-        .children(studio_core::speed::has_speed(&layer.content).then(|| speed_section(layer, workspace, cx)))
-        .children(trackable(layer).then(|| track_section(layer, workspace, cx)))
-        .children(studio_core::cutout::can_cut_out(layer).then(|| cutout_section(layer, workspace, cx)))
-        .children(workspace.state.has_sound(layer.id).then(|| audio_section(layer, workspace, cx)))
+        .children(layer.transform.is_some().then(|| fold("animate", "Animate", None, workspace, cx, |cx| animate_section(layer, cx))))
+        .children(studio_core::speed::has_speed(&layer.content).then(|| fold("speed", "Speed", None, workspace, cx, |cx| speed_section(layer, workspace, cx))))
+        .children(trackable(layer).then(|| fold("track", "Track Motion", None, workspace, cx, |cx| track_section(layer, workspace, cx))))
+        .children(studio_core::cutout::can_cut_out(layer).then(|| fold("cutout", "Remove Background", None, workspace, cx, |cx| cutout_section(layer, workspace, cx))))
+        .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, workspace, cx, |cx| audio_section(layer, workspace, cx))))
         .into_any_element()
+}
+
+/// A Properties section that folds: a heading with an arrow (click to open or close it), and
+/// `body` underneath while it is open. Sections start closed. `trailing` controls (such as
+/// Layer Transform's Reset) show in the heading while the section is open.
+fn fold(key: &'static str, title: &'static str, trailing: Option<AnyElement>, workspace: &Workspace, cx: &mut Context<Workspace>, body: impl FnOnce(&mut Context<Workspace>) -> Div) -> Div {
+    let open = workspace.ui.section_open(key);
+    let heading = div()
+        .id(ElementId::Name(format!("section-{key}").into()))
+        .flex()
+        .items_center()
+        .gap_1()
+        .h(px(26.0))
+        .mt_1()
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.ui.toggle_section(key);
+            cx.notify();
+        }))
+        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(hsla(color::MUTED)))
+        .child(div().flex_1().text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title))
+        .children(trailing.filter(|_| open))
+        .test_support();
+    div().when(key != "layer", |section| section.child(divider())).child(heading).when(open, |section| section.child(body(cx)))
 }
 
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
