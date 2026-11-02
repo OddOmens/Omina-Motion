@@ -462,7 +462,7 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
                         .outline()
                         .small()
                         .label("Remove Silences")
-                        .tooltip("Cut the pauses out and close the gaps (jump cuts)")
+                        .tooltip(if normal_speed { "Cut the pauses out and close the gaps (jump cuts)" } else { "Set the clip back to normal speed to remove its silences" })
                         .disabled(busy || !normal_speed)
                         .on_click(cx.listener(move |this, _, window, cx| super::analysis::remove_silences(this, id, window, cx))),
                 )
@@ -490,6 +490,8 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
                         .small()
                         .icon(Icon::new(IconName::AudioLines))
                         .label("Separate Audio")
+                        // The separated sound plays at normal speed, so a sped-up clip's would not match.
+                        .when(!normal_speed, |button| button.disabled(true).tooltip("Set the clip back to normal speed to separate its audio"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.state.separate_audio(id).is_some() {
                                 cx.notify();

@@ -94,7 +94,11 @@ impl EditorState {
         let Some(origins) = self.keyframe_drag.as_ref().map(|drag| drag.keys.iter().map(|(origin, _)| origin.frame).collect::<Vec<_>>()) else { return };
         let (Some(&first), Some(&last)) = (origins.iter().min(), origins.iter().max()) else { return };
         let exclude = super::snap::SnapExclusions { selected_keyframes: true, ..Default::default() };
-        let delta = self.snapped_delta(&origins, delta, exclude).clamp(-first, self.duration() - 1 - last);
+        // The group may already lie partly outside the composition (after it was shortened, or a
+        // layer was moved in time). It can always move back in, but never further out.
+        let earliest = (-first).min(0);
+        let latest = (self.duration() - 1 - last).max(0);
+        let delta = self.snapped_delta(&origins, delta, exclude).clamp(earliest, latest);
         let Some(mut drag) = self.keyframe_drag.take() else { return };
         // Each keyframe heads for its own target. Move those going right from the rightmost
         // first, then those going left from the leftmost first, so keys moving together never
@@ -289,6 +293,24 @@ mod tests {
             state.drag_keyframes(-step);
         }
         assert_eq!(title_keys(&state), vec![0, 12, 156, 168], "the spacing survives hitting frame 0");
+    }
+
+    #[test]
+    fn keyframes_past_a_shortened_composition_can_still_be_dragged() {
+        let mut state = EditorState::new();
+        let title = state.composition().layers[0].id;
+        // The title fades at 24, 36, 156 and 168; the composition now ends at frame 100.
+        state.composition_mut().duration_frames = 100;
+        for frame in [24, 36, 156, 168] {
+            state.select_keyframe(KeyframeRef { layer: title, path: opacity(), frame }, true);
+        }
+        state.begin_keyframe_drag();
+        state.drag_keyframes(30);
+        assert_eq!(title_keys(&state), vec![24, 36, 156, 168], "never further out");
+        state.drag_keyframes(-10);
+        assert_eq!(title_keys(&state), vec![14, 26, 146, 158], "but back in, as far as frame 0 allows");
+        state.drag_keyframes(-40);
+        assert_eq!(title_keys(&state), vec![0, 12, 132, 144]);
     }
 
     #[test]

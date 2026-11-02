@@ -234,6 +234,8 @@ impl Layer {
         self.in_frame += delta;
         self.out_frame += delta;
         self.start_frame += delta;
+        // Speed ramp keyframes are in composition frames too.
+        self.time.speed.shift(delta);
         if let Some(transform) = self.transform.as_mut() {
             transform.anchor_point.shift(delta);
             transform.position.shift(delta);

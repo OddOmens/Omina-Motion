@@ -89,6 +89,17 @@ impl History {
         change(&mut self.baseline);
     }
 
+    /// `absorb`, for a change that holds in every version of the project (a library color now
+    /// being blue, a background job's result for settings a layer still has): it is applied to the
+    /// undo and redo steps too, so undoing an unrelated edit doesn't bring back what it replaced.
+    /// `change` must leave a project alone where it doesn't apply.
+    pub fn absorb_everywhere(&mut self, change: impl Fn(&mut Project)) {
+        change(&mut self.baseline);
+        for step in self.undo.iter_mut().chain(&mut self.redo) {
+            change(&mut step.project);
+        }
+    }
+
     /// Notes that `project` was just saved.
     pub fn mark_saved(&mut self, project: &Project) {
         self.record(project);
@@ -188,6 +199,21 @@ mod tests {
         history.absorb(fit);
         assert!(!history.can_undo(&project));
         assert!(!history.has_unsaved_changes(&project));
+    }
+
+    #[test]
+    fn changes_that_hold_everywhere_reach_every_step() {
+        let original = sample_project();
+        let mut history = History::new(&original);
+        let mut project = renamed(&original, "Edited");
+        history.record(&project);
+        let recolor = |project: &mut Project| project.compositions[0].layers[0].label = studio_core::model::LabelColor::Blue;
+        recolor(&mut project);
+        history.absorb_everywhere(recolor);
+        assert!(history.undo(&mut project));
+        assert_eq!(project.compositions[0].layers[0].label, studio_core::model::LabelColor::Blue, "undoing the rename keeps the new color");
+        assert!(history.redo(&mut project));
+        assert_eq!(project.compositions[0].layers[0].label, studio_core::model::LabelColor::Blue);
     }
 
     #[test]

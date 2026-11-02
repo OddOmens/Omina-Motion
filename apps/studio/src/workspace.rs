@@ -274,6 +274,9 @@ pub enum EditTarget {
 pub struct EditingField {
     pub target: EditTarget,
     pub input: Entity<InputState>,
+    /// The text the input opened with. Left as it was, nothing is written back: a number shown
+    /// rounded would otherwise replace the exact value (and could add a keyframe).
+    initial: String,
     /// Shown over the layer in the viewer (a double-click there) rather than in its panel.
     pub in_viewer: bool,
     _events: Subscription,
@@ -362,6 +365,8 @@ pub struct UiState {
     pub caption_job: Option<panels::captions::CaptionJob>,
     /// Silence removal, beat finding, tracking or reframing running in the background, if any.
     pub analysis_job: Option<panels::analysis::AnalysisJob>,
+    /// The import running in the background, shown in a popup.
+    pub import_job: Option<panels::importing::ImportJob>,
     /// The layer waiting for a click on a video to track (Track Motion).
     pub track_pick: Option<Id>,
     /// Background removal running in the background, if any.
@@ -596,8 +601,19 @@ impl Workspace {
         let sound = Sound::new();
         #[cfg(test)]
         let sound = Sound::silent();
+        // The app starts on an empty project (tests start on the sample project, with something
+        // in it to work on), so the sample never shows, even for a frame.
+        #[cfg(not(test))]
+        let state = {
+            let settings = crate::app_settings::load();
+            let mut state = EditorState::new();
+            state.new_project(&settings.default_folders, settings.new_composition);
+            state
+        };
+        #[cfg(test)]
+        let state = EditorState::new();
         Self {
-            state: EditorState::new(),
+            state,
             ui: UiState {
                 active_panel: PanelId::Timeline,
                 left_panel: LeftPanel::Media,
@@ -647,6 +663,7 @@ impl Workspace {
                 enhance_job: None,
                 enhance_skipped: Vec::new(),
                 analysis_job: None,
+                import_job: None,
                 track_pick: None,
                 cutout_pick: None,
                 effect_drop_layer: None,
@@ -773,7 +790,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Opens a text input over a value. Enter or clicking elsewhere commits it.
     /// Switches tools. A pen path still being drawn is finished as an open line first, so
     /// changing tools never throws away what was drawn.
     pub fn set_tool(&mut self, tool: Tool) {
@@ -783,9 +799,10 @@ impl Workspace {
         self.ui.tool = tool;
     }
 
+    /// Opens a text input over a value. Enter or clicking elsewhere commits it.
     pub fn begin_edit(&mut self, target: EditTarget, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_edit(window, cx);
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(text));
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(text.clone()));
         input.update(cx, |state, cx| {
             state.focus(window, cx);
             state.select_all(window, cx);
@@ -795,24 +812,27 @@ impl Workspace {
                 this.commit_edit(window, cx);
             }
         });
-        self.ui.editing = Some(EditingField { target, input, in_viewer: false, _events: events });
+        self.ui.editing = Some(EditingField { target, input, initial: text, in_viewer: false, _events: events });
         cx.notify();
     }
 
-    /// Applies and closes the open text input, if any. Invalid numbers are ignored.
+    /// Applies and closes the open text input, if any. Invalid numbers, and text left as it
+    /// was, are ignored.
     pub fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editing) = self.ui.editing.take() else { return };
         let text = editing.input.read(cx).value().to_string();
-        match editing.target {
-            EditTarget::Number(target) => {
+        let target = if text == editing.initial { None } else { Some(editing.target) };
+        match target {
+            None => {}
+            Some(EditTarget::Number(target)) => {
                 if let Some(value) = parse_value(&text) {
                     target.write(&mut self.state, value);
                 }
             }
-            EditTarget::SourceText(layer) => self.state.set_text(layer, &text),
-            EditTarget::LibraryName(id) => self.state.rename_library_item(id, &text),
-            EditTarget::CaptionText(layer, start, end) => self.state.set_caption_text(layer, start..end, &text),
-            EditTarget::LayerName(layer) => self.state.rename_layer(layer, &text),
+            Some(EditTarget::SourceText(layer)) => self.state.set_text(layer, &text),
+            Some(EditTarget::LibraryName(id)) => self.state.rename_library_item(id, &text),
+            Some(EditTarget::CaptionText(layer, start, end)) => self.state.set_caption_text(layer, start..end, &text),
+            Some(EditTarget::LayerName(layer)) => self.state.rename_layer(layer, &text),
         }
         // Hand keyboard focus back to the editor so shortcuts work again.
         window.focus(&self.focus, cx);
@@ -842,23 +862,40 @@ impl Workspace {
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = chosen.await else { return };
-            this.update_in(cx, |this, window, cx| this.import_paths(paths, window, cx)).ok();
+            this.update_in(cx, |this, window, cx| this.import_paths(paths, None, window, cx)).ok();
         })
         .detach();
     }
 
-    /// Imports files (from the Import dialog, or dropped from the Finder) and returns the new
-    /// items. Media is linked where it is on disk, and proxies start building.
-    pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Vec<Id> {
-        // After Effects projects and Lottie animations come in as compositions of their own.
-        let (projects, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| ["aep", "aepx", "json"].iter().any(|extension| crate::state::is_extension(path, extension)));
-        for path in projects {
-            self.import_project_file(&path, window, cx);
+    /// Imports files (from the Import dialog, or dropped from the Finder) in the background,
+    /// with a popup while it runs, then runs `then` with the new items. Media is linked where it
+    /// is on disk, and proxies start building.
+    pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>, then: Option<panels::importing::Then>, window: &mut Window, cx: &mut Context<Self>) {
+        panels::importing::start(self, paths, then, window, cx);
+    }
+
+    /// Where images embedded in an imported project file (a Lottie animation's) are written:
+    /// a folder of its own in the cache, so importing the same file again reuses it.
+    pub fn imported_assets_folder(&self, path: &std::path::Path) -> std::path::PathBuf {
+        self.render.proxies.cache_folder().parent().map_or_else(std::env::temp_dir, std::path::Path::to_path_buf).join("Imported").join(format!("{:x}", {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut hasher);
+            hasher.finish()
+        }))
+    }
+
+    /// Adds what an import read to the project and says what came in and what was left out.
+    /// Returns the new media items (compositions from project files open instead).
+    pub fn add_imported(&mut self, projects: Vec<(std::path::PathBuf, Result<crate::state::ReadProject, String>)>, files: Vec<crate::state::ReadFile>, window: &mut Window, cx: &mut Context<Self>) -> Vec<Id> {
+        for (path, read) in projects {
+            self.add_imported_project(&path, read, window, cx);
         }
-        if paths.is_empty() {
+        if files.is_empty() {
+            self.request_proxies();
             return Vec::new();
         }
-        let (imported, skipped) = self.state.import_paths(paths);
+        let (imported, skipped) = self.state.add_read_files(files);
         for &item in &imported {
             self.ui.reveal_item(&self.state.project, item);
         }
@@ -872,21 +909,11 @@ impl Workspace {
         imported
     }
 
-    /// Imports an After Effects project or a Lottie animation, then says what came in and
-    /// what was left out.
-    fn import_project_file(&mut self, path: &std::path::Path, window: &mut Window, cx: &mut Context<Self>) {
+    /// Adds an After Effects project or a Lottie animation, then says what came in and what
+    /// was left out.
+    fn add_imported_project(&mut self, path: &std::path::Path, read: Result<crate::state::ReadProject, String>, window: &mut Window, cx: &mut Context<Self>) {
         let file = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        if crate::state::is_extension(path, "aepx") {
-            window.push_notification(format!("“{file}” is an XML project. In After Effects, save it as .aep, then import that.").as_str(), cx);
-            return;
-        }
-        let assets = self.render.proxies.cache_folder().parent().map_or_else(std::env::temp_dir, std::path::Path::to_path_buf).join("Imported").join(format!("{:x}", {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            path.hash(&mut hasher);
-            hasher.finish()
-        }));
-        match self.state.import_project_file(path, &assets) {
+        match read.and_then(|read| self.state.add_read_project(&read)) {
             Ok(imported) => {
                 if let Some(folder) = imported.folder {
                     self.ui.reveal_item(&self.state.project, folder);
@@ -894,7 +921,6 @@ impl Workspace {
                         self.ui.toggle_folder(folder);
                     }
                 }
-                self.request_proxies();
                 let count = imported.compositions.len();
                 let heading = format!("Imported “{file}”: {count} composition{}.", if count == 1 { "" } else { "s" });
                 if imported.notes.is_empty() {
@@ -1201,6 +1227,7 @@ impl Render for Workspace {
                     .child(div().flex_1().min_w_0().pr(gutter).pb(gutter).child(workspace)),
             )
             .children(panels::color_picker::popover(self, cx))
+            .children(panels::importing::popup(self, cx))
     }
 }
 

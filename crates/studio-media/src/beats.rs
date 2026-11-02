@@ -14,6 +14,9 @@ const RATE: u32 = 11_025;
 const HOP: usize = 256;
 /// The tempos looked for, in beats per minute.
 const TEMPO_RANGE: (f64, f64) = (70.0, 180.0);
+/// The smallest rise in loudness that counts as a hit: about 1 dB (a quarter more power), on
+/// the onset curve's log scale. Sound that never rises this much has no beats.
+const MIN_ONSET: f32 = 0.22;
 
 /// The beats in `path`'s sound, as seconds from its start.
 pub fn detect_beats(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<Vec<f64>, MediaError> {
@@ -44,6 +47,11 @@ pub fn beats_from_energy(energy: &[f32], steps_per_second: f64) -> Vec<f64> {
     let log: Vec<f32> = energy.iter().map(|value| (value + 1e-9).ln()).collect();
     let onsets: Vec<f32> = log.windows(2).map(|pair| (pair[1] - pair[0]).max(0.0)).collect();
     if onsets.len() < 8 {
+        return Vec::new();
+    }
+    // Silence or a steady sound never gets louder, so it has no beats. Without this every tempo
+    // would score the same and a grid would be laid out over nothing.
+    if onsets.iter().all(|&onset| onset < MIN_ONSET) {
         return Vec::new();
     }
     // The tempo: the beat spacing (in steps) where the onset curve best matches itself, with a
@@ -123,6 +131,12 @@ mod tests {
     #[test]
     fn silence_has_no_beats_and_short_sound_is_left_alone() {
         assert!(beats_from_energy(&[0.0; 4], 43.0).is_empty());
+        let rate = f64::from(RATE) / HOP as f64;
+        let twelve_seconds = (12.0 * rate) as usize;
+        assert!(beats_from_energy(&vec![0.0; twelve_seconds], rate).is_empty(), "silence");
+        // A steady tone with the tiny wobble a real recording has.
+        let tone: Vec<f32> = (0..twelve_seconds).map(|step| 0.1 + 0.0001 * (step % 3) as f32).collect();
+        assert!(beats_from_energy(&tone, rate).is_empty(), "a steady tone");
         let flat = vec![0.01f32; 500];
         let beats = beats_from_energy(&flat, 43.0);
         assert!(beats.len() <= 500, "{}", beats.len());

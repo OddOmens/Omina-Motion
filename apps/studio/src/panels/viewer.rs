@@ -272,10 +272,8 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         .flex()
         .items_center()
         .gap_1()
-        .child(icon_button("first-frame", IconName::SkipBack, "First Frame (Home)", false, cx.listener(|this, _, _, cx| {
-            let start = this.state.work_area.start as i64;
-            this.go_to(start, cx);
-        })))
+        // The same as Home and End: the composition's first and last frames.
+        .child(icon_button("first-frame", IconName::SkipBack, "First Frame (Home)", false, cx.listener(|this, _, _, cx| this.go_to(0, cx))))
         .child(icon_button("previous-frame", IconName::StepBack, "Previous Frame (Page Up)", false, cx.listener(
             |this, _, _, cx| {
                 let frame = this.state.current_frame - 1;
@@ -296,7 +294,7 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
             },
         )))
         .child(icon_button("last-frame", IconName::SkipForward, "Last Frame (End)", false, cx.listener(|this, _, _, cx| {
-            let end = this.state.work_area.end as i64 - 1;
+            let end = this.state.composition().duration_frames - 1;
             this.go_to(end, cx);
         })))
         .child(div().w(px(8.0)))

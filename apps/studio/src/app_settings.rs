@@ -271,9 +271,32 @@ pub fn recovery_path() -> PathBuf {
     folder().join("recovery.studio")
 }
 
-/// The saved settings, or the defaults if there are none (or they can't be read).
+/// The saved settings, or the defaults if there are none. A setting that can't be read (one
+/// written by a newer Studio, say) falls back to its default on its own, keeping the rest. A file
+/// that can't be read in full is copied aside first (`settings.damaged.json`), since the next
+/// save replaces it.
 pub fn load() -> AppSettings {
-    std::fs::read_to_string(settings_path()).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+    let Ok(text) = std::fs::read_to_string(settings_path()) else { return AppSettings::default() };
+    if let Ok(settings) = serde_json::from_str(&text) {
+        return settings;
+    }
+    if let Err(error) = std::fs::write(folder().join("settings.damaged.json"), &text) {
+        eprintln!("could not keep a copy of the unreadable settings: {error}");
+    }
+    serde_json::from_str::<serde_json::Value>(&text).map_or_else(|_| AppSettings::default(), |saved| readable_part(&saved))
+}
+
+/// The settings in `saved` that can be read, each over the default.
+fn readable_part(saved: &serde_json::Value) -> AppSettings {
+    let Ok(serde_json::Value::Object(mut kept)) = serde_json::to_value(AppSettings::default()) else { return AppSettings::default() };
+    for (name, value) in saved.as_object().into_iter().flatten() {
+        let mut trial = kept.clone();
+        trial.insert(name.clone(), value.clone());
+        if serde_json::from_value::<AppSettings>(serde_json::Value::Object(trial)).is_ok() {
+            kept.insert(name.clone(), value.clone());
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default()
 }
 
 /// Saves the settings. Failing to (a read-only disk, say) only loses what is remembered, so it
@@ -294,14 +317,28 @@ pub fn update(change: impl FnOnce(&mut AppSettings)) {
     save(&settings);
 }
 
-/// Writes through a temporary file and a rename, so a crash never leaves half a file.
+/// Writes through a temporary file and a rename, so a crash never leaves half a file. The new
+/// text is flushed to the disk before the rename, so a power cut can't leave an empty file in
+/// its place. A symbolic link is written through (the file it points to is replaced), so the
+/// link stays a link.
 pub fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let path = if path.is_symlink() { std::fs::canonicalize(path)? } else { path.to_path_buf() };
     let name = path.file_name().map_or_else(|| "file".into(), |name| name.to_string_lossy().into_owned());
     let temporary = path.with_file_name(format!(".{name}.saving"));
-    std::fs::write(&temporary, text)?;
-    std::fs::rename(&temporary, path).inspect_err(|_| {
+    let written = std::fs::File::create(&temporary).and_then(|mut file| {
+        file.write_all(text.as_bytes())?;
+        file.sync_all()
+    });
+    written.and_then(|()| std::fs::rename(&temporary, &path)).inspect_err(|_| {
         let _ = std::fs::remove_file(&temporary);
-    })
+    })?;
+    // The rename itself is recorded in the folder; flush that too where the system allows it.
+    #[cfg(unix)]
+    if let Some(folder) = path.parent().and_then(|folder| std::fs::File::open(folder).ok()) {
+        let _ = folder.sync_all();
+    }
+    Ok(())
 }
 
 /// Keeps a recovery copy of unsaved work, noting which project file it belongs to.
@@ -322,6 +359,38 @@ pub fn clear_recovery() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn saving_through_a_link_keeps_the_link() {
+        let folder = std::env::temp_dir().join(format!("studio-atomic-test-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let (real, link) = (folder.join("real.studio"), folder.join("link.studio"));
+        std::fs::write(&real, "old").unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_atomically(&link, "new").unwrap();
+        assert!(link.is_symlink(), "still a link");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new", "the file it points to was saved");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn a_setting_that_cant_be_read_doesnt_lose_the_others() {
+        std::fs::create_dir_all(folder()).unwrap();
+        // A theme from a newer Studio, next to settings this one knows.
+        std::fs::write(settings_path(), r#"{"theme": "Sepia", "loop_playback": true, "recovery_seconds": 90}"#).unwrap();
+        let settings = load();
+        assert_eq!(settings.theme, AppSettings::default().theme, "the unknown theme falls back");
+        assert!(settings.loop_playback);
+        assert_eq!(settings.recovery_seconds, 90, "the rest are kept");
+        let copy = std::fs::read_to_string(folder().join("settings.damaged.json")).unwrap();
+        assert!(copy.contains("Sepia"), "the original is kept aside");
+        std::fs::write(settings_path(), "{ not json").unwrap();
+        assert_eq!(load(), AppSettings::default());
+        assert_eq!(std::fs::read_to_string(folder().join("settings.damaged.json")).unwrap(), "{ not json");
+        std::fs::remove_file(settings_path()).unwrap();
+    }
 
     #[test]
     fn settings_and_recovery_round_trip() {

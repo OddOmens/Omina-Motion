@@ -51,12 +51,12 @@ fn lock(report: &Mutex<Report>) -> std::sync::MutexGuard<'_, Report> {
     report.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Downloads the model's files with the system's `curl` (on every Mac, and on Windows 10 and
-/// most Linux systems), each to a temporary name first, so a broken download is never used.
+/// Downloads the model's files, each checked against the SHA-256 it was published with (see
+/// `download`). Files already there are kept.
 fn download_model(folder: &std::path::Path, report: &Mutex<Report>, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     std::fs::create_dir_all(folder).map_err(|error| format!("could not make the model folder: {error}"))?;
     let files = studio_captions::model_paths(folder);
-    for (index, (url, destination)) in files.iter().enumerate() {
+    for (index, (url, destination, sha256)) in files.iter().enumerate() {
         if cancelled() {
             return Err("cancelled".into());
         }
@@ -68,13 +68,7 @@ fn download_model(folder: &std::path::Path, report: &Mutex<Report>, cancelled: &
         if destination.is_file() {
             continue;
         }
-        let partial = destination.with_extension("part");
-        let status = std::process::Command::new("curl").args(["-sSfL", "-o"]).arg(&partial).arg(url).status().map_err(|error| format!("could not start the download: {error}"))?;
-        if !status.success() {
-            let _ = std::fs::remove_file(&partial);
-            return Err("the captions model could not be downloaded. Check the internet connection and try again.".into());
-        }
-        std::fs::rename(&partial, destination).map_err(|error| format!("could not save the model: {error}"))?;
+        crate::download::fetch_checked(url, destination, sha256, "the captions model")?;
     }
     Ok(())
 }

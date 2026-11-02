@@ -467,7 +467,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             // Files dragged in from the Finder are imported (linked where they are on disk).
             .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, _| style.bg(hsla(color::HOVER)))
             .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
-                this.import_paths(paths.paths().to_vec(), window, cx);
+                this.import_paths(paths.paths().to_vec(), None, window, cx);
             }))
             .child(preview)
             .child(column_header)

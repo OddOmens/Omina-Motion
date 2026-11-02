@@ -15,6 +15,7 @@ pub mod enhance;
 pub mod export;
 pub mod fields;
 pub mod graph_editor;
+pub mod importing;
 pub mod libraries;
 pub mod project;
 pub mod properties;

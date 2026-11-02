@@ -27,7 +27,7 @@ pub const PROXY_WIDTH: u32 = 1280;
 /// Reports progress (0–1) as it goes and stops early, returning `Ok(false)`, if `cancelled` says so.
 /// The file is written under a temporary name and only renamed into place when complete.
 pub fn build_proxy(source: &Path, output: &Path, width: u32, progress: &dyn Fn(f32), cancelled: &dyn Fn() -> bool) -> Result<bool, MediaError> {
-    let partial = output.with_extension("partial.mov");
+    let partial = partial_path(output);
     let built = encode_proxy(source, &partial, width, progress, cancelled);
     if !matches!(built, Ok(true)) {
         // Cancelled or failed: never leave a partial file in the cache.
@@ -40,6 +40,16 @@ pub fn build_proxy(source: &Path, output: &Path, width: u32, progress: &dyn Fn(f
     })?;
     progress(1.0);
     Ok(true)
+}
+
+/// Where a proxy is written while it is being built.
+fn partial_path(proxy: &Path) -> PathBuf {
+    proxy.with_extension("partial.mov")
+}
+
+/// Proxies to keep when the cache is trimmed, with the files they are being built in.
+fn with_partials(proxies: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    proxies.into_iter().flat_map(|proxy| [partial_path(&proxy), proxy]).collect()
 }
 
 /// Writes the proxy to `partial`. Returns `Ok(false)` if cancelled.
@@ -73,6 +83,11 @@ fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32
     encoder.set_width(out_width);
     encoder.set_height(out_height);
     encoder.set_format(proxy_pixel);
+    // The proxy keeps the source's YUV formula, in video range, and says so in the file, so it
+    // decodes to the same colors as the original.
+    let matrix = crate::color::matrix(decoder.color_space(), info.height);
+    encoder.set_colorspace(matrix);
+    encoder.set_color_range(ffmpeg::util::color::Range::MPEG);
     encoder.set_time_base(in_time_base);
     let rate = info.frame_rate;
     encoder.set_frame_rate(Some(ffmpeg::Rational::new(rate.numerator as i32, rate.denominator as i32)));
@@ -109,7 +124,9 @@ fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32
         while decoder.receive_frame(&mut decoded).is_ok() {
             let source_format = (decoded.format(), decoded.width(), decoded.height());
             if scaler.as_ref().is_none_or(|(_, f, w, h)| (*f, *w, *h) != source_format) {
-                let context = scaling::Context::get(source_format.0, source_format.1, source_format.2, proxy_pixel, out_width, out_height, scaling::Flags::BILINEAR)?;
+                let mut context = scaling::Context::get(source_format.0, source_format.1, source_format.2, proxy_pixel, out_width, out_height, scaling::Flags::BILINEAR)?;
+                let full_range = crate::color::is_full_range(decoded.format(), decoded.color_range());
+                crate::color::set_source_colors(&mut context, matrix, full_range, false);
                 scaler = Some((context, source_format.0, source_format.1, source_format.2));
             }
             let mut scaled = ffmpeg::frame::Video::empty();
@@ -253,7 +270,7 @@ impl Shared {
             return;
         }
         let cache = self.folder();
-        let in_use: Vec<PathBuf> = self.lock().status.keys().map(|source| proxy_path(&cache, source)).collect();
+        let in_use = with_partials(self.lock().status.keys().map(|source| proxy_path(&cache, source)).collect::<Vec<_>>());
         trim_cache(&cache, limit, &in_use);
     }
 
@@ -342,7 +359,7 @@ impl ProxyManager {
             queue.status.retain(|_, status| matches!(status, ProxyStatus::Building(_) | ProxyStatus::Queued));
             building
         };
-        let freed = trim_cache(&cache, 0, &building);
+        let freed = trim_cache(&cache, 0, &with_partials(building));
         self.shared.changed();
         freed
     }

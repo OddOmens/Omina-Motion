@@ -36,9 +36,9 @@ impl EditorState {
         if !enhance::record_cleaned(composition, layer, made_for, file.clone()) {
             return false;
         }
-        self.history.absorb(|project| {
+        self.history.absorb_everywhere(|project| {
             if let Some(composition) = project.composition_mut(comp) {
-                enhance::record_cleaned(composition, layer, made_for, file);
+                enhance::record_cleaned(composition, layer, made_for, file.clone());
             }
         });
         true
@@ -57,13 +57,16 @@ impl EditorState {
             .collect();
         let forget = |project: &mut studio_core::model::Project| {
             for &layer in &missing {
-                if let Some(enhance) = project.composition_mut(comp).and_then(|composition| composition.layer_mut(layer)).and_then(|layer| layer.audio.enhance.as_mut()) {
+                // Only a copy that really is gone: an undo step may point at another one.
+                if let Some(enhance) = project.composition_mut(comp).and_then(|composition| composition.layer_mut(layer)).and_then(|layer| layer.audio.enhance.as_mut())
+                    && enhance.file.as_ref().is_some_and(|file| !file.is_file())
+                {
                     enhance.file = None;
                 }
             }
         };
         forget(&mut self.project);
-        self.history.absorb(forget);
+        self.history.absorb_everywhere(forget);
         !missing.is_empty()
     }
 

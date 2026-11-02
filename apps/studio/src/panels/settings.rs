@@ -799,6 +799,20 @@ fn about(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Di
             });
             let defaults = AppSettings::default();
             set_look(defaults.theme, defaults.accent, cx);
+            // The proxy cache keeps its own copy of these, so it is told too. A cache moved
+            // elsewhere goes back to the standard folder (what was in the other one stays there).
+            workspace
+                .update(cx, |this, cx| {
+                    let proxies = &this.render.proxies;
+                    proxies.set_cache_limit(defaults.proxy_cache_limit_gb.map(|gb| u64::from(gb) << 30));
+                    if kept.cache_folder.is_some() {
+                        proxies.set_cache_folder(studio_media::default_cache_folder());
+                        this.request_proxies();
+                    }
+                    cx.notify();
+                })
+                .ok();
+            measure(&shown, &workspace, cx);
             shown.borrow_mut().note = Some("Settings are back to how Studio comes. Your projects, libraries and caches are untouched.".into());
             window.refresh();
         })

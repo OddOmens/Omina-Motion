@@ -34,6 +34,12 @@ fn matte_group(layers: &[Layer], index: usize) -> std::ops::RangeInclusive<usize
     top..=bottom
 }
 
+/// The ids of `layer` and the layers it shares a track matte with (see `matte_group`).
+pub(crate) fn matte_group_ids(composition: &Composition, layer: Id) -> Vec<Id> {
+    let Some(index) = composition.layers.iter().position(|found| found.id == layer) else { return Vec::new() };
+    composition.layers[matte_group(&composition.layers, index)].iter().map(|member| member.id).collect()
+}
+
 /// A copy of `layer` with fresh ids for itself and its effects.
 fn duplicate(project: &mut Project, layer: &Layer) -> Layer {
     let mut copy = layer.clone();

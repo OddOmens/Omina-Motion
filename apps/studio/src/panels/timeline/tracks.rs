@@ -236,10 +236,7 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
         .flex()
         .items_center()
         .gap_1()
-        .child(icon_button("tracks-start", IconName::SkipBack, "Go to Start (Home)", false, cx.listener(|this, _, _, cx| {
-            let start = this.state.work_area.start as i64;
-            this.go_to(start, cx);
-        })))
+        .child(icon_button("tracks-start", IconName::SkipBack, "Go to Start (Home)", false, cx.listener(|this, _, _, cx| this.go_to(0, cx))))
         .child(icon_button("tracks-play", if playing { IconName::Pause } else { IconName::Play }, "Play / Pause (Space)", playing, cx.listener(|this, _, _, cx| this.toggle_playback(cx))))
         .child(icon_button("tracks-loop", IconName::Repeat, "Loop Playback", state.loop_playback, cx.listener(|this, _, _, cx| {
             this.state.loop_playback = !this.state.loop_playback;
@@ -367,12 +364,16 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
         }))
         .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
             let Some((track, mut frame)) = this.ui.timeline.track_drop.take() else { return };
-            for item in this.import_paths(paths.paths().to_vec(), window, cx) {
-                this.state.add_clip_on_track(item, track, frame);
-                if let Some(added) = this.state.selected_layers.first().and_then(|id| this.state.composition().layer(*id)) {
-                    frame = added.out_frame;
+            let place: crate::panels::importing::Then = Box::new(move |this, items, _, cx| {
+                for item in items {
+                    this.state.add_clip_on_track(item, track, frame);
+                    if let Some(added) = this.state.selected_layers.first().and_then(|id| this.state.composition().layer(*id)) {
+                        frame = added.out_frame;
+                    }
                 }
-            }
+                cx.notify();
+            });
+            this.import_paths(paths.paths().to_vec(), Some(place), window, cx);
             cx.notify();
         }))
         .children(rows)

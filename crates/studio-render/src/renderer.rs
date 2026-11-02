@@ -250,6 +250,22 @@ fn swap_bgra_rgba(bgra: &[u8]) -> Vec<u8> {
 }
 
 /// The largest factor by which a transform enlarges things, for choosing raster resolution.
+/// What drawing a mask or track matte needs to know about the frame being rendered.
+struct Shapers<'a> {
+    project: &'a Project,
+    composition: &'a studio_core::model::Composition,
+    frame: i64,
+    at: f64,
+    time: f32,
+    scale: f32,
+    text_keys: &'a HashMap<Id, (u64, Vec2, Vec2)>,
+}
+
+/// A layer's opacity at frame `at`, from 0 to 1.
+fn opacity_at(layer: &Layer, at: f64) -> f32 {
+    layer.transform.as_ref().map_or(1.0, |t| (t.opacity.value_at(at) / 100.0).clamp(0.0, 1.0))
+}
+
 fn max_scale(transform: Affine) -> f32 {
     (transform.a.hypot(transform.b)).max(transform.c.hypot(transform.d))
 }
@@ -688,6 +704,74 @@ impl Renderer {
         self.fullscreen(encoder, &self.composite_pipeline, &bind_group, &targets.work[to].view);
     }
 
+    /// Draws a layer that shapes others (a mask or a track matte) into a matte slot, with its
+    /// effects and faded by its opacity, and returns the slot. It starts from an empty matte, so
+    /// a layer that draws nothing (one that has ended) never leaves an earlier matte behind.
+    fn draw_shaper(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, frame: &Shapers<'_>, shaper: &Layer) -> Option<usize> {
+        let world = world_transform(frame.composition, shaper.id, frame.at)?;
+        self.clear(encoder, &targets.work[slot::MATTE_A].view, [0.0; 4]);
+        if shaper.is_active_at(frame.frame) {
+            self.draw_layer(encoder, targets, frame.project, shaper, world, frame.scale, frame.text_keys, slot::MATTE_A);
+        }
+        let drawn = self.apply_effects(encoder, targets, shaper, frame.at, frame.time, frame.scale, slot::MATTE_A, slot::MATTE_B);
+        Some(self.fade_matte(encoder, targets, drawn, opacity_at(shaper, frame.at)))
+    }
+
+    /// `layer`'s mask layer drawn into a matte slot, and 1 if it hides what it covers (0 if it
+    /// shows it). An empty mask (one that has ended) shows nothing inside, so Show hides all.
+    fn draw_mask(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, frame: &Shapers<'_>, layer: &Layer) -> Option<(usize, f32)> {
+        let mask = layer.mask?;
+        let drawn = self.draw_shaper(encoder, targets, frame, frame.composition.layer(mask.layer)?)?;
+        Some((drawn, if mask.mode == studio_core::model::MaskMode::Hide { 1.0 } else { 0.0 }))
+    }
+
+    /// The track matte for the layer at stack position `index` (the layer above it), drawn into
+    /// a matte slot, if it uses one.
+    fn draw_track_matte(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, frame: &Shapers<'_>, index: usize, layer: &Layer) -> Option<usize> {
+        if layer.track_matte == studio_core::model::TrackMatte::None {
+            return None;
+        }
+        let above = frame.composition.layers.get(index.checked_sub(1)?)?;
+        self.draw_shaper(encoder, targets, frame, above)
+    }
+
+    /// Where an adjustment layer applies: its box, narrowed by its mask and track matte like any
+    /// layer. `adjusted` holds the adjusted picture (a layer slot) and is left alone. Returns the
+    /// slot holding the coverage.
+    #[allow(clippy::too_many_arguments)]
+    fn adjustment_coverage(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, frame: &Shapers<'_>, index: usize, layer: &Layer, world: Affine, adjusted: usize) -> usize {
+        // The coverage waits in the other layer slot: drawing a mask or matte uses the matte
+        // slots, and effects on it use the aux slots.
+        let coverage = if adjusted == slot::LAYER_A { slot::LAYER_B } else { slot::LAYER_A };
+        let other_matte = |drawn: usize| if drawn == slot::MATTE_A { slot::MATTE_B } else { slot::MATTE_A };
+        self.draw_source(encoder, targets, coverage, world, frame.scale, &Source::Solid([1.0; 4]), (Vec2::default(), layer.size));
+        if let Some((drawn, hide)) = self.draw_mask(encoder, targets, frame, layer) {
+            let masked = other_matte(drawn);
+            self.effect_pass(encoder, targets, MASK_PASS, [hide, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], frame.time, coverage, drawn, masked);
+            // Back to the layer slot (effect 0 copies), clear of the track matte drawn next.
+            self.effect_pass(encoder, targets, 0, [0.0; 8], frame.time, masked, masked, coverage);
+        }
+        let Some(matte) = self.draw_track_matte(encoder, targets, frame, index, layer) else { return coverage };
+        // The coverage laid over nothing through the matte: the coverage times the matte.
+        let narrowed = other_matte(matte);
+        self.clear(encoder, &targets.work[slot::AUX_A].view, [0.0; 4]);
+        self.composite(encoder, targets, slot::AUX_A, coverage, Some(matte), [0, layer.track_matte as u32, 0], 1.0, narrowed);
+        narrowed
+    }
+
+    /// A matte or mask drawn in `drawn` (one of the matte slots), faded by its layer's `opacity`
+    /// as After Effects does. Returns the slot holding the result.
+    fn fade_matte(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, drawn: usize, opacity: f32) -> usize {
+        if opacity >= 1.0 {
+            return drawn;
+        }
+        // Laid at `opacity` over nothing: the same picture with its coverage scaled.
+        let faded = if drawn == slot::MATTE_A { slot::MATTE_B } else { slot::MATTE_A };
+        self.clear(encoder, &targets.work[slot::AUX_A].view, [0.0; 4]);
+        self.composite(encoder, targets, slot::AUX_A, drawn, None, [0, 0, 0], opacity, faded);
+        faded
+    }
+
     /// Makes sure the text raster for a layer exists at `raster_scale`, returning its cache key,
     /// its box in source pixels and the raster's padding in source pixels.
     fn prepare_text(&mut self, text: &str, style: &TextStyle, raster_scale: f32) -> (u64, Vec2, Vec2) {
@@ -848,11 +932,23 @@ impl Renderer {
         let mut used_proxy_nested = false;
         let time = (frame as f64 / composition.frame_rate.fps()) as f32;
 
+        // A layer with a track matte uses the layer above it as the matte; that layer is not drawn itself.
+        let matte_sources: HashSet<Id> = composition
+            .layers
+            .windows(2)
+            .filter(|pair| pair[1].track_matte != studio_core::model::TrackMatte::None)
+            .map(|pair| pair[0].id)
+            .collect();
+        // Mask layers only shape the layers they mask; they are not drawn themselves.
+        let mask_sources: HashSet<Id> = composition.layers.iter().filter_map(|layer| layer.mask).map(|mask| mask.layer).collect();
+
         // Nested compositions first: rendering one reuses the renderer's own buffers, so it must
-        // happen before anything for this composition is prepared.
+        // happen before anything for this composition is prepared. Hidden ones are still needed
+        // when they serve as a matte or mask, as any hidden layer can.
         let mut nested = HashMap::new();
         if self.depth < MAX_NESTING {
-            for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame) && layer.switches.visible) {
+            let needed = |layer: &&Layer| layer.is_active_at(frame) && (layer.switches.visible || matte_sources.contains(&layer.id) || mask_sources.contains(&layer.id));
+            for layer in composition.layers.iter().filter(needed) {
                 let LayerContent::Composition { composition: inner_id } = layer.content else { continue };
                 let Some(inner) = project.composition(inner_id) else { continue };
                 // Its own time: from where the layer starts, at its own frame rate.
@@ -982,15 +1078,6 @@ impl Renderer {
         self.clear(&mut encoder, &targets.work[accum].view, linear(composition.background));
 
         let any_solo = composition.layers.iter().any(|layer| layer.switches.solo);
-        // A layer with a track matte uses the layer above it as the matte; that layer is not drawn itself.
-        let matte_sources: HashSet<Id> = composition
-            .layers
-            .windows(2)
-            .filter(|pair| pair[1].track_matte != studio_core::model::TrackMatte::None)
-            .map(|pair| pair[0].id)
-            .collect();
-        // Mask layers only shape the layers they mask; they are not drawn themselves.
-        let mask_sources: HashSet<Id> = composition.layers.iter().filter_map(|layer| layer.mask).map(|mask| mask.layer).collect();
 
         for (index, layer) in composition.layers.iter().enumerate().rev() {
             let shown = layer.switches.visible && layer.is_active_at(frame) && layer.content.has_picture() && (!any_solo || layer.switches.solo);
@@ -998,14 +1085,15 @@ impl Renderer {
                 continue;
             }
             let Some(world) = world_transform(composition, layer.id, at) else { continue };
-            let opacity = layer.transform.as_ref().map_or(1.0, |t| (t.opacity.value_at(at) / 100.0).clamp(0.0, 1.0));
+            let opacity = opacity_at(layer, at);
 
+            let shapers = Shapers { project, composition, frame, at, time, scale, text_keys: &text_keys };
             if matches!(layer.content, LayerContent::Adjustment) {
                 // Effects run on a copy of everything below, then blend back in where the layer covers.
                 self.effect_pass(&mut encoder, targets, 0, [0.0; 8], time, accum, accum, slot::LAYER_A);
                 let adjusted = self.apply_effects(&mut encoder, targets, layer, at, time, scale, slot::LAYER_A, slot::LAYER_B);
-                self.draw_source(&mut encoder, targets, slot::MATTE_A, world, scale, &Source::Solid([1.0; 4]), (Vec2::default(), layer.size));
-                self.composite(&mut encoder, targets, accum, adjusted, Some(slot::MATTE_A), [0, 0, 1], opacity, spare);
+                let coverage = self.adjustment_coverage(&mut encoder, targets, &shapers, index, layer, world, adjusted);
+                self.composite(&mut encoder, targets, accum, adjusted, Some(coverage), [0, 0, 1], opacity, spare);
                 std::mem::swap(&mut accum, &mut spare);
                 continue;
             }
@@ -1026,34 +1114,12 @@ impl Renderer {
             let mut image = self.apply_effects(&mut encoder, targets, layer, at, time, scale, drawn, spare_layer);
 
             // A mask layer keeps the image only inside (or only outside) what the mask draws.
-            if let Some(mask) = layer.mask
-                && let Some(mask_layer) = composition.layer(mask.layer)
-                && let Some(mask_world) = world_transform(composition, mask_layer.id, at)
-            {
-                // An empty mask (one that has ended) shows nothing inside, so Show hides all.
-                self.clear(&mut encoder, &targets.work[slot::MATTE_A].view, [0.0; 4]);
-                if mask_layer.is_active_at(frame) {
-                    self.draw_layer(&mut encoder, targets, project, mask_layer, mask_world, scale, &text_keys, slot::MATTE_A);
-                }
-                let drawn = self.apply_effects(&mut encoder, targets, mask_layer, at, time, scale, slot::MATTE_A, slot::MATTE_B);
+            if let Some((drawn, hide)) = self.draw_mask(&mut encoder, targets, &shapers, layer) {
                 let other = if image == slot::LAYER_A { slot::LAYER_B } else { slot::LAYER_A };
-                let hide = if mask.mode == studio_core::model::MaskMode::Hide { 1.0 } else { 0.0 };
                 self.effect_pass(&mut encoder, targets, MASK_PASS, [hide, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, drawn, other);
                 image = other;
             }
-
-            let matte = match (layer.track_matte, index.checked_sub(1).map(|above| &composition.layers[above])) {
-                (studio_core::model::TrackMatte::None, _) | (_, None) => None,
-                (_, Some(matte_layer)) => world_transform(composition, matte_layer.id, at).map(|matte_world| {
-                    // Start from an empty matte: a matte layer that draws nothing (one that has
-                    // ended, or has nothing to show) must not leave an earlier matte behind.
-                    self.clear(&mut encoder, &targets.work[slot::MATTE_A].view, [0.0; 4]);
-                    if matte_layer.is_active_at(frame) {
-                        self.draw_layer(&mut encoder, targets, project, matte_layer, matte_world, scale, &text_keys, slot::MATTE_A);
-                    }
-                    self.apply_effects(&mut encoder, targets, matte_layer, at, time, scale, slot::MATTE_A, slot::MATTE_B)
-                }),
-            };
+            let matte = self.draw_track_matte(&mut encoder, targets, &shapers, index, layer);
             let blend = layer.blend_mode as u32;
             let matte_mode = if matte.is_some() { layer.track_matte as u32 } else { 0 };
             self.composite(&mut encoder, targets, accum, image, matte, [blend, matte_mode, 0], opacity, spare);
@@ -1207,7 +1273,6 @@ impl Renderer {
                     None => self.draw_source(encoder, targets, target, world, scale, &placeholder(), full),
                 }
             }
-            // Nested compositions are not rendered yet.
             // A nested composition, rendered before this one, stretched over the layer's box.
             LayerContent::Composition { .. } => {
                 if let Some(picture) = self.nested.get(&layer.id) {

@@ -153,25 +153,10 @@ fn lock(report: &Mutex<Report>) -> std::sync::MutexGuard<'_, Report> {
     report.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Downloads the model with the system's `curl` to a temporary name, checks it is the file
-/// published (its SHA-256), and only then puts it in place.
+/// Downloads the model, checked against the SHA-256 it was published with (see `download`).
 pub fn fetch_model(folder: &Path) -> Result<(), String> {
-    use sha2::Digest as _;
     std::fs::create_dir_all(folder).map_err(|error| format!("could not make the model folder: {error}"))?;
-    let destination = folder.join(studio_cutout::MODEL_FILE);
-    let partial = destination.with_extension("part");
-    let status = std::process::Command::new("curl").args(["-sSfL", "-o"]).arg(&partial).arg(studio_cutout::MODEL_URL).status().map_err(|error| format!("could not start the download: {error}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&partial);
-        return Err("the cut-out model could not be downloaded. Check the internet connection and try again.".into());
-    }
-    let bytes = std::fs::read(&partial).map_err(|error| format!("could not read the download: {error}"))?;
-    let digest: String = sha2::Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
-    if digest != studio_cutout::MODEL_SHA256 {
-        let _ = std::fs::remove_file(&partial);
-        return Err("the downloaded cut-out model was not the expected file, so it was not used.".into());
-    }
-    std::fs::rename(&partial, &destination).map_err(|error| format!("could not save the model: {error}"))
+    crate::download::fetch_checked(studio_cutout::MODEL_URL, &folder.join(studio_cutout::MODEL_FILE), studio_cutout::MODEL_SHA256, "the cut-out model")
 }
 
 /// One source picture as RGBA: an image file, or a decoded video frame.

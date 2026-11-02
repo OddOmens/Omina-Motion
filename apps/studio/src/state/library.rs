@@ -42,11 +42,12 @@ impl EditorState {
     }
 
     /// Updates every linked color and text style in the project. This follows a library edit
-    /// rather than being one, so it is not an undo step of its own.
+    /// rather than being one, so it is not an undo step of its own; the undo steps are updated
+    /// too, since libraries are not part of the project's history.
     fn sync_libraries(&mut self) {
         library::sync_project(&mut self.project, &self.libraries);
         let libraries = &self.libraries;
-        self.history.absorb(|project| {
+        self.history.absorb_everywhere(|project| {
             library::sync_project(project, libraries);
         });
     }
@@ -180,6 +181,24 @@ mod tests {
         assert!(state.text_of(title).unwrap().1.fill.unwrap().link.is_none());
         assert_eq!(state.take_library_save(), Some(false));
         assert_eq!(state.take_library_save(), None);
+    }
+
+    #[test]
+    fn undoing_another_edit_keeps_a_library_colors_new_value() {
+        let mut state = EditorState::new();
+        let brand = state.add_brand("Brand A");
+        let primary = state.add_library_color(brand, Rgba::hex(0xff0000)).unwrap();
+        let title = state.composition().layers[0].id;
+        state.select_layer(title, false);
+        state.apply_library_color(primary);
+        state.record_history(false);
+        state.rename_layer(title, "Renamed");
+        state.record_history(false);
+        state.set_library_color(primary, Rgba::hex(0x0000ff));
+        state.record_history(false);
+        assert!(state.undo(), "the rename is undone");
+        let fill = state.text_of(title).unwrap().1.fill.unwrap();
+        assert_eq!((fill.link, Rgba { link: None, ..fill }), (Some(primary), Rgba::hex(0x0000ff)), "still the library's blue");
     }
 
     #[test]

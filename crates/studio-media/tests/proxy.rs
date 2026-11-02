@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use studio_media::{ProxyManager, ProxyStatus, VideoDecoder, build_proxy, probe, proxy_path};
+use studio_media::{MovieFormat, MovieSettings, MovieWriter, ProxyManager, ProxyStatus, VideoDecoder, build_proxy, probe, proxy_path};
 
 fn clip() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/colors.mp4")
@@ -104,6 +104,42 @@ fn scrubbing_uses_the_proxy_then_upgrades_to_full_quality() {
     }
     // On a clip this small the original can win the race; on long-GOP footage the proxy arrives first.
     println!("the proxy frame was shown first: {saw_proxy}");
+}
+
+#[test]
+fn clearing_the_cache_spares_the_proxy_being_built() {
+    let folder = scratch("clear");
+    // A longer clip than the fixture, so the build lasts long enough to be interrupted.
+    let source = folder.join("long.mp4");
+    let settings = MovieSettings::new(MovieFormat::H264, 1280, 720, studio_core::time::FrameRate::new(24, 1), None);
+    let mut writer = MovieWriter::create(&source, settings).unwrap();
+    for frame in 0..120u32 {
+        let shade = (frame * 2) as u8;
+        let picture: Vec<u8> = [shade, 255 - shade, 90, 255].iter().copied().cycle().take(1280 * 720 * 4).collect();
+        writer.write_video(&picture, 1280, 720).unwrap();
+    }
+    writer.finish().unwrap();
+    let manager = ProxyManager::new(folder.join("cache"));
+    manager.request(&source);
+    let started = Instant::now();
+    while !matches!(manager.status(&source), Some(ProxyStatus::Building(_))) {
+        assert!(started.elapsed() < Duration::from_secs(20), "the proxy never started");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // Cleared again and again for as long as the build runs, so the partial file is there for some.
+    let started = Instant::now();
+    loop {
+        match manager.status(&source) {
+            Some(ProxyStatus::Building(_)) => {
+                manager.clear_cache();
+            }
+            Some(ProxyStatus::Ready(_)) => break,
+            Some(ProxyStatus::Failed(error)) => panic!("clearing the cache broke the build: {error}"),
+            _ => {}
+        }
+        assert!(started.elapsed() < Duration::from_secs(20), "the proxy never finished");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

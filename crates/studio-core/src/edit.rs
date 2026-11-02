@@ -94,14 +94,15 @@ pub fn add_layer_from_item(
 
 /// Separates a video clip's sound onto a clip of its own, as CapCut and Premiere do: an audio
 /// layer on a sound track playing the same file over the same span (trim and slip included),
-/// while the video clip itself goes quiet. Returns the new audio layer.
+/// while the video clip itself goes quiet. Returns the new audio layer. Clips with a speed
+/// change or reversed are refused: audio layers always play at normal speed.
 pub fn separate_audio(project: &mut Project, comp_id: Id, layer_id: Id) -> Option<Id> {
     let id = project.allocate_id();
     let composition = project.composition_mut(comp_id)?;
     let index = composition.layers.iter().position(|layer| layer.id == layer_id)?;
     let video = &composition.layers[index];
     let LayerContent::Footage { item } = video.content else { return None };
-    if !video.has_audio || video.switches.locked {
+    if !video.has_audio || video.switches.locked || !video.time.is_normal() {
         return None;
     }
     let audio = Layer {
@@ -885,6 +886,20 @@ mod tests {
         let heard = crate::audio::composition_audio(&project, comp);
         assert_eq!(heard.iter().map(|clip| clip.layer).collect::<Vec<_>>(), vec![audio], "heard once, from the audio clip");
         assert!(separate_audio(&mut project, ids::MAIN_COMP, audio).is_none(), "an audio clip has nothing to separate");
+    }
+
+    #[test]
+    fn sped_up_clips_keep_their_sound() {
+        let mut project = sample::sample_project();
+        let info = FootageInfo { size: Vec2::new(64.0, 36.0), duration_seconds: 4.0, frame_rate: FrameRate::new(24, 1), has_audio: true };
+        let item = import_footage(&mut project, "/media/interview.mp4".into(), &info);
+        let video = add_layer_from_item(&mut project, ids::MAIN_COMP, item, 0, 24).unwrap();
+        assert!(crate::speed::set_speed(project.composition_mut(ids::MAIN_COMP).unwrap(), video, 50.0));
+        let layers = project.composition(ids::MAIN_COMP).unwrap().layers.len();
+        assert!(separate_audio(&mut project, ids::MAIN_COMP, video).is_none(), "audio clips have no speed, so it would not match");
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        assert_eq!(comp.layers.len(), layers);
+        assert!(comp.layer(video).unwrap().switches.audio, "the clip still plays its own sound");
     }
 
     #[test]

@@ -1021,3 +1021,83 @@ fn import_sheet() {
     }
     sheet.save(sheet_path).unwrap();
 }
+
+/// A white 20 × 20 square with a strong Glow, in the middle of the frame.
+fn glowing_square(id: u64) -> Layer {
+    let mut square = solid(id, 0xffffff, Vec2::new(20.0, 20.0), Vec2::new(50.0, 50.0));
+    let mut glow = effects::instantiate(effects::find("Glow").unwrap(), Id(id + 100));
+    glow.properties[0].value = Animated::constant(20.0);
+    glow.properties[2].value = Animated::constant(2.0);
+    square.effects.push(glow);
+    square
+}
+
+#[test]
+fn a_glow_inside_a_transparent_precomp_still_shows() {
+    let direct = render(&project(vec![glowing_square(2)]));
+    let inner = clear_comp(20, vec![glowing_square(21)]);
+    let mut outer = project(vec![nested(2, 20)]);
+    outer.compositions.push(inner);
+    let nested = render(&outer);
+    // Just outside the square, where only the halo reaches.
+    let (halo, through) = (pixel(&direct, 38, 50), pixel(&nested, 38, 50));
+    assert!(halo[0] > 60, "the halo shows when drawn directly: {halo:?}");
+    assert!(close(through, halo), "and the same through a precomp: {through:?} vs {halo:?}");
+}
+
+#[test]
+fn a_hidden_precomp_still_works_as_a_matte() {
+    let inner = clear_comp(20, vec![solid(21, 0xffffff, Vec2::new(40.0, 40.0), Vec2::new(50.0, 50.0))]);
+    let mut matte = nested(2, 20);
+    matte.switches.visible = false;
+    let mut blue = full(3, 0x0000ff);
+    blue.track_matte = TrackMatte::Alpha;
+    let mut project = project(vec![matte, blue]);
+    project.compositions.push(inner);
+    let frame = render(&project);
+    assert!(close(pixel(&frame, 50, 50), [0, 0, 255]), "inside the matte: {:?}", pixel(&frame, 50, 50));
+    assert!(close(pixel(&frame, 5, 5), [0, 0, 0]), "outside it: {:?}", pixel(&frame, 5, 5));
+}
+
+#[test]
+fn a_mattes_opacity_fades_what_it_reveals() {
+    let mut matte = full(2, 0xffffff);
+    matte.transform.as_mut().unwrap().opacity = Animated::constant(0.0);
+    let mut blue = full(3, 0x0000ff);
+    blue.track_matte = TrackMatte::Alpha;
+    let frame = render(&project(vec![matte, blue]));
+    assert!(close(pixel(&frame, 50, 50), [0, 0, 0]), "a fully faded matte reveals nothing: {:?}", pixel(&frame, 50, 50));
+}
+
+/// A full-frame adjustment layer that turns what is below it gray.
+fn gray_adjustment(id: u64) -> Layer {
+    let mut adjustment = full(id, 0x000000);
+    adjustment.content = LayerContent::Adjustment;
+    adjustment.effects.push(effects::instantiate(effects::find("Tint").unwrap(), Id(id + 100)));
+    adjustment
+}
+
+fn is_gray(color: [u8; 3]) -> bool {
+    color[0] == color[1] && color[1] == color[2] && color[0] > 20
+}
+
+#[test]
+fn an_adjustment_layer_applies_only_inside_its_track_matte() {
+    // A 40 × 40 matte in the middle; the adjustment below it uses it.
+    let matte = solid(2, 0xffffff, Vec2::new(40.0, 40.0), Vec2::new(50.0, 50.0));
+    let mut adjustment = gray_adjustment(3);
+    adjustment.track_matte = TrackMatte::Alpha;
+    let frame = render(&project(vec![matte, adjustment, full(4, 0xff0000)]));
+    assert!(is_gray(pixel(&frame, 50, 50)), "inside the matte: {:?}", pixel(&frame, 50, 50));
+    assert!(close(pixel(&frame, 5, 5), [255, 0, 0]), "outside it, untouched: {:?}", pixel(&frame, 5, 5));
+}
+
+#[test]
+fn an_adjustment_layers_mask_limits_where_it_applies() {
+    let mask = solid(2, 0xffffff, Vec2::new(40.0, 40.0), Vec2::new(50.0, 50.0));
+    let mut adjustment = gray_adjustment(3);
+    adjustment.mask = Some(studio_core::model::LayerMask { layer: Id(2), mode: studio_core::model::MaskMode::Hide });
+    let frame = render(&project(vec![mask, adjustment, full(4, 0xff0000)]));
+    assert!(close(pixel(&frame, 50, 50), [255, 0, 0]), "hidden inside the mask: {:?}", pixel(&frame, 50, 50));
+    assert!(is_gray(pixel(&frame, 5, 5)), "applied outside it: {:?}", pixel(&frame, 5, 5));
+}

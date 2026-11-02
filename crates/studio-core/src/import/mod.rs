@@ -155,6 +155,22 @@ impl<T: Copy> Track<T> {
     pub fn fixed(value: T) -> Self {
         Self { value, keys: Vec::new() }
     }
+
+    /// The value at `seconds`, holding each key until the next (no easing between them).
+    fn held_at(&self, seconds: f64) -> T {
+        self.keys.iter().rev().find(|(at, _, _)| *at <= seconds).map_or(self.value, |(_, value, _)| *value)
+    }
+}
+
+/// A position keyed as separate X and Y tracks, as one track. The axis with more keys drives
+/// the timing; the other is sampled at those times (held, not eased), so an animation on
+/// either axis alone comes through.
+pub fn combine_axes(x: &Track<f32>, y: &Track<f32>) -> Track<Vec2> {
+    if x.keys.len() >= y.keys.len() {
+        Track { value: Vec2::new(x.value, y.value), keys: x.keys.iter().map(|&(at, value, easing)| (at, Vec2::new(value, y.held_at(at)), easing)).collect() }
+    } else {
+        Track { value: Vec2::new(x.value, y.value), keys: y.keys.iter().map(|&(at, value, easing)| (at, Vec2::new(x.held_at(at), value), easing)).collect() }
+    }
 }
 
 /// What came in: the compositions made (the main one first) and what was left out.

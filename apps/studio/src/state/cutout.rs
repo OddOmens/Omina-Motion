@@ -96,9 +96,9 @@ impl EditorState {
         if !cutout::set_masks(composition, layer, clicks, folder.clone(), frames) {
             return false;
         }
-        self.history.absorb(|project| {
+        self.history.absorb_everywhere(|project| {
             if let Some(composition) = project.composition_mut(comp) {
-                cutout::set_masks(composition, layer, clicks, folder, frames);
+                cutout::set_masks(composition, layer, clicks, folder.clone(), frames);
             }
         });
         true

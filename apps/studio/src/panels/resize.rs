@@ -76,7 +76,8 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                 }
                 let made = ok_target
                     .update(cx, |this, cx| {
-                        let made = sizes.iter().filter(|&&index| this.state.magic_resize(SIZES[index].1, SIZES[index].2, short_label(SIZES[index].0)).is_some()).count();
+                        let wanted: Vec<(u32, u32, &str)> = sizes.iter().map(|&index| (SIZES[index].1, SIZES[index].2, short_label(SIZES[index].0))).collect();
+                        let made = this.state.magic_resize(&wanted).len();
                         cx.notify();
                         made
                     })

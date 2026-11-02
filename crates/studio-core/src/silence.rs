@@ -92,13 +92,16 @@ pub fn remove_spans(project: &mut Project, comp: Id, layer: Id, spans: &[(f64, f
         if to < now_out {
             crate::cut::split_layers(project, comp, &[layer], to);
         }
-        let pause = if from > now_in { crate::cut::split_layers(project, comp, &[layer], from).created.first().copied() } else { Some(layer) };
-        if let Some(pause) = pause
-            && crate::cut::ripple_delete(project, comp, &[pause]) > 0
-        {
+        // The pause, with its share of any track matte the clip uses, so the matte stays in step.
+        let pause: Vec<Id> = if from > now_in {
+            crate::cut::split_layers(project, comp, &[layer], from).created
+        } else {
+            project.composition(comp).map(|composition| crate::cut::matte_group_ids(composition, layer)).unwrap_or_default()
+        };
+        if !pause.is_empty() && crate::cut::ripple_delete(project, comp, &pause) > 0 {
             cut += 1;
         }
-        if pause == Some(layer) {
+        if from <= now_in {
             break; // The pause was the clip's start; the original layer is gone.
         }
     }
@@ -144,5 +147,33 @@ mod tests {
         pieces.sort();
         // What was left plays back to back: 0–24 (source 0–1 s), then 24–48 (source 2–3 s).
         assert_eq!(pieces, vec![(0, 24, 0), (24, 48, -24)]);
+    }
+
+    #[test]
+    fn a_clip_with_a_track_matte_loses_its_pause_and_keeps_its_matte_in_step() {
+        let mut project = sample_project();
+        let info = FootageInfo { size: Vec2::new(64.0, 36.0), duration_seconds: 10.0, frame_rate: FrameRate::new(24, 1), has_audio: true };
+        let item = edit::import_footage(&mut project, "/media/talk.mp4".into(), &info);
+        let clip = edit::add_layer_from_item(&mut project, ids::MAIN_COMP, item, 0, 0).unwrap();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        comp.duration_frames = 480;
+        // A matte the length of the clip, just above it.
+        let index = comp.layers.iter().position(|layer| layer.id == clip).unwrap();
+        let mut matte = comp.layers[index].clone();
+        matte.id = Id(9_000);
+        matte.name = "Matte".into();
+        comp.layers.insert(index, matte);
+        comp.layers[index + 1].track_matte = crate::model::TrackMatte::Alpha;
+        assert_eq!(remove_spans(&mut project, ids::MAIN_COMP, clip, &[(2.0, 4.0)]), 1);
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        let pieces = |name: &str| {
+            let mut spans: Vec<(i64, i64)> = comp.layers.iter().filter(|layer| layer.name == name).map(|layer| (layer.in_frame, layer.out_frame)).collect();
+            spans.sort();
+            spans
+        };
+        let clip_name = comp.layer(clip).unwrap().name.clone();
+        let (footage, mattes) = (pieces(&clip_name), pieces("Matte"));
+        assert_eq!(footage, vec![(0, 48), (48, 192)], "the pause (frames 48–96) is gone");
+        assert_eq!(mattes, footage, "each piece keeps its matte");
     }
 }

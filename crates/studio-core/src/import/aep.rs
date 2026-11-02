@@ -97,11 +97,16 @@ struct Reader {
     skipped: Skipped,
 }
 
-/// An item's type, id and name.
+/// An item's type, id and name. After Effects saves footage that goes by its file's name with
+/// no name of its own, so such items are named after the file.
 fn item_header(item: Chunk<'_>) -> Option<(u16, u32, String)> {
     let header = item.find(b"idta")?;
-    let name = item.find(b"Utf8").map(|bytes| String::from_utf8_lossy(bytes).into_owned()).unwrap_or_default();
-    Some((u16_at(header, 0)?, u32_at(header, 16)?, name))
+    let kind = u16_at(header, 0)?;
+    let mut name = item.find(b"Utf8").map(|bytes| String::from_utf8_lossy(bytes).into_owned()).unwrap_or_default();
+    if name.is_empty() && kind == FOOTAGE {
+        name = item.list(b"Pin ").and_then(footage_file).and_then(|path| path.file_name().map(|file| file.to_string_lossy().into_owned())).unwrap_or_default();
+    }
+    Some((kind, u32_at(header, 16)?, name))
 }
 
 /// The items directly inside a folder: the project's own list, or a folder's `Sfdr`.
@@ -246,11 +251,15 @@ fn footage(item: Chunk<'_>, key: u64, name: String, folder: Option<u64>) -> Opti
         let color = Rgba { r: channel(14), g: channel(18), b: channel(22), a: channel(10), link: None };
         return Some(SceneSource { key, name, folder, kind: SourceKind::Solid { size, color } });
     }
-    // Files: a small JSON block with the full path.
+    let path = footage_file(pin)?;
+    Some(SceneSource { key, name, folder, kind: SourceKind::File { path, size } })
+}
+
+/// Where a footage item's file is: a small JSON block in its `Pin ` list holds the full path.
+fn footage_file(pin: Chunk<'_>) -> Option<PathBuf> {
     let alias = pin.list(b"Als2")?.find(b"alas")?;
     let json: serde_json::Value = serde_json::from_slice(alias).ok()?;
-    let path = PathBuf::from(json.get("fullpath")?.as_str()?);
-    Some(SceneSource { key, name, folder, kind: SourceKind::File { path, size } })
+    Some(PathBuf::from(json.get("fullpath")?.as_str()?))
 }
 
 /// The element named `name` among a group's members (each named by the `tdmn` before it).
@@ -361,10 +370,7 @@ fn layer_transform(group: Chunk<'_>, start: f64, scale: f64) -> SceneTransform {
         if let (Some(x), Some(y)) = (x, y)
             && (!x.keys.is_empty() || !y.keys.is_empty())
         {
-            let (driver, other) = if x.keys.len() >= y.keys.len() { (&x, &y) } else { (&y, &x) };
-            let other_at = |seconds: f64| other.keys.iter().rev().find(|(at, _, _)| *at <= seconds).map_or(other.value, |(_, value, _)| *value);
-            let combine = |a: f32, b: f32| if std::ptr::eq(driver, &x) { Vec2::new(a, b) } else { Vec2::new(b, a) };
-            position = Some(Track { value: combine(driver.value, other.value), keys: driver.keys.iter().map(|&(at, value, easing)| (at, combine(value, other_at(at)), easing)).collect() });
+            position = Some(super::combine_axes(&x, &y));
         }
     }
     SceneTransform {
@@ -606,6 +612,10 @@ mod tests {
             println!("note: {note}");
         }
         assert!(!scene.comps.is_empty());
+        for source in &scene.sources {
+            println!("source: {:?}", source.name);
+        }
+        assert!(scene.sources.iter().all(|source| !source.name.is_empty()), "every source has a name");
         let mut project = crate::sample::sample_project();
         let imported = super::super::build(&mut project, &scene, "secret", &|_| None).unwrap();
         println!("made {} compositions; main is {:?}", imported.compositions.len(), project.composition(imported.compositions[0]).map(|c| &c.name));

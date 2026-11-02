@@ -16,10 +16,16 @@ use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::whisper::{self as whisper, Config, audio, model::Whisper};
 
-/// The model's files, as named in its Hugging Face repository.
-pub const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
-/// Where each file can be downloaded from.
-pub const MODEL_URL: &str = "https://huggingface.co/openai/whisper-tiny/resolve/main";
+/// The model's files, as named in its Hugging Face repository, with the SHA-256 of each at
+/// `MODEL_URL`'s revision, so a download can be checked before it is used.
+pub const MODEL_FILES: [(&str, &str); 3] = [
+    ("config.json", "ffdccec4f3211f4c63310f2b7098f309fe70f3952cedc5e4d11e43f5b2379b98"),
+    ("tokenizer.json", "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566"),
+    ("model.safetensors", "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395"),
+];
+/// Where each file can be downloaded from: one fixed revision of the repository, so the files
+/// can't change under their checksums.
+pub const MODEL_URL: &str = "https://huggingface.co/openai/whisper-tiny/resolve/169d4a4341b33bc18d8881c4b69c2e104e1cc0af";
 /// The sample rate Whisper listens at.
 pub const SAMPLE_RATE: u32 = whisper::SAMPLE_RATE as u32;
 
@@ -62,7 +68,7 @@ impl From<candle_core::Error> for CaptionError {
 
 /// Whether all of the model's files are in `folder`.
 pub fn model_present(folder: &Path) -> bool {
-    MODEL_FILES.iter().all(|name| folder.join(name).is_file())
+    MODEL_FILES.iter().all(|(name, _)| folder.join(name).is_file())
 }
 
 /// GPT-2's mapping from bytes to the characters its vocabulary spells them with, reversed:
@@ -377,9 +383,9 @@ pub fn read_speech(path: &Path, start: f64, end: f64) -> Result<Vec<f32>, Captio
     Ok(stereo[..read * studio_media::CHANNELS].chunks(studio_media::CHANNELS).map(|pair| pair.iter().sum::<f32>() / pair.len() as f32).collect())
 }
 
-/// Where the model's files go in `folder`, for downloading.
-pub fn model_paths(folder: &Path) -> Vec<(String, PathBuf)> {
-    MODEL_FILES.iter().map(|name| (format!("{MODEL_URL}/{name}"), folder.join(name))).collect()
+/// For downloading: each of the model's files' URL, where it goes in `folder`, and its SHA-256.
+pub fn model_paths(folder: &Path) -> Vec<(String, PathBuf, &'static str)> {
+    MODEL_FILES.iter().map(|(name, sha256)| (format!("{MODEL_URL}/{name}"), folder.join(name), *sha256)).collect()
 }
 
 #[cfg(test)]

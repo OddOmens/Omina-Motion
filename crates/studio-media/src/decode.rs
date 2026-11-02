@@ -12,6 +12,9 @@ use ffmpeg::software::scaling;
 use studio_core::media::VideoFrame;
 use studio_core::time::FrameRate;
 
+/// What a scaler was set up for: pixel format, width, height, YUV formula and full range.
+type ScalerSource = (Pixel, u32, u32, ffmpeg::util::color::Space, bool);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaError(pub String);
 
@@ -100,7 +103,8 @@ pub struct VideoDecoder {
     decoder: ffmpeg::decoder::Video,
     /// Converts decoded pictures to RGBA; rebuilt if the decoded format changes (hardware frames
     /// arrive as NV12 or P010 only after download).
-    scaler: Option<(scaling::Context, Pixel, u32, u32)>,
+    /// The RGBA scaler, and the source it was made for (format, size, YUV formula, full range).
+    scaler: Option<(scaling::Context, ScalerSource)>,
     output_size: (u32, u32),
     /// Kept alive while the decoder uses it.
     hardware: Option<crate::hardware::HardwareDevice>,
@@ -339,13 +343,19 @@ impl VideoDecoder {
     fn convert(&mut self, decoded: ffmpeg::frame::Video, index: i64) -> Result<VideoFrame, MediaError> {
         let decoded = crate::hardware::download(decoded)?;
         let (width, height) = self.output_size;
-        let source = (decoded.format(), decoded.width(), decoded.height());
-        let stale = self.scaler.as_ref().is_none_or(|(_, format, w, h)| (*format, *w, *h) != source);
+        let matrix = crate::color::matrix(decoded.color_space(), decoded.height());
+        let full_range = crate::color::is_full_range(decoded.format(), decoded.color_range());
+        let source = (decoded.format(), decoded.width(), decoded.height(), matrix, full_range);
+        let stale = self.scaler.as_ref().is_none_or(|(_, made_for)| *made_for != source);
         if stale {
-            let scaler = scaling::Context::get(source.0, source.1, source.2, Pixel::RGBA, width, height, scaling::Flags::BILINEAR)?;
-            self.scaler = Some((scaler, source.0, source.1, source.2));
+            // Full-resolution chroma: FFmpeg's faster default shifts colors by a few levels on
+            // 10-bit 4:2:2 footage (such as ProRes).
+            let flags = scaling::Flags::BILINEAR | scaling::Flags::FULL_CHR_H_INT;
+            let mut scaler = scaling::Context::get(source.0, source.1, source.2, Pixel::RGBA, width, height, flags)?;
+            crate::color::set_source_colors(&mut scaler, matrix, full_range, true);
+            self.scaler = Some((scaler, source));
         }
-        let (scaler, ..) = self.scaler.as_mut().expect("created above");
+        let (scaler, _) = self.scaler.as_mut().expect("created above");
         let mut rgba = ffmpeg::frame::Video::empty();
         scaler.run(&decoded, &mut rgba)?;
         let stride = rgba.stride(0);

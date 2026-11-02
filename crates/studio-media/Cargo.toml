@@ -14,8 +14,9 @@ cpal = "0.18"
 # Lock-free queue that hands mixed audio to the sound card thread without ever blocking it.
 rtrb = "0.4"
 
-# Like the rest of the workspace, except that `unsafe` is denied rather than forbidden, so the one
-# module that drives FFmpeg's hardware decoding (`hardware.rs`) can opt in explicitly.
+# Like the rest of the workspace, except that `unsafe` is denied rather than forbidden, so the two
+# modules that call FFmpeg directly (`hardware.rs` for hardware decoding, `color.rs` for the
+# scaler's YUV formula) can opt in explicitly.
 [lints.rust]
 unsafe_code = "deny"
 

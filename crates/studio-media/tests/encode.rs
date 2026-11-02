@@ -140,3 +140,26 @@ fn prores_4444_keeps_transparency() {
         assert!(frame.has_alpha, "the frame says it has transparency");
     }
 }
+
+/// A color written to a movie reads back as the same color: the decoder uses the formula the
+/// writer tagged (BT.709) rather than FFmpeg's standard-definition default.
+#[test]
+fn colors_survive_a_round_trip() {
+    let (width, height) = (64, 36);
+    let wanted = [60u8, 140, 200];
+    for (format, name) in [(MovieFormat::H264, "round.mp4"), (MovieFormat::ProRes422Hq, "round.mov")] {
+        let path = scratch(name);
+        let mut writer = MovieWriter::create(&path, MovieSettings::new(format, width, height, FrameRate::new(24, 1), None)).unwrap();
+        let picture = solid(width, height, [wanted[2], wanted[1], wanted[0], 255]);
+        for _ in 0..4 {
+            writer.write_video(&picture, width, height).unwrap();
+        }
+        writer.finish().unwrap();
+        let frame = VideoDecoder::open(&path, 4096, false).unwrap().frame(1).unwrap();
+        let i = ((frame.height / 2 * frame.width + frame.width / 2) * 4) as usize;
+        let got = &frame.rgba[i..i + 3];
+        for (channel, (&got, &wanted)) in got.iter().zip(&wanted).enumerate() {
+            assert!(got.abs_diff(wanted) <= 2, "{name}: channel {channel} came back {got}, wrote {wanted}");
+        }
+    }
+}

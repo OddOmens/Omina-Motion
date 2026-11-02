@@ -651,13 +651,6 @@ impl EditorState {
         self.file = None;
     }
 
-    /// Adds the folders new projects start with to the project as it is, as a starting point
-    /// (not an undoable edit, and not a change to save).
-    pub fn add_default_folders(&mut self, folders: &[String]) {
-        studio_core::folders::add_default_folders(&mut self.project, folders);
-        self.history = history::History::new(&self.project);
-    }
-
     // Text -------------------------------------------------------------------
 
     /// Adds a text layer centered at `position` (composition pixels) and selects it.
@@ -912,15 +905,21 @@ impl EditorState {
         added
     }
 
-    /// Makes a copy of the open composition in another size, rearranged to suit it (Magic
-    /// Resize), and opens it.
-    pub fn magic_resize(&mut self, width: u32, height: u32, label: &str) -> Option<Id> {
-        let comp = self.active_comp;
-        let name = format!("{} {label}", self.composition().name);
-        let made = studio_core::resize::resize_composition(&mut self.project, comp, width, height, &name)?;
-        self.open_composition(made);
-        self.selected_item = Some(made);
-        Some(made)
+    /// Makes copies of the open composition in other sizes (width, height and a label for the
+    /// name), each rearranged to suit its size (Magic Resize), and opens the last one. Every copy
+    /// is made from the original. Returns the copies made.
+    pub fn magic_resize(&mut self, sizes: &[(u32, u32, &str)]) -> Vec<Id> {
+        let source = self.active_comp;
+        let source_name = self.composition().name.clone();
+        let made: Vec<Id> = sizes
+            .iter()
+            .filter_map(|&(width, height, label)| studio_core::resize::resize_composition(&mut self.project, source, width, height, &format!("{source_name} {label}")))
+            .collect();
+        if let Some(&last) = made.last() {
+            self.open_composition(last);
+            self.selected_item = Some(last);
+        }
+        made
     }
 
     /// Removes every marker from the open composition.
@@ -992,9 +991,6 @@ impl EditorState {
         self.import_paths(paths).1
     }
 
-    /// Adds files to the project, as links to where they are on disk (nothing is copied).
-    /// Folders bring in the media inside them. Returns the new items, in order, and the files
-    /// that are not media Studio can read.
     /// Selects a just-imported item and puts it in `folder` (by name), if one is set.
     fn file_import(&mut self, item: Id, folder: Option<String>) {
         if let Some(folder) = folder {
@@ -1003,27 +999,12 @@ impl EditorState {
         self.selected_item = Some(item);
     }
 
-    /// Brings in an After Effects project (`.aep`) or a Lottie animation (`.json`): its
+    /// Brings in an After Effects project or a Lottie animation read by `read_project_file`: its
     /// compositions, footage and layers go in a new folder named after the file, and its main
-    /// composition opens. Embedded Lottie images are written into `asset_folder`. Returns what
-    /// came in, with notes on what didn't.
-    pub fn import_project_file(&mut self, path: &std::path::Path, asset_folder: &std::path::Path) -> Result<studio_core::import::Imported, String> {
-        use studio_core::import::{aep, build, lottie};
-        let bytes = std::fs::read(path).map_err(|error| format!("“{}” couldn't be read: {error}", path.display()))?;
-        let scene = if is_extension(path, "aep") {
-            aep::read(&bytes)?
-        } else {
-            let text = String::from_utf8(bytes).map_err(|_| "This JSON file isn't a Lottie animation.".to_owned())?;
-            lottie::read(&text, path, asset_folder)?
-        };
-        let name = path.file_stem().map_or_else(|| "Imported".into(), |stem| stem.to_string_lossy().into_owned());
-        // Footage moved since the project was saved is looked for beside the project file.
-        let beside = path.parent().map(std::path::Path::to_path_buf);
-        let probe = |media: &std::path::Path| {
-            let found = if media.exists() { Some(media.to_path_buf()) } else { beside.as_ref().zip(media.file_name()).map(|(folder, name)| folder.join(name)).filter(|moved| moved.exists()) };
-            found.and_then(|found| probe_media(&found))
-        };
-        let imported = build(&mut self.project, &scene, &name, &probe)?;
+    /// composition opens. Returns what came in, with notes on what didn't.
+    pub fn add_read_project(&mut self, read: &ReadProject) -> Result<studio_core::import::Imported, String> {
+        let probe = |media: &std::path::Path| read.media.get(media).cloned();
+        let imported = studio_core::import::build(&mut self.project, &read.scene, &read.name, &probe)?;
         if let Some(&main) = imported.compositions.first() {
             self.open_composition(main);
             self.selected_item = Some(main);
@@ -1031,35 +1012,34 @@ impl EditorState {
         Ok(imported)
     }
 
+    /// Adds files to the project, as links to where they are on disk (nothing is copied).
+    /// Folders bring in the media inside them. Returns the new items, in order, and the files
+    /// that are not media Studio can read. (The app reads files in the background instead; see
+    /// `panels::importing`.)
+    #[cfg(test)]
     pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>) -> (Vec<Id>, Vec<std::path::PathBuf>) {
+        let files = expand_folders(paths).into_iter().map(read_media_file).collect();
+        self.add_read_files(files)
+    }
+
+    /// Adds files read by `read_media_file`, as links to where they are on disk (nothing is
+    /// copied). Returns the new items, in order, and the files that are not media Studio can read.
+    pub fn add_read_files(&mut self, files: Vec<ReadFile>) -> (Vec<Id>, Vec<std::path::PathBuf>) {
+        use studio_core::import::Probed;
         let (mut imported, mut skipped) = (Vec::new(), Vec::new());
-        for path in expand_folders(paths) {
-            let before = self.project.items.len();
-            if let Ok((width, height)) = image::image_dimensions(&path) {
-                let item = edit::import_image(&mut self.project, path, Vec2::new(width as f32, height as f32));
-                self.file_import(item, self.import_folders.image.clone());
-                imported.push(item);
-                continue;
-            }
-            if let Ok(info) = studio_media::probe(&path) {
-                let footage = edit::FootageInfo {
-                    size: Vec2::new(info.width as f32, info.height as f32),
-                    duration_seconds: info.duration_seconds,
-                    frame_rate: info.frame_rate,
-                    has_audio: info.has_audio,
-                };
-                let item = edit::import_footage(&mut self.project, path, &footage);
-                self.file_import(item, self.import_folders.video.clone());
-            } else if let Ok(info) = studio_media::probe_audio(&path) {
+        for ReadFile { path, media } in files {
+            let (item, folder) = match media {
+                Some(Probed::Image(size)) => (edit::import_image(&mut self.project, path, size), self.import_folders.image.clone()),
+                Some(Probed::Footage(info)) => (edit::import_footage(&mut self.project, path, &info), self.import_folders.video.clone()),
                 // No picture, but sound: music, voice-over and other audio files.
-                let item = edit::import_audio(&mut self.project, path, info.duration_seconds);
-                self.file_import(item, self.import_folders.audio.clone());
-            } else {
-                skipped.push(path);
-            }
-            if self.project.items.len() > before {
-                imported.extend(self.selected_item);
-            }
+                Some(Probed::Audio(seconds)) => (edit::import_audio(&mut self.project, path, seconds), self.import_folders.audio.clone()),
+                None => {
+                    skipped.push(path);
+                    continue;
+                }
+            };
+            self.file_import(item, folder);
+            imported.push(item);
         }
         (imported, skipped)
     }
@@ -1121,15 +1101,58 @@ impl EditorState {
     }
 }
 
-/// The files to import for `paths`: files as they are, and for folders the files inside them
-/// (and their subfolders), sorted by name, skipping hidden ones. At most 1,000 files, so
-/// dropping a huge folder by mistake can't stall the editor.
 /// Whether `path` ends in `extension`, ignoring case.
 pub fn is_extension(path: &std::path::Path, extension: &str) -> bool {
     path.extension().is_some_and(|found| found.eq_ignore_ascii_case(extension))
 }
 
-/// What a media file is, for importers that bring in projects referring to it.
+/// A media file read for importing: where it is, and what it is (`None` if Studio can't read it).
+/// Reading needs FFmpeg and the disk, so the app does it off the main thread.
+pub struct ReadFile {
+    pub path: std::path::PathBuf,
+    pub media: Option<studio_core::import::Probed>,
+}
+
+pub fn read_media_file(path: std::path::PathBuf) -> ReadFile {
+    let media = probe_media(&path);
+    ReadFile { path, media }
+}
+
+/// An After Effects project or Lottie animation read for importing, with the media it uses
+/// already probed, so adding it to the project is quick.
+pub struct ReadProject {
+    name: String,
+    scene: studio_core::import::Scene,
+    /// What each media file the scene names turned out to be, by the path it names.
+    media: std::collections::HashMap<std::path::PathBuf, studio_core::import::Probed>,
+}
+
+/// Reads an After Effects project (`.aep`) or a Lottie animation (`.json`) and probes the
+/// media it uses. Embedded Lottie images are written into `asset_folder`.
+pub fn read_project_file(path: &std::path::Path, asset_folder: &std::path::Path) -> Result<ReadProject, String> {
+    use studio_core::import::{SourceKind, aep, lottie};
+    let bytes = std::fs::read(path).map_err(|error| format!("“{}” couldn't be read: {error}", path.display()))?;
+    let scene = if is_extension(path, "aep") {
+        aep::read(&bytes)?
+    } else {
+        let text = String::from_utf8(bytes).map_err(|_| "This JSON file isn't a Lottie animation.".to_owned())?;
+        lottie::read(&text, path, asset_folder)?
+    };
+    let name = path.file_stem().map_or_else(|| "Imported".into(), |stem| stem.to_string_lossy().into_owned());
+    // Footage moved since the project was saved is looked for beside the project file.
+    let beside = path.parent().map(std::path::Path::to_path_buf);
+    let mut media = std::collections::HashMap::new();
+    for source in &scene.sources {
+        let SourceKind::File { path: named, .. } = &source.kind else { continue };
+        let found = if named.exists() { Some(named.clone()) } else { beside.as_ref().zip(named.file_name()).map(|(folder, file)| folder.join(file)).filter(|moved| moved.exists()) };
+        if let Some(probed) = found.and_then(|found| probe_media(&found)) {
+            media.insert(named.clone(), probed);
+        }
+    }
+    Ok(ReadProject { name, scene, media })
+}
+
+/// What a media file is: an image, a video (with or without sound) or sound alone.
 fn probe_media(path: &std::path::Path) -> Option<studio_core::import::Probed> {
     use studio_core::import::Probed;
     if let Ok((width, height)) = image::image_dimensions(path) {
@@ -1141,7 +1164,10 @@ fn probe_media(path: &std::path::Path) -> Option<studio_core::import::Probed> {
     studio_media::probe_audio(path).ok().map(|info| Probed::Audio(info.duration_seconds))
 }
 
-fn expand_folders(paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+/// The files to import for `paths`: files as they are, and for folders the files inside them
+/// (and their subfolders), sorted by name, skipping hidden ones. At most 1,000 files, so
+/// dropping a huge folder by mistake can't stall the editor.
+pub fn expand_folders(paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
     const LIMIT: usize = 1000;
     let mut files = Vec::new();
     let mut pending: std::collections::VecDeque<std::path::PathBuf> = paths.into();
@@ -1324,6 +1350,17 @@ impl EditorState {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn magic_resize_makes_every_copy_from_the_original() {
+        let mut state = EditorState::new();
+        let original = state.composition().name.clone();
+        let made = state.magic_resize(&[(1080, 1920, "9:16"), (1080, 1350, "4:5"), (1080, 1080, "1:1")]);
+        assert_eq!(made.len(), 3);
+        let names: Vec<String> = made.iter().map(|&id| state.project.composition(id).unwrap().name.clone()).collect();
+        assert_eq!(names, ["9:16", "4:5", "1:1"].map(|label| format!("{original} {label}")));
+        assert_eq!(state.active_comp, made[2], "the last copy is open");
+    }
 
     #[test]
     fn playback_follows_the_clock_and_stops_on_manual_moves() {

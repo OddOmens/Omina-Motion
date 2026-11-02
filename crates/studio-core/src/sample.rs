@@ -1,5 +1,5 @@
-//! A placeholder project used until projects can be opened from disk.
-//! It covers each layer kind so every UI state can be seen during development.
+//! A sample project for tests: it covers each layer kind, so every editing action and UI state
+//! has something to work on. The app itself starts on an empty project.
 
 use crate::animation::{Animated, Keyframe, Vec2};
 use crate::effects;

@@ -6,6 +6,7 @@
 
 mod audio;
 mod beats;
+mod color;
 mod decode;
 mod encode;
 mod exact;

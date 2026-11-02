@@ -119,6 +119,48 @@ fn property_fields_scrub_and_accept_typed_values(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn opening_a_field_and_leaving_it_unchanged_changes_nothing(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // Between keyframes, where the animated position is not a round number.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        ws.state.select_layer(TITLE, false);
+        ws.state.set_current_frame(45);
+    }));
+    render(visual);
+    let keys = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().property(POSITION, 0).unwrap().keyframes);
+    let (before, keys_before) = (title_value(&workspace, visual, POSITION, 45), keys(visual));
+    let x = FieldTarget::Property { layer: TITLE, path: POSITION, component: 0 };
+    visual.update(|window, cx| window.click(field_id(x), cx));
+    render(visual);
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    assert_eq!(title_value(&workspace, visual, POSITION, 45), before, "the exact value is kept, not the rounded one shown");
+    assert_eq!(keys(visual), keys_before, "no keyframe was added");
+    assert!(!has_unsaved_changes(&workspace, visual));
+}
+
+#[gpui_kit::test]
+fn the_first_and_last_frame_buttons_match_home_and_end(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // A trimmed work area, so its ends differ from the composition's.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        ws.state.work_area = studio_core::time::FrameRange::new(30.0, 90.0);
+        ws.state.set_current_frame(60);
+    }));
+    render(visual);
+    let frame = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.current_frame);
+    let last = visual.update(|_, cx| workspace.read(cx).state.composition().duration_frames - 1);
+    visual.update(|window, cx| window.click("last-frame", cx));
+    assert_eq!(frame(visual), last);
+    visual.update(|window, cx| window.click("first-frame", cx));
+    assert_eq!(frame(visual), 0);
+    visual.update(|window, cx| window.press("end", cx));
+    assert_eq!(frame(visual), last);
+    visual.update(|window, cx| window.click("tracks-start", cx));
+    assert_eq!(frame(visual), 0);
+}
+
+#[gpui_kit::test]
 fn the_stopwatch_turns_animation_on(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|_, cx| {
@@ -1142,6 +1184,8 @@ fn drop_files(visual: &mut VisualTestContext, paths: Vec<std::path::PathBuf>, at
         window.render_frame(cx);
         window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Submit { position: point(at.x + px(1.0), at.y) }), cx);
     });
+    // Dropped files are read in the background.
+    visual.run_until_parked();
     render(visual);
 }
 
@@ -1272,6 +1316,18 @@ fn unsaved_work_is_recovered_after_studio_closes_without_saving(cx: &mut TestApp
     assert_eq!(title_value(&workspace, visual, ROTATION, 0), PropertyValue::Scalar(33.0));
     assert!(has_unsaved_changes(&workspace, visual), "restored work is still unsaved");
     visual.update(|_, cx| assert!(workspace.read(cx).state.file().is_none(), "it was untitled, and still is"));
+}
+
+#[gpui_kit::test]
+fn undoing_back_to_the_saved_project_removes_the_recovery_copy(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy());
+    assert!(crate::app_settings::recovery_path().exists());
+    visual.update(|_, cx| workspace.update(cx, |ws, _| assert!(ws.state.undo())));
+    assert!(!has_unsaved_changes(&workspace, visual));
+    visual.update(|_, cx| workspace.read(cx).keep_recovery_copy());
+    assert!(!crate::app_settings::recovery_path().exists(), "nothing to offer back on the next launch");
 }
 
 #[gpui_kit::test]
@@ -1762,6 +1818,18 @@ fn the_pickers_libraries_tab_links_a_color(cx: &mut TestAppContext) {
     // The picker says where it comes from, and Detach stops following the library.
     visual.update(|window, cx| window.click(("picker-tab", 0usize), cx));
     render(visual);
+    // Pressing Enter in the hex and opacity fields without changing them keeps the link.
+    for field in [0, 1] {
+        visual.update(|window, cx| {
+            let picker = workspace.read(cx).ui.color_picker.as_ref().unwrap();
+            let input = if field == 0 { picker.hex.clone() } else { picker.opacity.clone() };
+            input.update(cx, |state, cx| state.focus(window, cx));
+        });
+        visual.update(|window, cx| window.press("enter", cx));
+        render(visual);
+        let Some(Paint::Solid(fill)) = shape_style(&workspace, visual, layer).fill else { panic!() };
+        assert_eq!(fill.link, Some(primary), "field {field} left unchanged");
+    }
     visual.update(|window, cx| window.click("color-unlink", cx));
     render(visual);
     let Some(Paint::Solid(fill)) = shape_style(&workspace, visual, layer).fill else { panic!() };
@@ -2899,6 +2967,34 @@ fn ai_features_can_be_hidden_and_models_offered_for_download(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn importing_shows_a_popup_until_the_files_are_in(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let items = visual.update(|_, cx| workspace.read(cx).state.project.items.len());
+    let files = vec![fixture("colors.mp4"), fixture("still.png"), fixture("tone.wav")];
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.import_paths(files, None, window, cx)));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("import-popup")).is_some(), "the popup shows while files are read");
+    visual.run_until_parked();
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("import-popup")).is_none(), "and goes once they are in");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.items.len()), items + 3);
+}
+
+#[gpui_kit::test]
+fn a_cancelled_import_adds_nothing(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let items = visual.update(|_, cx| workspace.read(cx).state.project.items.len());
+    let files = vec![fixture("colors.mp4"), fixture("still.png")];
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.import_paths(files, None, window, cx)));
+    render(visual);
+    visual.update(|window, cx| window.click("import-cancel", cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("import-popup")).is_none());
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.items.len()), items, "nothing was added");
+}
+
+#[gpui_kit::test]
 fn importing_a_lottie_file_opens_its_animation(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     let folder = scratch_folder("lottie");
@@ -2907,7 +3003,8 @@ fn importing_a_lottie_file_opens_its_animation(cx: &mut TestAppContext) {
         "layers":[{"ty":4,"nm":"Ball","ind":1,"ip":0,"op":45,"st":0,
             "ks":{"p":{"a":1,"k":[{"t":0,"s":[320,60],"o":{"x":[0.5],"y":[0]},"i":{"x":[0.5],"y":[1]}},{"t":30,"s":[320,300]}]}},
             "shapes":[{"ty":"el","s":{"a":0,"k":[80,80]},"p":{"a":0,"k":[0,0]}},{"ty":"fl","c":{"a":0,"k":[1,0.5,0,1]},"o":{"a":0,"k":100}}]}]}"#).unwrap();
-    visual.update(|window, cx| workspace.update(cx, |ws, cx| { ws.import_paths(vec![file.clone()], window, cx); }));
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.import_paths(vec![file.clone()], None, window, cx)));
+    visual.run_until_parked();
     render(visual);
     visual.update(|_, cx| {
         let state = &workspace.read(cx).state;

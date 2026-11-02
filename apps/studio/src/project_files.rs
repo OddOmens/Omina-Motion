@@ -62,8 +62,6 @@ impl Workspace {
     /// reopens the project that was open last.
     pub fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let settings = app_settings::load();
-        // The untitled project Studio starts with has the folders new projects start with.
-        self.state.add_default_folders(&settings.default_folders);
         let recovery = app_settings::recovery_path();
         if let Ok(text) = std::fs::read_to_string(&recovery) {
             let name = settings.recovery_of.as_deref().and_then(|path| path.file_stem()).map_or_else(|| "Untitled".to_owned(), |name| name.to_string_lossy().into_owned());
@@ -77,7 +75,7 @@ impl Workspace {
                         this.restore_recovery(&text, settings.recovery_of, window, cx);
                     } else {
                         app_settings::clear_recovery();
-                        if let Some(last) = settings.last_project.filter(|path| path.exists()) {
+                        if let Some(last) = settings.last_project.filter(|path| path.exists() && settings.reopen_last_project) {
                             this.open_file(last, window, cx);
                         }
                     }
@@ -110,6 +108,9 @@ impl Workspace {
     /// Copies unsaved work to the recovery file (run every `RECOVERY_INTERVAL`).
     pub fn keep_recovery_copy(&self) {
         if !self.state.has_unsaved_changes() {
+            // Back to how it was saved (by undoing, say): an older copy would offer back work
+            // that was taken out on purpose.
+            clear_stale_recovery();
             return;
         }
         match self.state.project_text_with(&self.editor_settings()) {
@@ -283,6 +284,7 @@ impl Workspace {
     /// continue without saving, or cancel (and do nothing).
     pub fn unless_cancelled(&mut self, window: &mut Window, cx: &mut Context<Self>, then: Then) {
         if !self.state.has_unsaved_changes() {
+            clear_stale_recovery();
             then(self, window, cx);
             return;
         }
@@ -303,6 +305,14 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+}
+
+/// Removes a recovery copy left from before the project was back to how it was saved. Checks
+/// first, so the settings file is not rewritten when there is nothing to remove.
+fn clear_stale_recovery() {
+    if app_settings::recovery_path().exists() {
+        app_settings::clear_recovery();
     }
 }
 

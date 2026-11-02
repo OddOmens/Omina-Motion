@@ -23,6 +23,10 @@ fn to_srgb(linear: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let c = textureLoad(frame_tex, vec2<i32>(in.position.xy), 0);
-    let straight = select(c.rgb / c.a, vec3(0.0), c.a <= 0.0001);
-    return vec4(to_srgb(straight), c.a);
+    // Light added without coverage (a glow's halo over transparency) has more color than alpha.
+    // Straight alpha cannot hold that, so such a pixel gets just enough alpha to carry its light:
+    // over black it looks the same, instead of the light being thrown away with zero alpha.
+    let alpha = min(max(c.a, max(c.r, max(c.g, c.b))), 1.0);
+    let straight = select(c.rgb / alpha, vec3(0.0), alpha <= 0.0001);
+    return vec4(to_srgb(straight), alpha);
 }

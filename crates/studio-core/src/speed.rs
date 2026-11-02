@@ -21,15 +21,16 @@ pub fn set_speed(composition: &mut Composition, layer_id: Id, percent: f32) -> b
         return false;
     }
     let percent = percent.clamp(LayerTime::SPEED_RANGE.0, LayerTime::SPEED_RANGE.1);
-    let old = layer.time.constant_factor().unwrap_or(1.0);
     let new = f64::from(percent) / 100.0;
+    // Amounts of source, in frames at normal speed. Summed frame by frame, so a clip that was
+    // ramping keeps what its in point showed and how much source it played.
+    let before_in = layer.time.source_seconds_between(layer.start_frame, layer.in_frame, 1.0);
+    let played = layer.time.source_seconds_between(layer.in_frame, layer.out_frame, 1.0);
     // The source's start, as seen from the in point, stays put: what the in point shows now,
-    // it shows after.
-    let shown_seconds = (layer.in_frame - layer.start_frame) as f64 * old;
-    let length = layer.out_frame - layer.in_frame;
-    let new_length = ((length as f64 * old / new).round() as i64).max(1);
-    layer.start_frame = layer.in_frame - (shown_seconds / new).round() as i64;
-    layer.out_frame = layer.in_frame + new_length;
+    // it shows after. Frames are shown rounded down, so the whole frame on screen is kept.
+    let shown = (before_in + 1e-6).floor();
+    layer.start_frame = layer.in_frame - (shown / new).round() as i64;
+    layer.out_frame = layer.in_frame + ((played / new).round() as i64).max(1);
     layer.time.speed = Animated::constant(percent);
     true
 }
@@ -126,6 +127,31 @@ mod tests {
         let rate = FrameRate::new(24, 1);
         assert_eq!(layer.source_frame(24, rate, rate), 95, "starts on the last frame");
         assert_eq!(layer.source_frame(24 + 95, rate, rate), 0, "ends on the first");
+    }
+
+    #[test]
+    fn leaving_a_ramp_keeps_the_frame_at_the_in_point() {
+        let (mut project, id) = clip();
+        // Trimmed so the in point shows a second into the source, then ramped.
+        assert!(crate::trim::trim_in(&mut project, ids::MAIN_COMP, id, 48));
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        assert!(apply_ramp(comp, id, Ramp::SpeedUp));
+        let rate = FrameRate::new(24, 1);
+        let shown = comp.layer(id).unwrap().source_frame(48, rate, rate);
+        assert!(set_speed(comp, id, 100.0));
+        assert_eq!(comp.layer(id).unwrap().source_frame(48, rate, rate), shown);
+    }
+
+    #[test]
+    fn moving_a_ramped_clip_takes_its_ramp_along() {
+        let (mut project, id) = clip();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        assert!(apply_ramp(comp, id, Ramp::SpeedUp));
+        let rate = FrameRate::new(24, 1);
+        let before: Vec<i64> = (24..120).map(|frame| comp.layer(id).unwrap().source_frame(frame, rate, rate)).collect();
+        comp.layer_mut(id).unwrap().shift_in_time(100);
+        let after: Vec<i64> = (124..220).map(|frame| comp.layer(id).unwrap().source_frame(frame, rate, rate)).collect();
+        assert_eq!(before, after);
     }
 
     #[test]

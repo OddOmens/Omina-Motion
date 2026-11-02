@@ -381,7 +381,16 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
 /// Imports the finished movie into the project's Exports folder and puts it in place of
 /// `layer`. If the layer has gone meanwhile, the movie is still imported.
 fn replace_with_movie(workspace: &mut Workspace, path: &Path, comp: Id, layer: Id, window: &mut Window, cx: &mut Context<Workspace>) {
-    let Some(&item) = workspace.import_paths(vec![path.to_path_buf()], window, cx).first() else { return };
+    let replace: crate::panels::importing::Then = Box::new(move |workspace, items, window, cx| {
+        if let Some(&item) = items.first() {
+            put_in_place(workspace, item, comp, layer, window, cx);
+        }
+    });
+    workspace.import_paths(vec![path.to_path_buf()], Some(replace), window, cx);
+}
+
+/// The second half of `replace_with_movie`, once the movie is imported as `item`.
+fn put_in_place(workspace: &mut Workspace, item: Id, comp: Id, layer: Id, window: &mut Window, cx: &mut Context<Workspace>) {
     workspace.state.file_into_exports(item);
     workspace.ui.reveal_item(&workspace.state.project, item);
     if workspace.state.replace_with_render(comp, layer, item).is_none() {

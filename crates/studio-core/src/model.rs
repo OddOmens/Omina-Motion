@@ -673,7 +673,7 @@ impl LayerTime {
 
     /// Seconds of source played from `from` to `to` (composition frames), at `fps`: the
     /// speed summed frame by frame, so ramps play the right amount.
-    fn source_seconds_between(&self, from: i64, to: i64, fps: f64) -> f64 {
+    pub(crate) fn source_seconds_between(&self, from: i64, to: i64, fps: f64) -> f64 {
         if let Some(factor) = self.constant_factor() {
             return (to - from) as f64 / fps * factor;
         }

@@ -282,6 +282,9 @@ fn full_quality_worker(shared: &Shared, path: &Path, generation: u64, max_width:
     };
     if let Some(clip) = shared.lock().clip(path, generation) {
         clip.frame_count = Some(decoder.frame_count());
+        // A frame asked for before the length was known may lie past the end. Keep it within the
+        // clip, or the last frame would be decoded, dropped as too far from it, and decoded again.
+        clip.wanted = clip.clamp(clip.wanted);
     }
     // Wake the proxy worker too, now that the clip's length is known.
     shared.work.notify_all();
@@ -379,6 +382,28 @@ mod tests {
         while server.frame(&clip, 3).is_none() {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn a_first_request_past_the_end_shows_the_last_frame() {
+        let clip = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/colors.mp4");
+        let server = FrameServer::new(64, None);
+        let ready = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = ready.clone();
+        server.set_on_ready(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        // Asked once, before the clip's 48 frames are known, then never again.
+        server.frame(&clip, 1000);
+        let started = std::time::Instant::now();
+        while ready.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            assert!(started.elapsed() < std::time::Duration::from_secs(5), "the last frame was never reported ready");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let state = server.shared.lock();
+        let clip = &state.clips[clip.as_path()];
+        assert_eq!(clip.wanted, 47);
+        assert!(clip.full.has(47), "the decoded frame is kept");
     }
 
     #[test]

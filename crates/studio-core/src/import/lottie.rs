@@ -35,8 +35,10 @@ pub fn read(text: &str, file: &Path, asset_folder: &Path) -> Result<Scene, Strin
     if !(fps > 0.0 && fps <= 999.0) || !(1.0..=30_000.0).contains(&width) || !(1.0..=30_000.0).contains(&height) {
         return Err("This Lottie animation has an impossible size or frame rate.".into());
     }
-    let mut reader = Reader { scene: Scene::default(), fps, assets: HashMap::new(), keys: 1, file: file.to_owned(), asset_folder: asset_folder.to_owned(), unsupported: Vec::new() };
+    let mut reader = Reader { scene: Scene::default(), fps, assets: HashMap::new(), keys: 1, file: file.to_owned(), asset_folder: asset_folder.to_owned(), unsupported: Vec::new(), time_offset: 0.0 };
     let length = |value: &Value| (value.get("op").and_then(Value::as_f64).unwrap_or(fps * 10.0) - value.get("ip").and_then(Value::as_f64).unwrap_or(0.0)).max(1.0) / fps;
+    // Precompositions have no size of their own in most files: the layers showing them carry it.
+    let sizes = precomp_sizes(&root);
 
     // Assets: images, and precompositions (which need their keys before any layer uses them).
     let assets = root.get("assets").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -54,19 +56,25 @@ pub fn read(text: &str, file: &Path, asset_folder: &Path) -> Result<Scene, Strin
     }
     for (key, id, asset) in precomps {
         let layers = reader.layers(asset.get("layers"));
+        let (used_width, used_height) = sizes.get(&id).copied().unwrap_or((width, height));
         let size = |name: &str, fallback: f64| asset.get(name).and_then(Value::as_f64).unwrap_or(fallback).clamp(1.0, 30_000.0) as u32;
+        // Long enough for every layer inside, which may run past the main animation's end when
+        // the precomposition starts early (a negative `st` on the layer showing it).
+        let last_out = layers.iter().map(|layer| layer.out_point).fold(0.0, f64::max);
         reader.scene.comps.push(SceneComp {
             key,
             name: asset.get("nm").and_then(Value::as_str).map_or_else(|| format!("Precomp {id}"), str::to_owned),
             folder: None,
-            width: size("w", width),
-            height: size("h", height),
+            width: size("w", used_width),
+            height: size("h", used_height),
             fps,
-            seconds: length(&root),
+            seconds: length(&root).max(last_out),
             background: Rgba::TRANSPARENT,
             layers,
         });
     }
+    // The main animation runs from its `ip`, which becomes the composition's first frame.
+    reader.time_offset = root.get("ip").and_then(Value::as_f64).unwrap_or(0.0) / fps;
     let layers = reader.layers(root.get("layers"));
     let main = reader.next_key();
     let name = root.get("nm").and_then(Value::as_str).filter(|name| !name.trim().is_empty()).map_or_else(|| file.file_stem().map_or("Lottie".into(), |stem| stem.to_string_lossy().into_owned()), str::to_owned);
@@ -78,6 +86,25 @@ pub fn read(text: &str, file: &Path, asset_folder: &Path) -> Result<Scene, Strin
         reader.scene.notes.push(format!("Not brought in: {}.", reader.unsupported.join(", ")));
     }
     Ok(reader.scene)
+}
+
+/// The size each precomposition is shown at, by asset id, from the precomposition layers
+/// (`ty` 0) that show it, in the main animation or in other precompositions.
+fn precomp_sizes(root: &Value) -> HashMap<String, (f64, f64)> {
+    let mut sizes = HashMap::new();
+    let assets = root.get("assets").and_then(Value::as_array).into_iter().flatten();
+    let layer_lists = std::iter::once(root.get("layers")).chain(assets.map(|asset| asset.get("layers")));
+    for layer in layer_lists.flatten().filter_map(Value::as_array).flatten() {
+        if layer.get("ty").and_then(Value::as_i64) != Some(0) {
+            continue;
+        }
+        let id = layer.get("refId").and_then(Value::as_str);
+        let size = layer.get("w").and_then(Value::as_f64).zip(layer.get("h").and_then(Value::as_f64));
+        if let (Some(id), Some(size)) = (id, size) {
+            sizes.entry(id.to_owned()).or_insert(size);
+        }
+    }
+    sizes
 }
 
 enum Asset {
@@ -93,6 +120,8 @@ struct Reader {
     file: PathBuf,
     asset_folder: PathBuf,
     unsupported: Vec<&'static str>,
+    /// Seconds taken off every layer's timing: the main animation's start, while its layers are read.
+    time_offset: f64,
 }
 
 impl Reader {
@@ -140,7 +169,7 @@ impl Reader {
         let fps = self.fps;
         let number = |name: &str| layer.get(name).and_then(Value::as_f64);
         let name = layer.get("nm").and_then(Value::as_str).unwrap_or("Layer").to_owned();
-        let start = number("st").unwrap_or(0.0) / fps;
+        let start = number("st").unwrap_or(0.0) / fps - self.time_offset;
         let content = match layer.get("ty").and_then(Value::as_i64)? {
             0 => match self.assets.get(layer.get("refId")?.as_str()?) {
                 Some(Asset::Comp(key)) => SceneContent::Comp(*key),
@@ -186,8 +215,8 @@ impl Reader {
             name,
             parent: layer.get("parent").and_then(Value::as_u64),
             start,
-            in_point: number("ip").unwrap_or(0.0) / fps,
-            out_point: number("op").unwrap_or(fps * 10.0) / fps,
+            in_point: number("ip").unwrap_or(0.0) / fps - self.time_offset,
+            out_point: number("op").unwrap_or(fps * 10.0) / fps - self.time_offset,
             visible: layer.get("hd").and_then(Value::as_bool) != Some(true),
             content,
             transform,
@@ -315,18 +344,12 @@ fn bezier_path(value: &Value) -> Option<ShapePath> {
 fn transform(ks: &Value, start: f64, fps: f64) -> SceneTransform {
     let vec = |name: &str| ks.get(name).and_then(|property| track(property, start, fps, |values| Some(Vec2::new(*values.first()? as f32, *values.get(1).unwrap_or(&values[0]) as f32))));
     let number = |name: &str| ks.get(name).and_then(|property| track(property, start, fps, |values| values.first().map(|&v| v as f32)));
-    // Position split into x and y ("s": true): combined at the x keys.
+    // Position split into x and y ("s": true).
     let position = match ks.get("p") {
         Some(p) if p.get("s").and_then(Value::as_bool) == Some(true) => {
             let x = p.get("x").and_then(|x| track(x, start, fps, |v| v.first().map(|&v| v as f32)));
             let y = p.get("y").and_then(|y| track(y, start, fps, |v| v.first().map(|&v| v as f32)));
-            match (x, y) {
-                (Some(x), Some(y)) => {
-                    let y_at = |seconds: f64| y.keys.iter().rev().find(|(at, _, _)| *at <= seconds).map_or(y.value, |(_, value, _)| *value);
-                    Some(Track { value: Vec2::new(x.value, y.value), keys: x.keys.iter().map(|&(at, value, easing)| (at, Vec2::new(value, y_at(at)), easing)).collect() })
-                }
-                _ => None,
-            }
+            x.zip(y).map(|(x, y)| super::combine_axes(&x, &y))
         }
         _ => vec("p"),
     };
@@ -462,12 +485,58 @@ mod tests {
     fn base64_and_unsafe_paths() {
         assert_eq!(decode_base64("aGk=").unwrap(), b"hi");
         assert_eq!(decode_base64("aGVsbG8").unwrap(), b"hello");
-        let mut reader = Reader { scene: Scene::default(), fps: 30.0, assets: HashMap::new(), keys: 0, file: "/a/b.json".into(), asset_folder: "/tmp".into(), unsupported: Vec::new() };
+        let mut reader = Reader { scene: Scene::default(), fps: 30.0, assets: HashMap::new(), keys: 0, file: "/a/b.json".into(), asset_folder: "/tmp".into(), unsupported: Vec::new(), time_offset: 0.0 };
         let climbing = serde_json::json!({"p": "secret.png", "u": "../../etc/"});
         assert!(reader.image(&climbing, 1).is_none(), "paths can't climb out of the animation's folder");
         let beside = serde_json::json!({"p": "img_0.png", "u": "images/"});
         let SourceKind::File { path, .. } = reader.image(&beside, 2).unwrap().kind else { panic!() };
         assert_eq!(path, PathBuf::from("/a/images/img_0.png"));
+    }
+
+    #[test]
+    fn a_position_animated_only_up_and_down_keeps_its_motion() {
+        let file = r#"{"fr": 30, "ip": 0, "op": 60, "w": 800, "h": 600, "layers": [
+            {"ty": 3, "nm": "Bounce", "ip": 0, "op": 60, "st": 0,
+             "ks": {"p": {"s": true, "x": {"a": 0, "k": 100}, "y": {"a": 1, "k": [{"t": 0, "s": [0]}, {"t": 30, "s": [500]}]}}}}
+        ]}"#;
+        let scene = read(file, Path::new("/tmp/bounce.json"), Path::new("/tmp/assets")).unwrap();
+        let position = scene.comps[0].layers[0].transform.position.as_ref().unwrap();
+        let keys: Vec<Vec2> = position.keys.iter().map(|(_, value, _)| *value).collect();
+        assert_eq!(keys, vec![Vec2::new(100.0, 0.0), Vec2::new(100.0, 500.0)]);
+    }
+
+    #[test]
+    fn an_animation_that_starts_late_starts_at_frame_zero() {
+        let file = r#"{"fr": 30, "ip": 30, "op": 90, "w": 800, "h": 600, "layers": [
+            {"ty": 3, "nm": "Early", "ip": 30, "op": 90, "st": 30, "ks": {"o": {"a": 1, "k": [{"t": 0, "s": [0]}, {"t": 30, "s": [100]}]}}},
+            {"ty": 3, "nm": "Late", "ip": 70, "op": 90, "st": 0, "ks": {}}
+        ]}"#;
+        let scene = read(file, Path::new("/tmp/late.json"), Path::new("/tmp/assets")).unwrap();
+        let comp = &scene.comps[0];
+        assert_eq!(comp.seconds, 2.0);
+        let timing: Vec<(f64, f64, f64)> = comp.layers.iter().map(|layer| (layer.start, layer.in_point, layer.out_point)).collect();
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(timing[0].1, 0.0) && close(timing[0].2, 2.0), "{timing:?}");
+        assert!(close(timing[1].1, 40.0 / 30.0) && close(timing[1].2, 2.0), "{timing:?}");
+        // Keyframes move with their layer: the fade still begins on the layer's first frame.
+        let opacity = comp.layers[0].transform.opacity.as_ref().unwrap();
+        assert!(close(opacity.keys[0].0, 0.0), "{:?}", opacity.keys);
+    }
+
+    #[test]
+    fn a_precomp_takes_its_size_from_its_layer_and_keeps_late_content() {
+        let file = r#"{"fr": 30, "ip": 0, "op": 60, "w": 800, "h": 600,
+            "assets": [{"id": "inner", "layers": [{"ty": 3, "nm": "Late", "ip": 60, "op": 120, "st": 0, "ks": {}}]}],
+            "layers": [{"ty": 0, "nm": "Holder", "refId": "inner", "w": 400, "h": 300, "ip": 0, "op": 60, "st": -60, "ks": {}}]
+        }"#;
+        let scene = read(file, Path::new("/tmp/pre.json"), Path::new("/tmp/assets")).unwrap();
+        let inner = scene.comps.iter().find(|comp| comp.layers.iter().any(|layer| layer.name == "Late")).unwrap();
+        assert_eq!((inner.width, inner.height), (400, 300));
+        assert!(inner.seconds >= 4.0, "long enough for its layer: {}", inner.seconds);
+        let mut project = crate::sample::sample_project();
+        let imported = super::super::build(&mut project, &scene, "pre", &|_| None).unwrap();
+        let built = imported.compositions.iter().filter_map(|id| project.composition(*id)).find(|comp| comp.width == 400).unwrap();
+        assert_eq!(built.layers.len(), 1, "the late layer is kept");
     }
 
     #[test]

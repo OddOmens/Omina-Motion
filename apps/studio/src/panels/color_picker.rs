@@ -65,8 +65,8 @@ pub struct Picker {
     saturation: f32,
     value: f32,
     alpha: f32,
-    hex: Entity<InputState>,
-    opacity: Entity<InputState>,
+    pub(crate) hex: Entity<InputState>,
+    pub(crate) opacity: Entity<InputState>,
     field: MeasuredBounds,
     hue_bar: MeasuredBounds,
     alpha_bar: MeasuredBounds,
@@ -166,6 +166,10 @@ pub fn open(workspace: &mut Workspace, target: ColorTarget, at: Point<Pixels>, w
         }
         let Some(color) = Rgba::parse_hex(&input.read(cx).value()) else { return };
         let Some(picker) = this.ui.color_picker.as_mut() else { return };
+        // Left as it was: writing it back would unlink a Library color for nothing.
+        if color.to_hex() == picker.color().to_hex() {
+            return;
+        }
         let alpha = picker.alpha;
         picker.set_from(color.with_alpha(alpha));
         apply(this, window, cx);
@@ -176,6 +180,10 @@ pub fn open(workspace: &mut Workspace, target: ColorTarget, at: Point<Pixels>, w
         }
         let Some(percent) = crate::panels::fields::parse_value(&input.read(cx).value()) else { return };
         let Some(picker) = this.ui.color_picker.as_mut() else { return };
+        // The field shows whole percents, so an unchanged one would round the opacity and unlink it.
+        if percent == (picker.alpha * 100.0).round() {
+            return;
+        }
         picker.alpha = (percent / 100.0).clamp(0.0, 1.0);
         apply(this, window, cx);
     });
