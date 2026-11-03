@@ -921,6 +921,38 @@ impl EditorState {
         Some(layer)
     }
 
+    /// Adds a solid in the eyedropper's current color, filling the frame from the playhead on,
+    /// and selects it.
+    pub fn add_solid(&mut self) -> Option<Id> {
+        let (comp, frame, color) = (self.active_comp, self.current_frame, self.colors.current);
+        let layer = edit::add_solid_layer(&mut self.project, comp, color, frame)?;
+        self.select_layer(layer, false);
+        Some(layer)
+    }
+
+    /// Adds a null object in the middle of the frame from the playhead on, and selects it, ready
+    /// for other layers to be parented to it.
+    pub fn add_null(&mut self) -> Option<Id> {
+        let (comp, frame) = (self.active_comp, self.current_frame);
+        let layer = edit::add_null_layer(&mut self.project, comp, frame)?;
+        self.select_layer(layer, false);
+        Some(layer)
+    }
+
+    /// M: adds a marker at the playhead, or removes the one there. Returns whether one was added.
+    pub fn toggle_marker_at_playhead(&mut self) -> bool {
+        let frame = self.current_frame;
+        edit::toggle_marker(self.composition_mut(), frame)
+    }
+
+    /// Moves the selected layers one after another in the order they were selected: each
+    /// `step` frames after the one before starts, or (with `None`) where it ends. Returns
+    /// whether anything moved.
+    pub fn stagger_selection(&mut self, step: Option<i64>) -> bool {
+        let layers = self.selected_layers.clone();
+        layers.len() > 1 && edit::stagger_layers(self.composition_mut(), &layers, step)
+    }
+
     /// Adds element `index` (of `studio_core::elements::ELEMENTS`) in the middle of the open
     /// composition at the playhead, and selects it.
     pub fn add_element(&mut self, index: usize) -> Vec<Id> {

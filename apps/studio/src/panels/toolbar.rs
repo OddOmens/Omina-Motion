@@ -23,7 +23,7 @@ use gpui_kit::{
 use studio_core::model::ShapeKind;
 
 use crate::theme::{color, hsla, size};
-use crate::workspace::{LeftPanel, Tool, Workspace};
+use crate::workspace::{LeftPanel, NewLayer, Tool, Workspace};
 
 /// Width of the left rail: room for an icon and its name.
 pub const RAIL_WIDTH: f32 = 56.0;
@@ -94,8 +94,30 @@ fn tools(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
         .child(tool_button("tool-pen", IconName::PenTool, "Pen (G)", tool == Tool::Pen, pick(Tool::Pen), cx))
         .child(tool_button("tool-rotate", IconName::RotateCw, "Rotate (W)", tool == Tool::Rotate, pick(Tool::Rotate), cx))
         .child(eyedropper_button(workspace, cx))
+        .child(new_layer_button(cx))
         .child(divider())
         .child(group_button(2, workspace, cx))
+}
+
+/// The New Layer button: a menu of the layers made from nothing (a solid in the eyedropper's
+/// current color, an adjustment layer, a null object), each added from the playhead on.
+fn new_layer_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+    let weak = cx.weak_entity();
+    let item = move |label: &'static str, icon: IconName, kind: NewLayer| {
+        let weak = weak.clone();
+        PopupMenuItem::new(label).icon(Icon::new(icon)).on_click(move |_, _, cx| {
+            weak.update(cx, |this, cx| this.new_layer(kind, cx)).ok();
+        })
+    };
+    Button::new("tool-new-layer").ghost().small().icon(Icon::new(IconName::Layers)).tooltip("New Layer").dropdown_menu(move |menu, _, _| {
+        menu.label("New Layer")
+            .item(item("Solid (⌘Y)", IconName::Square, NewLayer::Solid))
+            .item(item("Adjustment Layer (⌥⌘Y)", IconName::Layers, NewLayer::Adjustment))
+            .item(item("Null Object (⇧⌥⌘Y)", IconName::SquareDashed, NewLayer::Null))
+    })
 }
 
 /// A short line between groups of rail buttons. The panel hairline is too faint against the
@@ -125,6 +147,7 @@ pub const TOOL_GROUPS: [ToolGroup; 3] = [
             (Tool::Cut, IconName::Scissors, "Cut", "C"),
             (Tool::Ripple, IconName::ArrowRightToLine, "Ripple", "B"),
             (Tool::Roll, IconName::Columns2, "Roll", "N"),
+            (Tool::RateStretch, IconName::Gauge, "Rate Stretch", "R"),
             (Tool::Slip, IconName::ArrowLeftRight, "Slip", "Y"),
             (Tool::Slide, IconName::MoveHorizontal, "Slide", "U"),
         ],

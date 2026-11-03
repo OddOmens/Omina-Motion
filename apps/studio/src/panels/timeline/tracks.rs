@@ -499,6 +499,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
         _ => {}
     }
 
+    let stretchable = studio_core::speed::has_speed(&layer.content);
     let grip = |edit: LayerTimeEdit, cx: &mut Context<Workspace>| {
         let name = if edit == LayerTimeEdit::TrimIn { "clip-trim-in" } else { "clip-trim-out" };
         div()
@@ -516,6 +517,8 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 let end = if edit == LayerTimeEdit::TrimIn { End::In } else { End::Out };
                 let edit = match this.ui.tool {
                     Tool::Ripple => LayerTimeEdit::Ripple(end),
+                    // Rate Stretch changes footage's speed; anything else just trims.
+                    Tool::RateStretch if stretchable => LayerTimeEdit::Stretch(end),
                     Tool::Roll => LayerTimeEdit::Roll(end),
                     _ => edit,
                 };

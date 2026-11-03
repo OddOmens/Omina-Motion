@@ -141,6 +141,29 @@ fn band(y: f32, center: f32) -> f32 {
     return exp(-d * d);
 }
 
+// `p` turned by `angle` radians. Pixel rows run downward, so a positive angle turns clockwise
+// on screen.
+fn rotate2(p: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+
+// A color turned around the gray axis by `degrees`, which shifts its hue (red to green at
+// 120°) while keeping its gray level. Used to treat any key color as if it were green.
+fn hue_rotate(v: vec3<f32>, degrees: f32) -> vec3<f32> {
+    let axis = vec3(0.57735027);
+    let a = radians(degrees);
+    return v * cos(a) + cross(axis, v) * sin(a) + axis * dot(axis, v) * (1.0 - cos(a));
+}
+
+// A sample's display-value color with its alpha applied, so transparent areas read as black.
+// Edge and relief effects use it to see the layer's outline as well as its detail.
+fn display_at(uv: vec2<f32>) -> vec3<f32> {
+    let s = sample(uv);
+    return to_display(straight(s)) * s.a;
+}
+
 // One direction of a separable Gaussian blur. p0.x = sigma (px), p0.yz = direction.
 fn gaussian(uv: vec2<f32>) -> vec4<f32> {
     let sigma = u.p0.x;
@@ -497,6 +520,250 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         case 60u: {
             let m = textureSampleLevel(aux, linear_sampler, uv, 0.0).a;
             return c * select(m, 1.0 - m, u.p0.x > 0.5);
+        }
+        // Linear Color Key: p0.x key hue (deg), p0.y tolerance (%), p0.z softness (%). Colors whose
+        // hue lies within the tolerance of the key, and that are saturated enough, become clear.
+        case 61u: {
+            let v = clamp(to_display(rgb), vec3(0.0), vec3(1.0));
+            let hsl = rgb_to_hsl(v);
+            let distance = abs(fract(hsl.x - u.p0.x / 360.0 + 0.5) - 0.5) * 360.0;
+            let tolerance = u.p0.y / 100.0 * 180.0;
+            let softness = max(u.p0.z / 100.0 * 180.0, 0.5);
+            let chroma = max(v.r, max(v.g, v.b)) - min(v.r, min(v.g, v.b));
+            let keyed = (1.0 - smoothstep(tolerance, tolerance + softness, distance)) * smoothstep(0.08, 0.2, chroma);
+            return c * (1.0 - keyed);
+        }
+        // Spill Suppressor: p0.x key hue (deg), p0.y suppression (100 = full). The color is turned so
+        // the key hue sits on green, green is limited to the larger of red and blue, and it is
+        // turned back.
+        case 62u: {
+            var v = hue_rotate(to_display(rgb), 120.0 - u.p0.x);
+            let spill = max(v.g - max(v.r, v.b), 0.0);
+            v.g -= spill * u.p0.y / 100.0;
+            return with_alpha(to_linear(hue_rotate(v, u.p0.x - 120.0)), c.a);
+        }
+        // Key Cleaner: p0.x edge radius (px). The alpha is averaged over rings at that radius and
+        // only well-surrounded pixels are kept, which pulls the edge in and softens it while solid
+        // areas stay solid.
+        case 63u: {
+            let radius = u.p0.x;
+            if (radius < 0.25 || c.a <= 0.0) {
+                return c;
+            }
+            var total = 0.0;
+            for (var i = 0; i < 16; i++) {
+                let angle = f32(i) / 16.0 * 2.0 * PI;
+                let direction = vec2(cos(angle), sin(angle)) / size;
+                total += sample(uv + direction * radius).a * 2.0 + sample(uv + direction * radius * 0.5).a;
+            }
+            // Compared with the pixel's own alpha, so an evenly see-through layer is left alone.
+            let around = clamp(total / 48.0 / c.a, 0.0, 1.0);
+            return c * smoothstep(0.5, 1.0, around);
+        }
+        // Median: p0.x radius (px). The middle value, per channel, of a 3 × 3 grid of samples
+        // spaced by the radius, sorted with a 19-step compare-and-swap network.
+        case 64u: {
+            let radius = u.p0.x;
+            if (radius < 0.25) {
+                return c;
+            }
+            var v: array<vec4<f32>, 9>;
+            for (var i = 0; i < 9; i++) {
+                let offset = vec2(f32(i % 3) - 1.0, f32(i / 3) - 1.0) * radius / size;
+                v[i] = sample(uv + offset);
+            }
+            var pairs = array<vec2<u32>, 19>(
+                vec2(1u, 2u), vec2(4u, 5u), vec2(7u, 8u), vec2(0u, 1u), vec2(3u, 4u), vec2(6u, 7u), vec2(1u, 2u),
+                vec2(4u, 5u), vec2(7u, 8u), vec2(0u, 3u), vec2(5u, 8u), vec2(4u, 7u), vec2(3u, 6u), vec2(1u, 4u),
+                vec2(2u, 5u), vec2(4u, 7u), vec2(4u, 2u), vec2(6u, 4u), vec2(4u, 2u),
+            );
+            for (var i = 0; i < 19; i++) {
+                let pair = pairs[i];
+                let a = v[pair.x];
+                let b = v[pair.y];
+                v[pair.x] = min(a, b);
+                v[pair.y] = max(a, b);
+            }
+            return v[4];
+        }
+        // Stroke: p0.x brush size (px), p0.y opacity (%). The most coverage found within the brush
+        // size around each pixel, as white, placed under the layer so it shows only outside it.
+        case 65u: {
+            let brush = u.p0.x;
+            if (brush < 0.25) {
+                return c;
+            }
+            var reach = 0.0;
+            for (var ring = 1; ring <= 3; ring++) {
+                let radius = brush * f32(ring) / 3.0;
+                for (var i = 0; i < 24; i++) {
+                    let angle = (f32(i) + f32(ring) * 0.33) / 24.0 * 2.0 * PI;
+                    reach = max(reach, sample(uv + vec2(cos(angle), sin(angle)) * radius / size).a);
+                }
+            }
+            let outline = reach * u.p0.y / 100.0;
+            return c + vec4(outline) * (1.0 - c.a);
+        }
+        // Crop: p0 left, right, top, bottom (% of the frame cut away), p1.x feather (px, inward).
+        case 66u: {
+            let low = vec2(u.p0.x, u.p0.z) / 100.0 * size;
+            let high = (vec2(1.0) - vec2(u.p0.y, u.p0.w) / 100.0) * size;
+            let inside = min(min(pixel.x - low.x, high.x - pixel.x), min(pixel.y - low.y, high.y - pixel.y));
+            return c * clamp((inside + 0.5) / max(u.p1.x, 1.0), 0.0, 1.0);
+        }
+        // Mirror: p0.x axis angle (deg; 0 reflects the left half onto the right, 90 the top onto
+        // the bottom), p0.y center offset (% of the frame along the reflection).
+        case 67u: {
+            let angle = radians(u.p0.x);
+            let normal = vec2(cos(angle), sin(angle));
+            let extent = abs(normal.x) * size.x + abs(normal.y) * size.y;
+            let origin = size * 0.5 + normal * u.p0.y / 100.0 * extent;
+            let distance = dot(pixel - origin, normal);
+            return sample(select(pixel, pixel - 2.0 * distance * normal, distance > 0.0) / size);
+        }
+        // Offset: p0.x, p0.y shift (% of the frame). The picture wraps around, so what leaves one
+        // edge comes back at the other.
+        case 68u: { return textureSampleLevel(src, linear_sampler, fract(uv - u.p0.xy / 100.0), 0.0); }
+        // Motion Tile: p0.x tiles across, p0.y tiles down, p0.z mirror edges (1 flips every other
+        // tile so neighbours meet seamlessly). The middle tile stays centered.
+        case 69u: {
+            let tiles = max(u.p0.xy, vec2(1.0));
+            let q = (uv - center) * tiles + center;
+            let cell = floor(q);
+            var f = fract(q);
+            if (u.p0.z >= 0.5) {
+                let odd = abs(cell - 2.0 * floor(cell * 0.5));
+                f = mix(f, vec2(1.0) - f, odd);
+            }
+            return textureSampleLevel(src, linear_sampler, f, 0.0);
+        }
+        // Twirl: p0.x angle (deg), p0.y radius (% of half the shorter side). Turns most at the
+        // center, easing to nothing at the radius.
+        case 70u: {
+            let offset = pixel - size * 0.5;
+            let radius = max(u.p0.y / 100.0 * 0.5 * min(size.x, size.y), 1.0);
+            let distance = length(offset);
+            if (distance >= radius) {
+                return c;
+            }
+            let t = 1.0 - distance / radius;
+            return sample((size * 0.5 + rotate2(offset, -radians(u.p0.x) * t * t)) / size);
+        }
+        // Ripple: p0.x amplitude (px), p0.y wavelength (px), p0.z speed (cycles per second). Rings
+        // spread outward from the center.
+        case 71u: {
+            let offset = pixel - size * 0.5;
+            let distance = length(offset);
+            let direction = select(offset / distance, vec2(0.0), distance < 0.001);
+            let push = sin((distance / max(u.p0.y, 1.0) - u.info.z * u.p0.z) * 2.0 * PI) * u.p0.x;
+            return sample((pixel + direction * push) / size);
+        }
+        // Kaleidoscope: p0.x segments, p0.y rotation (deg). One wedge around the center is
+        // repeated and mirrored all the way round.
+        case 72u: {
+            let offset = pixel - size * 0.5;
+            let turn = radians(u.p0.y);
+            let wedge = 2.0 * PI / max(u.p0.x, 2.0);
+            let angle = atan2(offset.y, offset.x) - turn;
+            var within = angle - wedge * floor(angle / wedge);
+            within = min(within, wedge - within);
+            let p = length(offset) * vec2(cos(within + turn), sin(within + turn));
+            return sample((size * 0.5 + p) / size);
+        }
+        // Polar Coordinates: p0.x amount (%). Rectangular to polar: the picture's width wraps
+        // clockwise round the center from the top, its top edge at the center.
+        case 73u: {
+            let offset = (pixel - size * 0.5) / (0.5 * min(size.x, size.y));
+            let angle = atan2(offset.x, -offset.y);
+            let polar = vec2(fract(angle / (2.0 * PI)), length(offset));
+            return sample(mix(uv, polar, u.p0.x / 100.0));
+        }
+        // Halftone: p0.x dot size (px), p0.y screen angle (deg). Black dots on white, each sized
+        // by the darkness at its cell's center. The layer's alpha is kept.
+        case 74u: {
+            let cell_size = max(u.p0.x, 2.0);
+            let angle = radians(u.p0.y);
+            let turned = rotate2(pixel, -angle);
+            let cell_center = (floor(turned / cell_size) + 0.5) * cell_size;
+            let s = sample(rotate2(cell_center, angle) / size);
+            let lightness = mix(1.0, clamp(dot(to_display(straight(s)), LUMA), 0.0, 1.0), s.a);
+            let radius = sqrt(1.0 - lightness) * 0.70710678 * cell_size;
+            let ink = clamp(radius - length(turned - cell_center) + 0.5, 0.0, 1.0) * min(radius * 2.0, 1.0);
+            return with_alpha(vec3(1.0 - ink), c.a);
+        }
+        // Find Edges: p0.x amount (%). A Sobel filter on each channel, shown as dark lines on white.
+        case 75u: {
+            let t = 1.0 / size;
+            let tl = display_at(uv + vec2(-t.x, -t.y));
+            let tc = display_at(uv + vec2(0.0, -t.y));
+            let tr = display_at(uv + vec2(t.x, -t.y));
+            let ml = display_at(uv + vec2(-t.x, 0.0));
+            let mr = display_at(uv + vec2(t.x, 0.0));
+            let bl = display_at(uv + vec2(-t.x, t.y));
+            let bc = display_at(uv + vec2(0.0, t.y));
+            let br = display_at(uv + vec2(t.x, t.y));
+            let gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+            let gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+            let edges = vec3(1.0) - clamp(sqrt(gx * gx + gy * gy) * 0.5, vec3(0.0), vec3(1.0));
+            return with_alpha(to_linear(mix(to_display(rgb), edges, u.p0.x / 100.0)), c.a);
+        }
+        // Emboss: p0.x amount (%), p0.y light direction (deg, clockwise from up). A gray relief
+        // whose sides facing the light are bright.
+        case 76u: {
+            let angle = radians(u.p0.y);
+            let toward = vec2(sin(angle), -cos(angle)) * 1.5 / size;
+            let lit = dot(display_at(uv - toward), LUMA) - dot(display_at(uv + toward), LUMA);
+            let gray = clamp(0.5 + lit * u.p0.x / 100.0, 0.0, 1.0);
+            return with_alpha(to_linear(vec3(gray)), c.a);
+        }
+        // Duotone: p0.x shadow hue, p0.y highlight hue (deg), p0.z amount (%). Brightness is mapped
+        // from a deep version of the shadow hue to a light version of the highlight hue.
+        case 77u: {
+            let v = to_display(rgb);
+            let y = clamp(dot(v, LUMA), 0.0, 1.0);
+            let dark = hsl_to_rgb(vec3(fract(u.p0.x / 360.0), 0.85, 0.22));
+            let light = hsl_to_rgb(vec3(fract(u.p0.y / 360.0), 0.9, 0.75));
+            let toned = mix(dark, light, smoothstep(0.0, 1.0, y));
+            return with_alpha(to_linear(mix(v, toned, u.p0.z / 100.0)), c.a);
+        }
+        // Iris Wipe: p0.x completion (%), p0.y feather (px). A circle closes on the center; at 0%
+        // it covers the whole frame (corners too), at 100% nothing is left.
+        case 78u: {
+            let feather = max(u.p0.y, 0.5);
+            let reach = length(size) * 0.5 + feather;
+            let radius = (1.0 - u.p0.x / 100.0) * reach - feather * 0.5;
+            return c * (1.0 - smoothstep(radius - feather * 0.5, radius + feather * 0.5, length(pixel - size * 0.5)));
+        }
+        // Venetian Blinds: p0.x completion (%), p0.y direction (deg; 0 gives horizontal slats),
+        // p0.z slat width (px), p0.w feather (px). Each slat closes from one side.
+        case 79u: {
+            let angle = radians(u.p0.y);
+            let across = dot(pixel - size * 0.5, vec2(sin(angle), -cos(angle)));
+            let width = max(u.p0.z, 1.0);
+            let feather = max(u.p0.w, 0.5);
+            let within = across - width * floor(across / width);
+            let edge = u.p0.x / 100.0 * (width + feather) - feather * 0.5;
+            return c * smoothstep(edge - feather * 0.5, edge + feather * 0.5, within);
+        }
+        // Gradient Wipe: p0.x completion (%), p0.y softness (%). The layer's own brightness is the
+        // order: the darkest parts disappear first and the brightest last.
+        case 80u: {
+            let y = clamp(dot(to_display(rgb), LUMA), 0.0, 1.0);
+            let softness = max(u.p0.y / 100.0, 0.002);
+            let edge = u.p0.x / 100.0 * (1.0 + softness) - softness * 0.5;
+            return c * smoothstep(edge - softness * 0.5, edge + softness * 0.5, y);
+        }
+        // Pulse: p0.x amount (% of extra size at the peak), p0.y pulses per second. Grows and
+        // shrinks smoothly about the center.
+        case 81u: {
+            let grow = 1.0 + u.p0.x / 100.0 * 0.5 * (1.0 - cos(u.info.z * u.p0.y * 2.0 * PI));
+            return sample((size * 0.5 + (pixel - size * 0.5) / grow) / size);
+        }
+        // Swing: p0.x angle (deg, the furthest it turns each way), p0.y swings per second. A
+        // pendulum's rotation about the center.
+        case 82u: {
+            let turn = radians(u.p0.x) * sin(u.info.z * u.p0.y * 2.0 * PI);
+            return sample((size * 0.5 + rotate2(pixel - size * 0.5, -turn)) / size);
         }
         default: { return c; }
     }

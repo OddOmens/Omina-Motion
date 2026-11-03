@@ -7,6 +7,7 @@
 
 use crate::animation::{Animated, CubicBezier, Easing, Keyframe};
 use crate::model::{Composition, Id, LayerContent, LayerTime};
+use crate::trim_tools::End;
 
 /// Whether a layer's speed can be changed: footage (stills and graphics have no speed).
 pub fn has_speed(content: &LayerContent) -> bool {
@@ -32,6 +33,33 @@ pub fn set_speed(composition: &mut Composition, layer_id: Id, percent: f32) -> b
     layer.start_frame = layer.in_frame - (shown / new).round() as i64;
     layer.out_frame = layer.in_frame + ((played / new).round() as i64).max(1);
     layer.time.speed = Animated::constant(percent);
+    true
+}
+
+/// The Rate Stretch tool: moves one end of a clip to `frame` and changes the clip's speed so
+/// the same part of its source fills the new length, while the other end stays put. The speed
+/// stays within `LayerTime::SPEED_RANGE`, so the end may stop short of `frame`, and a ramp
+/// becomes a constant speed. Returns whether the clip changed.
+pub fn stretch_to(composition: &mut Composition, layer_id: Id, end: End, frame: i64) -> bool {
+    let Some(layer) = composition.layer(layer_id).filter(|layer| has_speed(&layer.content) && !layer.switches.locked) else { return false };
+    let (in_frame, out_frame) = (layer.in_frame, layer.out_frame);
+    // How much source the clip shows, in frames at normal speed.
+    let played = layer.time.source_seconds_between(in_frame, out_frame, 1.0);
+    let length = match end {
+        End::In => out_frame - frame,
+        End::Out => frame - in_frame,
+    }
+    .max(1);
+    if played <= 0.0 || !set_speed(composition, layer_id, (played / length as f64 * 100.0) as f32) {
+        return false;
+    }
+    // `set_speed` keeps the in point; stretching from the start keeps the out point instead.
+    if end == End::In
+        && let Some(layer) = composition.layer_mut(layer_id)
+    {
+        let shift = out_frame - layer.out_frame;
+        layer.shift_in_time(shift);
+    }
     true
 }
 
@@ -102,6 +130,34 @@ mod tests {
         let item = edit::import_footage(&mut project, "/media/run.mp4".into(), &info);
         let layer = edit::add_layer_from_item(&mut project, ids::MAIN_COMP, item, 0, 24).unwrap();
         (project, layer)
+    }
+
+    #[test]
+    fn rate_stretch_changes_the_speed_to_fill_the_new_length() {
+        let (mut project, id) = clip();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        // The 96-frame clip from frame 24, stretched out to twice its length: half speed.
+        assert!(stretch_to(comp, id, End::Out, 24 + 192));
+        let layer = comp.layer(id).unwrap();
+        assert_eq!((layer.in_frame, layer.out_frame), (24, 216));
+        assert_eq!(layer.time.speed.value, 50.0);
+        let rate = FrameRate::new(24, 1);
+        assert_eq!(layer.source_frame(215, rate, rate), 95, "still ends on the last source frame");
+        // Its start pulled in to frame 168 squeezes it into 48 frames, keeping the out point.
+        assert!(stretch_to(comp, id, End::In, 168));
+        let layer = comp.layer(id).unwrap();
+        assert_eq!((layer.in_frame, layer.out_frame, layer.time.speed.value), (168, 216, 200.0));
+        assert_eq!(layer.source_frame(168, rate, rate), 0, "still starts on the first source frame");
+    }
+
+    #[test]
+    fn rate_stretch_leaves_stills_alone() {
+        let mut project = sample_project();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let text = comp.layers.iter().find(|layer| matches!(layer.content, LayerContent::Text { .. })).unwrap().id;
+        let before = comp.layer(text).unwrap().clone();
+        assert!(!stretch_to(comp, text, End::Out, before.out_frame + 50));
+        assert_eq!(comp.layer(text).unwrap(), &before);
     }
 
     #[test]

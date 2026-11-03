@@ -16,7 +16,7 @@ use studio_core::captions::{CaptionAnimation, CaptionStyle, CaptionWord};
 use studio_core::model::{BlendMode, Id, Layer, LayerContent, LayerMask, MaskMode, TextPath, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 
-use super::chrome::{divider, hint, icon_button, panel, section};
+use super::chrome::{CardHeading, card, card_list, divider, hint, icon_button, panel, section};
 use super::color_picker;
 use super::fields::{FieldTarget, property_row, value_field};
 use crate::state::{AudioSetting, ColorTarget, PaintSlot, ShapeSetting, Switch, TextSetting};
@@ -586,19 +586,13 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
 
 /// The Reset button in the Layer Transform heading.
 fn transform_reset(id: Id, cx: &mut Context<Workspace>) -> AnyElement {
-    div()
-        .id("reset-transform")
-        .text_color(hsla(color::VALUE))
-        .cursor_pointer()
-        .hover(|style| style.text_color(hsla(color::TEXT)))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            // The heading folds the section on a click; Reset shouldn't.
-            cx.stop_propagation();
-            this.state.reset_transform(id);
-            cx.notify();
-        }))
-        .child("Reset")
-        .into_any_element()
+    icon_button("reset-transform", IconName::RotateCcw, "Reset Transform", false, cx.listener(move |this, _, _, cx| {
+        // The heading folds the section on a click; Reset shouldn't.
+        cx.stop_propagation();
+        this.state.reset_transform(id);
+        cx.notify();
+    }))
+    .into_any_element()
 }
 
 fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -926,7 +920,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
     let transform = if layer.transform.is_some() {
         fold("transform", "Layer Transform", Some(transform_reset(id, cx)), workspace, cx, |cx| transform_section(layer, workspace, cx))
     } else {
-        div().child(divider()).child(hint("Audio layers have no transform."))
+        div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Audio layers have no transform.")
     };
     let text = match &layer.content {
         LayerContent::Text { text, style } => Some(fold("text", "Text", None, workspace, cx, |cx| text_section(layer, text, style, workspace, cx))),
@@ -938,7 +932,6 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
     let selected_keys = workspace.state.selected_keyframes.iter().filter(|key| key.layer == layer.id).count();
     let mass_edit_note = (selected_keys > 1).then(|| {
         div()
-            .mt_2()
             .px_2()
             .py_1()
             .rounded(px(3.0))
@@ -946,12 +939,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
             .text_color(hsla(color::MUTED))
             .child(format!("{selected_keys} keyframes selected. With the playhead on one of them, a change applies to every selected keyframe of that property."))
     });
-    div()
-        .id("properties-body")
-        .size_full()
-        .overflow_y_scroll()
-        .px_2p5()
-        .pb_3()
+    card_list("properties-body")
         .children(mass_edit_note)
         .child(fold("layer", "Layer", None, workspace, cx, |cx| layer_section(layer, workspace, cx)))
         .child(transform)
@@ -965,28 +953,43 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .into_any_element()
 }
 
-/// A Properties section that folds: a heading with an arrow (click to open or close it), and
-/// `body` underneath while it is open. Sections start closed. `trailing` controls (such as
-/// Layer Transform's Reset) show in the heading while the section is open.
+/// A Properties section, as a card like the Effects and Color tabs': a heading with an arrow
+/// (click to open or close it), and `body` underneath while it is open. Sections start
+/// closed. `trailing` controls (such as Layer Transform's Reset) show in the heading while
+/// the section is open.
 fn fold(key: &'static str, title: &'static str, trailing: Option<AnyElement>, workspace: &Workspace, cx: &mut Context<Workspace>, body: impl FnOnce(&mut Context<Workspace>) -> Div) -> Div {
     let open = workspace.ui.section_open(key);
-    let heading = div()
-        .id(ElementId::Name(format!("section-{key}").into()))
-        .flex()
-        .items_center()
-        .gap_1()
-        .h(px(26.0))
-        .mt_1()
-        .cursor_pointer()
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.ui.toggle_section(key);
-            cx.notify();
-        }))
-        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(hsla(color::MUTED)))
-        .child(div().flex_1().text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title))
-        .children(trailing.filter(|_| open))
-        .test_support();
-    div().when(key != "layer", |section| section.child(divider())).child(heading).when(open, |section| section.child(body(cx)))
+    let heading = CardHeading {
+        id: ElementId::Name(format!("section-{key}").into()),
+        icon: Some(section_icon(key)),
+        title: title.into(),
+        open,
+        muted: false,
+        trailing: trailing.filter(|_| open).into_iter().collect(),
+    };
+    let body = open.then(|| body(cx).into_any_element());
+    card(heading, cx.listener(move |this, _, _, cx| {
+        this.ui.toggle_section(key);
+        cx.notify();
+    }), body)
+}
+
+/// The icon on a Properties section's heading.
+fn section_icon(key: &str) -> IconName {
+    match key {
+        "layer" => IconName::Layers,
+        "transform" => IconName::Move,
+        "text" => IconName::Type,
+        "shape" => IconName::Shapes,
+        "captions" => IconName::Captions,
+        "animate" => IconName::Sparkles,
+        "speed" => IconName::Hourglass,
+        "track" => IconName::Crosshair,
+        "cutout" => IconName::Eraser,
+        "audio" => IconName::Volume2,
+        "enhance" => IconName::AudioLines,
+        _ => IconName::Settings,
+    }
 }
 
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {

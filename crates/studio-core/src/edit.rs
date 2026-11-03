@@ -303,6 +303,76 @@ pub fn add_adjustment_layer(project: &mut Project, comp_id: Id, in_frame: i64) -
     add_top_layer(project, comp_id, name, LayerContent::Adjustment, size, size * 0.5, in_frame)
 }
 
+/// Adds a solid of `color` the size of the frame at the top of the stack, from `in_frame` to
+/// the end, as After Effects' New Solid does.
+pub fn add_solid_layer(project: &mut Project, comp_id: Id, color: Rgba, in_frame: i64) -> Option<Id> {
+    let composition = project.composition(comp_id)?;
+    let size = composition.size();
+    let taken = composition.layers.iter().filter(|layer| layer.name.starts_with("Solid ")).count();
+    add_top_layer(project, comp_id, format!("Solid {}", taken + 1), LayerContent::Solid { color }, size, size * 0.5, in_frame)
+}
+
+/// How big a null object's box is, in composition pixels.
+pub const NULL_SIZE: f32 = 100.0;
+
+/// Adds a null object at the top of the stack, in the middle of the frame, from `in_frame` to
+/// the end: a layer that draws nothing, for other layers to be parented to so they move, turn
+/// and scale together. Its box can be selected and dragged in the viewer like any layer's.
+pub fn add_null_layer(project: &mut Project, comp_id: Id, in_frame: i64) -> Option<Id> {
+    let composition = project.composition(comp_id)?;
+    let center = composition.size() * 0.5;
+    let taken = composition.layers.iter().filter(|layer| layer.name.starts_with("Null ")).count();
+    let content = LayerContent::Solid { color: Rgba::TRANSPARENT };
+    add_top_layer(project, comp_id, format!("Null {}", taken + 1), content, Vec2::new(NULL_SIZE, NULL_SIZE), center, in_frame)
+}
+
+/// Adds a marker at `frame`, or removes the one already there (pressing M on a marker takes
+/// it away again). Frames outside the composition are ignored. Returns whether a marker was
+/// added.
+pub fn toggle_marker(composition: &mut Composition, frame: i64) -> bool {
+    if !(0..composition.duration_frames).contains(&frame) {
+        return false;
+    }
+    let before = composition.markers.len();
+    composition.markers.retain(|marker| marker.frame != frame);
+    if composition.markers.len() != before {
+        return false;
+    }
+    composition.markers.push(crate::model::Marker { frame, label: "Marker".to_owned() });
+    composition.markers.sort_by_key(|marker| marker.frame);
+    true
+}
+
+/// Moves `layers` in time one after another, in the order given (their keyframes move with
+/// them). Each starts `step` frames after the one before it starts, or, with `None`, where the
+/// one before ends (After Effects' Sequence Layers). The first stays put; a layer that would
+/// overlap another clip on its track moves to a track of its own, and locked layers stay where
+/// they are (the next one follows on from where they really are). Returns whether anything
+/// moved.
+pub fn stagger_layers(composition: &mut Composition, layers: &[Id], step: Option<i64>) -> bool {
+    let mut previous: Option<(i64, i64)> = None;
+    let mut moved = false;
+    for &id in layers {
+        let Some(layer) = composition.layer(id) else { continue };
+        if let Some((previous_in, previous_out)) = previous {
+            let target = match step {
+                Some(step) => previous_in + step,
+                None => previous_out,
+            }
+            .clamp(0, (composition.duration_frames - 1).max(0));
+            if target != layer.in_frame && !layer.switches.locked {
+                let track = layer.track;
+                crate::tracks::place_clip(composition, id, track, target);
+                moved = true;
+            }
+        }
+        if let Some(layer) = composition.layer(id) {
+            previous = Some((layer.in_frame, layer.out_frame));
+        }
+    }
+    moved
+}
+
 /// Removes an effect from a layer.
 pub fn remove_effect(composition: &mut Composition, layer_id: Id, effect_id: Id) {
     if let Some(layer) = composition.layer_mut(layer_id) {
@@ -955,6 +1025,63 @@ mod tests {
         // Asking again finds the same layer rather than making another.
         assert_eq!(ensure_color_grade_layer(&mut project, ids::MAIN_COMP), Some(grade));
         assert_eq!(project.composition(ids::MAIN_COMP).unwrap().layers.len(), before + 1);
+    }
+
+    #[test]
+    fn solids_and_nulls_go_on_top_and_nulls_draw_nothing() {
+        let mut project = sample::sample_project();
+        let solid = add_solid_layer(&mut project, ids::MAIN_COMP, Rgba::hex(0x3366ff), 12).unwrap();
+        let null = add_null_layer(&mut project, ids::MAIN_COMP, 0).unwrap();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        assert_eq!(comp.layers[0].id, null, "the newest on top");
+        let (solid, null) = (comp.layer(solid).unwrap(), comp.layer(null).unwrap());
+        assert_eq!((solid.name.as_str(), solid.size, solid.in_frame, solid.out_frame), ("Solid 1", comp.size(), 12, comp.duration_frames));
+        assert!(matches!(null.content, LayerContent::Solid { color } if color.a == 0.0), "a null draws nothing");
+        assert_eq!((null.name.as_str(), null.size), ("Null 1", Vec2::new(NULL_SIZE, NULL_SIZE)));
+        assert_eq!(null.transform.as_ref().unwrap().position.value, comp.size() * 0.5, "in the middle");
+        assert!(null.switches.visible, "a null can be picked in the viewer");
+        assert_eq!(add_null_layer(&mut project, ids::MAIN_COMP, 0).and_then(|id| project.composition(ids::MAIN_COMP).unwrap().layer(id).map(|l| l.name.clone())).as_deref(), Some("Null 2"));
+    }
+
+    #[test]
+    fn markers_toggle_at_a_frame() {
+        let mut project = sample::sample_project();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        comp.markers.clear();
+        assert!(toggle_marker(comp, 30));
+        assert!(toggle_marker(comp, 10));
+        assert_eq!(comp.markers.iter().map(|marker| marker.frame).collect::<Vec<_>>(), vec![10, 30], "kept in frame order");
+        assert!(!toggle_marker(comp, 30), "pressing it on a marker removes it");
+        assert_eq!(comp.markers.len(), 1);
+        assert!(!toggle_marker(comp, -1) && !toggle_marker(comp, comp.duration_frames), "outside the composition");
+        assert_eq!(comp.markers.len(), 1);
+    }
+
+    #[test]
+    fn staggering_offsets_each_layer_from_the_one_before() {
+        let mut project = sample::sample_project();
+        let a = add_solid_layer(&mut project, ids::MAIN_COMP, Rgba::hex(0xff0000), 0).unwrap();
+        let b = add_solid_layer(&mut project, ids::MAIN_COMP, Rgba::hex(0x00ff00), 0).unwrap();
+        let c = add_solid_layer(&mut project, ids::MAIN_COMP, Rgba::hex(0x0000ff), 0).unwrap();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        for (id, length) in [(a, 20), (b, 30), (c, 10)] {
+            let layer = comp.layer_mut(id).unwrap();
+            layer.in_frame = 5;
+            layer.start_frame = 5;
+            layer.out_frame = 5 + length;
+        }
+        let ins = |comp: &Composition| [a, b, c].map(|id| comp.layer(id).unwrap().in_frame);
+        assert!(stagger_layers(comp, &[a, b, c], Some(4)));
+        assert_eq!(ins(comp), [5, 9, 13], "four frames apart, from the first");
+        // Sequenced end to end, in the order given.
+        assert!(stagger_layers(comp, &[c, a, b], None));
+        assert_eq!(ins(comp), [23, 43, 13]);
+        assert_eq!(comp.layer(b).unwrap().out_frame - comp.layer(b).unwrap().in_frame, 30, "lengths are kept");
+        assert!(!stagger_layers(comp, &[c, a, b], None), "already in sequence");
+        // No two clips on one track overlap afterwards.
+        for layer in &comp.layers {
+            assert!(!comp.layers.iter().any(|other| other.id != layer.id && other.track == layer.track && other.in_frame < layer.out_frame && layer.in_frame < other.out_frame), "{} overlaps", layer.name);
+        }
     }
 
     #[test]

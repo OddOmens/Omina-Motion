@@ -131,6 +131,54 @@ pub fn section(title: impl Into<SharedString>, trailing: Option<AnyElement>) -> 
         .children(trailing)
 }
 
+/// A card's heading: what it shows and the controls on its right. Each control in
+/// `trailing` must stop its click from reaching the heading, which folds the card.
+pub struct CardHeading {
+    pub id: ElementId,
+    pub icon: Option<IconName>,
+    pub title: SharedString,
+    pub open: bool,
+    /// Drawn faded, for something turned off (an effect that is hidden, say).
+    pub muted: bool,
+    pub trailing: Vec<AnyElement>,
+}
+
+/// A rounded card holding one group of settings, as the Properties, Effects and Color tabs
+/// all show them: a heading that folds the card on a click, and `body` under it while open.
+pub fn card(heading: CardHeading, on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, body: Option<AnyElement>) -> Div {
+    let CardHeading { id, icon, title, open, muted, trailing } = heading;
+    let text = if muted { color::MUTED } else { color::TEXT };
+    let row = div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .h(px(34.0))
+        .px_2()
+        .cursor_pointer()
+        .hover(|style| style.bg(hsla(color::HOVER)))
+        .on_click(on_toggle)
+        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(hsla(color::MUTED)))
+        .children(icon.map(|icon| Icon::new(icon).size(px(14.0)).text_color(hsla(if muted { color::MUTED } else { color::ACCENT }))))
+        .child(div().flex_1().min_w_0().truncate().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(hsla(text)).child(title))
+        .children(trailing)
+        .test_support();
+    div()
+        .flex_none()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(hsla(color::HAIRLINE))
+        .bg(hsla(color::RAISED))
+        .overflow_hidden()
+        .child(row)
+        .children(body.filter(|_| open).map(|body| div().px_3().pb_3().when(muted, |body| body.opacity(0.5)).child(body)))
+}
+
+/// The list of cards a settings tab scrolls through, spaced as the Color tab spaces them.
+pub fn card_list(id: impl Into<ElementId>) -> gpui_kit::Stateful<Div> {
+    div().id(id).relative().size_full().overflow_y_scroll().px_2p5().py_2().flex().flex_col().gap_2()
+}
+
 /// A thin rule between panel sections.
 pub fn divider() -> Div {
     div().h(px(1.0)).my_1p5().bg(hsla(color::HAIRLINE))

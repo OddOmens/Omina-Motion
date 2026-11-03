@@ -42,6 +42,34 @@ pub const CATEGORIES: &[EffectCategory] = &[
             },
         ],
     },
+    // Moving, cutting and repeating the picture without changing its colors.
+    EffectCategory {
+        name: "Transform",
+        effects: &[
+            EffectDefinition {
+                name: "Crop",
+                parameters: &[
+                    (param("Left", "%", 0.2, PERCENT.0, PERCENT.1, 1), 0.0),
+                    (param("Right", "%", 0.2, PERCENT.0, PERCENT.1, 1), 0.0),
+                    (param("Top", "%", 0.2, PERCENT.0, PERCENT.1, 1), 0.0),
+                    (param("Bottom", "%", 0.2, PERCENT.0, PERCENT.1, 1), 0.0),
+                    (param("Feather", "px", 0.5, 0.0, 1000.0, 1), 0.0),
+                ],
+            },
+            // One side of a line through the center reflected onto the other.
+            EffectDefinition { name: "Mirror", parameters: &[(param("Axis Angle", "°", 0.5, -3600.0, 3600.0, 1), 0.0), (param("Center Offset", "%", 0.2, -50.0, 50.0, 1), 0.0)] },
+            // Shifts the picture with wraparound, so what leaves one edge comes back at the other.
+            EffectDefinition { name: "Offset", parameters: &[(param("Shift X", "%", 0.2, -100.0, 100.0, 1), 0.0), (param("Shift Y", "%", 0.2, -100.0, 100.0, 1), 0.0)] },
+            EffectDefinition {
+                name: "Motion Tile",
+                parameters: &[
+                    (param("Tiles Across", "", 0.05, 1.0, 50.0, 1), 3.0),
+                    (param("Tiles Down", "", 0.05, 1.0, 50.0, 1), 3.0),
+                    (param("Mirror Edges", "", 0.05, 0.0, 1.0, 0), 0.0),
+                ],
+            },
+        ],
+    },
     EffectCategory {
         name: "Color Correction",
         effects: &[
@@ -140,6 +168,19 @@ pub const CATEGORIES: &[EffectCategory] = &[
                 ],
             },
             EffectDefinition { name: "Turbulent Displace", parameters: &[(param("Amount", "", 0.5, -10000.0, 10000.0, 1), 50.0), (param("Size", "", 0.5, 2.0, 10000.0, 1), 100.0)] },
+            // Radius is a percentage of half the frame's shorter side.
+            EffectDefinition { name: "Twirl", parameters: &[(param("Angle", "°", 0.5, -3600.0, 3600.0, 1), 90.0), (param("Radius", "%", 0.2, PERCENT.0, PERCENT.1, 1), 50.0)] },
+            EffectDefinition {
+                name: "Ripple",
+                parameters: &[
+                    (param("Amplitude", "px", 0.1, 0.0, 1000.0, 1), 10.0),
+                    (param("Wavelength", "px", 0.5, 1.0, 4000.0, 0), 40.0),
+                    (param("Speed", "", 0.05, -100.0, 100.0, 1), 1.0),
+                ],
+            },
+            EffectDefinition { name: "Kaleidoscope", parameters: &[(param("Segments", "", 0.05, 2.0, 32.0, 0), 6.0), (param("Rotation", "°", 0.5, -3600.0, 3600.0, 1), 0.0)] },
+            // Rectangular to polar: the top edge wraps round to the center, the bottom to the rim.
+            EffectDefinition { name: "Polar Coordinates", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
         ],
     },
     EffectCategory {
@@ -148,22 +189,34 @@ pub const CATEGORIES: &[EffectCategory] = &[
             EffectDefinition { name: "Fill", parameters: &[(param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 1), 100.0)] },
             EffectDefinition { name: "Gradient Ramp", parameters: &[(param("Ramp Scatter", "", 0.5, 0.0, 256.0, 1), 0.0)] },
             EffectDefinition { name: "Fractal Noise", parameters: &[(param("Contrast", "", 0.5, 0.0, 10000.0, 1), 100.0), (param("Brightness", "", 0.5, -10000.0, 10000.0, 1), 0.0), (param("Evolution", "°", 0.5, -100000.0, 100000.0, 1), 0.0)] },
-            EffectDefinition { name: "Stroke", parameters: &[(param("Brush Size", "", 0.1, 0.0, 1000.0, 1), 2.0), (param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 1), 100.0)] },
+            // A white outline around the layer's shape, drawn outside its edge.
+            EffectDefinition { name: "Stroke", parameters: &[(param("Brush Size", "px", 0.1, 0.0, 200.0, 1), 4.0), (param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 1), 100.0)] },
         ],
     },
     EffectCategory {
         name: "Keying",
         effects: &[
-            EffectDefinition { name: "Linear Color Key", parameters: &[(param("Matching Tolerance", "%", 0.5, PERCENT.0, PERCENT.1, 1), 10.0), (param("Matching Softness", "%", 0.5, PERCENT.0, PERCENT.1, 1), 0.0)] },
-            EffectDefinition { name: "Key Cleaner", parameters: &[(param("Additional Edge Radius", "", 0.05, 0.0, 100.0, 1), 1.0)] },
-            EffectDefinition { name: "Spill Suppressor", parameters: &[(param("Suppression", "", 0.5, 0.0, 200.0, 0), 100.0)] },
+            // Removes colors near the key hue (120° is green screen, 240° blue screen).
+            EffectDefinition {
+                name: "Linear Color Key",
+                parameters: &[
+                    (param("Key Hue", "°", 0.5, 0.0, 360.0, 0), 120.0),
+                    (param("Matching Tolerance", "%", 0.5, PERCENT.0, PERCENT.1, 1), 20.0),
+                    (param("Matching Softness", "%", 0.5, PERCENT.0, PERCENT.1, 1), 10.0),
+                ],
+            },
+            // Pulls a key's edge in by the radius and softens it, leaving solid areas alone.
+            EffectDefinition { name: "Key Cleaner", parameters: &[(param("Additional Edge Radius", "px", 0.05, 0.0, 100.0, 1), 1.0)] },
+            // Takes the screen's color cast out of edges and reflections.
+            EffectDefinition { name: "Spill Suppressor", parameters: &[(param("Key Hue", "°", 0.5, 0.0, 360.0, 0), 120.0), (param("Suppression", "", 0.5, 0.0, 200.0, 0), 100.0)] },
         ],
     },
     EffectCategory {
         name: "Noise & Grain",
         effects: &[
             EffectDefinition { name: "Add Grain", parameters: &[(param("Intensity", "", 0.01, 0.0, 10.0, 2), 1.0), (param("Size", "", 0.01, 0.0, 10.0, 2), 1.0)] },
-            EffectDefinition { name: "Median", parameters: &[(param("Radius", "", 0.1, 0.0, 255.0, 0), 1.0)] },
+            // The middle value of nine samples spaced by the radius, which removes specks and keeps edges.
+            EffectDefinition { name: "Median", parameters: &[(param("Radius", "px", 0.1, 0.0, 100.0, 1), 1.0)] },
         ],
     },
     EffectCategory {
@@ -178,6 +231,20 @@ pub const CATEGORIES: &[EffectCategory] = &[
             EffectDefinition { name: "Letterbox", parameters: &[(param("Aspect Ratio", ":1", 0.01, 0.5, 4.0, 2), 2.39), (param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
             EffectDefinition { name: "Light Leak", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 60.0), (param("Hue", "°", 0.5, 0.0, 360.0, 0), 25.0), (param("Speed", "", 0.01, 0.0, 10.0, 2), 0.3)] },
             EffectDefinition { name: "Strobe", parameters: &[(param("Flashes per Second", "", 0.05, 0.1, 30.0, 1), 4.0), (param("Flash Length", "%", 0.5, 1.0, PERCENT.1, 0), 30.0), (param("Brightness", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
+            // Print-style dots: black on white, larger where the picture is darker.
+            EffectDefinition { name: "Halftone", parameters: &[(param("Dot Size", "px", 0.1, 2.0, 500.0, 1), 8.0), (param("Angle", "°", 0.5, -3600.0, 3600.0, 1), 45.0)] },
+            EffectDefinition { name: "Find Edges", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
+            // Direction is where the light comes from, clockwise from straight up.
+            EffectDefinition { name: "Emboss", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, 500.0, 0), 100.0), (param("Direction", "°", 0.5, -3600.0, 3600.0, 1), 135.0)] },
+            // Dark areas take one color and bright areas the other.
+            EffectDefinition {
+                name: "Duotone",
+                parameters: &[
+                    (param("Shadow Hue", "°", 0.5, 0.0, 360.0, 0), 275.0),
+                    (param("Highlight Hue", "°", 0.5, 0.0, 360.0, 0), 45.0),
+                    (param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0),
+                ],
+            },
         ],
     },
     EffectCategory {
@@ -185,6 +252,10 @@ pub const CATEGORIES: &[EffectCategory] = &[
         effects: &[
             EffectDefinition { name: "Wiggle", parameters: &[(param("Amount", "px", 0.5, 0.0, 2000.0, 1), 20.0), (param("Wiggles per Second", "", 0.05, 0.0, 60.0, 1), 3.0), (param("Seed", "", 0.1, 0.0, 1000.0, 0), 1.0)] },
             EffectDefinition { name: "Camera Shake", parameters: &[(param("Amount", "px", 0.5, 0.0, 2000.0, 1), 12.0), (param("Shakes per Second", "", 0.05, 0.0, 60.0, 1), 8.0), (param("Rotation", "°", 0.05, 0.0, 45.0, 1), 1.5), (param("Zoom", "%", 0.1, 0.0, 50.0, 1), 4.0)] },
+            // Grows and shrinks smoothly about the center, like a heartbeat.
+            EffectDefinition { name: "Pulse", parameters: &[(param("Amount", "%", 0.2, PERCENT.0, PERCENT.1, 1), 10.0), (param("Pulses per Second", "", 0.05, 0.0, 30.0, 2), 1.0)] },
+            // Rocks back and forth about the center like a pendulum.
+            EffectDefinition { name: "Swing", parameters: &[(param("Angle", "°", 0.1, 0.0, 180.0, 1), 10.0), (param("Swings per Second", "", 0.05, 0.0, 30.0, 2), 0.5)] },
         ],
     },
     EffectCategory {
@@ -202,6 +273,19 @@ pub const CATEGORIES: &[EffectCategory] = &[
             EffectDefinition { name: "Linear Wipe", parameters: &[(param("Transition Completion", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0), (param("Wipe Angle", "°", 0.5, -3600.0, 3600.0, 1), 90.0), (param("Feather", "", 0.5, 0.0, 10000.0, 1), 0.0)] },
             EffectDefinition { name: "Radial Wipe", parameters: &[(param("Transition Completion", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0), (param("Start Angle", "°", 0.5, -3600.0, 3600.0, 1), 0.0), (param("Feather", "", 0.5, 0.0, 10000.0, 1), 0.0)] },
             EffectDefinition { name: "Block Dissolve", parameters: &[(param("Transition Completion", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0), (param("Block Width", "", 0.5, 1.0, 10000.0, 1), 10.0)] },
+            // A circle closing in on the center.
+            EffectDefinition { name: "Iris Wipe", parameters: &[(param("Transition Completion", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0), (param("Feather", "px", 0.5, 0.0, 10000.0, 1), 0.0)] },
+            EffectDefinition {
+                name: "Venetian Blinds",
+                parameters: &[
+                    (param("Transition Completion", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0),
+                    (param("Direction", "°", 0.5, -3600.0, 3600.0, 1), 0.0),
+                    (param("Width", "px", 0.5, 1.0, 10000.0, 1), 20.0),
+                    (param("Feather", "px", 0.5, 0.0, 10000.0, 1), 0.0),
+                ],
+            },
+            // The layer's own brightness sets the order: dark areas go first, bright ones last.
+            EffectDefinition { name: "Gradient Wipe", parameters: &[(param("Transition Completion", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0), (param("Softness", "%", 0.5, PERCENT.0, PERCENT.1, 0), 10.0)] },
         ],
     },
 ];
@@ -256,9 +340,13 @@ mod tests {
         for effect in CATEGORIES.iter().flat_map(|category| category.effects) {
             assert!(names.insert(effect.name), "duplicate effect {}", effect.name);
             assert!(!effect.parameters.is_empty(), "{} has no parameters", effect.name);
+            // The effect shader takes at most twelve parameters.
+            assert!(effect.parameters.len() <= 12, "{} has too many parameters", effect.name);
+            let mut parameter_names = std::collections::HashSet::new();
             for (info, default) in effect.parameters {
                 assert!(info.min <= *default && *default <= info.max, "{} default out of range", info.name);
                 assert!(info.step > 0.0);
+                assert!(parameter_names.insert(info.name), "{} has two parameters called {}", effect.name, info.name);
             }
         }
     }

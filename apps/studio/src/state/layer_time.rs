@@ -30,6 +30,9 @@ pub enum LayerTimeEdit {
     Slide,
     /// The clips Track Select Forward picked move together.
     Group,
+    /// One end moves and the clip's speed changes so the same footage fills it (the Rate
+    /// Stretch tool).
+    Stretch(End),
 }
 
 /// A layer bar being dragged: which layer and edit, and its timing when the drag began.
@@ -57,7 +60,7 @@ impl EditorState {
             out_frame: found.out_frame,
         });
         // Edits that change several clips are applied afresh to the timing at the start.
-        self.layer_time_base = matches!(edit, LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group).then(|| self.composition().clone());
+        self.layer_time_base = matches!(edit, LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group | LayerTimeEdit::Stretch(_)).then(|| self.composition().clone());
     }
 
     /// Picks `layer` and every clip starting at or after it (on its track only, with
@@ -75,8 +78,8 @@ impl EditorState {
         let finished = self.layer_time_drag.take();
         self.layer_time_base = None;
         self.clear_snap_line();
-        // A layer moved onto a busy part of its track moves up to a track of its own.
-        if let Some(drag) = finished.filter(|drag| drag.edit == LayerTimeEdit::Move) {
+        // A layer moved or stretched onto a busy part of its track moves up to a track of its own.
+        if let Some(drag) = finished.filter(|drag| drag.edit == LayerTimeEdit::Move || matches!(drag.edit, LayerTimeEdit::Stretch(_))) {
             self.settle_on_track(drag.layer);
         }
     }
@@ -99,7 +102,7 @@ impl EditorState {
             LayerTimeEdit::TrimOut => (vec![drag.out_frame], SnapExclusions { layer_edges: own, ..Default::default() }),
             // The source's ends may line up with the clip's own in and out points.
             // Applied from the starting timing above, without snapping.
-            LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group => (Vec::new(), SnapExclusions::default()),
+            LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group | LayerTimeEdit::Stretch(_) => (Vec::new(), SnapExclusions::default()),
             LayerTimeEdit::Slip => {
                 let end = self.source_span(drag.layer).map_or(drag.start_frame, |(start, end)| end - start + drag.start_frame);
                 (vec![drag.start_frame, end], SnapExclusions::default())
@@ -117,7 +120,7 @@ impl EditorState {
             LayerTimeEdit::Slip => {
                 trim::slip_to(&mut self.project, comp, drag.layer, drag.start_frame + delta);
             }
-            LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group => {}
+            LayerTimeEdit::Ripple(_) | LayerTimeEdit::Roll(_) | LayerTimeEdit::Slide | LayerTimeEdit::Group | LayerTimeEdit::Stretch(_) => {}
         }
     }
 
@@ -140,6 +143,9 @@ impl EditorState {
             LayerTimeEdit::Group => {
                 let picked = self.selected_layers.clone();
                 trim_tools::move_group(self.composition_mut(), &picked, delta);
+            }
+            LayerTimeEdit::Stretch(end) => {
+                studio_core::speed::stretch_to(self.composition_mut(), drag.layer, end, edge(end) + delta);
             }
             _ => {}
         }

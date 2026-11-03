@@ -359,6 +359,37 @@ pub fn set_playback_quality(workspace: &mut Workspace, quality: crate::app_setti
     crate::app_settings::update(|settings| settings.playback_quality = quality);
 }
 
+/// The guides over the picture: the action safe (93%) and title safe (90%) boxes broadcast
+/// uses, the rule of thirds, and a small cross at the center. They are only drawn, never
+/// rendered or exported.
+fn guides_overlay() -> impl IntoElement {
+    let line = gpui_kit::rgba(0xffffff66);
+    let faint = gpui_kit::rgba(0xffffff33);
+    // A box `inset` of the frame in from each edge, as a share of its size.
+    let safe = |inset: f32| div().absolute().top(relative(inset)).bottom(relative(inset)).left(relative(inset)).right(relative(inset)).border_1().border_color(line);
+    let across = |at: f32| div().absolute().left_0().right_0().top(relative(at)).h(px(1.0)).bg(faint);
+    let down = |at: f32| div().absolute().top_0().bottom_0().left(relative(at)).w(px(1.0)).bg(faint);
+    let cross = div()
+        .absolute()
+        .left(relative(0.5))
+        .top(relative(0.5))
+        .child(div().absolute().left(px(-8.0)).top(px(-0.5)).w(px(16.0)).h(px(1.0)).bg(line))
+        .child(div().absolute().top(px(-8.0)).left(px(-0.5)).h(px(16.0)).w(px(1.0)).bg(line));
+    div()
+        .id("viewer-guides-overlay")
+        .absolute()
+        .size_full()
+        .overflow_hidden()
+        .child(safe(0.035))
+        .child(safe(0.05))
+        .child(across(1.0 / 3.0))
+        .child(across(2.0 / 3.0))
+        .child(down(1.0 / 3.0))
+        .child(down(2.0 / 3.0))
+        .child(cross)
+        .test_support()
+}
+
 /// The bar under the viewer (the panel's footer), in one row: magnification and frame size on the left, the play
 /// and frame-stepping controls in the middle, and the current timecode on the right.
 fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
@@ -378,6 +409,10 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         .child(format!("{} × {}", composition.width, composition.height))
         .child(icon_button("viewer-snapping", IconName::Magnet, "Snap anchor points to corners, edges and center", workspace.state.viewer_snapping, cx.listener(|this, _, _, cx| {
             this.state.viewer_snapping = !this.state.viewer_snapping;
+            cx.notify();
+        })))
+        .child(icon_button("viewer-guides", IconName::Grid3x3, "Safe Areas and Grid (')", workspace.ui.guides, cx.listener(|this, _, _, cx| {
+            this.ui.guides = !this.ui.guides;
             cx.notify();
         })));
     let timecode = div().flex_1().flex().justify_end().child(
@@ -1045,6 +1080,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 .text_color(hsla(color::TEXT))
                 .child(format!("Preview: {}", lut.name()))
         }))
+        .children(workspace.ui.guides.then(guides_overlay))
         .children(selection_overlay(workspace, cx))
         .children(pen_draft_overlay(workspace))
         .children(cutout_clicks_overlay(workspace))

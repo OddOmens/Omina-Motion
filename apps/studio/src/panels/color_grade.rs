@@ -24,7 +24,7 @@ use gpui_kit::{
 use studio_core::model::{Id, LutSource, Rgba};
 use studio_core::property::PropertyPath;
 
-use super::chrome::{EmptyDragView, MeasuredBounds, icon_button};
+use super::chrome::{CardHeading, EmptyDragView, MeasuredBounds, card, card_list, icon_button};
 use super::fields::{FieldTarget, value_field};
 use crate::state::GradeTarget;
 use crate::theme::{color, hsla, size};
@@ -87,6 +87,8 @@ enum Track {
     Light,
     /// Gray to full color.
     Saturation,
+    /// Around the color wheel, red to red (for hue angles from 0° to 360°).
+    Hue,
 }
 
 /// What importing a `.cube` file does once it is in the LUT library.
@@ -471,7 +473,35 @@ fn track_fill(track: Track) -> gpui_kit::Background {
         Track::Tint => gradient(0x3fae5a, 0xc04fb8),
         Track::Light => gradient(0x050505, 0xf2f2f2),
         Track::Saturation => gradient(0x7a7a7a, 0xe2453c),
+        // Drawn by `track_bar` as several pieces; this is only what shows under them.
+        Track::Hue => hsla(color::HAIRLINE).into(),
     }
+}
+
+/// The colored bar of a slider's track. A hue track runs through six colors, which takes one
+/// two-color gradient for each step between them.
+fn track_bar(track: Track) -> gpui_kit::Div {
+    let bar = div().absolute().left_0().right_0().top(px(6.0)).h(px(4.0)).rounded_full().overflow_hidden();
+    match track {
+        Track::Hue => {
+            const STOPS: [u32; 7] = [0xff0000, 0xffff00, 0x00ff00, 0x00ffff, 0x0000ff, 0xff00ff, 0xff0000];
+            bar.flex().children(STOPS.windows(2).map(|pair| {
+                div().flex_1().h_full().bg(linear_gradient(90.0, linear_color_stop(gpui_kit::rgb(pair[0]), 0.0), linear_color_stop(gpui_kit::rgb(pair[1]), 1.0)))
+            }))
+        }
+        _ => bar.bg(track_fill(track)),
+    }
+}
+
+/// The slider the Effects tab shows under an effect parameter, when one helps: for settings
+/// with a modest range (a slider over thousands of pixels or many turns would be too coarse
+/// to use). Hue angles get a rainbow track.
+pub(crate) fn effect_slider_track(layer: Id, effect: Id, parameter: usize, workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let info = workspace.state.composition().layer(layer)?.effects.iter().find(|e| e.id == effect)?.properties.get(parameter)?.info;
+    let span = info.max - info.min;
+    let hue = info.unit == "°" && info.min == 0.0 && info.max == 360.0;
+    let useful = span > 0.0 && (hue || (span <= 500.0 && info.unit != "°"));
+    useful.then(|| slider_track(layer, effect, parameter, if hue { Track::Hue } else { Track::Plain }, workspace, cx))
 }
 
 /// A slider's track: click or drag along it to set the value, double-click to put it back. A
@@ -490,7 +520,7 @@ fn slider_track(layer: Id, effect: Id, parameter: usize, track: Track, workspace
         .h(px(16.0))
         .cursor_pointer()
         .child(slider_bounds(workspace, effect, parameter).probe())
-        .child(div().absolute().left_0().right_0().top(px(6.0)).h(px(4.0)).rounded_full().bg(track_fill(track)))
+        .child(track_bar(track))
         .children(default_mark)
         .child(div().absolute().top(px(2.0)).left(relative(at(value))).ml(px(-6.0)).size(px(12.0)).rounded_full().bg(gpui_kit::rgb(0xffffff)).border_1().border_color(gpui_kit::rgb(0x000000)).shadow_md())
         .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -603,48 +633,47 @@ fn section_card(section: &'static Section, layer: Id, effect: Id, workspace: &Wo
     let enabled = workspace.state.composition().layer(layer).and_then(|l| l.effects.iter().find(|e| e.id == effect)).is_some_and(|e| e.enabled);
     // Cards start open; folding one is remembered.
     let open = !workspace.ui.toggled_sections.contains(key);
-    let heading = div()
-        .id(ElementId::Name(format!("{key}-heading").into()))
-        .flex()
-        .items_center()
-        .gap_1p5()
-        .h(px(34.0))
-        .px_2()
-        .cursor_pointer()
-        .hover(|style| style.bg(hsla(color::HOVER)))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.ui.toggle_section(key);
-            cx.notify();
-        }))
-        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(hsla(color::MUTED)))
-        .child(Icon::new(section.icon).size(px(14.0)).text_color(hsla(if enabled { color::ACCENT } else { color::MUTED })))
-        .child(div().flex_1().min_w_0().truncate().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(hsla(if enabled { color::TEXT } else { color::MUTED })).child(section.title))
-        .child(icon_button(ElementId::Name(format!("{key}-on").into()), if enabled { IconName::Eye } else { IconName::EyeOff }, if enabled { "Turn Off" } else { "Turn On" }, false, cx.listener(move |this, _, _, cx| {
+    let heading = CardHeading {
+        id: ElementId::Name(format!("{key}-heading").into()),
+        icon: Some(section.icon),
+        title: section.title.into(),
+        open,
+        muted: !enabled,
+        trailing: effect_buttons(|part| format!("{key}-{part}"), layer, effect, enabled, cx),
+    };
+    let body = open.then(|| controls(section, layer, effect, workspace, cx).into_any_element());
+    card(heading, cx.listener(move |this, _, _, cx| {
+        this.ui.toggle_section(key);
+        cx.notify();
+    }), body)
+    .into_any_element()
+}
+
+/// The buttons on an effect card's heading: turn the effect off or on, reset it, remove it.
+/// `name` gives each its element id from "on", "reset" or "remove". Used by the Color and
+/// Effects tabs alike.
+pub(crate) fn effect_buttons(name: impl Fn(&str) -> String, layer: Id, effect: Id, enabled: bool, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
+    vec![
+        icon_button(ElementId::Name(name("on").into()), if enabled { IconName::Eye } else { IconName::EyeOff }, if enabled { "Turn Off" } else { "Turn On" }, false, cx.listener(move |this, _, _, cx| {
             // The heading folds on a click; the buttons in it don't.
             cx.stop_propagation();
             this.state.toggle_effect(layer, effect);
             cx.notify();
-        })))
-        .child(icon_button(ElementId::Name(format!("{key}-reset").into()), IconName::RotateCcw, "Reset", false, cx.listener(move |this, _, _, cx| {
+        }))
+        .into_any_element(),
+        icon_button(ElementId::Name(name("reset").into()), IconName::RotateCcw, "Reset", false, cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             super::effect_controls::reset_effect(this, layer, effect);
             cx.notify();
-        })))
-        .child(icon_button(ElementId::Name(format!("{key}-remove").into()), IconName::Trash, "Remove", false, cx.listener(move |this, _, _, cx| {
+        }))
+        .into_any_element(),
+        icon_button(ElementId::Name(name("remove").into()), IconName::Trash, "Remove", false, cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             this.state.remove_effect(layer, effect);
             cx.notify();
-        })));
-    div()
-        .flex_none()
-        .rounded(px(8.0))
-        .border_1()
-        .border_color(hsla(color::HAIRLINE))
-        .bg(hsla(color::RAISED))
-        .overflow_hidden()
-        .child(heading)
-        .when(open, |card| card.child(controls(section, layer, effect, workspace, cx).px_3().pb_3().when(!enabled, |controls| controls.opacity(0.5))))
-        .into_any_element()
+        }))
+        .into_any_element(),
+    ]
 }
 
 /// Adds the correction `section` to what `target` grades, opening its card.
@@ -753,16 +782,7 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let target = workspace.ui.grade_target;
     let layer = workspace.state.grade_layer(target);
     let layer_name = layer.and_then(|id| workspace.state.composition().layer(id)).map(|layer| layer.name.clone());
-    let mut list = div()
-        .id("color-grade")
-        .relative()
-        .size_full()
-        .overflow_y_scroll()
-        .px_2p5()
-        .py_2()
-        .flex()
-        .flex_col()
-        .gap_2()
+    let mut list = card_list("color-grade")
         .child(workspace.ui.grade_bounds.probe())
         .child(div().flex().flex_col().gap_1().child(target_switch(target, cx)).child(target_line(target, layer_name.as_deref())));
     if target == GradeTarget::Clip && layer.is_none() {

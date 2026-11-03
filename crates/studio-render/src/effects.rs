@@ -20,8 +20,9 @@ pub enum Pass {
     Lut { intensity: f32 },
 }
 
-/// Effects whose controls exist in the catalog but which the GPU does not draw yet.
-const NOT_RENDERED: &[&str] = &["Stroke", "Linear Color Key", "Key Cleaner", "Spill Suppressor", "Median"];
+/// Effects whose controls exist in the catalog but which the GPU does not draw yet. Every
+/// catalog effect is drawn today; new ones go here until their shader exists.
+const NOT_RENDERED: &[&str] = &[];
 
 /// Whether the renderer draws this catalog effect.
 pub fn is_rendered(name: &str) -> bool {
@@ -80,6 +81,28 @@ pub fn passes(effect: &Effect, frame: f64, scale: f32) -> Option<Vec<Pass>> {
         "RGB Split" => shader(49, &[px(0), v(1)]),
         "VHS" => shader(50, &[v(0), v(1)]),
         "Scanlines" => shader(51, &[px(0), v(1), v(2)]),
+        "Linear Color Key" => shader(61, &[v(0), v(1), v(2)]),
+        "Spill Suppressor" => shader(62, &[v(0), v(1)]),
+        "Key Cleaner" => shader(63, &[px(0)]),
+        "Median" => shader(64, &[px(0)]),
+        "Stroke" => shader(65, &[px(0), v(1)]),
+        "Crop" => shader(66, &[v(0), v(1), v(2), v(3), px(4)]),
+        "Mirror" => shader(67, &[v(0), v(1)]),
+        "Offset" => shader(68, &[v(0), v(1)]),
+        "Motion Tile" => shader(69, &[v(0), v(1), v(2)]),
+        "Twirl" => shader(70, &[v(0), v(1)]),
+        "Ripple" => shader(71, &[px(0), px(1), v(2)]),
+        "Kaleidoscope" => shader(72, &[v(0), v(1)]),
+        "Polar Coordinates" => shader(73, &[v(0)]),
+        "Halftone" => shader(74, &[px(0), v(1)]),
+        "Find Edges" => shader(75, &[v(0)]),
+        "Emboss" => shader(76, &[v(0), v(1)]),
+        "Duotone" => shader(77, &[v(0), v(1), v(2)]),
+        "Iris Wipe" => shader(78, &[v(0), px(1)]),
+        "Venetian Blinds" => shader(79, &[v(0), v(1), px(2), px(3)]),
+        "Gradient Wipe" => shader(80, &[v(0), v(1)]),
+        "Pulse" => shader(81, &[v(0), v(1)]),
+        "Swing" => shader(82, &[v(0), v(1)]),
         "Glow" => Pass::Glow { threshold: v(0) / 100.0, sigma: px(1) * 0.5, intensity: v(2) },
         "Drop Shadow" => {
             // Direction is measured clockwise from straight up, as in After Effects.

@@ -48,6 +48,14 @@ actions!(studio, [
     SlideTool,
     TrackSelectTool,
     EyedropperTool,
+    RateStretchTool,
+    ToggleMarker,
+    NewSolid,
+    NewAdjustmentLayer,
+    NewNull,
+    SequenceLayers,
+    StaggerLayers,
+    ToggleGuides,
     Copy,
     Paste,
     Duplicate,
@@ -109,6 +117,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("a", TrackSelectTool, Some(NOT_TYPING)),
         // Photoshop's eyedropper key.
         KeyBinding::new("i", EyedropperTool, Some(NOT_TYPING)),
+        // Premiere's Rate Stretch and marker keys.
+        KeyBinding::new("r", RateStretchTool, Some(NOT_TYPING)),
+        KeyBinding::new("m", ToggleMarker, Some(NOT_TYPING)),
+        // After Effects' New Solid, Adjustment Layer and Null Object.
+        KeyBinding::new("cmd-y", NewSolid, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-alt-y", NewAdjustmentLayer, Some(KEY_CONTEXT)),
+        KeyBinding::new("cmd-alt-shift-y", NewNull, Some(KEY_CONTEXT)),
+        // After Effects' title/action safe toggle.
+        KeyBinding::new("'", ToggleGuides, Some(NOT_TYPING)),
         KeyBinding::new("enter", FinishPath, Some(NOT_TYPING)),
         // Outside text fields, so copying and pasting text in a field still works.
         KeyBinding::new("cmd-c", Copy, Some(NOT_TYPING)),
@@ -177,6 +194,17 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Snapping", ToggleSnapping),
         ]),
         Menu::new("Composition").items([MenuItem::action("Composition Settings…", CompositionSettings), MenuItem::action("Magic Resize…", MagicResize)]),
+        Menu::new("Layer").items([
+            MenuItem::action("New Solid", NewSolid),
+            MenuItem::action("New Adjustment Layer", NewAdjustmentLayer),
+            MenuItem::action("New Null Object", NewNull),
+            MenuItem::separator(),
+            MenuItem::action("Add or Remove Marker", ToggleMarker),
+            MenuItem::separator(),
+            MenuItem::action("Sequence Layers", SequenceLayers),
+            MenuItem::action("Stagger Layers by 5 Frames", StaggerLayers),
+        ]),
+        Menu::new("View").items([MenuItem::action("Safe Areas and Grid", ToggleGuides)]),
     ]
 }
 
@@ -239,6 +267,9 @@ pub enum Tool {
     Ripple,
     /// Drag the cut between two touching clips to move it.
     Roll,
+    /// Drag a clip's end to change its speed so the same footage fills the new length, like
+    /// Premiere's Rate Stretch tool.
+    RateStretch,
     /// Drag a clip to change which part of its source plays.
     Slip,
     /// Drag a clip between its neighbors, which stretch to meet it.
@@ -249,6 +280,17 @@ pub enum Tool {
     /// on the selected shapes, text and solids).
     Eyedropper,
 }
+
+/// The kinds of layer the Layer menu makes from nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewLayer {
+    Solid,
+    Adjustment,
+    Null,
+}
+
+/// How many frames apart Stagger Layers starts each layer.
+pub const STAGGER_FRAMES: i64 = 5;
 
 /// Drag payloads. GPUI routes drops by type, so each kind of drag has its own type.
 #[derive(Clone, Debug)]
@@ -415,6 +457,8 @@ pub struct UiState {
     /// Whether the eyedropper's color menu (current color, recent picks, swatches) is open, and
     /// whether its rail button is held down (a long press opens the menu).
     pub color_well: bool,
+    /// Whether the viewer shows the title and action safe areas, thirds and center (').
+    pub guides: bool,
     pub eyedropper_press: bool,
     /// What the Color panel grades: the selected clip or the whole video.
     pub grade_target: crate::state::GradeTarget,
@@ -732,6 +776,7 @@ impl Workspace {
                 cutout_pick: None,
                 effect_drop_layer: None,
                 color_well: false,
+                guides: false,
                 eyedropper_press: false,
                 grade_target: crate::state::GradeTarget::Clip,
                 white_balance_pick: None,
@@ -868,6 +913,31 @@ impl Workspace {
 
     /// Switches tools. A pen path still being drawn is finished as an open line first, so
     /// changing tools never throws away what was drawn.
+    /// Adds a new solid, adjustment layer or null object (the Layer menu and the top bar's New
+    /// Layer button), and shows its properties.
+    pub fn new_layer(&mut self, kind: NewLayer, cx: &mut Context<Self>) {
+        let added = match kind {
+            NewLayer::Solid => self.state.add_solid(),
+            NewLayer::Adjustment => self.state.add_adjustment_layer(),
+            NewLayer::Null => self.state.add_null(),
+        };
+        if added.is_some() {
+            // An adjustment layer is for effects; the others are set up in Properties.
+            self.ui.tabs.insert(PanelId::Properties, if kind == NewLayer::Adjustment { 1 } else { 0 });
+            cx.notify();
+        }
+    }
+
+    /// Sequence Layers (`None`) or Stagger Layers (`Some(frames)`) on the selection, saying
+    /// why nothing happened when fewer than two layers are selected.
+    pub fn stagger(&mut self, step: Option<i64>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.selected_layers.len() < 2 {
+            window.push_notification("Select two or more layers, in the order they should play.", cx);
+        } else if self.state.stagger_selection(step) {
+            cx.notify();
+        }
+    }
+
     pub fn set_tool(&mut self, tool: Tool) {
         if tool != Tool::Pen {
             self.state.finish_pen(false);
@@ -1234,6 +1304,23 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &EyedropperTool, _, cx| {
                 this.set_tool(Tool::Eyedropper);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &RateStretchTool, _, cx| {
+                this.set_tool(Tool::RateStretch);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMarker, _, cx| {
+                this.state.toggle_marker_at_playhead();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &NewSolid, _, cx| this.new_layer(NewLayer::Solid, cx)))
+            .on_action(cx.listener(|this, _: &NewAdjustmentLayer, _, cx| this.new_layer(NewLayer::Adjustment, cx)))
+            .on_action(cx.listener(|this, _: &NewNull, _, cx| this.new_layer(NewLayer::Null, cx)))
+            .on_action(cx.listener(|this, _: &SequenceLayers, window, cx| this.stagger(None, window, cx)))
+            .on_action(cx.listener(|this, _: &StaggerLayers, window, cx| this.stagger(Some(STAGGER_FRAMES), window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleGuides, _, cx| {
+                this.ui.guides = !this.ui.guides;
                 cx.notify();
             }))
             // Enter ends a pen path as an open line (a path closes by clicking its first point).

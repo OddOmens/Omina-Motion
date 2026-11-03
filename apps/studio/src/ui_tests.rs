@@ -1474,7 +1474,7 @@ fn only_effects_that_suit_the_selected_clip_are_listed(cx: &mut TestAppContext) 
     let listed = |visual: &mut VisualTestContext, name: &str| visual.update(|window, _| window.try_find(ElementId::Name(format!("effect:{name}").into())).is_some());
     render(visual);
     assert!(listed(visual, "Exposure") && listed(visual, "Gaussian Blur"), "everything shows with nothing selected");
-    assert!(!listed(visual, "Stroke"), "effects the renderer can't draw are never listed");
+    assert!(listed(visual, "Stroke") && listed(visual, "Linear Color Key"), "effects the renderer now draws are listed");
     visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.select_layer(TITLE, false); cx.notify(); }));
     render(visual);
     assert!(!listed(visual, "Exposure"), "no colour correction for text");
@@ -2209,6 +2209,9 @@ fn add_video_with_sound(workspace: &Entity<Workspace>, visual: &mut VisualTestCo
 fn separate_audio_moves_the_sound_to_its_own_clip(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     let video = add_video_with_sound(&workspace, visual);
+    // Taller still, so the Audio card's buttons are in view without scrolling the panel.
+    visual.simulate_resize(size(px(1600.0), px(2000.0)));
+    render(visual);
     visual.update(|window, cx| window.click("separate-audio", cx));
     render(visual);
     let (audio, video_plays) = visual.update(|_, cx| {
@@ -3466,4 +3469,136 @@ fn the_viewer_draws_a_frame_only_when_it_changes(cx: &mut TestAppContext) {
     draw_frame(visual);
     draw_frame(visual);
     assert_eq!(drawn(visual), start + 2, "one frame at the new size once the drag ends");
+}
+
+/// The first footage clip in the open composition.
+fn first_footage(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> Id {
+    visual.update(|_, cx| workspace.read(cx).state.composition().layers.iter().find(|layer| matches!(layer.content, LayerContent::Footage { .. })).unwrap().id)
+}
+
+#[gpui_kit::test]
+fn the_effects_tab_adds_effects_and_slides_their_settings(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let clip = first_footage(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(clip, false);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 1);
+        cx.notify();
+    }));
+    render(visual);
+    // The Add Effect menu lists what suits the clip; picking one adds it as a card.
+    visual.update(|window, cx| window.click("fx-add", cx));
+    render(visual);
+    // Crop is near the top of the list, so it is in view without scrolling the menu.
+    click_label(visual, "Crop");
+    render(visual);
+    let crop = visual.update(|_, cx| workspace.read(cx).state.effect_named(clip, "Crop")).expect("Crop was added");
+    assert!(visual.update(|window, _| window.try_find(ElementId::Name(format!("fx-twirl:{}", crop.0).into())).is_some()), "it shows as a card");
+    // Its Left (0–100%) has a slider: a quarter of the way along is 25%.
+    let amount = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().property(PropertyPath::Effect { effect: crop, parameter: 0 }, 0).unwrap().value.component(0));
+    let bounds = visual.update(|window, _| window.find(ElementId::Name(format!("grade-slider:{}:0", crop.0).into())).bounds());
+    let middle = bounds.center();
+    visual.update(|window, cx| window.drag(middle, point(bounds.origin.x + bounds.size.width * 0.25, middle.y), cx));
+    render(visual);
+    assert!((amount(visual) - 25.0).abs() <= 1.0, "dragged to {}", amount(visual));
+    // The card's buttons turn it off and remove it.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("fx-on:{}", crop.0).into()), cx));
+    render(visual);
+    let enabled = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().effects.iter().find(|e| e.id == crop).unwrap().enabled);
+    assert!(!enabled, "the eye turns it off");
+    visual.update(|window, cx| window.click(ElementId::Name(format!("fx-remove:{}", crop.0).into()), cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).state.effect_named(clip, "Crop")).is_none(), "removed");
+}
+
+#[gpui_kit::test]
+fn new_layers_markers_and_guides_come_from_the_menus(cx: &mut TestAppContext) {
+    use crate::workspace::{NewAdjustmentLayer, NewNull, NewSolid, ToggleGuides, ToggleMarker};
+    let (workspace, visual) = open(cx);
+    let top_name = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layers[0].name.clone());
+    visual.update(|window, cx| window.dispatch_action(Box::new(NewSolid), cx));
+    render(visual);
+    assert_eq!(top_name(visual), "Solid 1");
+    visual.update(|window, cx| window.dispatch_action(Box::new(NewAdjustmentLayer), cx));
+    render(visual);
+    assert!(top_name(visual).starts_with("Adjustment Layer"));
+    // The top bar's New Layer button offers the same.
+    visual.update(|window, cx| window.click("tool-new-layer", cx));
+    render(visual);
+    click_label(visual, "Null Object (⇧⌥⌘Y)");
+    render(visual);
+    assert_eq!(top_name(visual), "Null 1");
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.selected_layers, vec![state.composition().layers[0].id], "the new layer is selected");
+    });
+    visual.update(|window, cx| window.dispatch_action(Box::new(NewNull), cx));
+    render(visual);
+    assert_eq!(top_name(visual), "Null 2");
+
+    // M marks the playhead, and again takes the mark away.
+    let markers_at = |visual: &mut VisualTestContext| visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().markers.iter().filter(|marker| marker.frame == state.current_frame).count()
+    });
+    visual.update(|window, cx| window.dispatch_action(Box::new(ToggleMarker), cx));
+    render(visual);
+    assert_eq!(markers_at(visual), 1);
+    visual.update(|window, cx| window.dispatch_action(Box::new(ToggleMarker), cx));
+    render(visual);
+    assert_eq!(markers_at(visual), 0);
+
+    // The guides show over the picture, from the menu or the viewer's button.
+    let guides = |visual: &mut VisualTestContext| visual.update(|window, _| window.try_find("viewer-guides-overlay").is_some());
+    assert!(!guides(visual));
+    visual.update(|window, cx| window.dispatch_action(Box::new(ToggleGuides), cx));
+    render(visual);
+    assert!(guides(visual));
+    visual.update(|window, cx| window.click("viewer-guides", cx));
+    render(visual);
+    assert!(!guides(visual));
+}
+
+#[gpui_kit::test]
+fn stagger_layers_spaces_the_selection_out(cx: &mut TestAppContext) {
+    use crate::workspace::{NewSolid, STAGGER_FRAMES, StaggerLayers};
+    let (workspace, visual) = open(cx);
+    let mut solids = Vec::new();
+    for _ in 0..3 {
+        visual.update(|window, cx| window.dispatch_action(Box::new(NewSolid), cx));
+        render(visual);
+        solids.push(visual.update(|_, cx| workspace.read(cx).state.selected_layers[0]));
+    }
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.clear_selection();
+        for &solid in &solids {
+            ws.state.select_layer(solid, true);
+        }
+        cx.notify();
+    }));
+    visual.update(|window, cx| window.dispatch_action(Box::new(StaggerLayers), cx));
+    render(visual);
+    let ins: Vec<i64> = solids.iter().map(|&solid| layer_timing(&workspace, visual, solid).1).collect();
+    assert_eq!(ins, vec![ins[0], ins[0] + STAGGER_FRAMES, ins[0] + 2 * STAGGER_FRAMES]);
+}
+
+#[gpui_kit::test]
+fn the_rate_stretch_tool_changes_a_clips_speed(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let clip = first_footage(&workspace, visual);
+    visual.update(|window, cx| window.press("r", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.tool, crate::workspace::Tool::RateStretch));
+    let (_, in_before, out_before) = layer_timing(&workspace, visual, clip);
+    let grip = center_of(visual, ("clip-trim-out", clip.0 as usize));
+    visual.update(|window, cx| window.drag(grip, point(grip.x + px(60.0), grip.y), cx));
+    render(visual);
+    let (_, in_after, out_after) = layer_timing(&workspace, visual, clip);
+    let speed = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().time.speed.value);
+    assert_eq!(in_after, in_before, "the start stays put");
+    assert!(out_after > out_before, "the clip got longer: {out_before} → {out_after}");
+    let expected = 100.0 * (out_before - in_before) as f32 / (out_after - in_after) as f32;
+    assert!(speed < 100.0 && (speed - expected).abs() < 2.0, "slowed to fill it: {speed}% (about {expected}%)");
 }

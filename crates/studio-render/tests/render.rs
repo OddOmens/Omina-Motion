@@ -754,33 +754,86 @@ fn shape_sheet() {
     image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8).unwrap();
 }
 
-/// Saves the newer effects, each on a gradient card with text, to `EFFECT_SHEET` as a PNG.
+/// A shape layer of `kind` filled with `fill`, `size` across, centered on `center`.
+fn shape(id: u64, kind: ShapeKind, fill: Paint, size: Vec2, center: Vec2) -> Layer {
+    let mut layer = solid(id, 0, size, center);
+    layer.content = LayerContent::Shape { style: ShapeStyle { fill: Some(fill), ..ShapeStyle::new(kind) }, path: None };
+    layer
+}
+
+/// Saves every catalog effect at its defaults, one labelled cell each, to `EFFECT_SHEET` as a PNG.
+/// The test picture is a composition with a colorful gradient card, a green-screen patch with a
+/// face in front of it, and a star on a transparent surround, so moves, colors, keys and
+/// outlines all show. Transitions are drawn half done, and a few effects are shown again at
+/// other settings to check their direction and reach.
 /// Run with `EFFECT_SHEET=/path/effects.png cargo test -p studio-render --test render effect_sheet -- --ignored`.
 #[test]
 #[ignore = "writes an image for a visual check"]
 fn effect_sheet() {
     let path = std::env::var("EFFECT_SHEET").expect("set EFFECT_SHEET to the PNG to write");
-    let names = ["Black & White", "Invert", "Vignette", "Letterbox", "Light Leak", "Strobe", "Wiggle", "Camera Shake", "Glitch", "RGB Split", "VHS", "Scanlines"];
-    let (cell, columns) = (240u32, 4u32);
-    let rows = (names.len() as u32).div_ceil(columns);
+    let (cell, columns) = (180u32, 8u32);
+    let size = cell as f32;
+    // Each cell: its label, the effect, and parameters changed from the defaults. The first cell
+    // is the picture with no effect, for comparison.
+    type Cell<'a> = (String, &'a str, Vec<(usize, f32)>);
+    let mut cells: Vec<Cell> = vec![("(no effect)".into(), "", vec![])];
+    cells.extend(effects::CATEGORIES.iter().flat_map(|category| category.effects).map(|effect| (effect.name.to_owned(), effect.name, vec![])));
+    cells.push(("Crop 20 10 15 5, feather 8".into(), "Crop", vec![(0, 20.0), (1, 10.0), (2, 15.0), (3, 5.0), (4, 8.0)]));
+    cells.push(("Offset 25%, 10%".into(), "Offset", vec![(0, 25.0), (1, 10.0)]));
+    cells.push(("Mirror 90°".into(), "Mirror", vec![(0, 90.0)]));
+    cells.push(("Motion Tile mirrored".into(), "Motion Tile", vec![(2, 1.0)]));
+    cells.push(("Stroke 10 px".into(), "Stroke", vec![(0, 10.0)]));
+    cells.push(("Key Cleaner 6 px".into(), "Key Cleaner", vec![(0, 6.0)]));
+    cells.push(("Median 6 px".into(), "Median", vec![(0, 6.0)]));
+    cells.push(("Iris Wipe 80%, feather 20".into(), "Iris Wipe", vec![(0, 80.0), (1, 20.0)]));
+    cells.push(("Gradient Wipe 80%".into(), "Gradient Wipe", vec![(0, 80.0)]));
+    cells.push(("Blinds 30%, 45°".into(), "Venetian Blinds", vec![(0, 30.0), (1, 45.0)]));
+    let rows = (cells.len() as u32).div_ceil(columns);
     let mut sheet = vec![0u8; (cell * columns * cell * rows * 4) as usize];
     let mut renderer = Renderer::new().unwrap();
-    for (index, name) in names.iter().enumerate() {
-        let mut card = solid(2, 0, Vec2::new(cell as f32, cell as f32 * 0.75), Vec2::new(cell as f32 / 2.0, cell as f32 / 2.0));
-        card.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Linear { start: Rgba::hex(0xf97316), end: Rgba::hex(0x3b82f6), angle: 30.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) }, path: None };
-        card.effects.push(effects::instantiate(effects::find(name).unwrap(), Id(9)));
-        let mut text = solid(4, 0, Vec2::new(150.0, 60.0), Vec2::new(cell as f32 / 2.0, cell as f32 / 2.0));
-        text.content = LayerContent::Text { text: "Sale".into(), style: TextStyle { font_size: 52.0, line_height: 60.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() } };
-        text.effects.push(effects::instantiate(effects::find(name).unwrap(), Id(10)));
-        let mut scene = project(vec![text, card, full(3, 0x202024)]);
+    let card = shape(21, ShapeKind::Rectangle, Paint::Linear { start: Rgba::hex(0xf97316), end: Rgba::hex(0x3b82f6), angle: 30.0 }, Vec2::new(105.0, 95.0), Vec2::new(62.0, 62.0));
+    let screen = shape(22, ShapeKind::Rectangle, Paint::Solid(Rgba::hex(0x00b140)), Vec2::new(62.0, 80.0), Vec2::new(138.0, 60.0));
+    let face = shape(23, ShapeKind::Ellipse, Paint::Radial { inner: Rgba::hex(0xf1c6a6), outer: Rgba::hex(0xa8694a) }, Vec2::new(30.0, 38.0), Vec2::new(138.0, 60.0));
+    let star = shape(24, ShapeKind::Star, Paint::Solid(Rgba::hex(0xfacc15)), Vec2::new(46.0, 46.0), Vec2::new(120.0, 128.0));
+    let mut picture = clear_comp(20, vec![star, face, screen, card]);
+    (picture.width, picture.height) = (cell, cell);
+    for (index, (text, name, values)) in cells.iter().enumerate() {
+        let mut layer = nested(2, 20);
+        layer.size = Vec2::new(size, size);
+        layer.transform = Some(Transform::centered(layer.size, Vec2::new(size / 2.0, size / 2.0)));
+        if !name.is_empty() {
+            let mut effect = effects::instantiate(effects::find(name).unwrap(), Id(9));
+            for property in &mut effect.properties {
+                if property.name == "Transition Completion" {
+                    property.value = Animated::constant(50.0);
+                }
+            }
+            for &(parameter, value) in values {
+                effect.properties[parameter].value = Animated::constant(value);
+            }
+            if *name == "Apply LUT" {
+                effect.lut = studio_core::grade::looks().next().map(|look| studio_core::model::LutSource::Look(look.to_owned()));
+            }
+            layer.effects.push(effect);
+        }
+        // Text is drawn to fill its box, so the box is sized roughly to the label.
+        let width = (text.chars().count() as f32 * 6.5).min(size - 6.0);
+        let mut label = solid(4, 0, Vec2::new(width, 16.0), Vec2::new(size / 2.0, size - 11.0));
+        label.content = LayerContent::Text { text: text.clone(), style: TextStyle { font_size: 12.0, line_height: 16.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() } };
+        let backdrop = solid(3, 0x2a2a30, Vec2::new(size, size), Vec2::new(size / 2.0, size / 2.0));
+        let mut scene = project(vec![label, layer, backdrop]);
         (scene.compositions[0].width, scene.compositions[0].height) = (cell, cell);
+        scene.compositions.push(picture.clone());
         let frame = renderer.render(&scene, Id(1), 5, cell, cell, &studio_core::media::NoVideo).unwrap();
         let (ox, oy) = ((index as u32 % columns) * cell, (index as u32 / columns) * cell);
         for y in 0..cell {
             for x in 0..cell {
                 let from = ((y * cell + x) * 4) as usize;
                 let to = (((oy + y) * cell * columns + ox + x) * 4) as usize;
-                sheet[to..to + 4].copy_from_slice(&[frame.bgra[from + 2], frame.bgra[from + 1], frame.bgra[from], 255]);
+                // A one-pixel gap between cells keeps neighbouring effects apart.
+                let edge = x == cell - 1 || y == cell - 1;
+                let color = if edge { [0, 0, 0, 255] } else { [frame.bgra[from + 2], frame.bgra[from + 1], frame.bgra[from], 255] };
+                sheet[to..to + 4].copy_from_slice(&color);
             }
         }
     }

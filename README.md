@@ -65,7 +65,14 @@ Inside `apps/studio/src`:
 - `panels/color_picker.rs`: the color picker every color chip opens: a saturation/brightness square, hue and
   opacity sliders, hex and opacity fields, the project's colors, the picked and saved colors, paint type for
   shapes, and a Libraries tab.
-- The right panel's tabs are Properties, Effects (the selected layer's effects, keyframable) and Color.
+- The right panel's tabs are Properties, Effects (the selected layer's effects, keyframable, with an Add
+  Effect menu and sliders for settings with a modest range) and Color. All three show their groups as the
+  same folding cards (`chrome::card`), with the same heading buttons for effects (on/off, reset, remove).
+- The top bar's New Layer button and the Layer menu add a solid (in the eyedropper's current color, ⌘Y), an
+  adjustment layer (⌥⌘Y) or a null object (⇧⌥⌘Y, a layer that draws nothing, for parenting), and hold Add or
+  Remove Marker (M), Sequence Layers and Stagger Layers (`studio-core/src/edit.rs`). The Rate Stretch tool (R,
+  with Cut, Ripple and Roll) drags a clip's end to change its speed (`speed::stretch_to`). The viewer's grid
+  button (') shows title and action safe areas, thirds and the center.
 - `panels/color_grade.rs`, `state/grade.rs`: the Color tab (like Lumetri): grade the selected clip or the
   whole video, which goes on a full-length adjustment layer at the top (made the first time). The tab
   starts with a tile per correction; each added one is a card for one of the effects Basic Correction
@@ -189,7 +196,8 @@ cargo run -p studio-export --release --example export -- project.studio out.mp4 
   components (use plain elements, as the timeline does) and never query the OS during render.
 - Every visible control either works or is shown disabled. Nothing is decorative.
 - Rendering works in 16-bit float linear light with premultiplied alpha. Effects not drawn by the
-  GPU yet are listed in `studio-render/src/effects.rs` and left out of the UI. Effects that would do nothing
+  GPU yet would be listed in `studio-render/src/effects.rs` (none are now) and left out of the UI.
+  `EFFECT_SHEET=/path.png cargo test -p studio-render --test render effect_sheet -- --ignored` renders every effect. Effects that would do nothing
   on a kind of layer (colour correction on text, anything on audio) are decided in `studio_core::effects::suits`.
 - `unsafe` is forbidden workspace-wide, with two audited exceptions in `studio-media`: `hardware.rs` (FFmpeg's
   hardware-decoding API) and `color.rs` (telling FFmpeg's scaler a video's YUV formula). Every unsafe block
