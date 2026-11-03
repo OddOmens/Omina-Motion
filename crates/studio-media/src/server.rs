@@ -17,6 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use studio_core::media::{VideoFrame, VideoSource};
@@ -172,6 +173,8 @@ struct Shared {
     /// Wakes workers when there is new work or the server is shutting down.
     work: Condvar,
     on_ready: Mutex<Option<ReadyCallback>>,
+    /// Counts the frames the viewer wanted that have arrived (see `FrameServer::generation`).
+    generation: AtomicU64,
 }
 
 impl Shared {
@@ -181,6 +184,7 @@ impl Shared {
     }
 
     fn notify_ready(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
         if let Some(callback) = self.on_ready.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             callback();
         }
@@ -197,13 +201,20 @@ impl FrameServer {
     /// Full-quality frames are decoded at most `max_width` wide (the preview needs no more).
     /// With `proxies`, clips whose proxy is ready also get a fast proxy worker.
     pub fn new(max_width: u32, proxies: Option<Arc<ProxyManager>>) -> Self {
-        let shared = Arc::new(Shared { state: Mutex::default(), work: Condvar::new(), on_ready: Mutex::new(None) });
+        let shared = Arc::new(Shared { state: Mutex::default(), work: Condvar::new(), on_ready: Mutex::new(None), generation: AtomicU64::new(0) });
         Self { shared, max_width, proxies }
     }
 
     /// Called (from a decode thread) whenever the frame the viewer wants becomes available.
     pub fn set_on_ready(&self, callback: impl Fn() + Send + Sync + 'static) {
         *self.shared.on_ready.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(callback));
+    }
+
+    /// A number that changes whenever a frame the viewer asked for arrives (or a clip fails to
+    /// open), so a picture drawn earlier can be known to be out of date. While it is unchanged,
+    /// drawing the same frame again gives the same picture.
+    pub fn generation(&self) -> u64 {
+        self.shared.generation.load(Ordering::Relaxed)
     }
 
     /// While playing, clips decode ahead of the playhead (from their proxy if they have one),

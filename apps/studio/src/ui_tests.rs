@@ -3426,3 +3426,44 @@ fn luts_go_on_clips_from_the_effects_panel_and_change_in_effect_controls(cx: &mu
     });
     assert!(matches!(selected, Some(LayerContent::Adjustment)));
 }
+
+#[gpui_kit::test]
+fn the_viewer_draws_a_frame_only_when_it_changes(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    for _ in 0..3 {
+        draw_frame(visual);
+    }
+    let drawn = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).render.frames_drawn);
+    let start = drawn(visual);
+    // Edits elsewhere redraw the viewer panel, but the same picture isn't drawn again.
+    for _ in 0..5 {
+        visual.update(|_, cx| workspace.update(cx, |_, cx| cx.notify()));
+        draw_frame(visual);
+    }
+    assert_eq!(drawn(visual), start, "nothing it shows changed");
+    // Moving the playhead draws the new frame.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.current_frame += 10;
+        cx.notify();
+    }));
+    draw_frame(visual);
+    assert_eq!(drawn(visual), start + 1);
+    // Dragging the divider above the timeline makes the viewer taller: the picture on screen
+    // is stretched instead of drawn at every size, then drawn once at the new size.
+    let viewer = visual.update(|window, _| window.find("viewer").bounds());
+    // Below the viewer's footer, in the gap between it and the timeline.
+    let grip = point(viewer.center().x, viewer.origin.y + viewer.size.height + px(crate::theme::size::PANEL_FOOTER_HEIGHT + crate::theme::size::GUTTER * 0.5));
+    visual.update(|window, cx| window.pointer_down(grip, MouseButton::Left, cx));
+    draw_frame(visual);
+    for step in 1..=20 {
+        visual.update(|window, cx| window.pointer_move(point(grip.x, grip.y + px(step as f32 * 4.0)), Some(MouseButton::Left), cx));
+        draw_frame(visual);
+    }
+    let grown = visual.update(|window, _| window.find("viewer").bounds()).size.height - viewer.size.height;
+    assert!(grown > px(40.0), "the viewer grew: {grown:?}");
+    assert_eq!(drawn(visual), start + 1, "no frames drawn mid-drag");
+    visual.update(|window, cx| window.pointer_up(point(grip.x, grip.y + px(80.0)), MouseButton::Left, cx));
+    draw_frame(visual);
+    draw_frame(visual);
+    assert_eq!(drawn(visual), start + 2, "one frame at the new size once the drag ends");
+}

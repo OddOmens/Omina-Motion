@@ -41,7 +41,26 @@ pub struct ViewerRender {
     showing_proxy: bool,
     /// How long the last viewer frame took to render, shown under the timeline.
     pub last_render_ms: Option<f64>,
+    /// What the frame on screen was drawn from, so an unchanged frame is not drawn again.
+    drawn: Option<DrawnFrame>,
+    /// How many viewer frames have been drawn, so tests can check that unchanged ones aren't.
+    #[cfg(test)]
+    pub frames_drawn: usize,
 }
+
+/// Everything a viewer frame depends on. The cheap parts are checked first, so a changed
+/// frame is told apart before the projects are compared.
+struct DrawnFrame {
+    frame: i64,
+    comp: Id,
+    width: u32,
+    height: u32,
+    /// The frame server's count of arrived frames (see `FrameServer::generation`).
+    media: u64,
+    /// The project as drawn: the editor's, or the copy previewing a LUT.
+    project: studio_core::model::Project,
+}
+
 
 /// A gray checkerboard, made once, shown under transparent parts of the composition.
 fn transparency_grid() -> Arc<RenderImage> {
@@ -80,6 +99,9 @@ impl ViewerRender {
             last_error: None,
             showing_proxy: false,
             last_render_ms: None,
+            drawn: None,
+            #[cfg(test)]
+            frames_drawn: 0,
         }
     }
 }
@@ -213,6 +235,12 @@ pub(crate) fn lut_preview(workspace: &Workspace) -> Option<studio_core::model::P
 }
 
 /// Renders the frame for the viewer at `width` × `height` device pixels and swaps it on screen.
+///
+/// The viewer is redrawn far more often than its picture changes: on every edit anywhere, and
+/// on every pointer move during any drag (the UI library redraws the whole window then). So a
+/// frame is only drawn again when something it depends on changed. While a drag is resizing
+/// the viewer, the picture on screen is stretched to the new size instead, and drawn sharp at
+/// the new size once the drag ends.
 fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut Window, cx: &mut Context<Workspace>) {
     if workspace.render.renderer.is_err() {
         return;
@@ -235,12 +263,29 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
         .chain(previewed)
         .collect();
     workspace.render.media.release_unused(|path| footage.contains(path));
-    let started = std::time::Instant::now();
     let previewed = lut_preview(workspace);
-    let Ok(renderer) = workspace.render.renderer.as_mut() else { return };
     let state = &workspace.state;
-    let rendered = renderer.render(previewed.as_ref().unwrap_or(&state.project), state.active_comp, state.current_frame, width, height, &workspace.render.media);
+    let shown = previewed.as_ref().unwrap_or(&state.project);
+    // Cut-outs load their masks from disk as they are made, which the project doesn't record,
+    // so frames are always drawn afresh while one is being made.
+    let reusable = workspace.ui.cutout_job.is_none() && workspace.render.image.is_some();
+    if let Some(drawn) = workspace.render.drawn.as_ref().filter(|_| reusable) {
+        let fresh = drawn.frame == state.current_frame && drawn.comp == state.active_comp && drawn.media == workspace.render.media.generation() && drawn.project == *shown;
+        if fresh && ((drawn.width, drawn.height) == (width, height) || cx.has_active_drag()) {
+            return;
+        }
+    }
+    let started = std::time::Instant::now();
+    // Read before drawing: a frame arriving while this one is drawn leaves it out of date.
+    let media = workspace.render.media.generation();
+    let Ok(renderer) = workspace.render.renderer.as_mut() else { return };
+    let rendered = renderer.render(shown, state.active_comp, state.current_frame, width, height, &workspace.render.media);
     workspace.render.last_render_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+    #[cfg(test)]
+    {
+        workspace.render.frames_drawn += 1;
+    }
+    workspace.render.drawn = rendered.is_ok().then(|| DrawnFrame { frame: state.current_frame, comp: state.active_comp, width, height, media, project: shown.clone() });
     match rendered {
         Ok(frame) => {
             workspace.render.last_error = None;
