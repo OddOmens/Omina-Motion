@@ -376,6 +376,22 @@ pub fn relink_missing_media(project: &mut Project, project_folder: &Path, exists
             None => missing.push(path.clone()),
         }
     }
+    // LUT files chosen for Apply LUT effects are relinked the same way.
+    let effects = project.compositions.iter_mut().flat_map(|comp| &mut comp.layers).flat_map(|layer| &mut layer.effects);
+    for path in effects.filter_map(|effect| match effect.lut.as_mut() {
+        Some(crate::model::LutSource::File(path)) => Some(path),
+        _ => None,
+    }) {
+        if exists(path) {
+            continue;
+        }
+        let beside = path.file_name().map(|name| project_folder.join(name));
+        match beside.filter(|candidate| exists(candidate)) {
+            Some(found) => *path = found,
+            None if !missing.contains(path) => missing.push(path.clone()),
+            None => {}
+        }
+    }
     missing
 }
 
@@ -581,6 +597,21 @@ mod tests {
         let missing = relink_missing_media(&mut project, Path::new("/new/place"), exists);
         assert_eq!(missing, vec![PathBuf::from("/old/machine/gone.wav")]);
         assert!(project.items.iter().any(|item| item.path.as_deref() == Some(Path::new("/new/place/clip.mp4"))));
+    }
+
+    #[test]
+    fn lut_choices_are_saved_and_their_files_relinked() {
+        use crate::model::LutSource;
+        let mut project = sample_project();
+        let grade = edit::ensure_color_grade_layer(&mut project, ids::MAIN_COMP).unwrap();
+        edit::add_lut(&mut project, ids::MAIN_COMP, grade, LutSource::Look("Noir".into())).unwrap();
+        edit::add_lut(&mut project, ids::MAIN_COMP, grade, LutSource::File("/old/machine/Film.cube".into())).unwrap();
+        let (mut opened, _) = from_text(&to_text(&project, view()).unwrap()).unwrap();
+        assert_eq!(opened, project);
+        let exists = |path: &Path| path == Path::new("/new/place/Film.cube");
+        assert!(relink_missing_media(&mut opened, Path::new("/new/place"), exists).is_empty());
+        let luts: Vec<_> = opened.compositions[0].layers.iter().flat_map(|layer| &layer.effects).filter_map(|effect| effect.lut.clone()).collect();
+        assert_eq!(luts, vec![LutSource::Look("Noir".into()), LutSource::File("/new/place/Film.cube".into())]);
     }
 
     #[test]

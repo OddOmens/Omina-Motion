@@ -41,11 +41,15 @@ pub fn panel(
         .px_1()
         .border_b_1()
         .border_color(hsla(color::HAIRLINE))
-        .children(tabs.iter().enumerate().map(|(index, title)| {
+        // Tabs share what room there is, a long title (a layer's name) shortened with an
+        // ellipsis, so the collapse button always stays in view.
+        .child(div().flex_1().min_w_0().h_full().flex().items_center().gap_1().overflow_hidden().children(tabs.iter().enumerate().map(|(index, title)| {
             let selected = index == active_tab;
             div()
                 .id(ElementId::Name(format!("tab:{id:?}:{index}").into()))
                 .h_full()
+                .min_w_0()
+                .flex_shrink(1.0)
                 .px_1p5()
                 .flex()
                 .items_center()
@@ -57,16 +61,16 @@ pub fn panel(
                         cx.notify();
                     }))
                 })
-                .child(SharedString::from(title.to_string()))
+                .child(div().min_w_0().truncate().child(SharedString::from(title.to_string())))
                 .test_support()
-        }))
-        .child(div().flex_1())
+        })))
         // Panels in the right column fold away to their header.
         .when(collapsible, |header| {
             header.child(
                 div()
                     .id(ElementId::Name(format!("collapse:{id:?}").into()))
                     .size(px(22.0))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()

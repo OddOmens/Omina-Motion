@@ -1,6 +1,6 @@
-//! The Properties panel (first tab) and Effect Controls (second tab). Properties
-//! shows the selected layer's transform and, for text layers, character and
-//! paragraph styling. Every value scrubs or can be typed into.
+//! The Properties panel (first tab), Effect Controls (second tab) and Color (third tab, in
+//! `color_grade`). Properties shows the selected layer's transform and, for text layers,
+//! character and paragraph styling. Every value scrubs or can be typed into.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -990,18 +990,10 @@ fn fold(key: &'static str, title: &'static str, trailing: Option<AnyElement>, wo
 }
 
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
-    let composition = workspace.state.composition();
-    let selected: Vec<&Layer> = workspace.state.selected_layers.iter().filter_map(|id| composition.layer(*id)).collect();
-    let subject = match selected.as_slice() {
-        [] => "No Selection".to_owned(),
-        [layer] => layer.name.clone(),
-        layers => format!("{} Layers", layers.len()),
+    let body = match workspace.ui.tab(PanelId::Properties) {
+        0 => properties_body(workspace, cx),
+        1 => super::effect_controls::body(workspace, cx),
+        _ => super::color_grade::body(workspace, cx),
     };
-    let properties_title = format!("Properties: {subject}");
-    let body = if workspace.ui.tab(PanelId::Properties) == 0 {
-        properties_body(workspace, cx)
-    } else {
-        super::effect_controls::body(workspace, cx)
-    };
-    panel(PanelId::Properties, &[properties_title.as_str(), "Effect Controls"], None, body, workspace, cx)
+    panel(PanelId::Properties, &["Properties", "Effects", "Color"], None, body, workspace, cx)
 }

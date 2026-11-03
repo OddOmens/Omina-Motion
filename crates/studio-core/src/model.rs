@@ -601,6 +601,27 @@ pub struct Effect {
     pub name: String,
     pub enabled: bool,
     pub properties: Vec<EffectProperty>,
+    /// The lookup table an Apply LUT effect uses; `None` for every other effect, and for an
+    /// Apply LUT whose table has not been chosen yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lut: Option<LutSource>,
+}
+
+/// Where a LUT comes from: one of Studio's built-in looks (see `grade::LOOK_GROUPS`), or a `.cube` file.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum LutSource {
+    Look(String),
+    File(std::path::PathBuf),
+}
+
+impl LutSource {
+    /// The name shown for it: the look's, or the file's without its extension.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Look(name) => name.clone(),
+            Self::File(path) => path.file_stem().map_or_else(|| path.display().to_string(), |stem| stem.to_string_lossy().into_owned()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -7,14 +7,17 @@ use studio_core::model::Effect;
 /// One step of an effect.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Pass {
-    /// A single shader pass: effect id and up to eight parameters.
-    Shader { id: u32, params: [f32; 8] },
+    /// A single shader pass: effect id and up to twelve parameters.
+    Shader { id: u32, params: [f32; 12] },
     /// A two-pass Gaussian blur with this sigma, in output pixels.
     Blur { sigma: f32 },
     /// Bright pass, blur, then add back: threshold 0–1, sigma in output pixels, intensity.
     Glow { threshold: f32, sigma: f32, intensity: f32 },
     /// The layer's alpha offset, blurred and placed underneath. Offset and sigma in output pixels.
     Shadow { offset: [f32; 2], opacity: f32, sigma: f32 },
+    /// The effect's lookup table (`Effect::lut`), mixed in at `intensity` (0–1). Draws nothing
+    /// while no table is chosen or it can't be read.
+    Lut { intensity: f32 },
 }
 
 /// Effects whose controls exist in the catalog but which the GPU does not draw yet.
@@ -26,7 +29,7 @@ pub fn is_rendered(name: &str) -> bool {
 }
 
 fn shader(id: u32, values: &[f32]) -> Pass {
-    let mut params = [0.0; 8];
+    let mut params = [0.0; 12];
     params[..values.len()].copy_from_slice(values);
     Pass::Shader { id, params }
 }
@@ -48,6 +51,11 @@ pub fn passes(effect: &Effect, frame: f64, scale: f32) -> Option<Vec<Pass>> {
         "Hue/Saturation" => shader(8, &[v(0), v(1), v(2)]),
         "Tint" => shader(9, &[v(0)]),
         "Vibrance" => shader(10, &[v(0), v(1)]),
+        "Basic Correction" => shader(52, &(0..10).map(v).collect::<Vec<_>>()),
+        "Color Wheels" => shader(53, &(0..9).map(v).collect::<Vec<_>>()),
+        "Tone Curve" => shader(54, &[v(0), v(1), v(2), v(3)]),
+        "Levels" => shader(55, &[v(0), v(1), v(2), v(3), v(4)]),
+        "Apply LUT" => Pass::Lut { intensity: v(0) / 100.0 },
         "Bulge" => shader(11, &[v(0), px(1)]),
         "Wave Warp" => shader(12, &[px(0), px(1), v(2)]),
         "Turbulent Displace" => shader(13, &[px(0), px(1)]),

@@ -7,4 +7,4 @@ mod path;
 mod renderer;
 pub mod text;
 
-pub use renderer::{RenderError, RenderedFrame, Renderer};
+pub use renderer::{RenderError, RenderedFrame, Renderer, read_cube};

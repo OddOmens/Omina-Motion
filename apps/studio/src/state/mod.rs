@@ -14,6 +14,7 @@ mod clips;
 mod copy;
 mod cutout;
 mod enhance;
+mod grade;
 mod history;
 mod keyframes;
 mod layer_time;
@@ -40,6 +41,7 @@ use studio_core::time::FrameRange;
 
 pub use captions::HeardWord;
 pub use cutout::CutoutSource;
+pub use grade::GradeTarget;
 pub use keyframes::KeyframeRef;
 pub use layer_time::LayerTimeEdit;
 pub use viewer::{ANCHOR_POINTS, ScaleHandle};
@@ -120,6 +122,8 @@ pub enum ColorTarget {
     /// A caption layer's spoken-word color, and its background box.
     CaptionHighlight(Id),
     CaptionBackground(Id),
+    /// The eyedropper's current color, which can then go on layers or into the swatches.
+    Current,
 }
 
 /// A paint's angle, if it is a linear gradient.
@@ -256,6 +260,8 @@ pub struct EditorState {
     clipboard: Vec<studio_core::model::Layer>,
     /// The project file being edited; `None` until the project is first saved.
     file: Option<PathBuf>,
+    /// The eyedropper's current color, its recent picks and the saved swatches (see `grade`).
+    pub colors: crate::app_settings::SavedColors,
 }
 
 /// Composition settings from the new-composition defaults in Settings: transparent, as new
@@ -311,6 +317,7 @@ impl EditorState {
             libraries: studio_core::library::Libraries::default(),
             library_save: library::LibrarySave::Saved,
             file: None,
+            colors: settings.colors.clone(),
             project,
         }
     }
@@ -636,16 +643,17 @@ impl EditorState {
         self.selected_item.and_then(|id| self.project.item(id)).filter(|item| matches!(item.kind, ProjectItemKind::Footage | ProjectItemKind::Image) && item.size.is_some())
     }
 
-    /// Makes a device mockup (see `studio_core::mockups`) with the selected video or picture on
-    /// its screen, as long as the footage (or 10 seconds without), opens it and selects it.
-    pub fn add_mockup(&mut self, device: studio_core::mockups::Device, orientation: studio_core::mockups::Orientation, format: studio_core::templates::Format, finish: studio_core::mockups::Finish) -> Option<studio_core::mockups::Mockup> {
+    /// Adds a device mockup (see `studio_core::mockups`) to the open composition as one layer,
+    /// centered and scaled to fit, with the selected video or picture on its screen, and selects
+    /// it. It lasts as long as the composition, or the footage if that is longer.
+    pub fn add_mockup(&mut self, device: studio_core::mockups::Device, orientation: studio_core::mockups::Orientation, finish: studio_core::mockups::Finish) -> Option<studio_core::mockups::Placed> {
         let footage = self.mockup_footage();
-        let seconds = footage.and_then(|item| item.duration_seconds).filter(|seconds| *seconds > 0.0).unwrap_or(10.0);
-        let request = studio_core::mockups::MockupRequest { device, orientation, format, finish, footage: footage.map(|item| item.id), seconds };
-        let made = studio_core::mockups::build(&mut self.project, &request)?;
-        self.open_composition(made.composition);
-        self.selected_item = Some(made.composition);
-        Some(made)
+        let seconds = footage.and_then(|item| item.duration_seconds).filter(|seconds| *seconds > 0.0).unwrap_or(0.0);
+        let request = studio_core::mockups::MockupRequest { device, orientation, finish, footage: footage.map(|item| item.id), seconds };
+        let placed = studio_core::mockups::add_to(&mut self.project, self.active_comp, &request)?;
+        self.selected_layers = vec![placed.layer];
+        self.selected_keyframes.clear();
+        Some(placed)
     }
 
     /// Starts a new, empty project: one 1920 × 1080, 30 fps, 10-second composition, and the
@@ -782,6 +790,7 @@ impl EditorState {
             ColorTarget::CaptionHighlight(layer) => self.caption_style(layer).map(|style| style.highlight),
             ColorTarget::CaptionBackground(layer) => self.caption_style(layer)?.background,
             ColorTarget::Library(id) => self.libraries.color(id).map(|(_, item)| item.color),
+            ColorTarget::Current => Some(self.colors.current),
         }
     }
 
@@ -800,6 +809,7 @@ impl EditorState {
             ColorTarget::Library(id) => self.set_library_color(id, color),
             ColorTarget::CaptionHighlight(layer) => self.edit_captions(layer, |style| style.highlight = color),
             ColorTarget::CaptionBackground(layer) => self.edit_captions(layer, |style| style.background = Some(color)),
+            ColorTarget::Current => self.colors.current = color,
         }
     }
 

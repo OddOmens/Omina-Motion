@@ -5,9 +5,10 @@
 struct EffectUniform {
     // x: effect id (see `effects.rs`), y-w: unused.
     id: vec4<u32>,
-    // Up to eight parameters.
+    // Up to twelve parameters.
     p0: vec4<f32>,
     p1: vec4<f32>,
+    p2: vec4<f32>,
     // x, y: output size in pixels; z: time in seconds; w: unused.
     info: vec4<f32>,
 };
@@ -112,6 +113,32 @@ fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
     let q = select(hsl.z + hsl.y - hsl.z * hsl.y, hsl.z * (1.0 + hsl.y), hsl.z < 0.5);
     let p = 2.0 * hsl.z - q;
     return vec3(hue_channel(p, q, hsl.x + 1.0 / 3.0), hue_channel(p, q, hsl.x), hue_channel(p, q, hsl.x - 1.0 / 3.0));
+}
+
+// Linear light to display (sRGB-encoded) values and back. Grading works on display values, as
+// colorists' tools do, so sliders act evenly from shadows to highlights. Values above 1 (bright
+// light from a glow, say) carry on along a power curve instead of clipping.
+fn to_display(v: vec3<f32>) -> vec3<f32> {
+    let c = max(v, vec3(0.0));
+    return select(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3(0.0031308));
+}
+
+fn to_linear(v: vec3<f32>) -> vec3<f32> {
+    let c = max(v, vec3(0.0));
+    return select(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, c <= vec3(0.04045));
+}
+
+// A color wheel's push: the hue (degrees) at `amount` (0-100), with its brightness taken out so
+// it tints without lightening or darkening.
+fn wheel_tint(hue: f32, amount: f32) -> vec3<f32> {
+    let c = hsl_to_rgb(vec3(fract(hue / 360.0), 1.0, 0.5));
+    return (c - vec3(dot(c, LUMA))) * amount / 100.0;
+}
+
+// A soft bump of brightness around `center`, for the Tone Curve's bands.
+fn band(y: f32, center: f32) -> f32 {
+    let d = (y - center) / 0.16;
+    return exp(-d * d);
 }
 
 // One direction of a separable Gaussian blur. p0.x = sigma (px), p0.yz = direction.
@@ -409,6 +436,62 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let line = fract((pixel.y + u.info.z * u.p0.z * spacing) / spacing);
             let dark = step(0.5, line) * u.p0.y / 100.0;
             return vec4(c.rgb * (1.0 - dark), c.a);
+        }
+        // Basic Correction. p0: temperature, tint (-100-100), exposure (stops), contrast;
+        // p1: highlights, shadows, whites, blacks (-100-100); p2.x saturation (100 = unchanged),
+        // p2.y vibrance. White balance and exposure act on light; the rest on display values.
+        case 52u: {
+            let t = u.p0.x / 100.0;
+            let n = u.p0.y / 100.0;
+            // Kept in step with `studio_core::grade::white_balance_gains`.
+            let k = 0.5;
+            var gains = vec3(exp2(k * (t + n * 0.5)), exp2(-k * n), exp2(k * (n * 0.5 - t)));
+            gains = gains / dot(gains, LUMA);
+            var v = to_display(rgb * gains * exp2(u.p0.z));
+            v = (v - 0.5) * (1.0 + u.p0.w / 100.0) + 0.5;
+            let y = clamp(dot(v, LUMA), 0.0, 1.0);
+            let highlights = smoothstep(0.35, 1.0, y) * u.p1.x / 100.0 * 0.25;
+            let shadows = (1.0 - smoothstep(0.0, 0.65, y)) * u.p1.y / 100.0 * 0.25;
+            let whites = y * y * u.p1.z / 100.0 * 0.25;
+            let blacks = (1.0 - y) * (1.0 - y) * (1.0 - y) * u.p1.w / 100.0 * 0.15;
+            v = v + vec3(highlights + shadows + whites + blacks);
+            let gray = dot(v, LUMA);
+            v = mix(vec3(gray), v, u.p2.x / 100.0);
+            // Vibrance boosts dull colors more than ones already strong, as in case 10.
+            let spread = max(v.r, max(v.g, v.b)) - min(v.r, min(v.g, v.b));
+            v = mix(vec3(gray), v, 1.0 + u.p2.y / 100.0 * (1.0 - clamp(spread, 0.0, 1.0)));
+            return with_alpha(to_linear(v), c.a);
+        }
+        // Color Wheels: lift, gamma and gain. p0: shadows hue, amount, brightness, midtones hue;
+        // p1: midtones amount, brightness, highlights hue, amount; p2.x highlights brightness.
+        case 53u: {
+            var v = to_display(rgb);
+            let lift = wheel_tint(u.p0.x, u.p0.y) * 0.25 + u.p0.z / 100.0 * 0.25;
+            let gamma = max(vec3(1.0) + wheel_tint(u.p0.w, u.p1.x) * 0.5 + u.p1.y / 100.0 * 0.5, vec3(0.1));
+            let gain = vec3(1.0) + wheel_tint(u.p1.z, u.p1.w) * 0.5 + u.p2.x / 100.0 * 0.5;
+            v = gain * (v + lift * (vec3(1.0) - v));
+            v = pow(max(v, vec3(0.0)), 1.0 / gamma);
+            return with_alpha(to_linear(v), c.a);
+        }
+        // Tone Curve: p0 highlights, lights, darks, shadows (-100-100), each lifting or lowering
+        // its band of brightness. Black and white stay put.
+        case 54u: {
+            var v = to_display(rgb);
+            let y = clamp(dot(v, LUMA), 0.0, 1.0);
+            let bands = u.p0.x * band(y, 0.875) + u.p0.y * band(y, 0.625) + u.p0.z * band(y, 0.375) + u.p0.w * band(y, 0.125);
+            let ends = clamp(8.0 * y * (1.0 - y), 0.0, 1.0);
+            v = v + vec3(bands / 100.0 * 0.25 * ends);
+            return with_alpha(to_linear(v), c.a);
+        }
+        // Levels, on display values from 0 to 255: p0 input black, input white, gamma, output
+        // black; p1.x output white.
+        case 55u: {
+            let low = u.p0.x / 255.0;
+            let high = max(u.p0.y / 255.0, low + 1.0 / 255.0);
+            var v = clamp((to_display(rgb) - low) / (high - low), vec3(0.0), vec3(1.0));
+            v = pow(v, vec3(1.0 / max(u.p0.z, 0.01)));
+            v = mix(vec3(u.p0.w / 255.0), vec3(u.p1.x / 255.0), v);
+            return with_alpha(to_linear(v), c.a);
         }
         // Mask: keep the image where the mask (in aux) draws, or with p0.x = 1 where it does not.
         case 60u: {

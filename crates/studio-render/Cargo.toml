@@ -12,6 +12,8 @@ authors.workspace = true
 studio-core.workspace = true
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
+# 16-bit floats, for uploading lookup tables as filterable 3D textures.
+half = "2"
 pollster = "0.4"
 cosmic-text = "0.19"
 tiny-skia = "0.11"

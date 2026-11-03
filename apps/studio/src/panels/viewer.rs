@@ -112,23 +112,37 @@ impl ViewerRender {
         Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
     }
 
+    /// The composition's frame drawn `width` × `height` for the LUT previews, from the
+    /// viewer's own decoded footage. The flag says whether every video frame in it was the one
+    /// asked for; one still decoding is stood in for by a nearby frame, or left out.
+    pub fn preview_frame(&mut self, project: &studio_core::model::Project, comp: studio_core::model::Id, frame: i64, width: u32, height: u32) -> Option<(studio_render::RenderedFrame, bool)> {
+        let renderer = self.renderer.as_mut().ok()?;
+        let watched = WatchedVideo { inner: &self.media, exact: std::cell::Cell::new(true) };
+        let picture = renderer.render(project, comp, frame, width, height, &watched).ok()?;
+        Some((picture, watched.exact.get()))
+    }
+
     /// A small picture of a device mockup, for the Mockups panel: built into a scratch project
-    /// and drawn once, over a dark gray where it is see-through.
-    pub fn mockup_picture(&mut self, request: &studio_core::mockups::MockupRequest, width: u32, height: u32) -> Option<Arc<RenderImage>> {
+    /// and drawn once, fitted into a `side` × `side` square keeping its shape, over a dark
+    /// gray where it is see-through.
+    pub fn mockup_picture(&mut self, request: &studio_core::mockups::MockupRequest, side: u32) -> Option<Arc<RenderImage>> {
         let renderer = self.renderer.as_mut().ok()?;
         let mut project = studio_core::model::Project::new(Vec::new(), Vec::new());
         let made = studio_core::mockups::build(&mut project, request)?;
+        let composition = project.composition(made.composition)?;
+        let fit = side as f32 / composition.width.max(composition.height) as f32;
+        let (width, height) = (((composition.width as f32 * fit).round() as u32).max(1), ((composition.height as f32 * fit).round() as u32).max(1));
         let picture = renderer.render(&project, made.composition, 0, width, height, &studio_core::media::NoVideo).ok()?;
         let bgra: Vec<u8> = picture
             .bgra
             .chunks(4)
             .flat_map(|pixel| {
                 let a = f32::from(pixel[3]) / 255.0;
-                let over = |c: u8| (f32::from(c) * a + 52.0 * (1.0 - a)) as u8;
+                let over = |c: u8| (f32::from(c) * a + 12.0 * (1.0 - a)) as u8;
                 [over(pixel[0]), over(pixel[1]), over(pixel[2]), 255]
             })
             .collect();
-        let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, bgra)?;
+        let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(picture.width, picture.height, bgra)?;
         Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
     }
 
@@ -160,9 +174,49 @@ impl ViewerRender {
     }
 }
 
+/// Passes video frames through from the frame server, noting whether any wasn't the exact
+/// frame asked for (still on its way).
+struct WatchedVideo<'a> {
+    inner: &'a FrameServer,
+    exact: std::cell::Cell<bool>,
+}
+
+impl studio_core::media::VideoSource for WatchedVideo<'_> {
+    fn frame(&self, path: &std::path::Path, index: i64) -> Option<Arc<studio_core::media::VideoFrame>> {
+        let frame = studio_core::media::VideoSource::frame(self.inner, path, index);
+        if frame.as_ref().is_none_or(|frame| frame.index != index) {
+            self.exact.set(false);
+        }
+        frame
+    }
+}
+
+/// The project as the viewer shows it while a LUT in the Effects panel is under the pointer: a
+/// copy with that LUT added to the selected clips that take grading, or, with none selected,
+/// on an adjustment layer over the whole picture. `None` when nothing is being previewed.
+pub(crate) fn lut_preview(workspace: &Workspace) -> Option<studio_core::model::Project> {
+    let lut = workspace.ui.lut_hover.clone()?;
+    let state = &workspace.state;
+    let comp = state.active_comp;
+    let mut project = state.project.clone();
+    let graded: Vec<Id> = state
+        .selected_layers
+        .iter()
+        .copied()
+        .filter(|id| state.composition().layer(*id).is_some_and(|layer| studio_core::effects::suits_layer("Apply LUT", &layer.content)))
+        .collect();
+    let targets = if graded.is_empty() { vec![studio_core::edit::add_adjustment_layer(&mut project, comp, 0)?] } else { graded };
+    for layer in targets {
+        studio_core::edit::add_lut(&mut project, comp, layer, lut.clone());
+    }
+    Some(project)
+}
+
 /// Renders the frame for the viewer at `width` × `height` device pixels and swaps it on screen.
 fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut Window, cx: &mut Context<Workspace>) {
-    let Ok(renderer) = workspace.render.renderer.as_mut() else { return };
+    if workspace.render.renderer.is_err() {
+        return;
+    }
     let state = &workspace.state;
     // While playing (the composition, or a preview in the Project panel), decoders work ahead.
     workspace.render.media.set_playing(state.is_playing() || workspace.ui.preview.playing.is_some());
@@ -182,7 +236,10 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
         .collect();
     workspace.render.media.release_unused(|path| footage.contains(path));
     let started = std::time::Instant::now();
-    let rendered = renderer.render(&state.project, state.active_comp, state.current_frame, width, height, &workspace.render.media);
+    let previewed = lut_preview(workspace);
+    let Ok(renderer) = workspace.render.renderer.as_mut() else { return };
+    let state = &workspace.state;
+    let rendered = renderer.render(previewed.as_ref().unwrap_or(&state.project), state.active_comp, state.current_frame, width, height, &workspace.render.media);
     workspace.render.last_render_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
     match rendered {
         Ok(frame) => {
@@ -559,6 +616,31 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         cx.notify();
         return;
     }
+    // Picking a white balance: the color clicked becomes neutral gray.
+    if let Some((layer, effect)) = workspace.ui.white_balance_pick.take() {
+        match color_at(workspace, point).filter(|color| color.a > 0.0) {
+            Some(color) => workspace.state.neutralize(layer, effect, color),
+            None => window.push_notification("Click on something in the picture that should be gray or white.", cx),
+        }
+        cx.notify();
+        return;
+    }
+    // The Eyedropper tool takes the color under the pointer as the current color; with Shift
+    // it also goes on the selected shapes, text and solids.
+    if workspace.ui.tool == Tool::Eyedropper {
+        match color_at(workspace, point).filter(|color| color.a > 0.0) {
+            Some(color) => {
+                let color = color.with_alpha(1.0);
+                workspace.state.pick_color(color);
+                if event.modifiers.shift {
+                    workspace.state.apply_color_to_selection(color);
+                }
+            }
+            None => window.push_notification("There is no picture there to take a color from.", cx),
+        }
+        cx.notify();
+        return;
+    }
     // Track Motion: the click picks the point of the video to follow.
     if let Some(target) = workspace.ui.track_pick.take() {
         let frame = workspace.state.current_frame;
@@ -905,6 +987,19 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 .text_color(hsla(color::TEXT))
                 .child("Proxy")
         }))
+        // Says what the picture shows while a LUT is previewed from the Effects panel.
+        .children(workspace.ui.lut_hover.as_ref().map(|lut| {
+            div()
+                .absolute()
+                .top(px(6.0))
+                .left(px(6.0))
+                .px_1p5()
+                .rounded(px(3.0))
+                .bg(gpui_kit::rgba(0x000000aa))
+                .text_size(px(size::SMALL_TEXT))
+                .text_color(hsla(color::TEXT))
+                .child(format!("Preview: {}", lut.name()))
+        }))
         .children(selection_overlay(workspace, cx))
         .children(pen_draft_overlay(workspace))
         .children(cutout_clicks_overlay(workspace))
@@ -926,6 +1021,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .when(workspace.ui.tool == Tool::Hand, |viewer| viewer.cursor_grab())
         .when(workspace.ui.track_pick.is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.color_picker.as_ref().is_some_and(|picker| picker.sampling), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
+        .when(workspace.ui.tool == Tool::Eyedropper || workspace.ui.white_balance_pick.is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.tool == Tool::Zoom, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.tool == Tool::Rotate, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| press_viewer(this, event, window, cx)))
@@ -944,7 +1040,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .on_drop(cx.listener(|this, drag: &EffectDrag, window, cx| {
             this.ui.effect_drop_layer = None;
             if let Some(layer) = effect_target(this, &drag.name, window.mouse_position()) {
-                this.state.add_effect(layer, &drag.name);
+                drag.apply(&mut this.state, layer);
                 this.ui.tabs.insert(PanelId::Properties, 1);
             }
             cx.notify();

@@ -669,7 +669,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
             // Effects dragged from the Effects panel are added to the clip they're dropped on.
             .drag_over::<EffectDrag>(|style, _, _, _| style.border_color(hsla(0xffffff)))
             .on_drop(cx.listener(move |this, drag: &EffectDrag, _, cx| {
-                this.state.add_effect(id, &drag.name);
+                drag.apply(&mut this.state, id);
                 cx.notify();
             }))
             // A transition dropped on a clip goes on the cut nearer the pointer: its start or end.

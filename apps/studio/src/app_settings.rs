@@ -69,12 +69,27 @@ pub struct AppSettings {
     pub cooler_background_removal: bool,
     /// Which AI features are shown (Settings > AI Models).
     pub ai: AiFeatures,
-    /// The OpenConnect studio API (such as `http://host:3100/studio/api`), whose apps' device
-    /// frame colors the Mockups panel offers. Its token is read from OpenConnect's own file.
-    pub openconnect_api: Option<String>,
     /// The movie an export was writing when Studio last ran, until it finished: if Studio quit
     /// or crashed first, its unfinished hidden file is removed on the next launch.
     pub export_in_progress: Option<PathBuf>,
+    /// The eyedropper's current color, the colors it picked lately, and the saved swatches.
+    pub colors: SavedColors,
+}
+
+/// Colors kept from one session to the next, like Photoshop's foreground color and swatches.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedColors {
+    pub current: studio_core::model::Rgba,
+    /// The latest picks, newest first.
+    pub recent: Vec<studio_core::model::Rgba>,
+    pub swatches: Vec<studio_core::model::Rgba>,
+}
+
+impl Default for SavedColors {
+    fn default() -> Self {
+        Self { current: studio_core::model::Rgba::hex(0xffffff), recent: Vec::new(), swatches: Vec::new() }
+    }
 }
 
 /// The features that use AI models, each of which can be hidden.
@@ -206,8 +221,8 @@ impl Default for AppSettings {
             compact_timeline: false,
             cooler_background_removal: false,
             ai: AiFeatures::default(),
-            openconnect_api: None,
             export_in_progress: None,
+            colors: SavedColors::default(),
         }
     }
 }

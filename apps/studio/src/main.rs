@@ -5,7 +5,7 @@ mod app_settings;
 mod assets;
 mod download;
 mod library_store;
-mod openconnect;
+mod lut_library;
 mod panels;
 mod project_files;
 mod sound;

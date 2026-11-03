@@ -16,6 +16,7 @@ pub mod effects;
 pub mod elements;
 pub mod enhance;
 pub mod folders;
+pub mod grade;
 pub mod import;
 pub mod library;
 pub mod mockups;

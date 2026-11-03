@@ -4,13 +4,16 @@
 //! - the **full-quality** worker decodes the original file: the frame the viewer wants,
 //!   and a few ahead while playing. A long decode (a jump in long-GOP footage) is
 //!   abandoned as soon as the viewer has moved on, so it never holds up newer requests.
-//! - the **proxy** worker starts once the clip's proxy is built. It decodes any wanted
-//!   frame the full-quality worker does not have yet; proxies are all-intra, so that is
-//!   a few milliseconds even for a far jump.
+//! - the **proxy** worker starts once the clip's proxy is built. Paused, it decodes the
+//!   wanted frame if the full-quality worker does not have it yet; proxies are all-intra,
+//!   so that is a few milliseconds even for a far jump.
 //!
-//! A request returns the exact full-quality frame if it is ready, else the exact proxy
-//! frame, else the nearest frame either worker has. `on_ready` fires when the frame the
-//! viewer wants arrives, so it can redraw.
+//! While playing, a clip with a proxy plays from the proxy alone, as editors do: the proxy
+//! worker decodes ahead of the playhead and the full-quality worker rests. Letting both chase
+//! the playhead meant neither got ahead, and the picture flickered between sharp original
+//! frames and soft proxy ones. Paused, a request returns the exact full-quality frame if it
+//! is ready, else the exact proxy frame, else the nearest frame either worker has.
+//! `on_ready` fires when the frame the viewer wants arrives, so it can redraw.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -63,7 +66,10 @@ struct Clip {
     /// Known once the full-quality worker has opened the file.
     frame_count: Option<i64>,
     error: Option<String>,
+    /// Whether the proxy worker has been started, and whether it could not open the proxy (the
+    /// clip then plays from the original after all).
     proxy_worker: bool,
+    proxy_failed: bool,
     /// Frames that just failed to decode (full quality, proxy). They are not tried again until
     /// the viewer asks for another frame; retrying straight away would spin forever.
     failed_full: Option<i64>,
@@ -78,8 +84,17 @@ impl Clip {
         self.frame_count.map_or(index.max(0), |count| index.clamp(0, count - 1))
     }
 
-    /// The next frame the full-quality worker should decode, if any.
+    /// Whether the clip plays from its proxy: it has one, and it opened.
+    fn plays_proxy(&self) -> bool {
+        self.proxy_worker && !self.proxy_failed
+    }
+
+    /// The next frame the full-quality worker should decode, if any. None while playing from
+    /// the proxy.
     fn next_full_job(&self, playing: bool) -> Option<i64> {
+        if playing && self.plays_proxy() {
+            return None;
+        }
         let last = self.frame_count? - 1;
         let wanted = self.wanted.clamp(0, last);
         if !self.full.has(wanted) && self.failed_full != Some(wanted) {
@@ -91,21 +106,39 @@ impl Clip {
         None
     }
 
-    /// The frame the proxy worker should decode: the wanted one, if neither worker has it.
-    fn next_proxy_job(&self) -> Option<i64> {
-        let wanted = self.clamp(self.wanted);
-        (!self.full.has(wanted) && !self.proxy.has(wanted) && self.failed_proxy != Some(wanted)).then_some(wanted)
+    /// The frame the proxy worker should decode. Paused, the wanted one if neither worker has
+    /// it; playing, the first frame from the wanted one on that it does not have, a little ahead.
+    fn next_proxy_job(&self, playing: bool) -> Option<i64> {
+        let last = self.frame_count? - 1;
+        let wanted = self.wanted.clamp(0, last);
+        let needed = |index: i64| !self.proxy.has(index) && self.failed_proxy != Some(index);
+        if playing {
+            return (wanted..=(wanted + PREFETCH).min(last)).find(|&index| needed(index));
+        }
+        (!self.full.has(wanted) && needed(wanted)).then_some(wanted)
     }
 
-    /// Whether a full-quality decode of `job` is no longer useful, because the viewer moved elsewhere.
+    /// Whether a full-quality decode of `job` is no longer useful, because the viewer moved
+    /// elsewhere or playback switched to the proxy.
     fn full_job_is_stale(&self, job: i64, playing: bool) -> bool {
+        if playing && self.plays_proxy() {
+            return true;
+        }
         let wanted = self.clamp(self.wanted);
         let ahead = playing && job > wanted && job <= wanted + PREFETCH;
         job != wanted && !ahead
     }
 
-    /// The best picture for `index` right now.
-    fn best(&self, index: i64) -> Option<Arc<VideoFrame>> {
+    /// The best picture for `index` right now. Playing from the proxy, that is the proxy's frame,
+    /// or while it is still on its way the latest proxy frame before it (never a later one, and
+    /// never a sharp original frame in between soft ones).
+    fn best(&self, index: i64, playing: bool) -> Option<Arc<VideoFrame>> {
+        if playing
+            && self.plays_proxy()
+            && let Some((_, frame)) = self.proxy.0.range(..=index).next_back()
+        {
+            return Some(frame.clone());
+        }
         if let Some(frame) = self.full.0.get(&index) {
             return Some(frame.clone());
         }
@@ -173,8 +206,12 @@ impl FrameServer {
         *self.shared.on_ready.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(callback));
     }
 
-    /// While playing, the full-quality worker decodes ahead of the playhead.
+    /// While playing, clips decode ahead of the playhead (from their proxy if they have one),
+    /// and proxy building waits, so it doesn't take the cores playback needs.
     pub fn set_playing(&self, playing: bool) {
+        if let Some(proxies) = &self.proxies {
+            proxies.set_paused(playing);
+        }
         let mut state = self.shared.lock();
         if state.playing != playing {
             state.playing = playing;
@@ -235,7 +272,8 @@ impl VideoSource for FrameServer {
         if start_proxy.is_some() {
             clip.proxy_worker = true;
         }
-        let found = clip.best(index);
+        let playing = state.playing;
+        let found = state.clips.get(path).and_then(|clip| clip.best(index, playing));
         drop(state);
 
         let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
@@ -321,9 +359,17 @@ fn full_quality_worker(shared: &Shared, path: &Path, generation: u64, max_width:
 
 /// Decodes the clip's proxy: any wanted frame the full-quality worker does not have yet.
 fn proxy_worker(shared: &Shared, path: &Path, generation: u64, proxy_file: &Path) {
-    let Ok(mut decoder) = VideoDecoder::open(proxy_file, PROXY_WIDTH, false) else { return };
-    // Proxies match their source frame for frame, but wait for the source's length to be known.
-    while let Some(job) = wait_for_job(shared, path, generation, |clip, _| clip.frame_count.and(clip.next_proxy_job())) {
+    let Ok(mut decoder) = VideoDecoder::open(proxy_file, PROXY_WIDTH, false) else {
+        // Play from the original instead.
+        if let Some(clip) = shared.lock().clip(path, generation) {
+            clip.proxy_failed = true;
+        }
+        shared.work.notify_all();
+        return;
+    };
+    // Proxies match their source frame for frame, but wait for the source's length to be known
+    // (`next_proxy_job` needs it).
+    while let Some(job) = wait_for_job(shared, path, generation, Clip::next_proxy_job) {
         let Ok(mut frame) = decoder.frame(job) else {
             // Don't retry the same frame straight away (see `failed_proxy`).
             if let Some(clip) = shared.lock().clip(path, generation) {
@@ -357,7 +403,40 @@ mod tests {
         assert_eq!(clip.next_full_job(false), None, "no retry of the failed frame");
         assert_eq!(clip.next_full_job(true), Some(6), "while playing, later frames still decode");
         clip.failed_proxy = Some(5);
-        assert_eq!(clip.next_proxy_job(), None);
+        assert_eq!(clip.next_proxy_job(false), None);
+    }
+
+    /// A decoded frame standing in for source frame `index`.
+    fn picture(index: i64, from_proxy: bool) -> Arc<VideoFrame> {
+        Arc::new(VideoFrame { width: 2, height: 2, index, rgba: vec![0; 16], from_proxy, has_alpha: false })
+    }
+
+    #[test]
+    fn playing_with_a_proxy_uses_only_the_proxy_and_decodes_ahead() {
+        let mut clip = Clip { frame_count: Some(100), wanted: 10, proxy_worker: true, ..Clip::default() };
+        // Playing: the original rests, and the proxy works from the playhead onwards.
+        assert_eq!(clip.next_full_job(true), None);
+        assert!(clip.full_job_is_stale(10, true), "a decode under way is dropped");
+        assert_eq!(clip.next_proxy_job(true), Some(10));
+        clip.proxy.0.insert(10, picture(10, true));
+        assert_eq!(clip.next_proxy_job(true), Some(11), "then ahead");
+        assert_eq!(clip.next_proxy_job(false), None, "paused, only the wanted frame");
+        // A sharp original frame never cuts in while the proxy plays; a missing frame shows the
+        // latest proxy frame before it, not a later one.
+        clip.full.0.insert(12, picture(12, false));
+        clip.proxy.0.insert(14, picture(14, true));
+        assert!(clip.best(12, true).unwrap().from_proxy);
+        assert_eq!(clip.best(12, true).unwrap().index, 10);
+        // Paused, the original wins again.
+        assert!(!clip.best(12, false).unwrap().from_proxy);
+        assert_eq!(clip.next_full_job(false), Some(10));
+    }
+
+    #[test]
+    fn a_proxy_that_does_not_open_leaves_playback_to_the_original() {
+        let clip = Clip { frame_count: Some(100), wanted: 10, proxy_worker: true, proxy_failed: true, ..Clip::default() };
+        assert_eq!(clip.next_full_job(true), Some(10));
+        assert!(!clip.full_job_is_stale(10, true));
     }
 
     #[test]

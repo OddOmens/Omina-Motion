@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use studio_core::animation::Vec2;
 use studio_core::media::{VideoFrame, VideoSource};
-use studio_core::model::{Id, Layer, LayerContent, Paint, Project, Rgba, ShapeKind, ShapeStyle, TextStyle};
+use studio_core::model::{Id, Layer, LayerContent, LutSource, Paint, Project, Rgba, ShapeKind, ShapeStyle, TextStyle};
 use studio_core::transform::{Affine, world_transform};
 use wgpu::util::DeviceExt as _;
 
@@ -84,6 +84,14 @@ mod slot {
 struct MediaTexture {
     view: wgpu::TextureView,
     size: Vec2,
+}
+
+/// A lookup table on the GPU: a 3D texture, its samples per side and the input range it covers.
+struct LutTexture {
+    view: wgpu::TextureView,
+    size: u32,
+    domain_min: [f32; 3],
+    domain_max: [f32; 3],
 }
 
 /// A clip's current frame on the GPU, rewritten in place as playback moves.
@@ -177,6 +185,8 @@ pub struct Renderer {
     composite_layout: wgpu::BindGroupLayout,
     effect_pipeline: wgpu::RenderPipeline,
     effect_layout: wgpu::BindGroupLayout,
+    lut_pipeline: wgpu::RenderPipeline,
+    lut_layout: wgpu::BindGroupLayout,
     output_pipeline: wgpu::RenderPipeline,
     output_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -208,6 +218,9 @@ pub struct Renderer {
     /// Loaded images (or `None` where loading failed), with the file's modification time when
     /// loaded: a file that changes on disk, or appears after failing, is loaded again.
     images: HashMap<PathBuf, (Option<std::time::SystemTime>, Option<MediaTexture>)>,
+    /// Lookup tables for Apply LUT effects, with the file's modification time when loaded (`None`
+    /// for built-in looks), or `None` where the table could not be read.
+    luts: HashMap<LutSource, (Option<std::time::SystemTime>, Option<LutTexture>)>,
     /// The current picture of each footage layer. Keyed by layer, so two layers showing
     /// different moments of the same clip each have their own.
     videos: HashMap<Id, VideoTexture>,
@@ -304,6 +317,16 @@ fn text_key(text: &str, style: &TextStyle, raster_scale: f32) -> u64 {
     hasher.finish()
 }
 
+/// Reads a `.cube` file, refusing ones too large to be a real lookup table.
+pub fn read_cube(path: &std::path::Path) -> Result<studio_core::grade::Lut, String> {
+    let bytes = std::fs::metadata(path).map_err(|error| error.to_string())?.len();
+    if bytes > studio_core::grade::MAX_FILE_BYTES {
+        return Err("it is too large to be a lookup table".into());
+    }
+    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    studio_core::grade::parse_cube(&text)
+}
+
 impl Renderer {
     /// Creates a renderer on the default GPU. No window or display is needed.
     pub fn new() -> Result<Self, RenderError> {
@@ -354,6 +377,17 @@ impl Renderer {
         let composite_layout = layout("composite", &[uniform_entry, texture_entry(1), texture_entry(2), texture_entry(3)]);
         let effect_layout = layout("effect", &[uniform_entry, texture_entry(1), texture_entry(2), sampler_entry(3)]);
         let output_layout = layout("output", &[texture_entry(0)]);
+        let table_entry = wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D3,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let lut_layout = layout("lut", &[uniform_entry, texture_entry(1), table_entry, sampler_entry(3)]);
 
         let pipeline = |label: &str, source: &str, layout: &wgpu::BindGroupLayout, format, samples, blend| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -392,6 +426,7 @@ impl Renderer {
         let layer_pipeline = pipeline("layer", include_str!("shaders/layer.wgsl"), &layer_layout, WORK_FORMAT, MSAA_SAMPLES, premultiplied);
         let composite_pipeline = pipeline("composite", include_str!("shaders/composite.wgsl"), &composite_layout, WORK_FORMAT, 1, None);
         let effect_pipeline = pipeline("effect", include_str!("shaders/effect.wgsl"), &effect_layout, WORK_FORMAT, 1, None);
+        let lut_pipeline = pipeline("lut", include_str!("shaders/lut.wgsl"), &lut_layout, WORK_FORMAT, 1, None);
         let output_pipeline = pipeline("output", include_str!("shaders/output.wgsl"), &output_layout, OUTPUT_FORMAT, 1, None);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -429,6 +464,8 @@ impl Renderer {
             composite_layout,
             effect_pipeline,
             effect_layout,
+            lut_pipeline,
+            lut_layout,
             output_pipeline,
             output_layout,
             sampler,
@@ -446,6 +483,7 @@ impl Renderer {
             cutouts: HashMap::new(),
             text_boxes: HashMap::new(),
             images: HashMap::new(),
+            luts: HashMap::new(),
             videos: HashMap::new(),
             max_texture,
             gpu_error,
@@ -634,14 +672,13 @@ impl Renderer {
 impl Renderer {
     /// One effect shader pass from work slot `from` (plus `aux`) into slot `to`.
     #[allow(clippy::too_many_arguments)]
-    fn effect_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, id: u32, params: [f32; 8], time: f32, from: usize, aux: usize, to: usize) {
-        let mut uniform = [0u8; 64];
+    fn effect_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, id: u32, params: &[f32], time: f32, from: usize, aux: usize, to: usize) {
+        let mut uniform = [0u8; 80];
         uniform[..4].copy_from_slice(&id.to_le_bytes());
-        let floats: [f32; 12] = [
-            params[0], params[1], params[2], params[3], //
-            params[4], params[5], params[6], params[7], //
-            targets.width as f32, targets.height as f32, time, 0.0,
-        ];
+        // Twelve parameters (unused ones zero), then the output size and the time.
+        let mut floats = [0.0f32; 16];
+        floats[..params.len().min(12)].copy_from_slice(&params[..params.len().min(12)]);
+        floats[12..].copy_from_slice(&[targets.width as f32, targets.height as f32, time, 0.0]);
         uniform[16..].copy_from_slice(bytemuck::cast_slice(&floats));
         let buffer = self.uniform(&uniform);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -657,10 +694,29 @@ impl Renderer {
         self.fullscreen(encoder, &self.effect_pipeline, &bind_group, &targets.work[to].view);
     }
 
+    /// Looks the image in slot `from` up in `lut`, mixing in `intensity` (0–1) of the result, into `to`.
+    fn lut_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, lut: &LutTexture, intensity: f32, from: usize, to: usize) {
+        let [a, b, c] = lut.domain_min;
+        let [d, e, f] = lut.domain_max;
+        let floats: [f32; 12] = [intensity, lut.size as f32, 0.0, 0.0, a, b, c, 0.0, d, e, f, 0.0];
+        let buffer = self.uniform(bytemuck::cast_slice(&floats));
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lut"),
+            layout: &self.lut_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&targets.work[from].view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&lut.view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        });
+        self.fullscreen(encoder, &self.lut_pipeline, &bind_group, &targets.work[to].view);
+    }
+
     /// A two-pass Gaussian blur from `from` into `to`, using `spare` in between.
     fn blur(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, sigma: f32, from: usize, spare: usize, to: usize) {
-        self.effect_pass(encoder, targets, 1, [sigma, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, from, from, spare);
-        self.effect_pass(encoder, targets, 1, [sigma, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, spare, spare, to);
+        self.effect_pass(encoder, targets, 1, &[sigma, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, from, from, spare);
+        self.effect_pass(encoder, targets, 1, &[sigma, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, spare, spare, to);
     }
 
     /// Runs `layer`'s enabled effects on the image in slot `image`, ping-ponging with `other`
@@ -675,7 +731,7 @@ impl Renderer {
             for pass in passes {
                 match pass {
                     Pass::Shader { id, params } => {
-                        self.effect_pass(encoder, targets, id, params, time, image, image, other);
+                        self.effect_pass(encoder, targets, id, &params, time, image, image, other);
                         std::mem::swap(&mut image, &mut other);
                     }
                     Pass::Blur { sigma } => {
@@ -683,15 +739,22 @@ impl Renderer {
                         std::mem::swap(&mut image, &mut other);
                     }
                     Pass::Glow { threshold, sigma, intensity } => {
-                        self.effect_pass(encoder, targets, 30, [threshold, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, image, slot::AUX_A);
+                        self.effect_pass(encoder, targets, 30, &[threshold, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, image, slot::AUX_A);
                         self.blur(encoder, targets, sigma, slot::AUX_A, other, slot::AUX_B);
-                        self.effect_pass(encoder, targets, 31, [intensity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, slot::AUX_B, other);
+                        self.effect_pass(encoder, targets, 31, &[intensity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, slot::AUX_B, other);
                         std::mem::swap(&mut image, &mut other);
                     }
+                    Pass::Lut { intensity } => {
+                        let loaded = effect.lut.as_ref().and_then(|source| self.luts.get(source)).and_then(|(_, lut)| lut.as_ref());
+                        if let Some(lut) = loaded.filter(|_| intensity > 0.0) {
+                            self.lut_pass(encoder, targets, lut, intensity, image, other);
+                            std::mem::swap(&mut image, &mut other);
+                        }
+                    }
                     Pass::Shadow { offset, opacity, sigma } => {
-                        self.effect_pass(encoder, targets, 32, [offset[0], offset[1], opacity, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, image, slot::AUX_A);
+                        self.effect_pass(encoder, targets, 32, &[offset[0], offset[1], opacity, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, image, slot::AUX_A);
                         self.blur(encoder, targets, sigma, slot::AUX_A, other, slot::AUX_B);
-                        self.effect_pass(encoder, targets, 33, [0.0; 8], time, image, slot::AUX_B, other);
+                        self.effect_pass(encoder, targets, 33, &[0.0; 8], time, image, slot::AUX_B, other);
                         std::mem::swap(&mut image, &mut other);
                     }
                 }
@@ -766,9 +829,9 @@ impl Renderer {
         self.draw_source(encoder, targets, coverage, world, frame.scale, &Source::Solid([1.0; 4]), (Vec2::default(), layer.size));
         if let Some((drawn, hide)) = self.draw_mask(encoder, targets, frame, layer) {
             let masked = other_matte(drawn);
-            self.effect_pass(encoder, targets, MASK_PASS, [hide, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], frame.time, coverage, drawn, masked);
+            self.effect_pass(encoder, targets, MASK_PASS, &[hide, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], frame.time, coverage, drawn, masked);
             // Back to the layer slot (effect 0 copies), clear of the track matte drawn next.
-            self.effect_pass(encoder, targets, 0, [0.0; 8], frame.time, masked, masked, coverage);
+            self.effect_pass(encoder, targets, 0, &[0.0; 8], frame.time, masked, masked, coverage);
         }
         let Some(matte) = self.draw_track_matte(encoder, targets, frame, index, layer) else { return coverage };
         // The coverage laid over nothing through the matte: the coverage times the matte.
@@ -915,6 +978,53 @@ impl Renderer {
         }
     }
 
+    /// Makes sure the lookup table `source` is on the GPU: a built-in look is made once; a `.cube`
+    /// file is read again when it changes on disk. Tables that can't be read are remembered (and
+    /// draw nothing) until their file changes.
+    fn prepare_lut(&mut self, source: &LutSource) {
+        let modified = match source {
+            LutSource::Look(_) => None,
+            LutSource::File(path) => std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok(),
+        };
+        if self.luts.get(source).is_some_and(|(loaded_at, _)| *loaded_at == modified) {
+            return;
+        }
+        let table = match source {
+            LutSource::Look(name) => studio_core::grade::look(name),
+            LutSource::File(path) => read_cube(path).ok(),
+        };
+        let texture = table.map(|table| self.upload_lut(&table));
+        self.luts.insert(source.clone(), (modified, texture));
+    }
+
+    /// Uploads a lookup table as a 16-bit float 3D texture (red along x, green along y, blue along z).
+    fn upload_lut(&self, table: &studio_core::grade::Lut) -> LutTexture {
+        let size = table.size as u32;
+        let mut texels: Vec<u16> = Vec::with_capacity(table.table.len() * 4);
+        for [r, g, b] in &table.table {
+            texels.extend([*r, *g, *b, 1.0].map(|value| half::f16::from_f32(value).to_bits()));
+        }
+        let view = self
+            .device
+            .create_texture_with_data(
+                &self.queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("lut"),
+                    size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: size },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D3,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                bytemuck::cast_slice(&texels),
+            )
+            .create_view(&Default::default());
+        LutTexture { view, size, domain_min: table.domain_min, domain_max: table.domain_max }
+    }
+
     /// Loads an image file into a texture once. Failed loads are remembered so they are not retried every frame.
     fn prepare_image(&mut self, path: &PathBuf) -> bool {
         let modified = std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok();
@@ -1009,6 +1119,9 @@ impl Renderer {
         self.paths.clear();
         self.path_text.clear();
         for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame)) {
+            for source in layer.effects.iter().filter(|effect| effect.enabled).filter_map(|effect| effect.lut.as_ref()) {
+                self.prepare_lut(source);
+            }
             match &layer.content {
                 LayerContent::Shape { style, path: Some(path) } => {
                     let raster_scale = world_transform(composition, layer.id, at_time).map_or(scale, |w| max_scale(w) * scale).max(0.05);
@@ -1101,6 +1214,9 @@ impl Renderer {
         // go once removed from it.
         let in_project: HashSet<&PathBuf> = project.items.iter().filter_map(|item| item.path.as_ref()).collect();
         self.images.retain(|path, _| in_project.contains(path));
+        // Lookup tables likewise, while an effect in the project uses them.
+        let luts_used: HashSet<&LutSource> = project.compositions.iter().flat_map(|comp| &comp.layers).flat_map(|layer| &layer.effects).filter_map(|effect| effect.lut.as_ref()).collect();
+        self.luts.retain(|source, _| luts_used.contains(source));
 
         let index = self.ensure_targets(width, height);
         let targets = &self.targets[index];
@@ -1121,7 +1237,7 @@ impl Renderer {
             let shapers = Shapers { project, composition, frame, at, time, scale, text_keys: &text_keys };
             if matches!(layer.content, LayerContent::Adjustment) {
                 // Effects run on a copy of everything below, then blend back in where the layer covers.
-                self.effect_pass(&mut encoder, targets, 0, [0.0; 8], time, accum, accum, slot::LAYER_A);
+                self.effect_pass(&mut encoder, targets, 0, &[0.0; 8], time, accum, accum, slot::LAYER_A);
                 let adjusted = self.apply_effects(&mut encoder, targets, layer, at, time, scale, slot::LAYER_A, slot::LAYER_B);
                 let coverage = self.adjustment_coverage(&mut encoder, targets, &shapers, index, layer, world, adjusted);
                 self.composite(&mut encoder, targets, accum, adjusted, Some(coverage), [0, 0, 1], opacity, spare);
@@ -1137,7 +1253,7 @@ impl Renderer {
                     let fit = Vec2::new(layer.size.x / mask.size.x.max(1.0), layer.size.y / mask.size.y.max(1.0));
                     self.draw_source(&mut encoder, targets, slot::MATTE_A, Affine::scale(fit).then(world), scale, &Source::Texture(&mask.view), (Vec2::default(), mask.size));
                     let remove = if cutout.remove { 1.0 } else { 0.0 };
-                    self.effect_pass(&mut encoder, targets, MASK_PASS, [remove, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, slot::LAYER_A, slot::MATTE_A, slot::LAYER_B);
+                    self.effect_pass(&mut encoder, targets, MASK_PASS, &[remove, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, slot::LAYER_A, slot::MATTE_A, slot::LAYER_B);
                     (slot::LAYER_B, slot::LAYER_A)
                 }
                 _ => (slot::LAYER_A, slot::LAYER_B),
@@ -1147,7 +1263,7 @@ impl Renderer {
             // A mask layer keeps the image only inside (or only outside) what the mask draws.
             if let Some((drawn, hide)) = self.draw_mask(&mut encoder, targets, &shapers, layer) {
                 let other = if image == slot::LAYER_A { slot::LAYER_B } else { slot::LAYER_A };
-                self.effect_pass(&mut encoder, targets, MASK_PASS, [hide, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, drawn, other);
+                self.effect_pass(&mut encoder, targets, MASK_PASS, &[hide, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, drawn, other);
                 image = other;
             }
             let matte = self.draw_track_matte(&mut encoder, targets, &shapers, index, layer);

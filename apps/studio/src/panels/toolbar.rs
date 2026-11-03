@@ -1,10 +1,16 @@
-//! The window's chrome around the panels: a slim top bar (the project's name and the progress
-//! of background jobs) and a rail down the left side, CapCut style: at the top, the buttons that
-//! pick the panel beside it (Media, Libraries, Effects) and the editing tools; at the bottom,
-//! New Comp, Import and Export, then Settings. The rail holds only things that work.
+//! The window's chrome around the panels: a slim top bar and a rail down the left side.
 //!
-//! The Pen button (G) draws custom shapes point by point. The Shape button picks the Shape tool on a click; pressing and holding it (or right-clicking)
-//! opens a menu beside it to choose which shape the tool draws.
+//! The top bar has the app's name on the left with the editing tools beside it (as in
+//! Photoshop's and Premiere's tool bars, one small icon each, named in a tooltip with its
+//! key), and on the right the project and composition open and the progress of background
+//! jobs. The rail, CapCut style, picks the
+//! panel beside it (Media, Libraries, Effects and so on) and at the bottom has New Comp,
+//! Import and Export, then Settings. Both hold only things that work.
+//!
+//! Some tool buttons hold more than one tool or a menu: a click picks the tool shown, and
+//! pressing and holding (or right-clicking) opens a menu under it. The Color button (I) is the
+//! eyedropper; its menu holds the current color, recent picks and swatches. The Shape button's
+//! menu picks which shape the tool draws.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -21,30 +27,75 @@ use crate::workspace::{LeftPanel, Tool, Workspace};
 
 /// Width of the left rail: room for an icon and its name.
 pub const RAIL_WIDTH: f32 = 56.0;
+/// Width and height of a tool button in the top bar.
+const TOOL_WIDTH: f32 = 30.0;
+const TOOL_HEIGHT: f32 = 28.0;
+/// How far below a tool button's top its menu opens.
+const MENU_DROP: f32 = TOOL_HEIGHT + 6.0;
 
-/// The top bar: where you are on the left, and background jobs' progress on the right.
+/// The top bar: the app's name and the tools on the left; where you are and background jobs'
+/// progress on the right.
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let project = workspace.state.document_name();
     let composition = workspace.state.composition().name.clone();
+    // "Project / Composition", as a breadcrumb; it gives way first when the window is narrow.
+    let breadcrumb = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_2()
+        .overflow_hidden()
+        .child(div().min_w_0().truncate().text_color(hsla(color::MUTED)).child(project))
+        .child(div().flex_none().text_color(hsla(color::MUTED)).child("/"))
+        .child(div().min_w_0().truncate().text_color(hsla(color::TEXT)).child(composition));
     div()
+        .w_full()
         .h(px(size::TOOLBAR_HEIGHT))
         .flex_none()
         .flex()
         .items_center()
-        .gap_2()
+        .gap_3()
         .px_3()
         .bg(hsla(color::BACKGROUND))
-        // "Project / Composition", as a breadcrumb.
-        .child(div().text_color(hsla(color::MUTED)).child(project))
-        .child(div().text_color(hsla(color::MUTED)).child("/"))
-        .child(div().text_color(hsla(color::TEXT)).child(composition))
-        .child(div().flex_1())
+        .child(div().flex_none().min_w(px(RAIL_WIDTH - 12.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(hsla(color::TEXT)).child("Studio"))
+        .child(tools(workspace, cx))
+        .child(breadcrumb)
         // Captions, cut-outs and exports running in the background show their progress here.
         .children(super::captions::status(workspace, cx))
         .children(super::cutout::status(workspace, cx))
         .children(super::enhance::status(workspace, cx))
         .children(super::analysis::status(workspace, cx))
         .children(super::export::status(workspace, cx))
+}
+
+/// The editing tools, in a row: selecting, editing clips, text, shapes, the pen, rotating,
+/// the eyedropper, and moving around the view.
+fn tools(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let tool = workspace.ui.tool;
+    let pick = |which: Tool| {
+        move |this: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
+            this.set_tool(which);
+            cx.notify();
+        }
+    };
+    let divider = || div().flex_none().w(px(1.0)).h(px(16.0)).mx_1().bg(hsla(color::MUTED).opacity(0.35));
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .child(group_button(0, workspace, cx))
+        .child(group_button(1, workspace, cx))
+        .child(divider())
+        .child(tool_button("tool-type", IconName::Type, "Text (⌘T)", tool == Tool::Type, pick(Tool::Type), cx))
+        .child(shape_button(workspace, cx))
+        .child(tool_button("tool-pen", IconName::PenTool, "Pen (G)", tool == Tool::Pen, pick(Tool::Pen), cx))
+        .child(tool_button("tool-rotate", IconName::RotateCw, "Rotate (W)", tool == Tool::Rotate, pick(Tool::Rotate), cx))
+        .child(eyedropper_button(workspace, cx))
+        .child(divider())
+        .child(group_button(2, workspace, cx))
 }
 
 /// A short line between groups of rail buttons. The panel hairline is too faint against the
@@ -89,15 +140,13 @@ fn group_button(index: usize, workspace: &Workspace, cx: &mut Context<Workspace>
     let group = &TOOL_GROUPS[index];
     let current = workspace.ui.tool;
     let shown = group.tools.iter().find(|tool| tool.0 == current).or_else(|| workspace.ui.group_tools.get(&index).and_then(|picked| group.tools.iter().find(|tool| tool.0 == *picked))).unwrap_or(&group.tools[0]);
-    let (tool, icon, label, _) = *shown;
+    let (tool, icon, label, key) = *shown;
     let active = group.tools.iter().any(|tool| tool.0 == current);
-    let corner = div().absolute().right(px(4.0)).bottom(px(4.0)).w(px(4.0)).h(px(1.0)).bg(hsla(color::MUTED));
-    let corner_up = div().absolute().right(px(4.0)).bottom(px(4.0)).w(px(1.0)).h(px(4.0)).bg(hsla(color::MUTED));
+    let tip = if group.tools.len() > 1 { format!("{label} ({key}) · hold for more") } else { format!("{label} ({key})") };
     div()
         .relative()
         .child(
-            rail_button_look(group.id, icon, label, active)
-                .relative()
+            tool_button_look(group.id, icon, tip, active)
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                     this.set_tool(tool);
                     this.ui.tool_press = Some(index);
@@ -119,14 +168,13 @@ fn group_button(index: usize, workspace: &Workspace, cx: &mut Context<Workspace>
                     this.ui.tool_menu = Some(index);
                     cx.notify();
                 }))
-                .child(corner)
-                .child(corner_up)
+                .child(menu_mark())
                 .test_support(),
         )
         .when(workspace.ui.tool_menu == Some(index), |button| button.child(group_menu(index, current, cx)))
 }
 
-/// The menu beside a group's button: each of its tools, with its key.
+/// The menu under a group's button: each of its tools, with its key.
 fn group_menu(index: usize, current: Tool, cx: &mut Context<Workspace>) -> impl IntoElement {
     let rows = TOOL_GROUPS[index].tools.iter().map(|&(tool, icon, label, key)| {
         div()
@@ -154,8 +202,8 @@ fn group_menu(index: usize, current: Tool, cx: &mut Context<Workspace>) -> impl 
         div()
             .id("tool-menu")
             .absolute()
-            .left(px(RAIL_WIDTH - 6.0))
-            .top_0()
+            .left_0()
+            .top(px(MENU_DROP))
             .w(px(190.0))
             .p_1()
             .flex()
@@ -203,6 +251,48 @@ fn rail_button(
     rail_button_look(id, icon, label, active).on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))).test_support()
 }
 
+/// A tool button in the top bar: its icon, named in a tooltip.
+fn tool_button(
+    id: &'static str,
+    icon: IconName,
+    tip: &'static str,
+    active: bool,
+    on_click: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    tool_button_look(id, icon, tip.to_owned(), active).on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))).test_support()
+}
+
+/// A tool button's appearance, without its behaviour.
+fn tool_button_look(id: &'static str, icon: IconName, tip: String, active: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id(id)
+        .relative()
+        .w(px(TOOL_WIDTH))
+        .h(px(TOOL_HEIGHT))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.0))
+        .text_color(hsla(if active { color::TEXT } else { color::MUTED }))
+        .when(active, |button| button.bg(hsla(color::ROW_SELECTED)))
+        .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
+        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
+        .child(Icon::new(icon).size(px(16.0)))
+}
+
+/// The small mark in a tool button's corner that says holding it opens a menu: a tiny L.
+fn menu_mark() -> impl IntoElement {
+    div()
+        .absolute()
+        .right(px(3.0))
+        .bottom(px(3.0))
+        .size(px(4.0))
+        .border_r_1()
+        .border_b_1()
+        .border_color(hsla(color::MUTED))
+}
+
 /// A rail button's appearance, without its behaviour.
 fn rail_button_look(id: &'static str, icon: IconName, label: &'static str, active: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
     div()
@@ -228,14 +318,11 @@ fn rail_button_look(id: &'static str, icon: IconName, label: &'static str, activ
 fn shape_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let kind = workspace.ui.shape_kind;
     let active = workspace.ui.tool == Tool::Shape;
-    // The corner mark: a tiny L in the bottom right.
-    let corner = div().absolute().right(px(5.0)).bottom(px(5.0)).w(px(5.0)).h(px(1.0)).bg(hsla(color::MUTED));
-    let corner_up = div().absolute().right(px(5.0)).bottom(px(5.0)).w(px(1.0)).h(px(5.0)).bg(hsla(color::MUTED));
+    let tip = format!("{} (Q) · hold for shapes, double-click for a background", kind.name());
     div()
         .relative()
         .child(
-            rail_button_look("tool-shape", shape_icon(kind), "Shape", active)
-                .relative()
+            tool_button_look("tool-shape", shape_icon(kind), tip, active)
                 .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &gpui_kit::MouseDownEvent, window, cx| {
                     if event.click_count >= 2 {
                         this.ui.shape_press = false;
@@ -263,14 +350,59 @@ fn shape_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl Into
                     this.ui.shape_menu = true;
                     cx.notify();
                 }))
-                .child(corner)
-                .child(corner_up)
+                .child(menu_mark())
                 .test_support(),
         )
         .when(workspace.ui.shape_menu, |button| button.child(shape_menu(kind, cx)))
 }
 
-/// The menu of shapes beside the Shape button. Picking one selects the Shape tool with it.
+/// The Eyedropper button (I): a click picks the tool, which takes colors from the viewer.
+/// Holding it, or right-clicking, opens the color menu (`color_well`). A dot in its corner
+/// shows the current color.
+fn eyedropper_button(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let active = workspace.ui.tool == Tool::Eyedropper;
+    let current = workspace.state.colors.current;
+    let dot = div()
+        .absolute()
+        .right(px(2.0))
+        .bottom(px(2.0))
+        .size(px(7.0))
+        .rounded_full()
+        .border_1()
+        .border_color(hsla(color::MUTED))
+        .bg(gpui_kit::rgba(current.with_alpha(1.0).to_rgba_u32()));
+    div()
+        .relative()
+        .child(
+            tool_button_look("tool-eyedropper", IconName::Pipette, "Eyedropper (I) · hold for colors and swatches".to_owned(), active)
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                    this.set_tool(Tool::Eyedropper);
+                    this.ui.eyedropper_press = true;
+                    cx.notify();
+                    // Still held after a moment: open the color menu.
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(HOLD_FOR_MENU).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.ui.eyedropper_press {
+                                this.ui.color_well = true;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }))
+                .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.ui.eyedropper_press = false))
+                .on_mouse_down(MouseButton::Right, cx.listener(|this, _, _, cx| {
+                    this.ui.color_well = true;
+                    cx.notify();
+                }))
+                .child(dot)
+                .test_support(),
+        )
+        .when(workspace.ui.color_well, |button| button.child(super::color_well::menu(workspace, cx)))
+}
+
+/// The menu of shapes under the Shape button. Picking one selects the Shape tool with it.
 fn shape_menu(current: ShapeKind, cx: &mut Context<Workspace>) -> impl IntoElement {
     let rows = ShapeKind::ALL.into_iter().enumerate().map(|(index, kind)| {
         div()
@@ -298,8 +430,8 @@ fn shape_menu(current: ShapeKind, cx: &mut Context<Workspace>) -> impl IntoEleme
         div()
             .id("shape-menu")
             .absolute()
-            .left(px(RAIL_WIDTH - 6.0))
-            .top_0()
+            .left_0()
+            .top(px(MENU_DROP))
             .w(px(170.0))
             .p_1()
             .flex()
@@ -323,19 +455,13 @@ fn shape_menu(current: ShapeKind, cx: &mut Context<Workspace>) -> impl IntoEleme
     .with_priority(2)
 }
 
-/// The rail down the left: the panels it shows beside it (Media, Effects), the editing tools,
-/// and import and new composition.
+/// The rail down the left: the panels it shows beside it (Media, Effects and so on), and
+/// getting work in and out.
 pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
-    let (tool, side) = (workspace.ui.tool, workspace.ui.left_panel);
+    let side = workspace.ui.left_panel;
     let show = |panel: LeftPanel| {
         move |this: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
             this.ui.left_panel = panel;
-            cx.notify();
-        }
-    };
-    let pick = |which: Tool| {
-        move |this: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
-            this.set_tool(which);
             cx.notify();
         }
     };
@@ -349,7 +475,7 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .gap_1()
         .py_2()
         .bg(hsla(color::BACKGROUND))
-        // At the top: the side panels, then the tools.
+        // At the top: the side panels.
         .child(rail_button("rail-media", IconName::Folder, "Media", side == LeftPanel::Media, show(LeftPanel::Media), cx))
         .child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx))
         .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
@@ -357,14 +483,6 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", side == LeftPanel::Templates, show(LeftPanel::Templates), cx))
         .child(rail_button("rail-mockups", IconName::TabletSmartphone, "Mockups", side == LeftPanel::Mockups, show(LeftPanel::Mockups), cx))
         .when(workspace.ui.settings.ai.captions, |rail| rail.child(rail_button("rail-captions", IconName::Captions, "Captions", side == LeftPanel::Captions, show(LeftPanel::Captions), cx)))
-        .child(separator())
-        .child(group_button(0, workspace, cx))
-        .child(group_button(1, workspace, cx))
-        .child(rail_button("tool-type", IconName::Type, "Text", tool == Tool::Type, pick(Tool::Type), cx))
-        .child(shape_button(workspace, cx))
-        .child(rail_button("tool-pen", IconName::PenTool, "Pen", tool == Tool::Pen, pick(Tool::Pen), cx))
-        .child(rail_button("tool-rotate", IconName::RotateCw, "Rotate", tool == Tool::Rotate, pick(Tool::Rotate), cx))
-        .child(group_button(2, workspace, cx))
         // At the bottom: getting work in and out (new composition ⌘N, import ⌘I, export ⌘M),
         // and Settings last.
         .child(div().flex_1())

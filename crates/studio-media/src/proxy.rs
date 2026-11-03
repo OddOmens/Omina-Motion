@@ -10,7 +10,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use ffmpeg_next as ffmpeg;
@@ -219,6 +219,8 @@ struct Shared {
     cache: Mutex<PathBuf>,
     /// The most the cache may hold, in bytes (`u64::MAX` for no limit).
     limit: AtomicU64,
+    /// Whether building is on hold while something plays (see `ProxyManager::set_paused`).
+    paused: AtomicBool,
 }
 
 /// Whether `name` is one Studio gives proxies (see `proxy_path`): sixteen hex digits, then
@@ -302,12 +304,18 @@ pub struct ProxyManager {
 impl ProxyManager {
     /// Keeps proxies in `cache` (created if missing).
     pub fn new(cache: PathBuf) -> Self {
-        let shared = Arc::new(Shared { queue: Mutex::default(), work: Condvar::new(), on_change: Mutex::new(None), cache: Mutex::new(cache), limit: AtomicU64::new(u64::MAX) });
+        let shared = Arc::new(Shared { queue: Mutex::default(), work: Condvar::new(), on_change: Mutex::new(None), cache: Mutex::new(cache), limit: AtomicU64::new(u64::MAX), paused: AtomicBool::new(false) });
         let worker = shared.clone();
         if let Err(error) = std::thread::Builder::new().name("proxies".into()).spawn(move || build_loop(&worker)) {
             eprintln!("could not start the proxy builder: {error}");
         }
         Self { shared }
+    }
+
+    /// Holds building while `paused` (while playback runs) and carries on afterwards. A build
+    /// uses every core, which left too little for decoding the footage being played.
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.paused.store(paused, Ordering::Relaxed);
     }
 
     /// Called (from the builder thread) when any proxy's status changes.
@@ -424,7 +432,17 @@ fn build_loop(shared: &Shared) {
                 set_status(ProxyStatus::Building(fraction));
             }
         };
-        let cancelled = || shared.lock().shutting_down;
+        // Checked between packets: waits there while building is on hold, then says whether
+        // to give up (Studio is quitting).
+        let cancelled = || loop {
+            if shared.lock().shutting_down {
+                return true;
+            }
+            if !shared.paused.load(Ordering::Relaxed) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
         match build_proxy(&source, &output, PROXY_WIDTH, &progress, &cancelled) {
             Ok(true) => {
                 set_status(ProxyStatus::Ready(output));

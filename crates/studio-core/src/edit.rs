@@ -246,6 +246,63 @@ pub fn add_effect(project: &mut Project, comp_id: Id, layer_id: Id, name: &str) 
     Some(id)
 }
 
+/// Adds an Apply LUT effect using `lut` to a layer. Returns the new effect, or `None` where an
+/// effect could not be added (see `add_effect`).
+pub fn add_lut(project: &mut Project, comp_id: Id, layer_id: Id, lut: crate::model::LutSource) -> Option<Id> {
+    let id = add_effect(project, comp_id, layer_id, "Apply LUT")?;
+    set_effect_lut(project.composition_mut(comp_id)?, layer_id, id, Some(lut));
+    Some(id)
+}
+
+/// Sets which lookup table an Apply LUT effect uses. Other effects have none, so they are left alone.
+pub fn set_effect_lut(composition: &mut Composition, layer_id: Id, effect_id: Id, lut: Option<crate::model::LutSource>) -> bool {
+    let effect = composition.layer_mut(layer_id).and_then(|layer| layer.effects.iter_mut().find(|effect| effect.id == effect_id));
+    match effect {
+        Some(effect) if effect.name == "Apply LUT" => {
+            effect.lut = lut;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The name the global grade's adjustment layer gets when it is made.
+pub const COLOR_GRADE_NAME: &str = "Color Grade";
+
+/// The layer that grades the whole composition: the topmost adjustment layer that lasts from
+/// the first frame to the last, if there is one.
+pub fn color_grade_layer(composition: &Composition) -> Option<Id> {
+    composition
+        .layers
+        .iter()
+        .find(|layer| matches!(layer.content, LayerContent::Adjustment) && layer.in_frame <= 0 && layer.out_frame >= composition.duration_frames)
+        .map(|layer| layer.id)
+}
+
+/// The global grade's layer (see `color_grade_layer`), made if there is none: an adjustment
+/// layer the size of the frame, at the top of the stack, lasting the whole composition.
+pub fn ensure_color_grade_layer(project: &mut Project, comp_id: Id) -> Option<Id> {
+    if let Some(id) = color_grade_layer(project.composition(comp_id)?) {
+        return Some(id);
+    }
+    let id = add_adjustment_layer(project, comp_id, 0)?;
+    let composition = project.composition_mut(comp_id)?;
+    let layer = composition.layer_mut(id)?;
+    layer.name = COLOR_GRADE_NAME.to_owned();
+    layer.label = crate::model::LabelColor::Lavender;
+    Some(id)
+}
+
+/// Adds an adjustment layer the size of the frame at the top of the stack, from `in_frame` to
+/// the end. Its effects change everything below it.
+pub fn add_adjustment_layer(project: &mut Project, comp_id: Id, in_frame: i64) -> Option<Id> {
+    let composition = project.composition(comp_id)?;
+    let size = composition.size();
+    let taken = composition.layers.iter().filter(|layer| matches!(layer.content, LayerContent::Adjustment)).count();
+    let name = format!("Adjustment Layer {}", taken + 1);
+    add_top_layer(project, comp_id, name, LayerContent::Adjustment, size, size * 0.5, in_frame)
+}
+
 /// Removes an effect from a layer.
 pub fn remove_effect(composition: &mut Composition, layer_id: Id, effect_id: Id) {
     if let Some(layer) = composition.layer_mut(layer_id) {
@@ -875,6 +932,45 @@ pub fn set_parent(composition: &mut Composition, layer_id: Id, parent: Option<Id
 mod tests {
     use super::*;
     use crate::sample::{self, ids};
+
+    #[test]
+    fn the_global_grade_is_one_full_length_adjustment_layer_on_top() {
+        let mut project = sample::sample_project();
+        // The sample's "Grade" layer lasts the whole composition, so it already is the global grade.
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        let existing = color_grade_layer(comp).unwrap();
+        assert_eq!(comp.layer(existing).unwrap().name, "Grade");
+        assert_eq!(ensure_color_grade_layer(&mut project, ids::MAIN_COMP), Some(existing));
+
+        // Shortened, it no longer covers everything, so a new one is made.
+        project.composition_mut(ids::MAIN_COMP).unwrap().layer_mut(existing).unwrap().out_frame = 100;
+        let before = project.composition(ids::MAIN_COMP).unwrap().layers.len();
+        let grade = ensure_color_grade_layer(&mut project, ids::MAIN_COMP).unwrap();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        let layer = comp.layer(grade).unwrap();
+        assert_ne!(grade, existing);
+        assert_eq!(comp.layers[0].id, grade, "on top");
+        assert_eq!((layer.name.as_str(), layer.in_frame, layer.out_frame), (COLOR_GRADE_NAME, 0, comp.duration_frames));
+        assert_eq!(layer.size, comp.size());
+        // Asking again finds the same layer rather than making another.
+        assert_eq!(ensure_color_grade_layer(&mut project, ids::MAIN_COMP), Some(grade));
+        assert_eq!(project.composition(ids::MAIN_COMP).unwrap().layers.len(), before + 1);
+    }
+
+    #[test]
+    fn luts_go_only_on_apply_lut_effects() {
+        let mut project = sample::sample_project();
+        let grade = ensure_color_grade_layer(&mut project, ids::MAIN_COMP).unwrap();
+        let look = crate::model::LutSource::Look("Vivid".into());
+        let effect = add_lut(&mut project, ids::MAIN_COMP, grade, look.clone()).unwrap();
+        let lut_of = |project: &Project, id: Id| project.composition(ids::MAIN_COMP).unwrap().layer(grade).unwrap().effects.iter().find(|e| e.id == id).unwrap().lut.clone();
+        assert_eq!(lut_of(&project, effect), Some(look.clone()));
+        assert!(set_effect_lut(project.composition_mut(ids::MAIN_COMP).unwrap(), grade, effect, None));
+        assert_eq!(lut_of(&project, effect), None);
+        let blur = add_effect(&mut project, ids::MAIN_COMP, grade, "Gaussian Blur").unwrap();
+        assert!(!set_effect_lut(project.composition_mut(ids::MAIN_COMP).unwrap(), grade, blur, Some(look)));
+        assert_eq!(lut_of(&project, blur), None);
+    }
 
     #[test]
     fn separating_audio_puts_the_sound_on_its_own_clip_in_step() {

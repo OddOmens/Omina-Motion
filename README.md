@@ -18,6 +18,8 @@ crates/studio-render GPU compositor (wgpu: Metal, Vulkan, DirectX 12). Renders a
 crates/studio-media  Media probing and video decoding with FFmpeg (hardware or software, whichever measures
                      faster per clip), a frame server that decodes on background threads, and proxies:
                      all-intra ProRes Proxy copies built in the background so scrubbing is instant.
+                     A clip with a proxy plays from it alone (decoded ahead), and building waits
+                     while anything plays.
                      Also audio: decoding and resampling, a mixer for a composition's sound, and playback
                      through the sound card (cpal: CoreAudio, WASAPI, ALSA). And movie writing: H.264 + AAC
                      (.mp4) and ProRes 422 HQ + 24-bit PCM (.mov), converted to BT.709 YUV in `yuv.rs`.
@@ -42,10 +44,11 @@ Inside `apps/studio/src`:
   unit-tested without a window. `state/history.rs` is undo and redo.
 - `panels/timeline/tracks.rs`: the timeline's tracks (CapCut style): one row per track, several clips
   per row, thumbnails and waveforms, and each clip's keyframe rows when it is opened.
-- `panels/toolbar.rs`: the top bar (where you are, and background jobs' progress) and the rail on the left:
-  at the top the side panel (Media, Libraries, Effects) and the tools; at the bottom New Comp, Import,
-  Export and Settings. Tools that share a button (Select / Track Select, Cut / Ripple / Roll / Slip /
-  Slide, Hand / Zoom) and the Shape button open a menu when held or right-clicked.
+- `panels/toolbar.rs`: the top bar ("Studio" and the editing tools beside it as small icons named in
+  tooltips; on the right the project and composition, and background jobs' progress) and the rail on the left: at the top the side panel (Media,
+  Libraries, Effects and so on); at the bottom New Comp, Import, Export and Settings. Tools that share a
+  button (Select / Track Select, Cut / Ripple / Roll / Slip / Slide, Hand / Zoom), the Shape button and the
+  Eyedropper open a menu under them when held or right-clicked.
 - Premiere's trim tools (ripple, roll, slide, moving a group) are in `studio-core/src/trim_tools.rs`;
   `state/layer_time.rs` applies each drag afresh to the timing as it was when the drag began.
 - Pen paths: the model and geometry are in `studio-core/src/path.rs`; drawing and point dragging are in
@@ -60,7 +63,24 @@ Inside `apps/studio/src`:
   to ProRes 4444 with transparency in an Exports folder beside the project; Export and Replace imports it
   into the project's Exports folder and puts it in the layer's place.
 - `panels/color_picker.rs`: the color picker every color chip opens: a saturation/brightness square, hue and
-  opacity sliders, hex and opacity fields, the project's colors, paint type for shapes, and a Libraries tab.
+  opacity sliders, hex and opacity fields, the project's colors, the picked and saved colors, paint type for
+  shapes, and a Libraries tab.
+- The right panel's tabs are Properties, Effects (the selected layer's effects, keyframable) and Color.
+- `panels/color_grade.rs`, `state/grade.rs`: the Color tab (like Lumetri): grade the selected clip or the
+  whole video, which goes on a full-length adjustment layer at the top (made the first time). The tab
+  starts with a tile per correction; each added one is a card for one of the effects Basic Correction
+  (grouped into White Balance with a picker, Light and Color), Apply LUT, Color Wheels (sized to the panel,
+  each with a brightness slider), Tone Curve, Levels and Vignette. Values are sliders on colored tracks,
+  with a typed value and double-click to reset; the same effects keyframe in the Effects tab. LUTs are `.cube` files or the 31 built-in looks in five groups
+  (`studio-core/src/grade.rs`), drawn by `shaders/lut.wgsl` from a 3D texture. Imported LUTs are copied
+  into Studio's settings folder, in `LUTs` (`lut_library.rs`), and listed in the Effects panel, where pointing at one previews it in the viewer (on the selected clips, or the whole picture). The Color
+  tab's LUT browser and the Effects panel show each LUT on the current frame (`panels/lut_previews.rs`:
+  the frame is drawn small without the LUT being chosen, then each table is applied on the CPU). `GRADE_SHEET=/path.png cargo test -p studio-render --test render grade_sheet -- --ignored`
+  renders every look into one picture to check.
+- `panels/color_well.rs`: the Eyedropper tool (I) keeps a current color, like Photoshop's foreground color:
+  click the viewer to pick it (Shift-click also fills the selected shapes, text and solids). Holding or
+  right-clicking the top bar's Eyedropper button opens it, to apply it, save it as a swatch or into a library, or
+  reuse a recent pick. Recent picks and swatches are kept in Settings, for every project.
 - `panels/libraries.rs`, `state/library.rs`, `library_store.rs`: Libraries (brands holding shared colors and
   text styles, linked wherever they are used; the model and syncing are in `studio-core/src/library.rs`).
   They are stored in Studio's settings folder as `libraries.json`, with backups in `Library Backups`.
@@ -75,12 +95,14 @@ Inside `apps/studio/src`:
   reply, greeting, outlined words, vlog title).
   `TEMPLATE_SHEET=/path.png cargo test -p studio-render --test render template_sheet -- --ignored` renders
   them all into one picture to check.
-- `panels/mockups.rs`: the Mockups panel. Device mockups for iPhone, iPhone Duo, iPad and Mac, drawn as shapes after
-  OpenConnect's device frames (`studio-core/src/mockups.rs`): each makes a Screen composition at the device's own
-  screen size (the selected video or picture fills it) and a mockup showing it through a rounded mask, all hanging off
-  a "Device" null. Finishes are ready-made or read from OpenConnect's apps (`openconnect.rs`; the API address is set
-  in the panel, the token comes from `~/.config/openconnect/token`). `MOCKUP_SHEET=/path.png cargo test -p
-  studio-render --test render mockup_sheet -- --ignored` renders them all into one picture.
+- `panels/mockups.rs`: the Mockups panel. Device mockups for iPhone, iPhone Duo, iPad, Mac, Apple Watch (with bands) and
+  a browser window (1920 × 1080 page, light or dark), drawn as shapes
+  (`studio-core/src/mockups.rs`). A card's + opens the finishes that device comes in (`Device::finishes`, a list per
+  device); picking one adds the device upright to the open composition as one layer, centered and scaled to fit
+  (rotate the layer to turn it). Looking at the cards adds nothing. The layer is a see-through
+  mockup composition sized to the device, showing a Screen composition at the device's own screen size (the selected
+  video or picture fills it) through a rounded mask. `MOCKUP_SHEET=/path.png cargo test -p studio-render --test render
+  mockup_sheet -- --ignored` renders them all into one picture.
 - `panels/elements.rs`: the Elements panel (shapes, arrows, badges, frames, social buttons and emoji
   stickers, defined in `studio-core/src/elements.rs`). `ELEMENT_SHEET=/path.png cargo test -p studio-render
   --test render element_sheet -- --ignored` renders them all into one picture.
@@ -185,15 +207,13 @@ cargo run -p studio-export --release --example export -- project.studio out.mp4 
 
 - **Network.** Studio contacts only: Hugging Face, to download the captions (Whisper) and cut-out (MobileSAM)
   models, after asking or from Settings > AI Models (pinned files, each checked against its SHA-256 before use;
-  `https` only); and OpenConnect, only at the address set in the Mockups panel. Its token is read from
-  `~/.config/openconnect/token` and handed to `curl` on standard input; plain `http` is allowed only for this
-  computer and the local network. There is no telemetry, analytics or crash reporting.
+  `https` only). There is no telemetry, analytics or crash reporting.
 - **On disk.** Settings, libraries (and up to 30 backups), downloaded models and the recovery copy of unsaved
   work live in `~/Library/Application Support/Studio`. Proxies, background-removal masks, cleaned speech and
   images from imported animations live in `~/Library/Caches/Studio` (or the folder chosen in Settings >
   Media Cache), and each can be cleared there.
 - **Sharing projects.** A `.studio` file holds the full paths of its media (which include your user name) and
-  of files in Studio's cache; it holds no settings, libraries or OpenConnect details. Exported movies carry
+  of files in Studio's cache; it holds no settings or libraries. Exported movies carry
   only the encoder's tags: no project name, paths or dates.
 
 ## Releasing

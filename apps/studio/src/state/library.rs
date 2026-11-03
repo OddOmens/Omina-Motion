@@ -100,7 +100,12 @@ impl EditorState {
     /// fill, or a solid's color. Returns how many layers took it.
     pub fn apply_library_color(&mut self, id: LinkId) -> usize {
         let Some((_, item)) = self.libraries.color(id) else { return 0 };
-        let color = item.color.linked(Some(id));
+        self.apply_color_to_selection(item.color.linked(Some(id)))
+    }
+
+    /// Uses `color` on the selected layers: a shape's fill, a text layer's fill, or a solid's
+    /// color. Returns how many layers took it.
+    pub fn apply_color_to_selection(&mut self, color: Rgba) -> usize {
         let layers = self.selected_layers.clone();
         let mut applied = 0;
         for layer in layers {
@@ -121,6 +126,12 @@ impl EditorState {
             applied += 1;
         }
         applied
+    }
+
+    /// Whether any selected layer can take a color (see `apply_color_to_selection`).
+    pub fn selection_takes_color(&self) -> bool {
+        let composition = self.composition();
+        self.selected_layers.iter().filter_map(|id| composition.layer(*id)).any(|layer| matches!(layer.content, LayerContent::Shape { .. } | LayerContent::Text { .. } | LayerContent::Solid { .. }))
     }
 
     /// Uses a library text style on `layers` (the text ones), linked.

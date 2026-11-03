@@ -2501,7 +2501,7 @@ fn the_preview_plays_and_pauses_sound(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_device_click_makes_a_mockup_with_the_selected_picture_on_its_screen(cx: &mut TestAppContext) {
+fn the_plus_on_a_device_picks_a_finish_then_adds_it_to_the_open_composition(cx: &mut TestAppContext) {
     use studio_core::mockups::Device;
     use studio_core::model::LayerContent;
     let (workspace, visual) = open(cx);
@@ -2517,49 +2517,41 @@ fn a_device_click_makes_a_mockup_with_the_selected_picture_on_its_screen(cx: &mu
     for index in 0..Device::ALL.len() {
         assert!(visual.update(|window, _| window.try_find(("mockup", index)).is_some()), "device {index} has a card");
     }
-    // Sideways, 9:16, then the iPhone.
-    visual.update(|window, cx| window.click(("mockup-orientation", 1_usize), cx));
-    render(visual);
-    visual.update(|window, cx| window.click(("mockup-format", 2_usize), cx));
-    render(visual);
+    let (comp, layers_before) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.active_comp, state.composition().layers.len())
+    });
+    // Clicking a card to look at it adds nothing.
     visual.update(|window, cx| window.click(("mockup", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().layers.len(), layers_before));
+    // The iPhone's + asks for a finish first: nothing is added until one is picked.
+    visual.update(|window, cx| window.click(("mockup-add", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().layers.len(), layers_before));
+    click_label(visual, "Silver");
     render(visual);
     visual.update(|_, cx| {
         let state = &workspace.read(cx).state;
-        let mockup = state.composition();
-        assert_eq!((mockup.width, mockup.height), (1080, 1920), "the chosen shape");
-        assert!(mockup.name.starts_with("iPhone Landscape Mockup"));
+        assert_eq!(state.active_comp, comp, "it stays in the open composition");
+        let main = state.composition();
+        assert_eq!(main.layers.len(), layers_before + 1, "as one layer");
+        let added = main.layer(state.selected_layers[0]).unwrap();
+        let LayerContent::Composition { composition: mockup } = added.content else { panic!("the mockup is a composition layer") };
+        let position = added.transform.as_ref().unwrap().position.value;
+        assert_eq!(position, Vec2::new(main.width as f32 * 0.5, main.height as f32 * 0.5), "centered");
+        let mockup = state.project.composition(mockup).unwrap();
+        assert!(mockup.name.starts_with("iPhone Mockup"), "added upright");
+        let silver = studio_core::mockups::Finish::presets()[1].1.body;
+        let body = mockup.layers.iter().find(|layer| layer.name == "Body").unwrap();
+        assert!(matches!(&body.content, LayerContent::Shape { style, .. } if style.fill == Some(studio_core::model::Paint::Solid(silver))), "in the finish picked");
         let screen = mockup.layers.iter().find_map(|layer| match layer.content {
             LayerContent::Composition { composition } => Some(composition),
             _ => None,
         });
         let screen = state.project.composition(screen.unwrap()).unwrap();
-        assert_eq!((screen.width, screen.height), (2868, 1320), "a sideways iPhone screen");
+        assert_eq!((screen.width, screen.height), (1320, 2868), "an upright iPhone screen");
         assert!(screen.layers.iter().any(|layer| layer.content == LayerContent::Image { item: clip }), "the selected picture is on the screen");
-    });
-}
-
-#[gpui_kit::test]
-fn an_openconnect_address_that_is_not_a_web_address_says_so(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    tall_window(visual);
-    visual.update(|window, cx| window.click("rail-mockups", cx));
-    render(visual);
-    // The address sits at the bottom of the panel: scroll down to it.
-    visual.update(|window, cx| window.scroll("mockups-list", gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(-2000.0))), cx));
-    render(visual);
-    visual.update(|window, cx| window.click("openconnect-address", cx));
-    render(visual);
-    visual.update(|window, cx| {
-        window.input("10.0.0.1:3100", cx);
-        window.press("enter", cx);
-    });
-    visual.run_until_parked();
-    render(visual);
-    visual.update(|_, cx| {
-        let ui = &workspace.read(cx).ui;
-        assert_eq!(ui.settings.openconnect_api.as_deref(), Some("10.0.0.1:3100"));
-        assert!(matches!(&ui.mockups.status, crate::panels::mockups::OpenConnectStatus::Failed(message) if message.contains("http")), "{:?}", ui.mockups.status);
     });
 }
 
@@ -3144,4 +3136,293 @@ fn importing_a_lottie_file_opens_its_animation(cx: &mut TestAppContext) {
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.compositions.len()), compositions - 1);
     std::fs::remove_dir_all(&folder).ok();
+}
+
+/// The sample project's first video.
+const A_CAM: Id = Id(104);
+
+#[gpui_kit::test]
+fn the_eyedropper_tool_keeps_a_current_color_to_apply_and_save(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("i", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.tool, crate::workspace::Tool::Eyedropper));
+    // The sample project's background solid is dark gray at the bottom right.
+    let at = screen_point(&workspace, visual, Vec2::new(1800.0, 1000.0));
+    click_at(visual, at);
+    let picked = visual.update(|_, cx| workspace.read(cx).state.colors.clone());
+    assert_eq!(picked.recent.len(), 1, "the pick is remembered");
+    assert_eq!(picked.recent[0], picked.current);
+    assert_ne!(picked.current, studio_core::model::Rgba::hex(0xffffff), "the picture's color, not the starting white");
+
+    // The color menu puts it on the selected text and saves it as a swatch.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.right_click("tool-eyedropper", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("well-apply", cx));
+    render(visual);
+    let fill = visual.update(|_, cx| workspace.read(cx).state.text_style_of(TITLE).unwrap().fill);
+    assert_eq!(fill, Some(picked.current));
+    visual.update(|window, cx| window.click("well-save-swatch", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.colors.swatches, vec![picked.current]));
+    // A right-click on a swatch removes it.
+    visual.update(|window, cx| window.right_click(("well-swatch", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.colors.swatches.is_empty()));
+}
+
+#[gpui_kit::test]
+fn the_color_tab_grades_the_whole_video_on_its_adjustment_layer(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("tab:Properties:2", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("grade-target-video", cx));
+    render(visual);
+    // The panel starts empty; Add Correction adds a section.
+    visual.update(|window, _| assert!(window.try_find("grade-basic-heading").is_none()));
+    visual.update(|window, cx| window.click("grade-add:grade-basic", cx));
+    render(visual);
+    let (grade, basic) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let grade = state.grade_layer(crate::state::GradeTarget::Video).unwrap();
+        (grade, state.effect_named(grade, "Basic Correction").unwrap())
+    });
+    // Its controls are the effect's parameters: typing a temperature sets it.
+    let temperature = FieldTarget::Property { layer: grade, path: PropertyPath::Effect { effect: basic, parameter: 0 }, component: 0 };
+    visual.update(|window, cx| window.click(field_id(temperature), cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("40", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    let value = |visual: &mut VisualTestContext, parameter| visual.update(|_, cx| workspace.read(cx).state.composition().layer(grade).unwrap().property(PropertyPath::Effect { effect: basic, parameter }, 0).unwrap().value.component(0));
+    assert_eq!(value(visual, 0), 40.0);
+    visual.update(|window, cx| window.click("grade-basic-reset", cx));
+    render(visual);
+    assert_eq!(value(visual, 0), 0.0, "Reset");
+    visual.update(|window, cx| window.click("grade-basic-on", cx));
+    render(visual);
+    let enabled = visual.update(|_, cx| workspace.read(cx).state.composition().layer(grade).unwrap().effects.iter().find(|e| e.id == basic).unwrap().enabled);
+    assert!(!enabled, "the eye turns it off");
+
+    // The white balance picker waits for a click in the viewer, then lets go.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("white-balance-pick:{}", basic.0).into()), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.white_balance_pick, Some((grade, basic))));
+    let gray = screen_point(&workspace, visual, Vec2::new(1800.0, 1000.0));
+    click_at(visual, gray);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.white_balance_pick, None));
+
+    visual.update(|window, cx| window.click("grade-basic-remove", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.effect_named(grade, "Basic Correction"), None));
+}
+
+#[gpui_kit::test]
+fn the_color_tabs_lut_browser_shows_each_look_on_the_frame_and_picks_one(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(A_CAM, false);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 2);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("grade-add:grade-lut", cx));
+    render(visual);
+    let effect = visual.update(|_, cx| workspace.read(cx).state.effect_named(A_CAM, "Apply LUT").unwrap());
+    // A new LUT section opens its browser.
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.lut_browser, Some(effect)));
+    // The previews are made a few per redraw, until every look has one.
+    for _ in 0..20 {
+        render(visual);
+    }
+    let looks: Vec<studio_core::model::LutSource> = studio_core::grade::looks().map(|look| studio_core::model::LutSource::Look(look.to_owned())).collect();
+    visual.update(|_, cx| {
+        let previews = &workspace.read(cx).ui.lut_previews;
+        assert!(looks.iter().all(|look| previews.picture(look).is_some()), "every look has a preview");
+    });
+    // Clicking a tile puts that look on the clip, and the browser stays open to compare.
+    visual.update(|window, cx| window.click(("lut-tile", 1_usize), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.state.effect_lut(A_CAM, effect), Some(&looks[1]));
+        assert_eq!(ws.ui.lut_browser, Some(effect));
+    });
+    // Done closes it; the chosen look stays.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("lut-browse:{}", effect.0).into()), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.lut_browser, None));
+    // With a correction added, the tiles give way to the Add Correction menu, which offers
+    // only what isn't there yet.
+    visual.update(|window, _| {
+        assert!(window.try_find("grade-add:grade-basic").is_none());
+        assert!(window.try_find("grade-add").is_some());
+    });
+    visual.update(|window, cx| window.click("grade-add", cx));
+    render(visual);
+    click_label(visual, "Levels");
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.effect_named(A_CAM, "Levels").is_some()));
+}
+
+#[gpui_kit::test]
+fn color_sliders_set_reset_and_undo_in_one_step(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(A_CAM, false);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 2);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("grade-add:grade-basic", cx));
+    render(visual);
+    let basic = visual.update(|_, cx| workspace.read(cx).state.effect_named(A_CAM, "Basic Correction").unwrap());
+    let temperature = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(A_CAM).unwrap().property(PropertyPath::Effect { effect: basic, parameter: 0 }, 0).unwrap().value.component(0));
+    let track = ElementId::Name(format!("grade-slider:{}:0", basic.0).into());
+    let bounds = visual.update(|window, _| window.find(track.clone()).bounds());
+    // Drag from the middle (0) to three quarters along: −100 to 100, so 50.
+    let middle = bounds.center();
+    let three_quarters = point(bounds.origin.x + bounds.size.width * 0.75, middle.y);
+    visual.update(|window, cx| window.drag(middle, three_quarters, cx));
+    render(visual);
+    assert!((temperature(visual) - 50.0).abs() <= 1.0, "dragged to {}", temperature(visual));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.undo();
+        cx.notify();
+    }));
+    render(visual);
+    assert_eq!(temperature(visual), 0.0, "one undo takes the whole drag back");
+    // A click sets it straight away; a double-click on the name puts it back.
+    let quarter = point(bounds.origin.x + bounds.size.width * 0.25, middle.y);
+    click_at(visual, quarter);
+    assert!((temperature(visual) + 50.0).abs() <= 1.0, "clicked to {}", temperature(visual));
+    visual.update(|window, cx| window.double_click(ElementId::Name(format!("grade-label:{}:0", basic.0).into()), cx));
+    render(visual);
+    assert_eq!(temperature(visual), 0.0);
+}
+
+#[gpui_kit::test]
+fn dragging_a_color_wheel_tints_and_undoes_in_one_step(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(A_CAM, false);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 2);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("grade-add:grade-wheels", cx));
+    render(visual);
+    let wheels = visual.update(|_, cx| workspace.read(cx).state.effect_named(A_CAM, "Color Wheels").unwrap());
+    let amount = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(A_CAM).unwrap().property(PropertyPath::Effect { effect: wheels, parameter: 7 }, 0).unwrap().value.component(0));
+    let hue = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(A_CAM).unwrap().property(PropertyPath::Effect { effect: wheels, parameter: 6 }, 0).unwrap().value.component(0));
+    // Drag the Highlights wheel from its middle straight up: toward yellow-green (90°).
+    let circle = visual.update(|window, _| window.find(("grade-wheel", 2_usize)).bounds());
+    let center = circle.center();
+    visual.update(|window, cx| window.drag(center, point(center.x, center.y - circle.size.height * 0.4), cx));
+    render(visual);
+    assert!(amount(visual) > 50.0, "pushed most of the way out: {}", amount(visual));
+    assert!((hue(visual) - 90.0).abs() < 3.0, "straight up is 90°: {}", hue(visual));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.undo();
+        cx.notify();
+    }));
+    render(visual);
+    assert_eq!(amount(visual), 0.0, "one undo takes the whole drag back");
+}
+
+#[gpui_kit::test]
+fn hovering_a_lut_previews_it_in_the_viewer_without_changing_the_project(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(A_CAM, false);
+        // Fold the other categories so the LUTs are in view.
+        ws.ui.closed_effect_categories.extend(studio_core::effects::CATEGORIES.iter().map(|category| category.name));
+        ws.ui.closed_effect_categories.insert("Transitions");
+        cx.notify();
+    }));
+    render(visual);
+    let before = visual.update(|_, cx| workspace.read(cx).state.project.clone());
+    let row = visual.update(|window, _| window.find(("lut", 0_usize)).bounds().center());
+    visual.update(|window, cx| window.pointer_move(row, None, cx));
+    render(visual);
+    let first = studio_core::model::LutSource::Look(studio_core::grade::looks().next().unwrap().to_owned());
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.ui.lut_hover.as_ref(), Some(&first), "the viewer previews the LUT under the pointer");
+        assert_eq!(ws.state.project, before, "previewing changes nothing");
+        // What the viewer draws: the selected clip with the LUT on it.
+        let shown = crate::panels::viewer::lut_preview(ws).unwrap();
+        let clip = shown.composition(ws.state.active_comp).unwrap().layer(A_CAM).unwrap();
+        assert!(clip.effects.iter().any(|effect| effect.lut.as_ref() == Some(&first)));
+    });
+    // With nothing selected, it goes over the whole picture.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.selected_layers.clear()));
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        let shown = crate::panels::viewer::lut_preview(ws).unwrap();
+        let top = &shown.composition(ws.state.active_comp).unwrap().layers[0];
+        assert!(matches!(top.content, LayerContent::Adjustment) && top.effects.iter().any(|effect| effect.lut.as_ref() == Some(&first)));
+    });
+    // Leaving the row ends the preview, and it left no undo step behind.
+    visual.update(|window, cx| window.pointer_move(point(px(800.0), px(10.0)), None, cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.ui.lut_hover, None);
+        assert_eq!(ws.state.project, before);
+    });
+}
+
+#[gpui_kit::test]
+fn luts_go_on_clips_from_the_effects_panel_and_change_in_effect_controls(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(A_CAM, false);
+        // Fold the other categories so the LUTs are in view.
+        ws.ui.closed_effect_categories.extend(studio_core::effects::CATEGORIES.iter().map(|category| category.name));
+        ws.ui.closed_effect_categories.insert("Transitions");
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(("lut-apply", 0_usize), cx));
+    render(visual);
+    let effect = visual.update(|_, cx| workspace.read(cx).state.effect_named(A_CAM, "Apply LUT").unwrap());
+    let lut = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.effect_lut(A_CAM, effect).cloned());
+    assert_eq!(lut(visual), Some(studio_core::model::LutSource::Look(studio_core::grade::looks().next().unwrap().to_owned())));
+
+    // Effect Controls offers the LUT menu.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 1);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name(format!("lut-menu:{}", effect.0).into()), cx));
+    render(visual);
+    click_label(visual, "Moody Green");
+    render(visual);
+    assert_eq!(lut(visual), Some(studio_core::model::LutSource::Look("Moody Green".into())));
+
+    // New Adjustment Layer adds one over everything and selects it.
+    visual.update(|window, cx| window.click("new-adjustment-layer", cx));
+    render(visual);
+    let selected = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.selected_layers.first().and_then(|id| state.composition().layer(*id)).map(|layer| layer.content.clone())
+    });
+    assert!(matches!(selected, Some(LayerContent::Adjustment)));
 }

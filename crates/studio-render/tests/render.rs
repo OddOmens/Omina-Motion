@@ -169,6 +169,88 @@ fn adjustment_layers_affect_everything_below() {
     assert!(result[0] == result[1] && result[1] == result[2] && result[0] > 20, "red became gray: {result:?}");
 }
 
+/// A full-frame solid of `color` with the catalog effect `name`, its parameters set to `values`
+/// (by index; the rest at their defaults), rendered; returns the middle pixel.
+fn graded(color: u32, name: &str, values: &[(usize, f32)]) -> [u8; 3] {
+    let mut layer = full(2, color);
+    let mut effect = effects::instantiate(effects::find(name).unwrap(), Id(9));
+    for &(index, value) in values {
+        effect.properties[index].value = Animated::constant(value);
+    }
+    layer.effects.push(effect);
+    pixel(&render(&project(vec![layer])), 50, 50)
+}
+
+#[test]
+fn basic_correction_balances_exposes_and_saturates() {
+    let gray = 0x808080;
+    assert!(close(graded(gray, "Basic Correction", &[]), [128, 128, 128]), "the defaults change nothing");
+    let warm = graded(gray, "Basic Correction", &[(0, 60.0)]);
+    assert!(warm[0] > warm[2] + 20, "Temperature warms: {warm:?}");
+    let magenta = graded(gray, "Basic Correction", &[(1, 60.0)]);
+    assert!(magenta[1] + 15 < magenta[0], "Tint goes toward magenta: {magenta:?}");
+    assert!(graded(gray, "Basic Correction", &[(2, 1.0)])[0] > 160, "one stop brighter");
+    let flat = graded(0xcc3322, "Basic Correction", &[(8, 0.0)]);
+    assert!(flat[0] == flat[1] && flat[1] == flat[2], "no saturation is gray: {flat:?}");
+    assert!(graded(0x303030, "Basic Correction", &[(5, 100.0)])[0] > 0x30 + 15, "Shadows lifts dark tones");
+    assert!(graded(0xd0d0d0, "Basic Correction", &[(4, -100.0)])[0] < 0xd0 - 15, "Highlights pulls bright tones down");
+}
+
+#[test]
+fn color_wheels_tint_shadows_and_highlights_apart() {
+    assert!(close(graded(0x808080, "Color Wheels", &[]), [128, 128, 128]));
+    // Highlights pushed toward blue turn a light gray blue, and leave black alone.
+    let light = graded(0xd0d0d0, "Color Wheels", &[(6, 240.0), (7, 100.0)]);
+    assert!(light[2] > light[0] + 20, "{light:?}");
+    assert!(close(graded(0x000000, "Color Wheels", &[(6, 240.0), (7, 100.0)]), [0, 0, 0]));
+    // Lifting the shadows brightens black.
+    assert!(graded(0x000000, "Color Wheels", &[(2, 60.0)])[0] > 20);
+}
+
+#[test]
+fn levels_and_the_tone_curve_remap_brightness() {
+    assert!(close(graded(0x808080, "Levels", &[(1, 128.0)]), [255, 255, 255]), "input white at middle gray");
+    assert!(close(graded(0xffffff, "Levels", &[(4, 200.0)]), [200, 200, 200]), "output white");
+    assert!(close(graded(0x808080, "Tone Curve", &[]), [128, 128, 128]));
+    assert!(graded(0x303030, "Tone Curve", &[(3, 100.0)])[0] > 0x30 + 10, "Shadows lifts the darkest band");
+    assert!(close(graded(0xffffff, "Tone Curve", &[(0, -100.0)]), [255, 255, 255]), "white stays white");
+}
+
+/// A full-frame red solid under an adjustment layer whose Apply LUT uses `lut` at `intensity` %.
+fn lut_frame(lut: Option<studio_core::model::LutSource>, intensity: f32) -> [u8; 3] {
+    let mut grade = full(2, 0x000000);
+    grade.content = LayerContent::Adjustment;
+    let mut effect = effects::instantiate(effects::find("Apply LUT").unwrap(), Id(9));
+    effect.properties[0].value = Animated::constant(intensity);
+    effect.lut = lut;
+    grade.effects.push(effect);
+    pixel(&render(&project(vec![grade, full(3, 0xcc3322)])), 50, 50)
+}
+
+#[test]
+fn luts_grade_through_adjustment_layers() {
+    use studio_core::model::LutSource;
+    let original = [0xcc, 0x33, 0x22];
+    assert!(close(lut_frame(None, 100.0), original), "no table chosen draws the picture unchanged");
+    let noir = lut_frame(Some(LutSource::Look("Noir".into())), 100.0);
+    assert!(noir[0] == noir[1] && noir[1] == noir[2], "Noir is black and white: {noir:?}");
+    assert!(close(lut_frame(Some(LutSource::Look("Noir".into())), 0.0), original), "0% intensity");
+
+    // A .cube file that swaps red and blue, written to disk and read back like a user's LUT.
+    let folder = std::env::temp_dir().join(format!("studio-lut-test-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("Swap.cube");
+    let swap = studio_core::grade::Lut::from_fn("Swap", 17, |[r, g, b]| [b, g, r]);
+    std::fs::write(&path, swap.to_cube()).unwrap();
+    let swapped = lut_frame(Some(LutSource::File(path.clone())), 100.0);
+    assert!(close(swapped, [0x22, 0x33, 0xcc]), "red and blue swapped: {swapped:?}");
+    // A missing or broken file draws the picture as it is instead of failing the frame.
+    std::fs::write(&path, "not a lut").unwrap();
+    assert!(close(lut_frame(Some(LutSource::File(path)), 100.0), original));
+    assert!(close(lut_frame(Some(LutSource::File(folder.join("Gone.cube"))), 100.0), original));
+    let _ = std::fs::remove_dir_all(folder);
+}
+
 #[test]
 fn gaussian_blur_softens_edges() {
     let mut square = solid(2, 0xffffff, Vec2::new(40.0, 40.0), Vec2::new(50.0, 50.0));
@@ -214,7 +296,11 @@ fn every_rendered_effect_changes_the_picture() {
         if !studio_render::effects::is_rendered(definition.name) {
             continue;
         }
-        let template = effects::instantiate(definition, Id(9));
+        let mut template = effects::instantiate(definition, Id(9));
+        // Apply LUT draws nothing until a table is chosen.
+        if definition.name == "Apply LUT" {
+            template.lut = Some(studio_core::model::LutSource::Look("Noir".into()));
+        }
         let changed = (0..3).any(|trial| {
             let mut effect = template.clone();
             for property in &mut effect.properties {
@@ -701,6 +787,60 @@ fn effect_sheet() {
     image::save_buffer(path, &sheet, cell * columns, cell * rows, image::ColorType::Rgba8).unwrap();
 }
 
+/// Renders a picture through each built-in look and a few grading settings, on an adjustment
+/// layer as the whole-video grade does, into one sheet (the first cell is ungraded).
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn grade_sheet() {
+    use studio_core::model::LutSource;
+    let path = std::env::var("GRADE_SHEET").expect("set GRADE_SHEET to the PNG to write");
+    // Each cell: the LUT (for Apply LUT), the effect, and the parameters set on it.
+    type Grade<'a> = (Option<LutSource>, &'a str, Vec<(usize, f32)>);
+    let mut grades: Vec<Grade> = vec![(None, "", vec![])];
+    grades.extend(studio_core::grade::looks().map(|look| (Some(LutSource::Look(look.to_owned())), "Apply LUT", vec![])));
+    grades.push((None, "Basic Correction", vec![(0, 50.0), (3, 30.0), (8, 130.0)]));
+    grades.push((None, "Color Wheels", vec![(0, 200.0), (1, 60.0), (6, 30.0), (7, 50.0)]));
+    grades.push((None, "Tone Curve", vec![(0, -60.0), (3, 60.0)]));
+    grades.push((None, "Levels", vec![(0, 30.0), (1, 220.0), (2, 1.2)]));
+    let (cell, columns) = (200u32, 6u32);
+    let rows = (grades.len() as u32).div_ceil(columns);
+    let mut sheet = vec![0u8; (cell * columns * cell * rows * 4) as usize];
+    let mut renderer = Renderer::new().unwrap();
+    let size = cell as f32;
+    for (index, (lut, name, values)) in grades.iter().enumerate() {
+        let mut sky = solid(5, 0, Vec2::new(size, size * 0.55), Vec2::new(size / 2.0, size * 0.275));
+        sky.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Linear { start: Rgba::hex(0x5fa8e8), end: Rgba::hex(0xf7c08a), angle: 180.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) }, path: None };
+        let mut ground = solid(6, 0, Vec2::new(size, size * 0.45), Vec2::new(size / 2.0, size * 0.775));
+        ground.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Linear { start: Rgba::hex(0x4c7a3a), end: Rgba::hex(0x1d2a17), angle: 180.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) }, path: None };
+        let mut face = solid(7, 0, Vec2::new(size * 0.3, size * 0.3), Vec2::new(size * 0.5, size * 0.55));
+        face.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Radial { inner: Rgba::hex(0xf1c6a6), outer: Rgba::hex(0xa8694a) }), ..ShapeStyle::new(ShapeKind::Ellipse) }, path: None };
+        let mut grade = full(2, 0);
+        grade.content = LayerContent::Adjustment;
+        grade.size = Vec2::new(size, size);
+        grade.transform = Some(Transform::centered(grade.size, Vec2::new(size / 2.0, size / 2.0)));
+        if !name.is_empty() {
+            let mut effect = effects::instantiate(effects::find(name).unwrap(), Id(9));
+            effect.lut = lut.clone();
+            for &(parameter, value) in values {
+                effect.properties[parameter].value = Animated::constant(value);
+            }
+            grade.effects.push(effect);
+        }
+        let mut scene = project(vec![grade, face, ground, sky]);
+        (scene.compositions[0].width, scene.compositions[0].height) = (cell, cell);
+        let frame = renderer.render(&scene, Id(1), 0, cell, cell, &studio_core::media::NoVideo).unwrap();
+        let (ox, oy) = ((index as u32 % columns) * cell, (index as u32 / columns) * cell);
+        for y in 0..cell {
+            for x in 0..cell {
+                let from = ((y * cell + x) * 4) as usize;
+                let to = (((oy + y) * cell * columns + ox + x) * 4) as usize;
+                sheet[to..to + 4].copy_from_slice(&[frame.bgra[from + 2], frame.bgra[from + 1], frame.bgra[from], 255]);
+            }
+        }
+    }
+    image::save_buffer(path, &sheet, cell * columns, cell * rows, image::ColorType::Rgba8).unwrap();
+}
+
 #[test]
 fn captions_show_the_phrase_with_the_spoken_word_highlighted_over_their_box() {
     use studio_core::captions::{CaptionStyle, CaptionWord};
@@ -1102,27 +1242,17 @@ fn an_adjustment_layers_mask_limits_where_it_applies() {
     assert!(is_gray(pixel(&frame, 5, 5)), "applied outside it: {:?}", pixel(&frame, 5, 5));
 }
 
-/// Every device mockup, upright and on its side, with a bright screen.
+/// Every device mockup, upright and on its side, with a bright screen, each fitted into a cell.
 /// Run with `MOCKUP_SHEET=/path/sheet.png cargo test -p studio-render --test render mockup_sheet -- --ignored`
-/// (`MOCKUP_FORMAT=wide|portrait|vertical`, `MOCKUP_FINISH=` a preset's position, `MOCKUP_ZOOM=` 1 to 4).
+/// (`MOCKUP_FINISH=` which of each device's finishes, `MOCKUP_ZOOM=` 1 to 4).
 #[test]
 #[ignore = "writes an image for a visual check"]
 fn mockup_sheet() {
-    use studio_core::mockups::{Device, Finish, MockupRequest, Orientation, build};
-    use studio_core::templates::Format;
+    use studio_core::mockups::{Device, MockupRequest, Orientation, build};
     let path = std::env::var("MOCKUP_SHEET").expect("set MOCKUP_SHEET to the PNG to write");
-    let format = match std::env::var("MOCKUP_FORMAT").as_deref() {
-        Ok("portrait") => Format::Portrait,
-        Ok("vertical") => Format::Vertical,
-        _ => Format::Wide,
-    };
-    let finish = Finish::presets()[std::env::var("MOCKUP_FINISH").ok().and_then(|s| s.parse().ok()).unwrap_or(0usize).min(3)].1;
+    let pick: usize = std::env::var("MOCKUP_FINISH").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     let zoom: u32 = std::env::var("MOCKUP_ZOOM").ok().and_then(|s| s.parse().ok()).unwrap_or(1).clamp(1, 4);
-    let (cell_w, cell_h) = match format {
-        Format::Wide => (480u32 * zoom, 270u32 * zoom),
-        Format::Portrait => (320 * zoom, 400 * zoom),
-        Format::Vertical => (270 * zoom, 480 * zoom),
-    };
+    let (cell_w, cell_h) = (360u32 * zoom, 360u32 * zoom);
     let cases: Vec<(Device, Orientation)> = Device::ALL.iter().flat_map(|&device| [(device, Orientation::Portrait), (device, Orientation::Landscape)]).filter(|(device, orientation)| device.turns() || *orientation == Orientation::Portrait).collect();
     let mut sheet = image::RgbaImage::from_pixel(cell_w * cases.len() as u32, cell_h, image::Rgba([40, 40, 40, 255]));
     let mut renderer = Renderer::new().unwrap();
@@ -1142,10 +1272,17 @@ fn mockup_sheet() {
             color: Some(Rgba::hex(0xff5a36)),
             path: None,
         });
-        let made = build(&mut project, &MockupRequest { device, orientation, format, finish, footage: Some(screen_color), seconds: 10.0 }).unwrap();
-        let picture = renderer.render(&project, made.composition, 0, cell_w, cell_h, &studio_core::media::NoVideo).unwrap();
+        // The device's own finishes, the one asked for (or its last).
+        let finishes = device.finishes();
+        let finish = finishes[pick.min(finishes.len() - 1)].1;
+        let made = build(&mut project, &MockupRequest { device, orientation, finish, footage: Some(screen_color), seconds: 10.0 }).unwrap();
+        let mockup = project.composition(made.composition).unwrap();
+        let fit = cell_w as f32 / mockup.width.max(mockup.height) as f32;
+        let (w, h) = ((mockup.width as f32 * fit) as u32, (mockup.height as f32 * fit) as u32);
+        let picture = renderer.render(&project, made.composition, 0, w, h, &studio_core::media::NoVideo).unwrap();
+        let (w, h) = (picture.width, picture.height);
         for (i, pixel) in picture.bgra.chunks(4).enumerate() {
-            let (x, y) = (i as u32 % cell_w, i as u32 / cell_w);
+            let (x, y) = (i as u32 % w + (cell_w - w) / 2, i as u32 / w + (cell_h - h) / 2);
             let a = f32::from(pixel[3]) / 255.0;
             let over = |c: u8| (f32::from(c) * a + 60.0 * (1.0 - a)) as u8;
             sheet.put_pixel(index as u32 * cell_w + x, y, image::Rgba([over(pixel[2]), over(pixel[1]), over(pixel[0]), 255]));

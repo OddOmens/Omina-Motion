@@ -86,7 +86,7 @@ enum PickerDrag {
 }
 
 /// Builds a GPU image from a function of (x, y) giving RGBA bytes.
-fn make_image(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Arc<RenderImage> {
+pub(crate) fn make_image(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Arc<RenderImage> {
     let mut bgra = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
@@ -228,6 +228,8 @@ pub fn sampled(workspace: &mut Workspace, color: Rgba, window: &mut Window, cx: 
     if let Some(picker) = workspace.ui.color_picker.as_mut() {
         picker.sampling = false;
     }
+    // Picks are remembered with the Eyedropper tool's, so they can be used again anywhere.
+    workspace.state.pick_color(color);
     choose(workspace, color, window, cx);
 }
 
@@ -523,6 +525,40 @@ fn custom_tab(workspace: &Workspace, picker: &Picker, cx: &mut Context<Workspace
                 .children(save),
         )
         .child(color_row("color-swatch", used, cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .text_size(px(size::SMALL_TEXT))
+                .text_color(hsla(color::MUTED))
+                .child(div().flex_1().child("Picked and saved"))
+                .child(
+                    Button::new("color-save-swatch").ghost().xsmall().icon(Icon::new(IconName::Plus)).label("Swatch").tooltip("Save this color with your swatches").on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(color) = this.ui.color_picker.as_ref().map(Picker::color) {
+                            this.state.save_swatch(color);
+                        }
+                        cx.notify();
+                    })),
+                ),
+        )
+        .child(kept_colors(workspace, cx))
+}
+
+/// The eyedropper's current color, the saved swatches and the recent picks, without repeats,
+/// shared by every color picker; or a line saying how to fill it.
+fn kept_colors(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let kept = &workspace.state.colors;
+    let mut colors: Vec<Rgba> = Vec::new();
+    for color in std::iter::once(kept.current).chain(kept.swatches.iter().copied()).chain(kept.recent.iter().copied()) {
+        if !colors.iter().any(|old| old.same_look(color)) {
+            colors.push(color);
+        }
+    }
+    colors.truncate(24);
+    if kept.swatches.is_empty() && kept.recent.is_empty() {
+        return div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Colors you pick with the eyedropper (I) or save as swatches show here.").into_any_element();
+    }
+    color_row("color-kept", colors, cx).into_any_element()
 }
 
 fn libraries_tab(workspace: &Workspace, cx: &mut Context<Workspace>) -> gpui_kit::Div {

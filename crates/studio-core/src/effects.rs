@@ -45,6 +45,59 @@ pub const CATEGORIES: &[EffectCategory] = &[
     EffectCategory {
         name: "Color Correction",
         effects: &[
+            // Lumetri-style basic correction: white balance, then tone, then color.
+            EffectDefinition {
+                name: "Basic Correction",
+                parameters: &[
+                    (param("Temperature", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Tint", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Exposure", "", 0.01, -5.0, 5.0, 2), 0.0),
+                    (param("Contrast", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Highlights", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Shadows", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Whites", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Blacks", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Saturation", "", 0.5, 0.0, 200.0, 0), 100.0),
+                    (param("Vibrance", "", 0.5, -100.0, 100.0, 0), 0.0),
+                ],
+            },
+            // Lift, gamma and gain, each pushed toward a hue and made brighter or darker.
+            EffectDefinition {
+                name: "Color Wheels",
+                parameters: &[
+                    (param("Shadows Hue", "°", 0.5, 0.0, 360.0, 0), 0.0),
+                    (param("Shadows Amount", "", 0.5, 0.0, 100.0, 0), 0.0),
+                    (param("Shadows Brightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Midtones Hue", "°", 0.5, 0.0, 360.0, 0), 0.0),
+                    (param("Midtones Amount", "", 0.5, 0.0, 100.0, 0), 0.0),
+                    (param("Midtones Brightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Highlights Hue", "°", 0.5, 0.0, 360.0, 0), 0.0),
+                    (param("Highlights Amount", "", 0.5, 0.0, 100.0, 0), 0.0),
+                    (param("Highlights Brightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                ],
+            },
+            // A parametric curve, as in Lightroom: each band of brightness lifted or lowered.
+            EffectDefinition {
+                name: "Tone Curve",
+                parameters: &[
+                    (param("Highlights", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Lights", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Darks", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Shadows", "", 0.5, -100.0, 100.0, 0), 0.0),
+                ],
+            },
+            EffectDefinition {
+                name: "Levels",
+                parameters: &[
+                    (param("Input Black", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Input White", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Gamma", "", 0.01, 0.1, 10.0, 2), 1.0),
+                    (param("Output Black", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Output White", "", 0.5, 0.0, 255.0, 0), 255.0),
+                ],
+            },
+            // A lookup table: a built-in look or a .cube file (`Effect::lut`), mixed in by Intensity.
+            EffectDefinition { name: "Apply LUT", parameters: &[(param("Intensity", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
             EffectDefinition {
                 name: "Brightness & Contrast",
                 parameters: &[(param("Brightness", "", 0.5, -150.0, 150.0, 0), 0.0), (param("Contrast", "", 0.5, -100.0, 100.0, 0), 0.0)],
@@ -189,6 +242,7 @@ pub fn instantiate(definition: &EffectDefinition, id: Id) -> Effect {
             .iter()
             .map(|&(info, default)| EffectProperty { name: info.name.to_owned(), info, value: Animated::constant(default) })
             .collect(),
+        lut: None,
     }
 }
 
@@ -217,6 +271,16 @@ mod tests {
         assert!(!suits_layer("Gaussian Blur", &LayerContent::Audio { item: Id(1) }));
         assert!(suits_layer("Exposure", &LayerContent::Footage { item: Id(1) }));
         assert!(!suits_layer("No Such Effect", &LayerContent::Adjustment));
+    }
+
+    #[test]
+    fn grading_effects_suit_footage_and_adjustment_layers_only() {
+        for name in ["Basic Correction", "Color Wheels", "Tone Curve", "Levels", "Apply LUT"] {
+            assert!(suits_layer(name, &LayerContent::Adjustment), "{name}");
+            assert!(suits_layer(name, &LayerContent::Footage { item: Id(1) }), "{name}");
+            assert!(!suits_layer(name, &LayerContent::Solid { color: crate::model::Rgba::hex(0) }), "{name}");
+        }
+        assert!(instantiate(find("Apply LUT").unwrap(), Id(2)).lut.is_none());
     }
 
     #[test]

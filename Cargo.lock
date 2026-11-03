@@ -7666,6 +7666,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cosmic-text",
+ "half",
  "image",
  "pollster 0.4.0",
  "studio-core",

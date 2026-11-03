@@ -87,6 +87,9 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         if !studio_render::effects::is_rendered(&effect.name) {
             list = list.child(div().pl_5().pb_1().text_color(hsla(color::MUTED)).child("This effect is not drawn by the renderer yet; its settings are kept."));
         }
+        if !collapsed && effect.name == "Apply LUT" {
+            list = list.child(div().pl_5().child(super::color_grade::lut_chooser(layer_id, effect_id, workspace, cx)));
+        }
         if !collapsed {
             for parameter in 0..effect.properties.len() {
                 let path = PropertyPath::Effect { effect: effect_id, parameter };
@@ -99,7 +102,7 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
 }
 
 /// Puts every parameter of an effect back to its catalog default (keyframing animated ones).
-fn reset_effect(workspace: &mut Workspace, layer: studio_core::model::Id, effect: studio_core::model::Id) {
+pub(crate) fn reset_effect(workspace: &mut Workspace, layer: studio_core::model::Id, effect: studio_core::model::Id) {
     let Some(name) = workspace.state.composition().layer(layer).and_then(|l| l.effects.iter().find(|e| e.id == effect)).map(|e| e.name.clone()) else {
         return;
     };

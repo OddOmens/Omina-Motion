@@ -47,6 +47,7 @@ actions!(studio, [
     SlipTool,
     SlideTool,
     TrackSelectTool,
+    EyedropperTool,
     Copy,
     Paste,
     Duplicate,
@@ -106,6 +107,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("y", SlipTool, Some(NOT_TYPING)),
         KeyBinding::new("u", SlideTool, Some(NOT_TYPING)),
         KeyBinding::new("a", TrackSelectTool, Some(NOT_TYPING)),
+        // Photoshop's eyedropper key.
+        KeyBinding::new("i", EyedropperTool, Some(NOT_TYPING)),
         KeyBinding::new("enter", FinishPath, Some(NOT_TYPING)),
         // Outside text fields, so copying and pasting text in a field still works.
         KeyBinding::new("cmd-c", Copy, Some(NOT_TYPING)),
@@ -242,6 +245,9 @@ pub enum Tool {
     Slide,
     /// Click a clip to pick it and everything after it, then drag them together.
     TrackSelect,
+    /// Click the viewer to take the color there as the current color (Shift-click also puts it
+    /// on the selected shapes, text and solids).
+    Eyedropper,
 }
 
 /// Drag payloads. GPUI routes drops by type, so each kind of drag has its own type.
@@ -254,6 +260,20 @@ pub struct ProjectItemDrag {
 #[derive(Clone, Debug)]
 pub struct EffectDrag {
     pub name: String,
+    /// For Apply LUT dragged from the panel's LUTs: the table it uses.
+    pub lut: Option<studio_core::model::LutSource>,
+}
+
+impl EffectDrag {
+    /// Adds the dragged effect to `layer`.
+    pub fn apply(&self, state: &mut EditorState, layer: Id) {
+        match &self.lut {
+            Some(lut) => {
+                state.add_lut(layer, lut.clone());
+            }
+            None => state.add_effect(layer, &self.name),
+        }
+    }
 }
 
 /// A transition dragged from the Effects panel onto a cut in the timeline.
@@ -273,8 +293,6 @@ pub enum EditTarget {
     CaptionText(Id, usize, usize),
     /// A layer's name (Rename in a clip's right-click menu).
     LayerName(Id),
-    /// The OpenConnect API address (the Mockups panel).
-    OpenConnectApi,
 }
 
 /// The text input currently open over a value, and the subscription that commits it.
@@ -356,7 +374,7 @@ pub struct UiState {
     pub recovery_failing: bool,
     /// A library save that failed, to try again (with whether to back up first).
     pub library_save_failed: Option<bool>,
-    /// The Mockups panel's choices, its device pictures and OpenConnect's finishes.
+    /// The Mockups panel's choices and its device pictures.
     pub mockups: panels::mockups::MockupsUi,
     /// Pictures made of the Elements panel's elements, by index.
     pub element_pictures: HashMap<usize, Arc<gpui_kit::RenderImage>>,
@@ -394,6 +412,31 @@ pub struct UiState {
     pub cutout_pick: Option<Id>,
     /// The color picker, while it is open.
     pub color_picker: Option<panels::color_picker::Picker>,
+    /// Whether the eyedropper's color menu (current color, recent picks, swatches) is open, and
+    /// whether its rail button is held down (a long press opens the menu).
+    pub color_well: bool,
+    pub eyedropper_press: bool,
+    /// What the Color panel grades: the selected clip or the whole video.
+    pub grade_target: crate::state::GradeTarget,
+    /// The Basic Correction (layer, effect) waiting for a click on something gray in the viewer
+    /// to set its white balance.
+    pub white_balance_pick: Option<(Id, Id)>,
+    /// Where the Color panel's three color wheels and its sliders are on screen, for dragging,
+    /// and whether one is pressed (so the press and the drag after it are one undo step).
+    pub wheel_bounds: [panels::chrome::MeasuredBounds; 3],
+    pub slider_bounds: std::cell::RefCell<HashMap<(Id, usize), panels::chrome::MeasuredBounds>>,
+    pub grade_pressed: bool,
+    /// Where the Color panel is drawn, so its color wheels can fit its width.
+    pub grade_bounds: panels::chrome::MeasuredBounds,
+    /// The LUTs imported into Studio's LUT library, read when it changes.
+    pub user_luts: Vec<std::path::PathBuf>,
+    /// Pictures of what each LUT does to the current frame.
+    pub lut_previews: panels::lut_previews::LutPreviews,
+    /// The Apply LUT effect whose LUT browser is open in the Color panel.
+    pub lut_browser: Option<Id>,
+    /// The LUT under the pointer in the Effects panel, which the viewer shows on the picture
+    /// until the pointer leaves it (see `viewer::lut_preview`).
+    pub lut_hover: Option<studio_core::model::LutSource>,
     /// Keeps the open dialog's field links alive (Composition Settings' locked aspect ratio).
     pub dialog_subscriptions: Vec<Subscription>,
     /// Set when the user chose to quit while exporting: quit once the export has stopped.
@@ -688,6 +731,18 @@ impl Workspace {
                 track_pick: None,
                 cutout_pick: None,
                 effect_drop_layer: None,
+                color_well: false,
+                eyedropper_press: false,
+                grade_target: crate::state::GradeTarget::Clip,
+                white_balance_pick: None,
+                wheel_bounds: Default::default(),
+                grade_pressed: false,
+                slider_bounds: Default::default(),
+                grade_bounds: Default::default(),
+                user_luts: crate::lut_library::list(),
+                lut_previews: Default::default(),
+                lut_browser: None,
+                lut_hover: None,
                 quit_after_export: false,
             },
             focus,
@@ -854,7 +909,6 @@ impl Workspace {
             Some(EditTarget::LibraryName(id)) => self.state.rename_library_item(id, &text),
             Some(EditTarget::CaptionText(layer, start, end)) => self.state.set_caption_text(layer, start..end, &text),
             Some(EditTarget::LayerName(layer)) => self.state.rename_layer(layer, &text),
-            Some(EditTarget::OpenConnectApi) => panels::mockups::set_openconnect_api(self, &text, window, cx),
         }
         // Hand keyboard focus back to the editor so shortcuts work again.
         window.focus(&self.focus, cx);
@@ -1024,10 +1078,18 @@ impl Render for Workspace {
         if self.ui.left_panel == LeftPanel::Elements {
             panels::elements::make_pictures(self, window, cx);
         }
+        // A LUT preview ends when its row goes away (another panel opened) as well as when the
+        // pointer leaves it.
+        if self.ui.left_panel != LeftPanel::Effects {
+            self.ui.lut_hover = None;
+        }
+        // The LUT previews follow the current frame while the Effects panel or the Color
+        // panel's LUT is showing.
+        panels::lut_previews::keep_up(self, window, cx);
         // Layers set to Enhance Speech get their cleaned copies made, one at a time.
         panels::enhance::keep_going(self, window, cx);
         let picking = self.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
-        let dragging = cx.has_active_drag() || picking;
+        let dragging = cx.has_active_drag() || picking || self.ui.grade_pressed;
         self.state.record_history(dragging);
         // Library edits are saved once a drag (on the color wheel, say) is over.
         if !dragging && let Some(back_up) = self.state.take_library_save() {
@@ -1101,6 +1163,12 @@ impl Render for Workspace {
                     this.ui.template_gallery = false;
                     cx.notify();
                 }
+                // Escape also gives up picking a white balance and closes the color menu.
+                if this.ui.white_balance_pick.is_some() || this.ui.color_well {
+                    this.ui.white_balance_pick = None;
+                    this.ui.color_well = false;
+                    cx.notify();
+                }
             }))
             .on_action(cx.listener(|this, _: &FirstFrame, _, cx| this.go_to(0, cx)))
             .on_action(cx.listener(|this, _: &LastFrame, _, cx| {
@@ -1162,6 +1230,10 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &TrackSelectTool, _, cx| {
                 this.set_tool(Tool::TrackSelect);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &EyedropperTool, _, cx| {
+                this.set_tool(Tool::Eyedropper);
                 cx.notify();
             }))
             // Enter ends a pen path as an open line (a path closes by clicking its first point).
@@ -1239,6 +1311,8 @@ impl Render for Workspace {
                 this.ui.viewer_anchor = None;
                 this.ui.shape_press = false;
                 this.ui.tool_press = None;
+                this.ui.eyedropper_press = false;
+                this.ui.grade_pressed = false;
                 this.ui.effect_drop_layer = None;
                 if let Some(picker) = this.ui.color_picker.as_mut() {
                     picker.pressed = false;
