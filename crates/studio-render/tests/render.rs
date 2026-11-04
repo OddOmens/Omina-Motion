@@ -690,14 +690,38 @@ fn styled_shape(style: ShapeStyle) -> studio_render::RenderedFrame {
 #[test]
 fn gradients_run_across_the_box() {
     let (red, blue) = (Rgba::hex(0xff0000), Rgba::hex(0x0000ff));
-    let linear = styled_shape(ShapeStyle { fill: Some(Paint::Linear { start: red, end: blue, angle: 0.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) });
+    let linear = styled_shape(ShapeStyle { fill: Some(Paint::linear(red, blue, 0.0)), ..ShapeStyle::new(ShapeKind::Rectangle) });
     let (left, right) = (pixel(&linear, 12, 50), pixel(&linear, 88, 50));
     assert!(left[0] > 200 && left[2] < 60 && right[2] > 200 && right[0] < 60, "red on the left, blue on the right: {left:?} {right:?}");
-    let down = styled_shape(ShapeStyle { fill: Some(Paint::Linear { start: red, end: blue, angle: 90.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) });
+    let down = styled_shape(ShapeStyle { fill: Some(Paint::linear(red, blue, 90.0)), ..ShapeStyle::new(ShapeKind::Rectangle) });
     assert!(pixel(&down, 50, 12)[0] > 200 && pixel(&down, 50, 88)[2] > 200, "90° runs top to bottom");
-    let radial = styled_shape(ShapeStyle { fill: Some(Paint::Radial { inner: red, outer: blue }), ..ShapeStyle::new(ShapeKind::Ellipse) });
+    let radial = styled_shape(ShapeStyle { fill: Some(Paint::radial(red, blue)), ..ShapeStyle::new(ShapeKind::Ellipse) });
     let (center, edge) = (pixel(&radial, 50, 50), pixel(&radial, 50, 13));
     assert!(center[0] > 200 && center[2] < 40 && edge[2] > edge[0], "red in the middle, bluer at the edge: {center:?} {edge:?}");
+}
+
+#[test]
+fn gradient_stops_and_points_place_the_colors() {
+    use studio_core::gradient::{Gradient, GradientStop};
+    let (red, green, blue) = (Rgba::hex(0xff0000), Rgba::hex(0x00ff00), Rgba::hex(0x0000ff));
+    // Red, green half way, blue; running over the left half of the box only.
+    let stops = [GradientStop { at: 0.0, color: red }, GradientStop { at: 0.5, color: green }, GradientStop { at: 1.0, color: blue }];
+    let gradient = Gradient::new(&stops, Vec2::new(0.0, 0.5), Vec2::new(0.5, 0.5));
+    let check = |frame: &studio_render::RenderedFrame, what: &str| {
+        // The 80-pixel box spans x 10–90: the gradient ends at x 50.
+        let (start, middle, past) = (pixel(frame, 11, 50), pixel(frame, 30, 50), pixel(frame, 75, 50));
+        assert!(start[0] > 200 && start[1] < 100, "{what}: red at the start: {start:?}");
+        assert!(middle[1] > 200 && middle[0] < 60 && middle[2] < 60, "{what}: green a quarter across: {middle:?}");
+        assert!(past[2] > 200 && past[0] < 60 && past[1] < 60, "{what}: blue past the end: {past:?}");
+    };
+    let style = ShapeStyle { fill: Some(Paint::Linear(gradient)), ..ShapeStyle::new(ShapeKind::Rectangle) };
+    check(&styled_shape(style), "drawn shape");
+    // The same paint on a drawn path (filled by tiny-skia) puts the colors in the same places.
+    let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(x, y)| studio_core::path::PathPoint::corner(Vec2::new(x, y)));
+    let path = studio_core::path::ShapePath { points: corners.to_vec(), closed: true };
+    let mut layer = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
+    layer.content = LayerContent::Shape { style: ShapeStyle { kind: ShapeKind::Path, ..style }, path: Some(path) };
+    check(&render(&project(vec![layer])), "path");
 }
 
 #[test]
@@ -732,8 +756,8 @@ fn shape_sheet() {
     let path = std::env::var("SHAPE_SHEET").expect("set SHAPE_SHEET to the PNG to write");
     let (cell, gap) = (200.0, 20.0);
     let violet = Paint::Solid(Rgba::hex(0x8b5cf6));
-    let gradient = Paint::Linear { start: Rgba::hex(0xf472b6), end: Rgba::hex(0x60a5fa), angle: 45.0 };
-    let radial = Paint::Radial { inner: Rgba::hex(0xfde047), outer: Rgba::hex(0xea580c) };
+    let gradient = Paint::linear(Rgba::hex(0xf472b6), Rgba::hex(0x60a5fa), 45.0);
+    let radial = Paint::radial(Rgba::hex(0xfde047), Rgba::hex(0xea580c));
     let outline = Stroke { paint: Paint::Solid(Rgba::hex(0xffffff)), width: 10.0 };
     let rows: [(f32, Option<Paint>, Option<Stroke>, f32); 4] = [(0.0, Some(violet), None, 0.5), (30.0, Some(violet), None, 0.5), (12.0, Some(gradient), Some(outline), 0.35), (0.0, Some(radial), None, 0.75)];
     let mut layers = Vec::new();
@@ -791,9 +815,9 @@ fn effect_sheet() {
     let rows = (cells.len() as u32).div_ceil(columns);
     let mut sheet = vec![0u8; (cell * columns * cell * rows * 4) as usize];
     let mut renderer = Renderer::new().unwrap();
-    let card = shape(21, ShapeKind::Rectangle, Paint::Linear { start: Rgba::hex(0xf97316), end: Rgba::hex(0x3b82f6), angle: 30.0 }, Vec2::new(105.0, 95.0), Vec2::new(62.0, 62.0));
+    let card = shape(21, ShapeKind::Rectangle, Paint::linear(Rgba::hex(0xf97316), Rgba::hex(0x3b82f6), 30.0), Vec2::new(105.0, 95.0), Vec2::new(62.0, 62.0));
     let screen = shape(22, ShapeKind::Rectangle, Paint::Solid(Rgba::hex(0x00b140)), Vec2::new(62.0, 80.0), Vec2::new(138.0, 60.0));
-    let face = shape(23, ShapeKind::Ellipse, Paint::Radial { inner: Rgba::hex(0xf1c6a6), outer: Rgba::hex(0xa8694a) }, Vec2::new(30.0, 38.0), Vec2::new(138.0, 60.0));
+    let face = shape(23, ShapeKind::Ellipse, Paint::radial(Rgba::hex(0xf1c6a6), Rgba::hex(0xa8694a)), Vec2::new(30.0, 38.0), Vec2::new(138.0, 60.0));
     let star = shape(24, ShapeKind::Star, Paint::Solid(Rgba::hex(0xfacc15)), Vec2::new(46.0, 46.0), Vec2::new(120.0, 128.0));
     let mut picture = clear_comp(20, vec![star, face, screen, card]);
     (picture.width, picture.height) = (cell, cell);
@@ -862,11 +886,11 @@ fn grade_sheet() {
     let size = cell as f32;
     for (index, (lut, name, values)) in grades.iter().enumerate() {
         let mut sky = solid(5, 0, Vec2::new(size, size * 0.55), Vec2::new(size / 2.0, size * 0.275));
-        sky.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Linear { start: Rgba::hex(0x5fa8e8), end: Rgba::hex(0xf7c08a), angle: 180.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) }, path: None };
+        sky.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::linear(Rgba::hex(0x5fa8e8), Rgba::hex(0xf7c08a), 180.0)), ..ShapeStyle::new(ShapeKind::Rectangle) }, path: None };
         let mut ground = solid(6, 0, Vec2::new(size, size * 0.45), Vec2::new(size / 2.0, size * 0.775));
-        ground.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Linear { start: Rgba::hex(0x4c7a3a), end: Rgba::hex(0x1d2a17), angle: 180.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) }, path: None };
+        ground.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::linear(Rgba::hex(0x4c7a3a), Rgba::hex(0x1d2a17), 180.0)), ..ShapeStyle::new(ShapeKind::Rectangle) }, path: None };
         let mut face = solid(7, 0, Vec2::new(size * 0.3, size * 0.3), Vec2::new(size * 0.5, size * 0.55));
-        face.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::Radial { inner: Rgba::hex(0xf1c6a6), outer: Rgba::hex(0xa8694a) }), ..ShapeStyle::new(ShapeKind::Ellipse) }, path: None };
+        face.content = LayerContent::Shape { style: ShapeStyle { fill: Some(Paint::radial(Rgba::hex(0xf1c6a6), Rgba::hex(0xa8694a))), ..ShapeStyle::new(ShapeKind::Ellipse) }, path: None };
         let mut grade = full(2, 0);
         grade.content = LayerContent::Adjustment;
         grade.size = Vec2::new(size, size);

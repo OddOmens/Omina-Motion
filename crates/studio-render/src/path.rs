@@ -23,24 +23,29 @@ fn color(rgba: Rgba) -> tiny_skia::Color {
 }
 
 /// A paint as a tiny-skia shader, laid out over a box of `size` the way `layer.wgsl` lays out
-/// the same paint on the drawn shapes, so a path and a rectangle with one gradient match.
+/// the same paint on the drawn shapes, so a path and a rectangle with one gradient match: a
+/// linear gradient runs between its points in pixels, and a radial one is measured in
+/// fractions of the box (so its circle stretches with the box, as an ellipse).
 fn shader(paint: Paint, size: Vec2) -> Shader<'static> {
-    let center = Point::from_xy(size.x * 0.5, size.y * 0.5);
-    let stops = |a: Rgba, b: Rgba| vec![GradientStop::new(0.0, color(a)), GradientStop::new(1.0, color(b))];
+    let Some(gradient) = paint.gradient() else {
+        return match paint {
+            Paint::Solid(rgba) => Shader::SolidColor(color(rgba)),
+            _ => Shader::SolidColor(tiny_skia::Color::TRANSPARENT),
+        };
+    };
+    let stops: Vec<GradientStop> = gradient.stops().iter().map(|stop| GradientStop::new(stop.at, color(stop.color))).collect();
+    let first = color(gradient.stops()[0].color);
     match paint {
-        Paint::Solid(rgba) => Shader::SolidColor(color(rgba)),
-        Paint::Linear { start, end, angle } => {
-            // The gradient runs across the box along `angle`, reaching its far corners.
-            let (sin, cos) = angle.to_radians().sin_cos();
-            let reach = cos.abs() * size.x * 0.5 + sin.abs() * size.y * 0.5;
-            let from = Point::from_xy(center.x - cos * reach, center.y - sin * reach);
-            let to = Point::from_xy(center.x + cos * reach, center.y + sin * reach);
-            LinearGradient::new(from, to, stops(start, end), SpreadMode::Pad, Transform::identity()).unwrap_or(Shader::SolidColor(color(start)))
+        Paint::Radial(_) => {
+            let center = Point::from_xy(gradient.from.x, gradient.from.y);
+            let radius = ((gradient.to.x - gradient.from.x).hypot(gradient.to.y - gradient.from.y)).max(1e-4);
+            let stretch = Transform::from_scale(size.x.max(1e-3), size.y.max(1e-3));
+            RadialGradient::new(center, center, radius, stops, SpreadMode::Pad, stretch).unwrap_or(Shader::SolidColor(first))
         }
-        Paint::Radial { inner, outer } => {
-            // A unit circle stretched to the box, so the gradient is an ellipse like the box.
-            let stretch = Transform::from_row(size.x.max(1e-3) * 0.5, 0.0, 0.0, size.y.max(1e-3) * 0.5, center.x, center.y);
-            RadialGradient::new(Point::zero(), Point::zero(), 1.0, stops(inner, outer), SpreadMode::Pad, stretch).unwrap_or(Shader::SolidColor(color(inner)))
+        _ => {
+            let from = Point::from_xy(gradient.from.x * size.x, gradient.from.y * size.y);
+            let to = Point::from_xy(gradient.to.x * size.x, gradient.to.y * size.y);
+            LinearGradient::new(from, to, stops, SpreadMode::Pad, Transform::identity()).unwrap_or(Shader::SolidColor(first))
         }
     }
 }

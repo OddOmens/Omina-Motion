@@ -28,6 +28,10 @@ pub enum FieldTarget {
     TextPathStart { layer: Id },
     /// A footage layer's constant speed, as a percentage.
     Speed { layer: Id },
+    /// One side (0 width, 1 height) of a video or image layer's Size, in pixels.
+    MediaSize { layer: Id, side: usize },
+    /// Where a gradient stop sits along a shape's gradient, as a percentage.
+    GradientStop { layer: Id, slot: crate::state::PaintSlot, stop: usize },
 }
 
 /// How a field's number is shown and how fast it scrubs.
@@ -96,6 +100,14 @@ impl FieldTarget {
                 let start = state.composition().layer(layer)?.text_path?.start;
                 Some((start, FieldFormat { step: 1.0, decimals: 0, unit: "px", rotation: false }))
             }
+            Self::MediaSize { layer, side } => {
+                let size = state.media_size(layer)?;
+                Some((if side == 0 { size.x } else { size.y }, FieldFormat { step: 1.0, decimals: 0, unit: "px", rotation: false }))
+            }
+            Self::GradientStop { layer, slot, stop } => {
+                let at = state.shape_gradient(layer, slot)?.stops().get(stop)?.at;
+                Some((at * 100.0, FieldFormat { step: 0.5, decimals: 1, unit: "%", rotation: false }))
+            }
         }
     }
 
@@ -107,6 +119,8 @@ impl FieldTarget {
             Self::Audio { layer, setting } => state.set_audio_setting(layer, setting, value),
             Self::TextPathStart { layer } => state.set_text_path_start(layer, value),
             Self::Speed { layer } => state.set_speed(layer, value),
+            Self::MediaSize { layer, side } => state.set_media_size_side(layer, side, value),
+            Self::GradientStop { layer, slot, stop } => state.set_gradient_stop_location(layer, slot, stop, value / 100.0),
         }
     }
 

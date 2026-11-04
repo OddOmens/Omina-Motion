@@ -7,6 +7,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
+use gpui_kit::component::WindowExt as _;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,11 +17,12 @@ use gpui_kit::{
     AnyElement, AppContext as _, Bounds, Context, ImageSource, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, RenderImage,
     StatefulInteractiveElement, Styled, TestSupportExt as _, Window, canvas, div, fill, img, point, prelude::FluentBuilder as _, px, relative, rgb,
 };
-use studio_core::model::{Id, ProjectItem, ProjectItemKind};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use studio_core::model::{Id, LabelColor, ProjectItem, ProjectItemKind};
 
 use super::chrome::{icon_button, label_swatch, panel};
 use crate::theme::{color, hsla, size};
-use crate::workspace::{PanelId, ProjectItemDrag, Workspace};
+use crate::workspace::{EditTarget, PanelId, ProjectItemDrag, Workspace};
 
 /// The preview's state: which item it shows, where in it (seconds), whether it is playing, and
 /// the last video frame shown (made into an image once per frame, not once per redraw).
@@ -297,6 +299,115 @@ fn type_label(item: &ProjectItem, workspace: &Workspace) -> String {
     }
 }
 
+/// An item's name in its row, or a text field while it is being renamed.
+fn item_name(item: &ProjectItem, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    if let Some(editing) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::ItemName(item.id)) {
+        return div()
+            .flex_1()
+            .min_w_0()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(super::chrome::name_input(&editing.input, size::TEXT))
+            .into_any_element();
+    }
+    // Double-clicking the name renames the item (double-clicking the rest of the row opens it).
+    let (id, name) = (item.id, item.name.clone());
+    div()
+        .id(("project-item-name", id.0 as usize))
+        .min_w_0()
+        .truncate()
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &gpui_kit::MouseDownEvent, window, cx| {
+            if event.click_count >= 2 {
+                cx.stop_propagation();
+                this.state.selected_item = Some(id);
+                this.begin_edit(EditTarget::ItemName(id), name.clone(), window, cx);
+            }
+        }))
+        .child(item.name.clone())
+        .test_support()
+        .into_any_element()
+}
+
+/// An item's right-click menu, as in After Effects' Project panel: open a composition or
+/// change its settings, rename the item, give it a label color, show its file in the Finder,
+/// or delete it.
+fn item_menu(item: &ProjectItem, cx: &mut Context<Workspace>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let (id, name, label, kind) = (item.id, item.name.clone(), item.label, item.kind);
+    let path = item.path.clone();
+    let target = cx.weak_entity();
+    move |menu, window, cx| {
+        let mut menu = menu;
+        if kind == ProjectItemKind::Composition {
+            let open = target.clone();
+            let settings = target.clone();
+            menu = menu
+                .item(PopupMenuItem::new("Open Composition").on_click(move |_, _, cx| {
+                    open.update(cx, |this, cx| {
+                        this.state.open_composition(id);
+                        cx.notify();
+                    })
+                    .ok();
+                }))
+                .item(PopupMenuItem::new("Composition Settings…").on_click(move |_, window, cx| {
+                    // The settings dialog edits the open composition, so this one opens first.
+                    settings.update(cx, |this, cx| {
+                        this.state.open_composition(id);
+                        super::composition_settings::open(this, false, window, cx);
+                    })
+                    .ok();
+                }))
+                .separator();
+        }
+        let rename = target.clone();
+        let name = name.clone();
+        menu = menu.item(PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
+            rename.update(cx, |this, cx| this.begin_edit(EditTarget::ItemName(id), name.clone(), window, cx)).ok();
+        }));
+        let labels = target.clone();
+        menu = menu.submenu("Label", window, cx, move |mut submenu, _, _| {
+            for color in LabelColor::ALL {
+                let labels = labels.clone();
+                let swatch = Icon::new(IconName::Circle).text_color(gpui_kit::rgba(color.color().to_rgba_u32()));
+                submenu = submenu.item(PopupMenuItem::new(color.name()).icon(swatch).checked(color == label).on_click(move |_, _, cx| {
+                    labels
+                        .update(cx, |this, cx| {
+                            this.state.set_item_label(id, color);
+                            cx.notify();
+                        })
+                        .ok();
+                }));
+            }
+            submenu
+        });
+        // Imported files can be shown where they are on disk.
+        if let Some(path) = path.clone() {
+            menu = menu.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, window, cx| {
+                if let Err(error) = reveal_in_finder(&path) {
+                    window.push_notification(format!("Couldn't show the file in the Finder: {error}").as_str(), cx);
+                }
+            }));
+        }
+        // Delete asks first and removes the selected item (the right-click selected it).
+        let delete = target.clone();
+        menu.separator().item(PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
+            delete
+                .update(cx, |this, cx| {
+                    this.state.selected_item = Some(id);
+                    this.ui.active_panel = crate::workspace::PanelId::Project;
+                    this.delete(window, cx);
+                })
+                .ok();
+        }))
+    }
+}
+
+/// Shows a file selected in a Finder window.
+fn reveal_in_finder(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("it is no longer where it was imported from".to_owned());
+    }
+    std::process::Command::new("open").arg("-R").arg(path).spawn().map(|_| ()).map_err(|error| error.to_string())
+}
+
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let project = &workspace.state.project;
     let selected = workspace.state.selected_item.and_then(|id| project.item(id));
@@ -376,7 +487,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             .hover(|style| style.bg(hsla(color::HOVER)))
             .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
                 this.state.selected_item = Some(id);
-                // Double-click (or Enter) opens folders and compositions.
+                // Double-click (or Enter) opens folders and compositions; double-clicking the
+                // name renames instead (see `item_name`).
                 let opens = event.click_count() >= 2 || event.is_keyboard();
                 if opens && is_folder {
                     this.ui.toggle_folder(id);
@@ -398,7 +510,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                     .child(twirl)
                     // An expanded folder shows as open, as in Finder.
                     .child(Icon::new(if is_folder && is_open { IconName::FolderOpen } else { kind_icon(item.kind) }).size(px(14.0)).text_color(hsla(color::MUTED)))
-                    .child(div().truncate().child(item.name.clone())),
+                    .child(item_name(item, workspace, cx)),
             )
             .when(columns.kind, |row| row.child(div().w(px(TYPE_WIDTH)).pl_2().truncate().text_color(hsla(color::MUTED)).child(type_label(item, workspace))))
             .when(columns.duration, |row| row.child(div().w(px(DURATION_WIDTH)).pl_2().text_color(hsla(color::MUTED)).child(item.duration_seconds.map(clock).unwrap_or_default())))
@@ -432,8 +544,14 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                 DropPlace::Into(_) => row,
             };
         }
-        row.test_support()
-    });
+        row.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| {
+            this.state.selected_item = Some(id);
+            cx.notify();
+        }))
+        .test_support()
+        .context_menu(item_menu(item, cx))
+    })
+    .collect::<Vec<_>>();
 
     let footer = div()
         .flex()

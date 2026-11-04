@@ -127,56 +127,97 @@ pub fn section(title: impl Into<SharedString>, trailing: Option<AnyElement>) -> 
         .justify_between()
         .h(px(26.0))
         .mt_1()
-        .child(div().text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title.into()))
+        .child(div().text_color(hsla(color::TEXT)).child(title.into()))
         .children(trailing)
 }
 
-/// A card's heading: what it shows and the controls on its right. Each control in
-/// `trailing` must stop its click from reaching the heading, which folds the card.
+/// The width of each control slot on a card heading. Every heading keeps its slots, filled
+/// or not, so the buttons line up in columns down a tab.
+const HEADING_SLOT: f32 = 24.0;
+
+/// A button on a card heading: a small outlined square with an icon and a tooltip. Its click
+/// never reaches the heading, so it doesn't fold the card.
+pub fn heading_button(
+    id: impl Into<ElementId>,
+    icon: IconName,
+    tooltip: impl Into<SharedString>,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    Button::new(id)
+        .outline()
+        .small()
+        .icon(Icon::new(icon))
+        .tooltip(tooltip.into())
+        .selected(active)
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            on_click(event, window, cx);
+        })
+}
+
+/// A small "i" button whose tooltip explains a section, in place of a paragraph in the panel.
+/// Clicking it does nothing; hovering shows the text.
+pub fn info_button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> AnyElement {
+    heading_button(id, IconName::Info, text, false, |_, _, _| {}).into_any_element()
+}
+
+/// A card's heading: what it shows and the controls on its right, made with `heading_button`.
+/// `info` takes the first slot, then each of `trailing` in order (turn on or off, reset, then
+/// add or delete); a `None` keeps its slot empty so the columns stay lined up.
 pub struct CardHeading {
     pub id: ElementId,
     pub icon: Option<IconName>,
     pub title: SharedString,
+    /// What the section is for, shown by an info button's tooltip.
+    pub info: Option<SharedString>,
     pub open: bool,
     /// Drawn faded, for something turned off (an effect that is hidden, say).
     pub muted: bool,
-    pub trailing: Vec<AnyElement>,
+    pub trailing: Vec<Option<AnyElement>>,
 }
 
-/// A rounded card holding one group of settings, as the Properties, Effects and Color tabs
-/// all show them: a heading that folds the card on a click, and `body` under it while open.
+/// One group of settings, as the Properties, Effects and Color tabs all show them, drawn flat
+/// like the Align panel: a heading that folds the group on a click, `body` under it while
+/// open, and a hairline rule below.
 pub fn card(heading: CardHeading, on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, body: Option<AnyElement>) -> Div {
-    let CardHeading { id, icon, title, open, muted, trailing } = heading;
+    let CardHeading { id, icon, title, info, open, muted, trailing } = heading;
     let text = if muted { color::MUTED } else { color::TEXT };
+    let info = info.map(|text| info_button(ElementId::Name(format!("{id}-info").into()), text));
+    let slot = |control: Option<AnyElement>| div().w(px(HEADING_SLOT)).flex_none().flex().justify_center().children(control);
+    let slots = div().flex_none().flex().items_center().gap_1().child(slot(info)).children(trailing.into_iter().map(slot));
     let row = div()
         .id(id)
         .flex()
         .items_center()
         .gap_1p5()
-        .h(px(34.0))
-        .px_2()
+        .h(px(32.0))
+        .px_2p5()
         .cursor_pointer()
         .hover(|style| style.bg(hsla(color::HOVER)))
         .on_click(on_toggle)
         .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(hsla(color::MUTED)))
-        .children(icon.map(|icon| Icon::new(icon).size(px(14.0)).text_color(hsla(if muted { color::MUTED } else { color::ACCENT }))))
-        .child(div().flex_1().min_w_0().truncate().font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(hsla(text)).child(title))
-        .children(trailing)
+        .children(icon.map(|icon| Icon::new(icon).size(px(13.0)).text_color(hsla(color::MUTED))))
+        .child(div().flex_1().min_w_0().truncate().text_color(hsla(text)).child(title))
+        .child(slots)
         .test_support();
     div()
         .flex_none()
-        .rounded(px(8.0))
-        .border_1()
+        .border_b_1()
         .border_color(hsla(color::HAIRLINE))
-        .bg(hsla(color::RAISED))
-        .overflow_hidden()
         .child(row)
-        .children(body.filter(|_| open).map(|body| div().px_3().pb_3().when(muted, |body| body.opacity(0.5)).child(body)))
+        .children(body.filter(|_| open).map(|body| div().px_2p5().pb_2p5().when(muted, |body| body.opacity(0.5)).child(body)))
 }
 
-/// The list of cards a settings tab scrolls through, spaced as the Color tab spaces them.
+/// The list of cards a settings tab scrolls through. Lines that aren't cards (a status line,
+/// the Add Effect button) get `list_row` padding so they line up with the card headings.
 pub fn card_list(id: impl Into<ElementId>) -> gpui_kit::Stateful<Div> {
-    div().id(id).relative().size_full().overflow_y_scroll().px_2p5().py_2().flex().flex_col().gap_2()
+    div().id(id).relative().size_full().overflow_y_scroll().flex().flex_col()
+}
+
+/// A line in a card list that isn't a card, padded like the cards' headings.
+pub fn list_row() -> Div {
+    div().flex_none().px_2p5().py_2()
 }
 
 /// A thin rule between panel sections.
@@ -208,6 +249,14 @@ pub fn icon_button(
         .tooltip(tooltip)
         .selected(active)
         .on_click(on_click)
+}
+
+/// The text field a name turns into while it is renamed (a Project item, a clip), with its text
+/// at `text_size` so it stays the size of the name it replaces. (The input's own size presets
+/// draw smaller text than the rows around them.)
+pub fn name_input(input: &gpui_kit::Entity<gpui_kit::component::input::InputState>, text_size: f32) -> gpui_kit::component::input::Input {
+    // Inputs draw their text at seven eighths of a custom size.
+    gpui_kit::component::input::Input::new(input).with_size(gpui_kit::component::Size::Size(px(text_size / 0.875)))
 }
 
 /// A row of muted helper text, used for empty states.

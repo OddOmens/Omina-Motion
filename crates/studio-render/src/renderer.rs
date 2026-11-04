@@ -103,6 +103,9 @@ struct VideoTexture {
 }
 
 /// What `layer.wgsl` fills a layer's rectangle with.
+// A shape's style (with its gradients) makes `Shape` much the largest; sources only live for
+// one draw call, so that costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 enum Source<'a> {
     /// A premultiplied linear color.
     Solid([f32; 4]),
@@ -120,15 +123,33 @@ enum Source<'a> {
     Shape(ShapeStyle, Vec2, Vec2),
 }
 
-/// A paint as `layer.wgsl` takes it: mode (1 solid, 2 linear, 3 radial), angle in radians, and
-/// two premultiplied linear colors.
-fn paint_uniform(paint: Option<Paint>) -> (f32, f32, [f32; 4], [f32; 4]) {
-    match paint {
-        None => (0.0, 0.0, [0.0; 4], [0.0; 4]),
-        Some(Paint::Solid(color)) => (1.0, 0.0, linear(color), linear(color)),
-        Some(Paint::Linear { start, end, angle }) => (2.0, angle.to_radians(), linear(start), linear(end)),
-        Some(Paint::Radial { inner, outer }) => (3.0, 0.0, linear(inner), linear(outer)),
-    }
+/// A paint as `layer.wgsl`'s `Paint` takes it, as floats in order: mode (1 solid, 2 linear,
+/// 3 radial; 0 none) and stop count, eight premultiplied linear colors, eight stop locations,
+/// and the gradient's from and to points (fractions of the box).
+fn paint_uniform(paint: Option<Paint>) -> Vec<f32> {
+    use studio_core::gradient::MAX_STOPS;
+    let mut colors = [[0.0f32; 4]; MAX_STOPS];
+    let mut stops = [1.0f32; MAX_STOPS];
+    let (mode, count, points) = match paint {
+        None => (0.0, 0, [0.0; 4]),
+        Some(Paint::Solid(color)) => {
+            colors[0] = linear(color);
+            (1.0, 1, [0.0; 4])
+        }
+        Some(paint @ (Paint::Linear(gradient) | Paint::Radial(gradient))) => {
+            for (index, stop) in gradient.stops().iter().enumerate() {
+                colors[index] = linear(stop.color);
+                stops[index] = stop.at;
+            }
+            let mode = if matches!(paint, Paint::Linear(_)) { 2.0 } else { 3.0 };
+            (mode, gradient.stops().len(), [gradient.from.x, gradient.from.y, gradient.to.x, gradient.to.y])
+        }
+    };
+    let mut floats = vec![mode, count as f32, 0.0, 0.0];
+    floats.extend(colors.iter().flatten());
+    floats.extend(stops);
+    floats.extend(points);
+    floats
 }
 
 /// Compositions nest at most this deep (a composition inside one that is inside it again
@@ -651,11 +672,8 @@ impl Renderer {
         ];
         uniform.extend(shape);
         uniform.extend(shape_box);
-        uniform.extend(fill.2);
-        uniform.extend(fill.3);
-        uniform.extend(stroke.2);
-        uniform.extend(stroke.3);
-        uniform.extend([fill.0, fill.1, stroke.0, stroke.1]);
+        uniform.extend(fill);
+        uniform.extend(stroke);
         let buffer = self.uniform(bytemuck::cast_slice(&uniform));
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("layer"),

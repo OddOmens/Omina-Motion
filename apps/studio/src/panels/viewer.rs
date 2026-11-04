@@ -5,6 +5,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Context, CursorStyle, DragMoveEvent, ElementId, ImageSource, InteractiveElement, RenderImage, img,
     IntoElement, MouseButton, MouseDownEvent, ParentElement, StatefulInteractiveElement, Styled, TestSupportExt as _,
@@ -23,7 +24,7 @@ use studio_render::Renderer;
 use super::chrome::{EmptyDragView, icon_button, panel};
 use crate::state::ScaleHandle;
 use crate::theme::{color, hsla, size};
-use crate::workspace::{EditTarget, EffectDrag, PanelId, Tool, Workspace};
+use crate::workspace::{EditTarget, EffectDrag, PanelId, ProjectItemDrag, Tool, Workspace};
 
 /// Space kept between the composition frame and the viewer edge.
 const FIT_PADDING: f32 = 24.0;
@@ -477,6 +478,7 @@ enum ViewerDrag {
     Scale,
     Anchor,
     PathPoint,
+    GradientPoint,
 }
 
 /// Screen points per composition pixel that fit the whole frame in the viewer.
@@ -504,7 +506,19 @@ fn zoom_at(workspace: &mut Workspace, at: Vec2, zoom_in: bool) {
     } else {
         ZOOM_LEVELS.iter().rev().copied().find(|&level| level < current * 0.99)
     };
-    let Some(next) = next else { return };
+    if let Some(next) = next {
+        zoom_to(workspace, at, next);
+    }
+}
+
+/// Sets the magnification to `next` (kept within the zoom levels' range), keeping the
+/// composition point `at` where it is on screen.
+fn zoom_to(workspace: &mut Workspace, at: Vec2, next: f32) {
+    let current = viewer_scale(workspace);
+    let next = next.clamp(ZOOM_LEVELS[0], ZOOM_LEVELS[ZOOM_LEVELS.len() - 1]);
+    if !next.is_finite() || (next - current).abs() < f32::EPSILON {
+        return;
+    }
     // The point stays put on screen: the frame's corner moves by how much farther (or nearer)
     // the point now is from it, less the half of the growth that centering already gives.
     let composition = workspace.state.composition();
@@ -514,6 +528,22 @@ fn zoom_at(workspace: &mut Workspace, at: Vec2, zoom_in: bool) {
     workspace.ui.viewer_pan = (x + shift.x, y + shift.y);
     workspace.ui.viewer_zoom = Some(next);
 }
+
+/// The topmost layer under a window position in the viewer, if any (for its right-click menu).
+pub fn layer_under(workspace: &Workspace, position: gpui_kit::Point<gpui_kit::Pixels>) -> Option<Id> {
+    let point = to_comp(workspace, f32::from(position.x), f32::from(position.y));
+    workspace.state.layer_at(point)
+}
+
+/// Zooms the viewer one step (Cmd+= and Cmd+-), around the middle of what it shows.
+pub fn zoom_step(workspace: &mut Workspace, zoom_in: bool) {
+    let bounds = workspace.ui.viewer_bounds.get();
+    let middle = to_comp(workspace, bounds.left + bounds.width * 0.5, bounds.top + bounds.height * 0.5);
+    zoom_at(workspace, middle, zoom_in);
+}
+
+/// How strongly the scroll wheel zooms the viewer, per point scrolled.
+const WHEEL_ZOOM_SENSITIVITY: f32 = 0.004;
 
 /// Sets the magnification from the menu (`None` for Fit), centering the frame.
 fn set_zoom(workspace: &mut Workspace, zoom: Option<f32>) {
@@ -674,11 +704,63 @@ fn path_points_overlay(workspace: &Workspace, layer: Id, cx: &mut Context<Worksp
     elements
 }
 
+/// A selected shape's gradient: a line from where it starts to where it ends, with a handle
+/// on each end to drag (a ring at the start, a dot at the end, as in design tools).
+fn gradient_overlay(workspace: &Workspace, layer: Id, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
+    use crate::state::GradientEnd;
+    let Some(shown) = workspace.state.gradient_on_screen(layer) else { return Vec::new() };
+    let composition = workspace.state.composition();
+    let size = Vec2::new(composition.width as f32, composition.height as f32);
+    let frac = |v: Vec2| (v.x / size.x, v.y / size.y);
+    let mut elements = vec![curve_canvas(vec![[shown.from, shown.from, shown.to, shown.to]], size, hsla(color::ACCENT))];
+    for (end, at, name) in [(GradientEnd::From, shown.from, "from"), (GradientEnd::To, shown.to, "to")] {
+        let at = frac(at);
+        let dot = div()
+            .size(px(12.0))
+            .rounded_full()
+            .border_2()
+            .border_color(hsla(color::ACCENT))
+            .when(end == GradientEnd::To, |dot| dot.bg(hsla(color::ACCENT)))
+            .when(end == GradientEnd::From, |dot| dot.bg(hsla(color::PANEL)));
+        elements.push(
+            div()
+                .id(ElementId::Name(format!("gradient-{name}:{}", layer.0).into()))
+                .absolute()
+                .left(relative(at.0))
+                .top(relative(at.1))
+                .ml(px(-8.0))
+                .mt(px(-8.0))
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor(CursorStyle::Crosshair)
+                .child(dot)
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.ui.viewer_anchor = Some((f32::from(event.position.x), f32::from(event.position.y)));
+                    this.state.begin_gradient_drag(layer, end);
+                    cx.notify();
+                }))
+                .on_drag(ViewerDrag::GradientPoint, |_, _, _, cx| cx.new(|_| EmptyDragView))
+                .test_support()
+                .into_any_element(),
+        );
+    }
+    elements
+}
+
 /// Converts a window position to composition pixels, using where the frame was drawn last frame.
 fn to_comp(workspace: &Workspace, x: f32, y: f32) -> Vec2 {
     let frame = workspace.ui.frame_bounds.get();
     let scale = viewer_scale(workspace).max(f32::EPSILON);
     Vec2::new((x - frame.left) / scale, (y - frame.top) / scale)
+}
+
+/// Where a drop on the viewer lands, in composition pixels.
+fn drop_point(workspace: &Workspace, window: &Window) -> Vec2 {
+    let position = window.mouse_position();
+    to_comp(workspace, f32::from(position.x), f32::from(position.y))
 }
 
 /// Press in the viewer: the Type tool places a text layer; the Shape tool starts drawing a
@@ -965,6 +1047,8 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
 
         // A pen path's own points, over the scale handles (a point often sits on a corner).
         elements.extend(path_points_overlay(workspace, id, cx));
+        // A gradient's line and its two ends, to drag where it runs.
+        elements.extend(gradient_overlay(workspace, id, cx));
 
         // The anchor point, where the layer scales and rotates around, drawn over the scale
         // handles so it can be dragged off a corner. Drag it to move it; the layer stays put.
@@ -1106,6 +1190,39 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .when(workspace.ui.tool == Tool::Zoom, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.tool == Tool::Rotate, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| press_viewer(this, event, window, cx)))
+        // Holding the middle mouse button (the scroll wheel) pans, as the Hand tool does.
+        .when(workspace.ui.middle_pan.is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::ClosedHand))
+        .on_mouse_down(MouseButton::Middle, cx.listener(|this, event: &MouseDownEvent, _, cx| {
+            this.ui.middle_pan = Some(((f32::from(event.position.x), f32::from(event.position.y)), this.ui.viewer_pan));
+            cx.notify();
+        }))
+        .on_mouse_move(cx.listener(|this, event: &gpui_kit::MouseMoveEvent, _, cx| {
+            let Some(((x, y), (pan_x, pan_y))) = this.ui.middle_pan else { return };
+            if event.pressed_button != Some(MouseButton::Middle) {
+                // Released outside the viewer: the pan is over.
+                this.ui.middle_pan = None;
+                cx.notify();
+                return;
+            }
+            this.ui.viewer_pan = (pan_x + f32::from(event.position.x) - x, pan_y + f32::from(event.position.y) - y);
+            cx.notify();
+        }))
+        .on_mouse_up(MouseButton::Middle, cx.listener(|this, _, _, cx| {
+            this.ui.middle_pan = None;
+            cx.notify();
+        }))
+        // The scroll wheel (or two fingers on a trackpad) zooms smoothly around the pointer.
+        .on_scroll(cx.listener(|this, event: &gpui_kit::ScrollEvent, _, cx| {
+            let delta = f32::from(event.delta.pixel_delta(px(16.0)).y);
+            if delta == 0.0 {
+                return;
+            }
+            let at = to_comp(this, f32::from(event.position.x), f32::from(event.position.y));
+            let next = viewer_scale(this) * (delta * WHEEL_ZOOM_SENSITIVITY).exp();
+            zoom_to(this, at, next);
+            cx.stop_propagation();
+            cx.notify();
+        }))
         .on_drag(ViewerDrag::Move, |_, _, _, cx| cx.new(|_| EmptyDragView))
         // An effect dragged over the picture lights up the layer it would go on (one it suits).
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<EffectDrag>, _, cx| {
@@ -1126,6 +1243,25 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
             }
             cx.notify();
         }))
+        // A Media item dropped on the picture becomes a layer from the playhead, centered where
+        // it was let go (see `EditorState::add_items_at`).
+        .drag_over::<ProjectItemDrag>(|style, _, _, _| style.bg(hsla(color::HOVER)))
+        .on_drop(cx.listener(|this, drag: &ProjectItemDrag, window, cx| {
+            let at = drop_point(this, window);
+            this.state.add_items_at(&[drag.item], at);
+            cx.notify();
+        }))
+        // Files from the Finder are imported first, then added the same way, one after another.
+        .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, _| style.bg(hsla(color::HOVER)))
+        .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+            let at = drop_point(this, window);
+            let place: super::importing::Then = Box::new(move |this, items, _, cx| {
+                this.state.add_items_at(&items, at);
+                cx.notify();
+            });
+            this.import_paths(paths.paths().to_vec(), Some(place), window, cx);
+            cx.notify();
+        }))
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ViewerDrag>, _, cx| {
             let Some((x, y)) = this.ui.viewer_anchor else { return };
             if this.ui.tool == Tool::Hand {
@@ -1143,7 +1279,9 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         }))
         .child(workspace.ui.viewer_bounds.probe())
         .child(comp_frame)
-        .test_support();
+        .test_support()
+        // Right-clicking a layer opens its menu (see `layer_menu`).
+        .context_menu(super::layer_menu::build(None, cx.weak_entity()));
 
     let title = format!("Composition: {}", composition.name);
     panel(

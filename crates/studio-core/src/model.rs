@@ -1,5 +1,6 @@
 //! The project data model: project items, compositions, layers and their properties.
 
+use crate::gradient::Gradient;
 use crate::animation::{Animated, Vec2};
 use crate::time::FrameRate;
 
@@ -127,18 +128,19 @@ impl Rgba {
     }
 }
 
-/// How an area is filled: one color, or a two-color gradient across the layer's box.
+/// How an area is filled: one color, or a gradient over the layer's box (see `gradient`).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(from = "PaintFile")]
 pub enum Paint {
     Solid(Rgba),
-    /// From `start` to `end` along `angle` degrees (0 runs left to right, 90 top to bottom).
-    Linear { start: Rgba, end: Rgba, angle: f32 },
-    /// From `inner` at the center to `outer` at the edge of the box.
-    Radial { inner: Rgba, outer: Rgba },
+    /// Color stops along the line from the gradient's `from` to its `to`.
+    Linear(Gradient),
+    /// Color stops out from the gradient's `from` (the center) to its `to` (the edge).
+    Radial(Gradient),
 }
 
-/// How `Paint` is read from a file: shape fills were saved as a plain color at first.
+/// How `Paint` is read from a file: shape fills were saved as a plain color at first, and
+/// gradients as two colors with an angle before they had stops.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum PaintFile {
@@ -149,16 +151,32 @@ enum PaintFile {
 #[derive(serde::Deserialize)]
 enum PaintTagged {
     Solid(Rgba),
-    Linear { start: Rgba, end: Rgba, angle: f32 },
-    Radial { inner: Rgba, outer: Rgba },
+    Linear(LinearFile),
+    Radial(RadialFile),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum LinearFile {
+    Stops(Box<Gradient>),
+    TwoColors { start: Rgba, end: Rgba, angle: f32 },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum RadialFile {
+    Stops(Box<Gradient>),
+    TwoColors { inner: Rgba, outer: Rgba },
 }
 
 impl From<PaintFile> for Paint {
     fn from(file: PaintFile) -> Self {
         match file {
             PaintFile::Color(color) | PaintFile::Paint(PaintTagged::Solid(color)) => Self::Solid(color),
-            PaintFile::Paint(PaintTagged::Linear { start, end, angle }) => Self::Linear { start, end, angle },
-            PaintFile::Paint(PaintTagged::Radial { inner, outer }) => Self::Radial { inner, outer },
+            PaintFile::Paint(PaintTagged::Linear(LinearFile::Stops(gradient))) => Self::Linear(*gradient),
+            PaintFile::Paint(PaintTagged::Linear(LinearFile::TwoColors { start, end, angle })) => Self::linear(start, end, angle),
+            PaintFile::Paint(PaintTagged::Radial(RadialFile::Stops(gradient))) => Self::Radial(*gradient),
+            PaintFile::Paint(PaintTagged::Radial(RadialFile::TwoColors { inner, outer })) => Self::radial(inner, outer),
         }
     }
 }
@@ -184,20 +202,46 @@ impl PaintKind {
 }
 
 impl Paint {
+    /// A two-color linear gradient across the box at `angle` degrees (0 left to right).
+    pub fn linear(start: Rgba, end: Rgba, angle: f32) -> Self {
+        Self::Linear(Gradient::linear_at_angle(start, end, angle))
+    }
+
+    /// A two-color radial gradient from the middle of the box out to its sides.
+    pub fn radial(inner: Rgba, outer: Rgba) -> Self {
+        Self::Radial(Gradient::two(inner, outer, crate::gradient::RADIAL_FROM, crate::gradient::RADIAL_TO))
+    }
+
     pub fn kind(self) -> PaintKind {
         match self {
             Self::Solid(_) => PaintKind::Solid,
-            Self::Linear { .. } => PaintKind::Linear,
-            Self::Radial { .. } => PaintKind::Radial,
+            Self::Linear(_) => PaintKind::Linear,
+            Self::Radial(_) => PaintKind::Radial,
         }
     }
 
-    /// The colors it is made of: one for a solid, start and end for a gradient.
+    /// The gradient, for the gradient kinds.
+    pub fn gradient(self) -> Option<Gradient> {
+        match self {
+            Self::Solid(_) => None,
+            Self::Linear(gradient) | Self::Radial(gradient) => Some(gradient),
+        }
+    }
+
+    /// The same kind of paint with its gradient replaced (a solid stays as it is).
+    pub fn with_gradient(self, gradient: Gradient) -> Self {
+        match self {
+            Self::Solid(_) => self,
+            Self::Linear(_) => Self::Linear(gradient),
+            Self::Radial(_) => Self::Radial(gradient),
+        }
+    }
+
+    /// The colors it is made of: one for a solid, each stop's for a gradient.
     pub fn colors(self) -> Vec<Rgba> {
         match self {
             Self::Solid(color) => vec![color],
-            Self::Linear { start, end, .. } => vec![start, end],
-            Self::Radial { inner, outer } => vec![inner, outer],
+            Self::Linear(gradient) | Self::Radial(gradient) => gradient.stops().iter().map(|stop| stop.color).collect(),
         }
     }
 
@@ -205,32 +249,33 @@ impl Paint {
     pub fn colors_mut(&mut self) -> Vec<&mut Rgba> {
         match self {
             Self::Solid(color) => vec![color],
-            Self::Linear { start, end, .. } => vec![start, end],
-            Self::Radial { inner, outer } => vec![inner, outer],
+            Self::Linear(gradient) | Self::Radial(gradient) => gradient.colors_mut().collect(),
         }
     }
 
     /// The same paint with color number `index` (see `colors`) replaced.
     pub fn with_color(self, index: usize, color: Rgba) -> Self {
-        match (self, index) {
-            (Self::Solid(_), _) => Self::Solid(color),
-            (Self::Linear { end, angle, .. }, 0) => Self::Linear { start: color, end, angle },
-            (Self::Linear { start, angle, .. }, _) => Self::Linear { start, end: color, angle },
-            (Self::Radial { outer, .. }, 0) => Self::Radial { inner: color, outer },
-            (Self::Radial { inner, .. }, _) => Self::Radial { inner, outer: color },
+        match self {
+            Self::Solid(_) => Self::Solid(color),
+            Self::Linear(gradient) => Self::Linear(gradient.with_color(index, color)),
+            Self::Radial(gradient) => Self::Radial(gradient.with_color(index, color)),
         }
     }
 
     /// Changes to another kind of paint, keeping its colors: a solid becomes a gradient from its
-    /// color to black, and a gradient becomes a solid of its first color.
+    /// color to black, a gradient becomes a solid of its first color, and linear and radial
+    /// swap keeping their stops (starting from the new kind's usual placement).
     pub fn into_kind(self, kind: PaintKind) -> Self {
-        let colors = self.colors();
-        let first = colors[0];
-        let second = colors.get(1).copied().unwrap_or(Rgba::hex(0x000000));
-        match kind {
-            PaintKind::Solid => Self::Solid(first),
-            PaintKind::Linear => Self::Linear { start: first, end: second, angle: if let Self::Linear { angle, .. } = self { angle } else { 0.0 } },
-            PaintKind::Radial => Self::Radial { inner: first, outer: second },
+        use crate::gradient::{LINEAR_FROM, LINEAR_TO, RADIAL_FROM, RADIAL_TO};
+        let stops = match self {
+            Self::Solid(color) => Gradient::two(color, Rgba::hex(0x000000), LINEAR_FROM, LINEAR_TO),
+            Self::Linear(gradient) | Self::Radial(gradient) => gradient,
+        };
+        match (self, kind) {
+            (_, PaintKind::Solid) => Self::Solid(self.colors()[0]),
+            (Self::Linear(_), PaintKind::Linear) | (Self::Radial(_), PaintKind::Radial) => self,
+            (_, PaintKind::Linear) => Self::Linear(Gradient::new(stops.stops(), LINEAR_FROM, LINEAR_TO)),
+            (_, PaintKind::Radial) => Self::Radial(Gradient::new(stops.stops(), RADIAL_FROM, RADIAL_TO)),
         }
     }
 }
@@ -264,6 +309,39 @@ pub enum LabelColor {
 }
 
 impl LabelColor {
+    /// Every label, in the order After Effects lists them.
+    pub const ALL: [Self; 12] = [
+        Self::None,
+        Self::Red,
+        Self::Yellow,
+        Self::Aqua,
+        Self::Pink,
+        Self::Lavender,
+        Self::Peach,
+        Self::Seafoam,
+        Self::Blue,
+        Self::Green,
+        Self::Purple,
+        Self::Orange,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Red => "Red",
+            Self::Yellow => "Yellow",
+            Self::Aqua => "Aqua",
+            Self::Pink => "Pink",
+            Self::Lavender => "Lavender",
+            Self::Peach => "Peach",
+            Self::Seafoam => "Seafoam",
+            Self::Blue => "Blue",
+            Self::Green => "Green",
+            Self::Purple => "Purple",
+            Self::Orange => "Orange",
+        }
+    }
+
     pub const fn color(self) -> Rgba {
         Rgba::hex(match self {
             Self::None => 0x5a5a5a,
@@ -558,6 +636,9 @@ impl ShapeStyle {
 }
 
 /// What a layer shows.
+// A shape's style is the largest by far (its fill and stroke can each hold a gradient of up to
+// eight stops), but layers are few and boxing it would add a step to every shape read.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayerContent {
     Footage { item: Id },
@@ -684,11 +765,15 @@ pub struct LayerTime {
     /// Plays the same part of the source backwards.
     #[serde(default)]
     pub reverse: bool,
+    /// While a ramp is on, the constant speed the clip had before it (a percentage), so
+    /// removing the ramp puts the clip back exactly as it was. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_before_ramp: Option<f32>,
 }
 
 impl Default for LayerTime {
     fn default() -> Self {
-        Self { speed: Animated::constant(100.0), reverse: false }
+        Self { speed: Animated::constant(100.0), reverse: false, speed_before_ramp: None }
     }
 }
 
@@ -1141,8 +1226,23 @@ mod tests {
         let gradient = Paint::Solid(red).into_kind(PaintKind::Linear);
         assert_eq!(gradient.colors(), vec![red, Rgba::hex(0x000000)]);
         let blue = Rgba::hex(0x0000ff);
-        assert_eq!(gradient.with_color(1, blue).into_kind(PaintKind::Radial), Paint::Radial { inner: red, outer: blue });
-        assert_eq!(Paint::Radial { inner: red, outer: blue }.into_kind(PaintKind::Solid), Paint::Solid(red));
+        assert_eq!(gradient.with_color(1, blue).into_kind(PaintKind::Radial), Paint::radial(red, blue));
+        assert_eq!(Paint::radial(red, blue).into_kind(PaintKind::Solid), Paint::Solid(red));
+    }
+
+    #[test]
+    fn gradients_saved_with_two_colors_and_an_angle_still_load() {
+        let red = Rgba::hex(0xff0000);
+        let blue = Rgba::hex(0x0000ff);
+        let old = r#"{"Linear":{"start":{"r":1.0,"g":0.0,"b":0.0,"a":1.0},"end":{"r":0.0,"g":0.0,"b":1.0,"a":1.0},"angle":90.0}}"#;
+        assert_eq!(serde_json::from_str::<Paint>(old).unwrap(), Paint::linear(red, blue, 90.0));
+        let old = r#"{"Radial":{"inner":{"r":1.0,"g":0.0,"b":0.0,"a":1.0},"outer":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}}"#;
+        assert_eq!(serde_json::from_str::<Paint>(old).unwrap(), Paint::radial(red, blue));
+        // And a gradient with stops saves and loads as itself.
+        let mut gradient = Paint::linear(red, blue, 0.0).gradient().unwrap();
+        gradient.add_stop(0.3);
+        let paint = Paint::Linear(gradient);
+        assert_eq!(serde_json::from_str::<Paint>(&serde_json::to_string(&paint).unwrap()).unwrap(), paint);
     }
 
     #[test]

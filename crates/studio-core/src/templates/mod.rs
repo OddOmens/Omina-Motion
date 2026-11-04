@@ -426,7 +426,7 @@ impl Builder<'_> {
 
     /// A gray box marking where footage or a photo goes.
     fn placeholder(&mut self, size: Vec2, at: Vec2, corner: f32, from: f64, what: &str) -> Id {
-        let fill = Paint::Linear { start: Rgba::hex(0x3f3f46), end: Rgba::hex(0x27272a), angle: 60.0 };
+        let fill = Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0);
         self.shape(ShapeKind::Rectangle, size, at, Some(fill), Some((0x71717a, 2.0)), corner, from, &format!("Drop your {what} here"))
     }
 
@@ -434,7 +434,7 @@ impl Builder<'_> {
     /// colors, slowly drifting larger for life.
     fn background(&mut self) -> Id {
         let palette = self.palette();
-        let paint = Paint::Linear { start: Self::color(palette.background), end: Self::color(palette.background_2), angle: 120.0 };
+        let paint = Paint::linear(Self::color(palette.background), Self::color(palette.background_2), 120.0);
         let size = Vec2::new(self.width, self.height) * (1.0 / self.unit());
         let center = self.at(0.5, 0.5);
         let id = self.shape(ShapeKind::Rectangle, size, center, Some(paint), None, 0.0, 0.0, "Background");

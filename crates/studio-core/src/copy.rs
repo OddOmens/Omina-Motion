@@ -54,7 +54,7 @@ pub fn paste_layers(project: &mut Project, comp_id: Id, layers: &[Layer], frame:
 /// index `at`, each on a new track, `delta` frames later than the original. A parent that was
 /// copied too becomes the parent's copy; one outside the block is kept if it is in this
 /// composition. Masks and text paths follow the same rule. The block's top layer has nothing above it to use as a matte, so loses its own.
-fn insert_copies(project: &mut Project, comp_id: Id, originals: &[Layer], at: usize, delta: i64) -> Vec<Id> {
+pub(crate) fn insert_copies(project: &mut Project, comp_id: Id, originals: &[Layer], at: usize, delta: i64) -> Vec<Id> {
     let mut new_ids: HashMap<Id, Id> = HashMap::new();
     let mut copies = Vec::with_capacity(originals.len());
     for original in originals {
@@ -95,6 +95,63 @@ fn insert_copies(project: &mut Project, comp_id: Id, originals: &[Layer], at: us
     copies.iter().map(|copy| copy.id).collect()
 }
 
+/// Duplicates a Project panel item (Cmd+D there): a copy named "<name> copy" (or "copy 2", and
+/// so on) right after it, in the same folder. A composition's copy is a new composition with the
+/// same settings and copies of all its layers, with fresh ids, and parents, masks, text paths
+/// and ducking pointed at the copies. Folders aren't duplicated. Returns the copy's id.
+pub fn duplicate_item(project: &mut Project, id: Id) -> Option<Id> {
+    let index = project.items.iter().position(|item| item.id == id)?;
+    let original = project.items[index].clone();
+    if original.kind == crate::model::ProjectItemKind::Folder {
+        return None;
+    }
+    let copy_id = project.allocate_id();
+    if original.kind == crate::model::ProjectItemKind::Composition {
+        let composition = copy_composition(project, id, copy_id)?;
+        project.compositions.push(composition);
+    }
+    let name = copy_name(project, &original.name);
+    if let Some(composition) = project.composition_mut(copy_id) {
+        composition.name = name.clone();
+    }
+    project.items.insert(index + 1, crate::model::ProjectItem { id: copy_id, name, ..original });
+    Some(copy_id)
+}
+
+/// "<name> copy", or "<name> copy 2" and up when that name is taken.
+fn copy_name(project: &Project, name: &str) -> String {
+    let taken = |candidate: &str| project.items.iter().any(|item| item.name == candidate);
+    let first = format!("{name} copy");
+    if !taken(&first) {
+        return first;
+    }
+    (2..).map(|number| format!("{name} copy {number}")).find(|candidate| !taken(candidate)).unwrap_or(first)
+}
+
+/// A copy of composition `id` with id `copy_id`, its layers and effects given fresh ids and the
+/// layers' references to each other moved over to the copies.
+fn copy_composition(project: &mut Project, id: Id, copy_id: Id) -> Option<Composition> {
+    let mut composition = project.composition(id)?.clone();
+    composition.id = copy_id;
+    let mut new_ids: HashMap<Id, Id> = HashMap::new();
+    for layer in &mut composition.layers {
+        let fresh = project.allocate_id();
+        new_ids.insert(layer.id, fresh);
+        layer.id = fresh;
+        for effect in &mut layer.effects {
+            effect.id = project.allocate_id();
+        }
+    }
+    let moved = |old: Id| new_ids.get(&old).copied();
+    for layer in &mut composition.layers {
+        layer.parent = layer.parent.and_then(moved);
+        layer.mask = layer.mask.and_then(|mask| moved(mask.layer).map(|layer| LayerMask { layer, ..mask }));
+        layer.text_path = layer.text_path.and_then(|on| moved(on.layer).map(|layer| crate::model::TextPath { layer, ..on }));
+        layer.audio.duck_under = layer.audio.duck_under.and_then(moved);
+    }
+    Some(composition)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +159,39 @@ mod tests {
 
     fn comp(project: &Project) -> &Composition {
         project.composition(ids::MAIN_COMP).unwrap()
+    }
+
+    #[test]
+    fn duplicating_a_composition_item_copies_its_layers_with_fresh_ids() {
+        let mut project = sample_project();
+        let original = comp(&project).clone();
+        let copy = duplicate_item(&mut project, ids::MAIN_COMP).unwrap();
+        let item = project.item(copy).unwrap();
+        assert_eq!(item.name, format!("{} copy", project.item(ids::MAIN_COMP).unwrap().name));
+        let position = |id| project.items.iter().position(|item| item.id == id).unwrap();
+        assert_eq!(position(copy), position(ids::MAIN_COMP) + 1, "right after the original");
+        let duplicate = project.composition(copy).unwrap();
+        assert_eq!(duplicate.layers.len(), original.layers.len());
+        assert_eq!(duplicate.name, item.name);
+        for (copied, layer) in duplicate.layers.iter().zip(&original.layers) {
+            assert_ne!(copied.id, layer.id, "fresh ids");
+            assert_eq!(copied.name, layer.name);
+            // Parents point inside the copy, never back into the original.
+            if let Some(parent) = copied.parent {
+                assert!(duplicate.layer(parent).is_some());
+            }
+        }
+        // A second copy gets a numbered name.
+        let again = duplicate_item(&mut project, ids::MAIN_COMP).unwrap();
+        assert!(project.item(again).unwrap().name.ends_with("copy 2"));
+    }
+
+    #[test]
+    fn media_items_duplicate_but_folders_do_not() {
+        let mut project = sample_project();
+        let copy = duplicate_item(&mut project, ids::LOGO).unwrap();
+        assert_eq!(project.item(copy).unwrap().path, project.item(ids::LOGO).unwrap().path);
+        assert_eq!(duplicate_item(&mut project, ids::FOOTAGE_FOLDER), None);
     }
 
     #[test]

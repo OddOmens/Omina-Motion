@@ -43,6 +43,8 @@ pub(super) enum ViewerDrag {
     /// pixels. The layer's box is fitted again as it moves, so its own pixels shift; working
     /// from composition pixels keeps the drag steady.
     PathPoint { layer: Id, index: usize, part: PathPart, start: Vec2 },
+    /// Moving one end of a shape's gradient, from where it started in composition pixels.
+    GradientPoint { layer: Id, slot: super::PaintSlot, end: super::GradientEnd, start: Vec2 },
 }
 
 /// A point of a pen path layer as shown in the viewer, in composition pixels.
@@ -332,6 +334,7 @@ impl EditorState {
                 let target = to_local.apply(start + delta);
                 edit::move_path_point(self.composition_mut(), layer, index, part, target);
             }
+            ViewerDrag::GradientPoint { layer, slot, end, start } => self.place_gradient_end(layer, slot, end, start + delta),
             ViewerDrag::DrawShape { layer, start } => {
                 // Shift keeps it square (or circular), as in every drawing tool.
                 let delta = if constrain {

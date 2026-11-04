@@ -270,7 +270,7 @@ mod tests {
         let primary = libraries.add_color(brand, "Primary", Rgba::hex(0xff0000)).unwrap();
         let mut project = sample_project();
         let linked = Rgba::hex(0xff0000).linked(Some(primary));
-        let style = ShapeStyle { fill: Some(Paint::Linear { start: linked, end: Rgba::hex(0x000000), angle: 0.0 }), ..ShapeStyle::new(ShapeKind::Rectangle) };
+        let style = ShapeStyle { fill: Some(Paint::linear(linked, Rgba::hex(0x000000), 0.0)), ..ShapeStyle::new(ShapeKind::Rectangle) };
         let shape = crate::edit::add_shape_layer(&mut project, ids::MAIN_COMP, style, crate::animation::Vec2::new(100.0, 100.0), crate::animation::Vec2::new(0.0, 0.0), 0).unwrap();
         project.composition_mut(ids::MAIN_COMP).unwrap().background = linked;
 

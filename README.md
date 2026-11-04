@@ -73,6 +73,13 @@ Inside `apps/studio/src`:
   Remove Marker (M), Sequence Layers and Stagger Layers (`studio-core/src/edit.rs`). The Rate Stretch tool (R,
   with Cut, Ripple and Roll) drags a clip's end to change its speed (`speed::stretch_to`). The viewer's grid
   button (') shows title and action safe areas, thirds and the center.
+- Drops: Media items and files from the Finder can be dropped on the Media panel (import only), on a track
+  (clips there, one after another) or on the viewer (`EditorState::add_items_at`: from the playhead on a new
+  top track, centered where let go; full-frame pictures stay centered).
+- Gradients (`studio-core/src/gradient.rs`): two to eight color stops and a from/to line in fractions of the
+  layer's box. `panels/gradient_editor.rs` is the bar under a shape's fill or stroke (click to add a stop, drag
+  to move, click a stop for its color, Location, Delete, Reverse); the viewer shows the line with a handle on
+  each end to drag (`state/gradient.rs`). Files with the older two-color gradients still open.
 - `panels/color_grade.rs`, `state/grade.rs`: the Color tab (like Lumetri): grade the selected clip or the
   whole video, which goes on a full-length adjustment layer at the top (made the first time). The tab
   starts with a tile per correction; each added one is a card for one of the effects Basic Correction
@@ -129,7 +136,9 @@ Inside `apps/studio/src`:
 - `panels/captions.rs`, `state/captions.rs`: the Captions panel and Generate Captions (download the model, transcribe in the
   background) and caption layers; their timing and animations are in `studio-core/src/captions.rs`.
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.
-- `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout.
+- `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout. Cmd+[ / Cmd+] step a frame
+  (with Shift, five); Cmd+= / Cmd+- zoom the viewer, and the scroll wheel over it zooms around the pointer
+  (`panels/viewer.rs`, `zoom_to`).
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).
 - `project_files.rs`: Save, Save As, Open, asking about unsaved changes, reopening the last project, and the
   recovery copy of unsaved work.
@@ -137,7 +146,17 @@ Inside `apps/studio/src`:
   accent color, Project panel columns, default folders and import sorting, cache folder, proxy settings).
   `panels/settings.rs` is the Settings dialog (Cmd+,), with sections in a menu on its left.
 - `panels/project.rs`: the Project panel, with a preview that shows images and plays video and sound;
-  `studio-core/src/folders.rs` adds default folders and sorts imports into them.
+  `studio-core/src/folders.rs` adds default folders and sorts imports into them. Right-clicking an item opens
+  its menu: Open and Composition Settings (compositions), Rename, Label, Reveal in Finder, Delete. Double-clicking
+  a name renames it (as on a timeline clip), and Cmd+D there duplicates the selected item
+  (`studio-core/src/copy.rs`: a composition's copy gets copies of its layers).
+- Right-clicking a layer, on its clip or in the viewer, opens `panels/layer_menu.rs`: Rename, Duplicate,
+  Pre-compose… (`panels/precompose.rs`, with After Effects' trim-to-span and open options), Ungroup Composition
+  (`studio-core/src/nesting.rs`: the nested composition's layers come back in its place, through a null when it
+  was moved or scaled; the composition stays in the project), Flip Horizontal/Vertical, Reset Transform, Split,
+  Delete and the exports. Holding the middle mouse button over the viewer pans it.
+- Videos and images have Size above Scale in Layer Transform (`edit::set_media_size`): the pixels they are
+  drawn at, so Scale can animate from 0 to 100% of that. Reset Transform puts them back at their own size.
 - `theme.rs`: the palettes. Panels name colors by `theme::color` constants and `theme::hsla` swaps in the
   active theme's (Dark, Black, Light) and accent's color, so new panels follow the theme for free.
 - `panels/graph_editor.rs`: the Easings popover: easing families (In / Out / Both) and a curve editor.

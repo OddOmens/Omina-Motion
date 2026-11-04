@@ -33,18 +33,54 @@ impl EditorState {
         copies
     }
 
-    /// Pre-compose: moves the selected layers into a new composition, in their place, and
-    /// selects the layer that shows it.
-    pub fn precompose_selection(&mut self) -> Option<Id> {
+    /// The name Pre-compose suggests, as After Effects does: the top selected layer's name and
+    /// "Comp", numbered past any composition already called that.
+    pub fn precompose_name(&self) -> String {
+        let composition = self.composition();
+        let base = composition.layers.iter().find(|layer| self.selected_layers.contains(&layer.id)).map_or("Pre-comp", |layer| layer.name.as_str());
+        let taken = |name: &str| self.project.items.iter().any(|item| item.name == name);
+        (1..).map(|number| format!("{base} Comp {number}")).find(|name| !taken(name)).unwrap_or_else(|| format!("{base} Comp"))
+    }
+
+    /// Pre-compose: moves the selected layers into a new composition named `name` (with `trim`,
+    /// only as long as they span), in their place, and selects the layer that shows it.
+    pub fn precompose_selection(&mut self, name: &str, trim: bool) -> Option<Id> {
         if self.selected_layers.is_empty() {
             return None;
         }
         let comp = self.active_comp;
-        let name = format!("Pre-comp {}", self.project.compositions.len());
+        let name = if name.trim().is_empty() { self.precompose_name() } else { name.trim().to_owned() };
         let selected = self.selected_layers.clone();
-        let layer = studio_core::edit::precompose(&mut self.project, comp, &selected, &name)?;
+        let layer = studio_core::edit::precompose(&mut self.project, comp, &selected, &name, trim)?;
         self.select_new_layers(&[layer]);
         Some(layer)
+    }
+
+    /// Ungroups a nested composition's layer: its layers come back into this composition in
+    /// its place (the composition stays in the project) and are selected.
+    pub fn ungroup_layer(&mut self, layer: Id) -> Result<studio_core::nesting::Ungrouped, studio_core::nesting::UngroupError> {
+        let comp = self.active_comp;
+        let result = studio_core::nesting::ungroup(&mut self.project, comp, layer)?;
+        self.select_new_layers(&result.layers);
+        Ok(result)
+    }
+
+    /// Mirrors the selected layers left to right (`horizontal`) or top to bottom. Returns
+    /// whether any flipped.
+    pub fn flip_selection(&mut self, horizontal: bool) -> bool {
+        let selected = self.selected_layers.clone();
+        let mut flipped = false;
+        for layer in selected {
+            flipped |= studio_core::edit::flip_layer(self.composition_mut(), layer, horizontal);
+        }
+        flipped
+    }
+
+    /// Resets the transform of every selected layer (see `reset_transform`).
+    pub fn reset_selection_transform(&mut self) {
+        for layer in self.selected_layers.clone() {
+            self.reset_transform(layer);
+        }
     }
 
     /// The composition a layer shows, if it is a nested composition.

@@ -200,11 +200,11 @@ pub fn add(project: &mut Project, comp: Id, index: usize, center: Vec2, frame: i
         }
         Kind::PhotoFrame => {
             let frame_id = shape(project, ShapeKind::Rectangle, Vec2::new(560.0, 420.0), center, solid(0xffffff), None, 12.0);
-            let photo = shape(project, ShapeKind::Rectangle, Vec2::new(520.0, 380.0), center, Some(Paint::Linear { start: Rgba::hex(0x3f3f46), end: Rgba::hex(0x27272a), angle: 60.0 }), None, 6.0);
+            let photo = shape(project, ShapeKind::Rectangle, Vec2::new(520.0, 380.0), center, Some(Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0)), None, 6.0);
             parent_pair(project, comp, frame, frame_id, photo, "Drop your photo here")
         }
         Kind::CircleFrame => {
-            let ring = shape(project, ShapeKind::Ellipse, Vec2::new(360.0, 360.0), center, Some(Paint::Linear { start: Rgba::hex(0x3f3f46), end: Rgba::hex(0x27272a), angle: 60.0 }), Some(Stroke { paint: Paint::Solid(Rgba::hex(0xffffff)), width: 14.0 }), 0.0);
+            let ring = shape(project, ShapeKind::Ellipse, Vec2::new(360.0, 360.0), center, Some(Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0)), Some(Stroke { paint: Paint::Solid(Rgba::hex(0xffffff)), width: 14.0 }), 0.0);
             if let Some(id) = ring {
                 name(project, comp, id, "Drop your photo here");
             }
@@ -212,7 +212,7 @@ pub fn add(project: &mut Project, comp: Id, index: usize, center: Vec2, frame: i
         }
         Kind::PhoneFrame => {
             let body = shape(project, ShapeKind::Rectangle, Vec2::new(360.0, 740.0), center, solid(0x18181b), None, 56.0);
-            let screen = shape(project, ShapeKind::Rectangle, Vec2::new(330.0, 710.0), center, Some(Paint::Linear { start: Rgba::hex(0x3f3f46), end: Rgba::hex(0x27272a), angle: 60.0 }), None, 42.0);
+            let screen = shape(project, ShapeKind::Rectangle, Vec2::new(330.0, 710.0), center, Some(Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0)), None, 42.0);
             parent_pair(project, comp, frame, body, screen, "Drop your screen recording here")
         }
         Kind::Like => text_layer(project, comp, frame, center, "♥", "Helvetica Neue", 260.0, 0xef4444).into_iter().collect(),

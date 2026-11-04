@@ -3,7 +3,9 @@
 //! the pointer; a clip that would overlap another there gets a new track of its own. With the
 //! magnetic main track on, the main track's clips are kept packed after every edit.
 
-use studio_core::model::Id;
+use studio_core::animation::Vec2;
+use studio_core::model::{Composition, Id};
+use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
 use studio_core::tracks;
 
 use super::EditorState;
@@ -79,12 +81,54 @@ impl EditorState {
         self.select_layer(layer, false);
     }
 
+    /// Adds project items from a drop on the viewer: from the playhead, one after another on a
+    /// new track at the top, each centered on `at` (composition pixels). A picture that covers
+    /// the whole frame stays centered, so full-frame video isn't knocked off by a slightly
+    /// off-center drop. Selects the last one added and returns whether anything was added.
+    pub fn add_items_at(&mut self, items: &[Id], at: Vec2) -> bool {
+        let comp = self.active_comp;
+        let mut frame = self.current_frame;
+        let mut track = None;
+        let mut added = false;
+        for &item in items {
+            // Items that can't go in (a composition into itself) are skipped.
+            let Some(layer) = studio_core::edit::add_layer_from_item(&mut self.project, comp, item, 0, frame) else { continue };
+            // The first starts a new track on top; the rest follow it on that track.
+            if let Some(track) = track {
+                tracks::place_clip(self.composition_mut(), layer, track, frame);
+            }
+            center_on(self.composition_mut(), layer, at);
+            let Some(placed) = self.composition().layer(layer) else { continue };
+            track = Some(placed.track);
+            frame = placed.out_frame;
+            self.select_layer(layer, false);
+            added = true;
+        }
+        added
+    }
+
     /// Keeps the main track packed if it is magnetic. Run after edits, outside drags.
     pub(super) fn apply_magnetism(&mut self) {
         if self.magnetic_main_track {
             tracks::compact_main_track(self.composition_mut());
         }
     }
+}
+
+/// Moves a just-added layer so its picture is centered on `at`, unless it already fills the
+/// frame. Sound-only layers have no picture and are left alone.
+fn center_on(composition: &mut Composition, layer: Id, at: Vec2) {
+    let Some(start) = composition.layer(layer).map(|layer| layer.in_frame) else { return };
+    let Some(bounds) = studio_core::align::layer_bounds(composition, layer, start) else { return };
+    let (width, height) = (composition.width as f32, composition.height as f32);
+    let fills_frame = bounds.min.x <= 0.5 && bounds.min.y <= 0.5 && bounds.max.x >= width - 0.5 && bounds.max.y >= height - 0.5;
+    if fills_frame || !(at.x.is_finite() && at.y.is_finite()) {
+        return;
+    }
+    let shift = at - (bounds.min + bounds.max) * 0.5;
+    let Some(layer) = composition.layer_mut(layer) else { return };
+    let Some(position) = layer.transform.as_ref().map(|transform| transform.position.value_at(start as f64)) else { return };
+    layer.set_property(PropertyPath::Transform(TransformProperty::Position), start, PropertyValue::Pair(position + shift));
 }
 
 #[cfg(test)]
@@ -111,6 +155,33 @@ mod tests {
         assert_eq!(timing(&state, title).0, MAIN_TRACK);
         assert_eq!(timing(&state, title).1, 20);
         assert_eq!(timing(&state, solid).0, MAIN_TRACK, "two clips, one line");
+    }
+
+    #[test]
+    fn items_dropped_on_the_viewer_start_at_the_playhead_where_they_were_let_go() {
+        use studio_core::sample::ids;
+        let mut state = EditorState::new();
+        state.set_current_frame(30);
+        let at = Vec2::new(400.0, 300.0);
+        assert!(state.add_items_at(&[ids::LOGO, ids::B_ROLL], at));
+        let logo = state.composition().layers.iter().find(|layer| matches!(layer.content, studio_core::model::LayerContent::Image { item } if item == ids::LOGO) && layer.in_frame == 30).unwrap();
+        let bounds = studio_core::align::layer_bounds(state.composition(), logo.id, 30).unwrap();
+        let center = (bounds.min + bounds.max) * 0.5;
+        assert!((center.x - at.x).abs() < 0.5 && (center.y - at.y).abs() < 0.5, "the logo is centered on the drop: {center:?}");
+        // The full-frame B-roll follows the logo and stays centered on the frame.
+        let b_roll = state.composition().layer(state.selected_layers[0]).unwrap();
+        assert_eq!(b_roll.in_frame, logo.out_frame, "one after another");
+        assert_eq!(b_roll.track, logo.track, "on one track");
+        let bounds = studio_core::align::layer_bounds(state.composition(), b_roll.id, b_roll.in_frame).unwrap();
+        assert!(bounds.min.x.abs() < 0.5 && bounds.min.y.abs() < 0.5, "full-frame video isn't moved: {bounds:?}");
+    }
+
+    #[test]
+    fn a_composition_dropped_into_itself_adds_nothing() {
+        let mut state = EditorState::new();
+        let before = state.composition().layers.len();
+        assert!(!state.add_items_at(&[state.active_comp], Vec2::new(10.0, 10.0)));
+        assert_eq!(state.composition().layers.len(), before);
     }
 
     #[test]

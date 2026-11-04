@@ -279,7 +279,7 @@ fn sale_burst(b: &mut Builder) {
     b.background();
     let (number, word, sub, code) = (b.copy(0), b.copy(1), b.copy(2), b.copy(3));
     let center = b.at(0.5, if b.vertical() { 0.4 } else { 0.44 });
-    let burst = b.shape(ShapeKind::Star, Vec2::new(760.0, 760.0), center, Some(Paint::Radial { inner: Rgba::hex(p.accent), outer: Rgba::hex(p.background_2) }), None, 0.0, 0.0, "Burst");
+    let burst = b.shape(ShapeKind::Star, Vec2::new(760.0, 760.0), center, Some(Paint::radial(Rgba::hex(p.accent), Rgba::hex(p.background_2))), None, 0.0, 0.0, "Burst");
     if let Some(crate::model::LayerContent::Shape { style, .. }) = b.project.composition_mut(b.comp).and_then(|comp| comp.layer_mut(burst)).map(|layer| &mut layer.content) {
         style.points = 16;
         style.inner_radius = 0.72;
@@ -497,7 +497,7 @@ fn podcast(b: &mut Builder) {
     let (show, episode, guest) = (b.copy(0), b.copy(1), b.copy(2));
     let tall = b.tall();
     let photo_at = if tall { b.at(0.5, 0.3) } else { b.at(0.27, 0.45) };
-    let photo = b.shape(ShapeKind::Ellipse, Vec2::new(440.0, 440.0), photo_at, Some(Paint::Linear { start: Rgba::hex(0x3f3f46), end: Rgba::hex(0x27272a), angle: 60.0 }), Some((p.accent, 10.0)), 0.0, 0.2, "Drop your guest photo here");
+    let photo = b.shape(ShapeKind::Ellipse, Vec2::new(440.0, 440.0), photo_at, Some(Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0)), Some((p.accent, 10.0)), 0.0, 0.2, "Drop your guest photo here");
     b.pop_in(photo, 0.2);
     let text_x = if tall { 0.5 } else { 0.66 };
     let top = if tall { 0.55 } else { 0.3 };
@@ -602,7 +602,7 @@ fn end_card(b: &mut Builder) {
     let (title, handle, cta) = (b.copy(0), b.copy(1), b.copy(2));
     // Smaller and higher in the shorter formats, so it clears the headline.
     let (avatar_size, avatar_y) = if b.vertical() { (300.0, 0.32) } else if b.tall() { (240.0, 0.24) } else { (200.0, 0.2) };
-    let avatar = b.shape(ShapeKind::Ellipse, Vec2::new(avatar_size, avatar_size), b.at(0.5, avatar_y), Some(Paint::Linear { start: Rgba::hex(0x3f3f46), end: Rgba::hex(0x27272a), angle: 60.0 }), Some((p.accent, 10.0)), 0.0, 0.2, "Drop your profile photo here");
+    let avatar = b.shape(ShapeKind::Ellipse, Vec2::new(avatar_size, avatar_size), b.at(0.5, avatar_y), Some(Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0)), Some((p.accent, 10.0)), 0.0, 0.2, "Drop your profile photo here");
     b.pop_in(avatar, 0.2);
     let head_y = if b.vertical() { 0.5 } else { 0.46 };
     let head = b.text(title, b.at(0.5, head_y), 96.0, p.text, b.heavy(), 0.7);

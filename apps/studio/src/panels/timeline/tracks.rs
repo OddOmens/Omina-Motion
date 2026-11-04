@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::{
     AnyElement, AppContext as _, Bounds, Context, Div, DragMoveEvent, ImageSource, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, ParentElement, RenderImage, StatefulInteractiveElement, Styled, TestSupportExt as _, Window, canvas, div, fill,
@@ -409,44 +409,36 @@ fn clip_toggle(layer: Id, which: &'static str, on: bool, icons: (IconName, IconN
 /// One clip, and (when expanded) its keyframe rows underneath, as positioned elements of its
 /// track row.
 /// A clip's name in its header, or a text field while it is being renamed.
-fn clip_name(layer: &Layer, workspace: &Workspace) -> AnyElement {
-    use gpui_kit::component::Sizable as _;
+fn clip_name(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     if let Some(editing) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::LayerName(layer.id)) {
         return div()
             .flex_1()
             .min_w_0()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(gpui_kit::component::input::Input::new(&editing.input).xsmall())
+            .child(crate::panels::chrome::name_input(&editing.input, CLIP_NAME_TEXT))
             .into_any_element();
     }
-    div().flex_1().min_w_0().truncate().child(layer.name.clone()).into_any_element()
+    // Double-clicking the name renames the clip (double-clicking the rest of a nested
+    // composition's clip opens it).
+    let (id, name) = (layer.id, layer.name.clone());
+    div()
+        .id(("clip-name", id.0 as usize))
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            if event.click_count >= 2 {
+                cx.stop_propagation();
+                this.begin_edit(EditTarget::LayerName(id), name.clone(), window, cx);
+            }
+        }))
+        .child(layer.name.clone())
+        .test_support()
+        .into_any_element()
 }
 
-/// A clip's right-click menu: rename it, or render it on its own (Quick Export), optionally
-/// putting the render in its place.
-fn clip_menu(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-    let (id, name) = (layer.id, layer.name.clone());
-    let comp = workspace.state.active_comp;
-    let has_picture = layer.content.has_picture();
-    let busy = workspace.ui.export_job.is_some();
-    let depended_on = studio_core::bake::is_depended_on(&workspace.state.project, comp, id);
-    let target = cx.weak_entity();
-    move |menu, _, _| {
-        let rename = {
-            let (target, name) = (target.clone(), name.clone());
-            PopupMenuItem::new("Rename…").on_click(move |_, window, cx| {
-                target.update(cx, |this, cx| this.begin_edit(EditTarget::LayerName(id), name.clone(), window, cx)).ok();
-            })
-        };
-        let export = |label: &'static str, replace: bool| {
-            let target = target.clone();
-            PopupMenuItem::new(label).disabled(busy || !has_picture || (replace && depended_on)).on_click(move |_, window, cx| {
-                target.update(cx, |this, cx| crate::panels::export::quick_export_layer(this, id, replace, window, cx)).ok();
-            })
-        };
-        menu.item(rename).separator().item(export("Quick Export Layer", false)).item(export("Export and Replace Layer", true))
-    }
-}
+/// The size of a clip's name in its header, and of the field it turns into when renamed.
+const CLIP_NAME_TEXT: f32 = 11.0;
 
 fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     let state = &workspace.state;
@@ -560,7 +552,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
         .gap_0p5()
         .px_1()
         .bg(rgba((head << 8) | 0xff))
-        .text_size(px(11.0))
+        .text_size(px(CLIP_NAME_TEXT))
         .text_color(rgba((ink << 8) | 0xff))
         // The arrow opens the clip's keyframe rows.
         .child(
@@ -583,7 +575,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 .test_support(),
         )
         .child(Icon::new(kind_icon(layer, is_mask)).size(px(12.0)).text_color(rgba((ink << 8) | 0xdd)))
-        .child(clip_name(layer, workspace))
+        .child(clip_name(layer, workspace, cx))
         .when(!layer.effects.is_empty(), |header| header.child(div().px_1().rounded(px(3.0)).bg(rgba(0x00000026)).child(format!("fx {}", layer.effects.len()))))
         .when(layer.has_audio, |header| header.child(clip_toggle(id, "clip-mute", switches.audio, (IconName::Volume2, IconName::VolumeX), Switch::Audio, dark_ink, cx)))
         .when(layer.content.has_picture(), |header| header.child(clip_toggle(id, "clip-show", switches.visible, (IconName::Eye, IconName::EyeOff), Switch::Visible, dark_ink, cx)))
@@ -693,7 +685,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                     .child(header)
                     .children(inside)
                     .test_support()
-                    .context_menu(clip_menu(layer, workspace, cx)),
+                    .context_menu(crate::panels::layer_menu::build(Some(layer.id), cx.weak_entity())),
             )
             .children(fades.into_iter().flatten())
             .children(cut_line)

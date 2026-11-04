@@ -487,7 +487,7 @@ fn fill_screen(project: &mut Project, screen: Id, footage: Option<Id>) {
         transform.scale = Animated::constant(Vec2::new(fill, fill));
         return;
     }
-    let fill = Paint::Linear { start: Rgba::hex(0x3f3f46), end: Rgba::hex(0x27272a), angle: 60.0 };
+    let fill = Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0);
     let style = ShapeStyle { fill: Some(fill), ..ShapeStyle::new(ShapeKind::Rectangle) };
     if let Some(id) = edit::add_shape_layer(project, screen, style, Vec2::new(width, height), Vec2::new(width * 0.5, height * 0.5), 0)
         && let Some(layer) = project.composition_mut(screen).and_then(|composition| composition.layer_mut(id))

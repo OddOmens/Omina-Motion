@@ -313,10 +313,7 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
 /// Whether a shape's numbers are ones the renderer can draw (finite, and in range).
 fn shape_is_sound(style: &crate::model::ShapeStyle) -> bool {
     use crate::model::{INNER_RADIUS_RANGE, MAX_SHAPE_POINTS, MAX_STROKE_WIDTH, Paint};
-    let paint_ok = |paint: &Paint| match paint {
-        Paint::Linear { angle, .. } => angle.is_finite(),
-        Paint::Solid(_) | Paint::Radial { .. } => true,
-    };
+    let paint_ok = |paint: &Paint| paint.gradient().is_none_or(|gradient| gradient.is_sound());
     style.corner_radius.is_finite()
         && style.corner_radius >= 0.0
         && (3..=MAX_SHAPE_POINTS).contains(&style.points)
@@ -410,8 +407,8 @@ mod tests {
         use crate::model::{Paint, Rgba, ShapeKind, ShapeStyle, Stroke};
         let mut project = sample_project();
         let style = ShapeStyle {
-            fill: Some(Paint::Linear { start: Rgba::hex(0xff0000), end: Rgba::hex(0x0000ff), angle: 45.0 }),
-            stroke: Some(Stroke { paint: Paint::Radial { inner: Rgba::hex(0xffffff), outer: Rgba::hex(0x000000) }, width: 6.0 }),
+            fill: Some(Paint::linear(Rgba::hex(0xff0000), Rgba::hex(0x0000ff), 45.0)),
+            stroke: Some(Stroke { paint: Paint::radial(Rgba::hex(0xffffff), Rgba::hex(0x000000)), width: 6.0 }),
             ..ShapeStyle::new(ShapeKind::Star)
         };
         edit::add_shape_layer(&mut project, ids::MAIN_COMP, style, crate::animation::Vec2::new(200.0, 200.0), crate::animation::Vec2::new(500.0, 500.0), 0).unwrap();

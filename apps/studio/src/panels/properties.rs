@@ -16,7 +16,7 @@ use studio_core::captions::{CaptionAnimation, CaptionStyle, CaptionWord};
 use studio_core::model::{BlendMode, Id, Layer, LayerContent, LayerMask, MaskMode, TextPath, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 
-use super::chrome::{CardHeading, card, card_list, divider, hint, icon_button, panel, section};
+use super::chrome::{CardHeading, card, card_list, divider, heading_button, hint, icon_button, info_button, list_row, panel, section};
 use super::color_picker;
 use super::fields::{FieldTarget, property_row, value_field};
 use crate::state::{AudioSetting, ColorTarget, PaintSlot, ShapeSetting, Switch, TextSetting};
@@ -191,22 +191,14 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
             this.ui.cutout_pick = if this.ui.cutout_pick == Some(id) { None } else { Some(id) };
             cx.notify();
         }));
-    section = section.child(div().py_1().flex().gap_2().child(pick).when(cut.is_some(), |row| {
-        row.child(Button::new("cutout-clear").ghost().small().label("Clear").on_click(cx.listener(move |this, _, _, cx| {
-            if this.ui.cutout_job.as_ref().is_some_and(|job| job.layer == id) {
-                super::cutout::cancel(this);
-            }
-            this.state.clear_cutout(id);
-            this.ui.cutout_pick = None;
-            cx.notify();
-        })))
-    }));
     if picking {
-        section = section.child(hint("Click what to keep in the viewer. Option-click what to leave out. Each click updates the cut-out."));
+        section = section.child(status_line("Click to keep, Option-click to leave out."));
     }
+    // Until there is a cut-out, the heading's + starts picking.
     let Some(cut) = cut else {
-        return section.when(!picking, |section| section.child(hint("Pick a subject to cut it out of its background, or an object to take it out of the shot.")));
+        return section.when(!picking, |section| section.child(add_note()));
     };
+    section = section.child(div().py_1().child(pick));
     let modes = [("Keep Subject", false), ("Remove Subject", true)].map(|(label, remove)| (label.to_owned(), remove == cut.remove, remove)).to_vec();
     let mode_label = if cut.remove { "Remove Subject" } else { "Keep Subject" };
     section = section.child(labeled_row("Picked", choice_menu("cutout-mode", mode_label.to_owned(), modes, move |this, remove| this.state.set_cutout_remove(id, remove), target)));
@@ -220,7 +212,7 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
         (None, Some((start, end))) if is_video => format!("Following the subject over {} frames.", end - start),
         (None, Some(_)) => "Cut out.".to_owned(),
     };
-    section = section.child(div().py_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(state));
+    section = section.child(status_line(state));
     if is_video {
         let busy = job.is_some();
         section = section.child(
@@ -253,37 +245,54 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     let id = layer.id;
     let target = cx.weak_entity();
     let ramped = layer.time.constant_factor().is_none();
+    // While ramping, the speed row offers the way back: the clip as it was before the ramp.
     let speed = if ramped {
+        let back_to = layer.time.speed_before_ramp.unwrap_or(100.0);
         div()
             .flex()
             .items_center()
             .gap_2()
             .child(div().text_color(hsla(color::VALUE)).child("Ramping"))
-            .child(Button::new("speed-unramp").ghost().xsmall().label("Steady 100%").on_click(cx.listener(move |this, _, _, cx| {
-                this.state.set_speed(id, 100.0);
-                cx.notify();
-            })))
+            .child(
+                Button::new("speed-unramp")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::new(IconName::RotateCcw))
+                    .label("Remove Ramp")
+                    .tooltip(format!("Back to a steady {back_to:.0}%, as before the ramp"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state.remove_speed_ramp(id);
+                        cx.notify();
+                    })),
+            )
             .into_any_element()
     } else {
         value_field(FieldTarget::Speed { layer: id }, workspace, cx).into_any_element()
     };
-    let ramps = studio_core::speed::Ramp::ALL.iter().map(|&ramp| (ramp.name().to_owned(), false, ramp)).collect();
+    // `None` is the menu's way to take a ramp off.
+    let mut ramps: Vec<(String, bool, Option<studio_core::speed::Ramp>)> = vec![("No Ramp".to_owned(), !ramped, None)];
+    ramps.extend(studio_core::speed::Ramp::ALL.iter().map(|&ramp| (ramp.name().to_owned(), false, Some(ramp))));
+    let ramp_label = if ramped { "Ramping" } else { "Choose a ramp…" };
     let busy = workspace.ui.analysis_job.is_some();
     div()
         .child(labeled_row("Speed", speed))
-        .child(labeled_row("Ramp", choice_menu("speed-ramp", "Choose a ramp…".to_owned(), ramps, move |this, ramp| this.state.apply_speed_ramp(id, ramp), target.clone())))
+        .child(labeled_row(
+            "Ramp",
+            choice_menu("speed-ramp", ramp_label.to_owned(), ramps, move |this, ramp| match ramp {
+                Some(ramp) => this.state.apply_speed_ramp(id, ramp),
+                None => this.state.remove_speed_ramp(id),
+            }, target.clone()),
+        ))
         .child(
             div().py_1().child(Checkbox::new("speed-reverse").label("Play backwards").checked(layer.time.reverse).on_click(cx.listener(move |this, checked: &bool, _, cx| {
                 this.state.set_reverse(id, *checked);
                 cx.notify();
             }))),
         )
-        .when(ramped || layer.time.reverse, |section| section.child(hint("Sound is silent while a clip plays backwards or ramps.")))
         .when(workspace.ui.settings.ai.auto_reframe, |section_div| {
             section_div
                 .child(divider())
-                .child(section("Auto Reframe", None))
-                .child(hint("Makes a new composition in another shape, moving the clip to keep its subject in frame. Background-removal clicks pick the subject; otherwise it follows what is in the middle."))
+                .child(section("Auto Reframe", Some(info_button("reframe-info", REFRAME_INFO))))
                 .child(div().py_1().child(if busy {
                     div().text_color(hsla(color::MUTED)).child("Another analysis is running.").into_any_element()
                 } else {
@@ -327,25 +336,10 @@ fn trackable(layer: &Layer) -> bool {
 }
 
 /// Track Motion: pin this layer to a point that moves in a video below it.
-fn track_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
-    let id = layer.id;
-    let picking = workspace.ui.track_pick == Some(id);
-    let busy = workspace.ui.analysis_job.is_some();
-    div()
-        .child(hint(if picking { "Now click the point to follow in the video, at the playhead." } else { "Pins this layer to something moving in a video: its position follows the point you click." }))
-        .child(
-            div().py_1().child(
-                Button::new("track-motion")
-                    .small()
-                    .label(if picking { "Cancel" } else { "Track Motion" })
-                    .map(|button| if picking { button.primary() } else { button.outline() })
-                    .disabled(busy)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ui.track_pick = if this.ui.track_pick == Some(id) { None } else { Some(id) };
-                        cx.notify();
-                    })),
-            ),
-        )
+fn track_section(layer: &Layer, workspace: &Workspace) -> Div {
+    let picking = workspace.ui.track_pick == Some(layer.id);
+    // The heading's + starts picking (and cancels it).
+    div().child(if picking { status_line("Click the point to follow in the viewer.") } else { add_note() })
 }
 
 /// The Auto Reframe menu: one shape per item; choosing one starts the job.
@@ -370,12 +364,8 @@ fn enhance_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Worksp
     use studio_core::model::{EnhanceModel, SpeechEnhance};
     let id = layer.id;
     let Some(settings) = layer.audio.enhance.clone() else {
-        return div()
-            .child(hint("Removes background noise and hum, then EQs, de-esses and evens out the voice to podcast loudness. Runs on this Mac; the original file is untouched."))
-            .child(div().py_1().child(Button::new("enhance-start").small().primary().icon(Icon::new(IconName::WandSparkles)).label("Enhance Speech").on_click(cx.listener(move |this, _, _, cx| {
-                this.state.set_enhance(id, Some(SpeechEnhance::default()));
-                cx.notify();
-            }))));
+        // The heading's + sets it up.
+        return div().child(add_note());
     };
     let target = cx.weak_entity();
     let models = [(EnhanceModel::Studio, "Studio (best)"), (EnhanceModel::Light, "Light (fastest)"), (EnhanceModel::Off, "Off (keep background)")];
@@ -392,21 +382,21 @@ fn enhance_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Worksp
     let job = workspace.ui.enhance_job.as_ref().filter(|job| job.layer == id);
     let skipped = workspace.ui.enhance_skipped.iter().any(|(layer, made_for)| *layer == id && made_for.same_sound(&settings));
     let status = if !settings.on {
-        div().child(hint("Off: the original plays. Turn it on again to hear the cleaned sound."))
+        status_line("Off: the original plays.")
     } else if settings.file.is_some() {
-        div().child(hint("Cleaned. This is what plays and exports."))
+        status_line("Cleaned: this plays and exports.")
     } else if let Some(job) = job {
-        div().p_2p5().text_color(hsla(color::MUTED)).child(format!("{} · {}% (the original plays until it's done)", job.stage, (job.fraction * 100.0) as i64))
+        status_line(format!("{} · {}%", job.stage, (job.fraction * 100.0) as i64))
     } else if skipped {
-        div().flex().items_center().gap_2().child(hint("Not cleaned (stopped or failed).")).child(Button::new("enhance-retry").ghost().xsmall().label("Try Again").on_click(cx.listener(move |this, _, _, cx| {
+        div().flex().items_center().gap_2().child(status_line("Not cleaned (stopped or failed).")).child(Button::new("enhance-retry").ghost().xsmall().label("Try Again").on_click(cx.listener(move |this, _, _, cx| {
             this.ui.enhance_skipped.retain(|(layer, _)| *layer != id);
             cx.notify();
         })))
     } else {
-        div().child(hint("Waiting for another clip to finish…"))
+        status_line("Waiting for another clip to finish…")
     };
     div()
-        .child(div().py_0p5().child(toggle("enhance-on", "On (turn off to compare with the original)", settings.on, |settings, on| settings.on = on, cx)))
+        .child(div().py_0p5().child(toggle("enhance-on", "On", settings.on, |settings, on| settings.on = on, cx)))
         .child(labeled_row("Noise removal", choice_menu("enhance-model", model_name.to_owned(), model_choices, move |this, model| { this.state.edit_enhance(id, |settings| settings.model = model); }, target.clone())))
         .child(labeled_row("Strength", choice_menu("enhance-strength", format!("{}%", settings.strength), strengths, move |this, strength| { this.state.edit_enhance(id, |settings| settings.strength = strength); }, target.clone())))
         .child(div().flex().flex_col().gap_1().py_1()
@@ -415,10 +405,6 @@ fn enhance_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Worksp
             .child(toggle("enhance-deess", "Soften harsh \"s\" sounds", settings.de_ess, |settings, on| settings.de_ess = on, cx))
             .child(toggle("enhance-level", "Even out loudness (-16 LUFS)", settings.even_out, |settings, on| settings.even_out = on, cx)))
         .child(status)
-        .child(div().py_1().child(Button::new("enhance-remove").ghost().small().label("Remove Enhance Speech").on_click(cx.listener(move |this, _, _, cx| {
-            this.state.set_enhance(id, None);
-            cx.notify();
-        }))))
 }
 
 /// A layer's sound: whether its picture shows and its sound plays (separately), its volume and
@@ -584,11 +570,148 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         .child(transcript)
 }
 
+/// What each section is for, shown by the info button on its heading.
+const TRANSFORM_INFO: &str = "Where the layer sits, its size, turn and opacity. Pick a corner, an edge or the center for the anchor point, or drag the anchor in the viewer.";
+const ANIMATE_INFO: &str = "One-click ways for the layer to come in, go out, and move in between.";
+const SPEED_INFO: &str = "A steady speed changes the clip's length; a ramp keeps it. Sound is silent while a clip ramps or plays backwards.";
+const REFRAME_INFO: &str = "Makes a new composition in another shape, moving the clip to keep its subject in frame. Remove Background clicks pick the subject; otherwise it follows the middle.";
+const TRACK_INFO: &str = "Pins this layer to something moving in a video: its position follows the point you click.";
+const CUTOUT_INFO: &str = "Pick a subject to cut it out of its background, or an object to take it out of the shot. Click what to keep, Option-click what to leave out.";
+const ENHANCE_INFO: &str = "Removes background noise and hum, then EQs, de-esses and evens out the voice to podcast loudness. Runs on this Mac; the original file is untouched.";
+
+/// The note in a section that is empty until the heading's + adds something.
+fn add_note() -> Div {
+    status_line("Click + to add this to your layer.")
+}
+
+/// A short line of muted status text inside a section, such as what a job is doing.
+fn status_line(text: impl Into<gpui_kit::SharedString>) -> Div {
+    div().py_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(text.into())
+}
+
+/// The Reset button in the Speed heading: back to a steady 100%, forwards. Greyed out while
+/// the clip already plays that way.
+fn speed_reset(layer: &Layer, cx: &mut Context<Workspace>) -> AnyElement {
+    let id = layer.id;
+    heading_button("reset-speed", IconName::RotateCcw, "Reset Speed", false, cx.listener(move |this, _, _, cx| {
+        this.state.reset_speed(id);
+        cx.notify();
+    }))
+    .disabled(layer.time.is_normal())
+    .into_any_element()
+}
+
+/// The Animate heading's buttons: Reset takes every animation off (greyed out when there is
+/// none), and + opens a menu of the In, Out and Loop animations to add.
+fn animate_buttons(layer: &Layer, cx: &mut Context<Workspace>) -> [Option<AnyElement>; 2] {
+    use studio_core::presets::{Loop, Motion, Phase};
+    let id = layer.id;
+    let animation = layer.animation;
+    let animated = animation.enter.is_some() || animation.exit.is_some() || animation.looping.is_some();
+    let reset = heading_button("animate-reset", IconName::RotateCcw, "Remove Animations", false, cx.listener(move |this, _, _, cx| {
+        this.state.set_layer_motion(id, Phase::In, None, 0.5);
+        this.state.set_layer_motion(id, Phase::Out, None, 0.5);
+        this.state.set_layer_loop(id, None);
+        cx.notify();
+    }))
+    .disabled(!animated);
+    let weak = cx.weak_entity();
+    // One submenu each for In, Out and Loop, so the list stays short.
+    let add = Button::new("animate-add").outline().small().icon(Icon::new(IconName::Plus)).tooltip("Add Animation").dropdown_menu(move |menu, window, cx| {
+        let mut menu = menu;
+        for (phase, title, current) in [(Phase::In, "In", animation.enter), (Phase::Out, "Out", animation.exit)] {
+            let weak = weak.clone();
+            menu = menu.submenu(title, window, cx, move |mut submenu, _, _| {
+                // The length already chosen is kept, or half a second.
+                let seconds = current.map_or(0.5, |(_, seconds)| seconds);
+                for motion in Motion::ALL {
+                    let weak = weak.clone();
+                    let chosen = current.is_some_and(|(picked, _)| picked == motion);
+                    submenu = submenu.item(PopupMenuItem::new(motion.name()).checked(chosen).on_click(move |_, _, cx| {
+                        weak.update(cx, |this, cx| {
+                            this.state.set_layer_motion(id, phase, Some(motion), seconds);
+                            cx.notify();
+                        })
+                        .ok();
+                    }));
+                }
+                submenu
+            });
+        }
+        let weak = weak.clone();
+        menu.submenu("Loop", window, cx, move |mut submenu, _, _| {
+            for looping in Loop::ALL {
+                let weak = weak.clone();
+                submenu = submenu.item(PopupMenuItem::new(looping.name()).checked(animation.looping == Some(looping)).on_click(move |_, _, cx| {
+                    weak.update(cx, |this, cx| {
+                        this.state.set_layer_loop(id, Some(looping));
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+            }
+            submenu
+        })
+    });
+    // A menu button handles its own click, so the press is kept from the heading here.
+    let add = div().on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(add);
+    [Some(reset.into_any_element()), Some(add.into_any_element())]
+}
+
+/// The Track Motion heading's + button: starts picking the point to follow (an X cancels).
+fn track_add(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let id = layer.id;
+    let picking = workspace.ui.track_pick == Some(id);
+    let (icon, tip) = if picking { (IconName::X, "Cancel") } else { (IconName::Plus, "Track Motion") };
+    heading_button("track-motion-add", icon, tip, picking, cx.listener(move |this, _, _, cx| {
+        this.ui.track_pick = if this.ui.track_pick == Some(id) { None } else { Some(id) };
+        cx.notify();
+    }))
+    .disabled(workspace.ui.analysis_job.is_some())
+    .into_any_element()
+}
+
+/// The Remove Background heading's button: + picks a subject while there is no cut-out, and
+/// the trash clears the cut-out once there is one.
+fn cutout_button(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let id = layer.id;
+    if layer.cutout.is_none() {
+        let picking = workspace.ui.cutout_pick == Some(id);
+        let (icon, tip) = if picking { (IconName::X, "Done Picking") } else { (IconName::Plus, "Pick Subject") };
+        return heading_button("cutout-add", icon, tip, picking, cx.listener(move |this, _, _, cx| {
+            this.ui.cutout_pick = if this.ui.cutout_pick == Some(id) { None } else { Some(id) };
+            cx.notify();
+        }))
+        .into_any_element();
+    }
+    heading_button("cutout-clear", IconName::Trash, "Clear Cut-out", false, cx.listener(move |this, _, _, cx| {
+        if this.ui.cutout_job.as_ref().is_some_and(|job| job.layer == id) {
+            super::cutout::cancel(this);
+        }
+        this.state.clear_cutout(id);
+        this.ui.cutout_pick = None;
+        cx.notify();
+    }))
+    .into_any_element()
+}
+
+/// The Enhance Speech heading's button: + sets it up on the clip, and once it is, the trash
+/// takes it off again.
+fn enhance_button(layer: &Layer, cx: &mut Context<Workspace>) -> AnyElement {
+    use studio_core::model::SpeechEnhance;
+    let id = layer.id;
+    let set_up = layer.audio.enhance.is_some();
+    let (name, icon, tip) = if set_up { ("enhance-remove", IconName::Trash, "Remove Enhance Speech") } else { ("enhance-add", IconName::Plus, "Enhance Speech") };
+    heading_button(name, icon, tip, false, cx.listener(move |this, _, _, cx| {
+        this.state.set_enhance(id, (!set_up).then(SpeechEnhance::default));
+        cx.notify();
+    }))
+    .into_any_element()
+}
+
 /// The Reset button in the Layer Transform heading.
 fn transform_reset(id: Id, cx: &mut Context<Workspace>) -> AnyElement {
-    icon_button("reset-transform", IconName::RotateCcw, "Reset Transform", false, cx.listener(move |this, _, _, cx| {
-        // The heading folds the section on a click; Reset shouldn't.
-        cx.stop_propagation();
+    heading_button("reset-transform", IconName::RotateCcw, "Reset Transform", false, cx.listener(move |this, _, _, cx| {
         this.state.reset_transform(id);
         cx.notify();
     }))
@@ -600,6 +723,11 @@ fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Work
     let linked = workspace.state.scale_linked;
     let mut rows = div();
     for property in TransformProperty::ALL {
+        // Videos and images get Size above Scale: the pixels they are drawn at, leaving Scale
+        // free to animate from 0 to 100% of that.
+        if property == TransformProperty::Scale && workspace.state.media_size(id).is_some() {
+            rows = rows.child(media_size_row(id, workspace, cx));
+        }
         let extra = (property == TransformProperty::Scale).then(|| {
             let icon = if linked { IconName::Link } else { IconName::Unlink };
             icon_button("scale-link", icon, "Constrain Proportions", linked, cx.listener(|this, _, _, cx| {
@@ -614,6 +742,27 @@ fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Work
         }
     }
     rows
+}
+
+/// The Size row of a video or image layer, laid out like the property rows around it: width and
+/// height in pixels with a link to keep their proportions. Size isn't animated, so the stopwatch
+/// column is empty.
+fn media_size_row(id: Id, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let linked = workspace.state.media_size_linked;
+    let link = icon_button("media-size-link", if linked { IconName::Link } else { IconName::Unlink }, "Constrain Proportions", linked, cx.listener(|this, _, _, cx| {
+        this.state.media_size_linked = !this.state.media_size_linked;
+        cx.notify();
+    }));
+    let field = |side: usize, cx: &mut Context<Workspace>| value_field(FieldTarget::MediaSize { layer: id, side }, workspace, cx);
+    div()
+        .h(px(26.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().w(px(18.0)).flex_none())
+        .child(div().w(px(104.0)).flex_none().truncate().child("Size"))
+        .child(div().w(px(18.0)).flex_none().child(link))
+        .child(div().flex().gap_3().child(field(0, cx)).child(field(1, cx)))
 }
 
 /// Nine buttons in the layout of the layer's box (corners, edge middles, center): pressing one
@@ -659,7 +808,6 @@ fn anchor_grid(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>
         .py_1()
         .pl(px(28.0))
         .child(grid)
-        .child(div().flex_1().min_w_0().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Pick a corner, an edge or the center, or drag the anchor in the viewer to put it anywhere."))
 }
 
 /// A labeled row with an icon and a text-setting field, as in the character grid.
@@ -829,14 +977,17 @@ fn shape_paint_rows(id: Id, slot: PaintSlot, paint: Option<Paint>, workspace: &W
     );
     let mut rows = div().child(labeled_row(label, div().flex().items_center().gap_2().child(toggle).child(div().flex_1().child(menu))));
     if let Some(paint) = paint {
-        let colors = paint.colors();
-        let last = colors.len() - 1;
         let mut controls = div().flex().items_center().gap_1p5();
-        for (stop, color) in colors.into_iter().enumerate() {
-            let target = ColorTarget::Shape { layer: id, slot, stop };
-            controls = controls.child(color_picker::swatch(ElementId::Name(format!("shape-{key}-color:{stop}").into()), target, Some(color), cx));
-            if stop < last {
-                controls = controls.child(Icon::new(IconName::ArrowRight).size(px(12.0)).text_color(hsla(color::MUTED)));
+        match paint.gradient() {
+            // A gradient gets the stop editor; a solid its one color.
+            // Taller than a labeled row, so it gets a row of its own, lined up with the values.
+            Some(gradient) => {
+                let editor = super::gradient_editor::editor(id, slot, gradient, workspace, cx);
+                rows = rows.child(div().flex().gap_2().py_1().child(div().w(px(96.0)).flex_none()).child(div().flex_1().min_w_0().child(editor)));
+            }
+            None => {
+                let target = ColorTarget::Shape { layer: id, slot, stop: 0 };
+                controls = controls.child(color_picker::swatch(ElementId::Name(format!("shape-{key}-color:0").into()), target, paint.colors().first().copied(), cx));
             }
         }
         if paint.kind() == PaintKind::Linear {
@@ -845,7 +996,11 @@ fn shape_paint_rows(id: Id, slot: PaintSlot, paint: Option<Paint>, workspace: &W
         if slot == PaintSlot::Stroke {
             controls = controls.child(div().pl_2().text_color(hsla(color::MUTED)).child("Width")).child(value_field(FieldTarget::Shape { layer: id, setting: ShapeSetting::StrokeWidth }, workspace, cx));
         }
-        rows = rows.child(labeled_row("", controls));
+        // A radial gradient fill has nothing more to show.
+        let has_controls = paint.gradient().is_none() || paint.kind() == PaintKind::Linear || slot == PaintSlot::Stroke;
+        if has_controls {
+            rows = rows.child(labeled_row("", controls));
+        }
     }
     rows
 }
@@ -918,54 +1073,65 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
     };
     let id = layer.id;
     let transform = if layer.transform.is_some() {
-        fold("transform", "Layer Transform", Some(transform_reset(id, cx)), workspace, cx, |cx| transform_section(layer, workspace, cx))
+        fold("transform", "Layer Transform", Some(TRANSFORM_INFO), [Some(transform_reset(id, cx)), None], workspace, cx, |cx| transform_section(layer, workspace, cx))
     } else {
-        div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Audio layers have no transform.")
+        list_row().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Audio layers have no transform.")
     };
     let text = match &layer.content {
-        LayerContent::Text { text, style } => Some(fold("text", "Text", None, workspace, cx, |cx| text_section(layer, text, style, workspace, cx))),
-        LayerContent::Shape { style, .. } => Some(fold("shape", "Shape", None, workspace, cx, |cx| shape_section(layer, style, workspace, cx))),
-        LayerContent::Captions { words, style } => Some(fold("captions", "Captions", None, workspace, cx, |cx| captions_section(layer, style, words, workspace, cx))),
+        LayerContent::Text { text, style } => Some(fold("text", "Text", None, [None, None], workspace, cx, |cx| text_section(layer, text, style, workspace, cx))),
+        LayerContent::Shape { style, .. } => Some(fold("shape", "Shape", None, [None, None], workspace, cx, |cx| shape_section(layer, style, workspace, cx))),
+        LayerContent::Captions { words, style } => Some(fold("captions", "Captions", None, [None, None], workspace, cx, |cx| captions_section(layer, style, words, workspace, cx))),
         _ => None,
     };
     // Tell the user when an edit will change several keyframes at once.
     let selected_keys = workspace.state.selected_keyframes.iter().filter(|key| key.layer == layer.id).count();
     let mass_edit_note = (selected_keys > 1).then(|| {
-        div()
-            .px_2()
-            .py_1()
-            .rounded(px(3.0))
-            .bg(hsla(color::INSET))
+        list_row()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(size::SMALL_TEXT))
             .text_color(hsla(color::MUTED))
-            .child(format!("{selected_keys} keyframes selected. With the playhead on one of them, a change applies to every selected keyframe of that property."))
+            .child(format!("{selected_keys} keyframes selected"))
+            .child(info_button("mass-edit-info", "With the playhead on one of them, a change applies to every selected keyframe of that property."))
     });
     card_list("properties-body")
         .children(mass_edit_note)
-        .child(fold("layer", "Layer", None, workspace, cx, |cx| layer_section(layer, workspace, cx)))
+        .child(fold("layer", "Layer", None, [None, None], workspace, cx, |cx| layer_section(layer, workspace, cx)))
         .child(transform)
         .children(text)
-        .children(layer.transform.is_some().then(|| fold("animate", "Animate", None, workspace, cx, |cx| animate_section(layer, cx))))
-        .children(studio_core::speed::has_speed(&layer.content).then(|| fold("speed", "Speed", None, workspace, cx, |cx| speed_section(layer, workspace, cx))))
-        .children(trackable(layer).then(|| fold("track", "Track Motion", None, workspace, cx, |cx| track_section(layer, workspace, cx))))
-        .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", None, workspace, cx, |cx| cutout_section(layer, workspace, cx))))
-        .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, workspace, cx, |cx| audio_section(layer, workspace, cx))))
-        .children((workspace.state.can_enhance(layer.id) && workspace.ui.settings.ai.enhance_speech).then(|| fold("enhance", "Enhance Speech", None, workspace, cx, |cx| enhance_section(layer, workspace, cx))))
+        .children(layer.transform.is_some().then(|| fold("animate", "Animate", Some(ANIMATE_INFO), animate_buttons(layer, cx), workspace, cx, |cx| animate_section(layer, cx))))
+        .children(studio_core::speed::has_speed(&layer.content).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
+        .children(trackable(layer).then(|| fold("track", "Track Motion", Some(TRACK_INFO), [None, Some(track_add(layer, workspace, cx))], workspace, cx, |_| track_section(layer, workspace))))
+        .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", Some(CUTOUT_INFO), [None, Some(cutout_button(layer, workspace, cx))], workspace, cx, |cx| cutout_section(layer, workspace, cx))))
+        .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, [None, None], workspace, cx, |cx| audio_section(layer, workspace, cx))))
+        .children((workspace.state.can_enhance(layer.id) && workspace.ui.settings.ai.enhance_speech).then(|| fold("enhance", "Enhance Speech", Some(ENHANCE_INFO), [None, Some(enhance_button(layer, cx))], workspace, cx, |cx| enhance_section(layer, workspace, cx))))
         .into_any_element()
 }
 
 /// A Properties section, as a card like the Effects and Color tabs': a heading with an arrow
 /// (click to open or close it), and `body` underneath while it is open. Sections start
-/// closed. `trailing` controls (such as Layer Transform's Reset) show in the heading while
-/// the section is open.
-fn fold(key: &'static str, title: &'static str, trailing: Option<AnyElement>, workspace: &Workspace, cx: &mut Context<Workspace>, body: impl FnOnce(&mut Context<Workspace>) -> Div) -> Div {
+/// closed. `info` explains the section in its info button's tooltip; `controls` are the
+/// heading's reset button and its add or delete button, each optional, kept in those slots so
+/// they line up from section to section.
+fn fold(
+    key: &'static str,
+    title: &'static str,
+    info: Option<&'static str>,
+    controls: [Option<AnyElement>; 2],
+    workspace: &Workspace,
+    cx: &mut Context<Workspace>,
+    body: impl FnOnce(&mut Context<Workspace>) -> Div,
+) -> Div {
     let open = workspace.ui.section_open(key);
     let heading = CardHeading {
         id: ElementId::Name(format!("section-{key}").into()),
         icon: Some(section_icon(key)),
         title: title.into(),
+        info: info.map(Into::into),
         open,
         muted: false,
-        trailing: trailing.filter(|_| open).into_iter().collect(),
+        trailing: controls.into(),
     };
     let body = open.then(|| body(cx).into_any_element());
     card(heading, cx.listener(move |this, _, _, cx| {

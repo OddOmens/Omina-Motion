@@ -15,6 +15,7 @@ mod copy;
 mod cutout;
 mod enhance;
 mod grade;
+mod gradient;
 mod history;
 mod keyframes;
 mod layer_time;
@@ -44,6 +45,7 @@ pub use cutout::CutoutSource;
 pub use grade::GradeTarget;
 pub use keyframes::KeyframeRef;
 pub use layer_time::LayerTimeEdit;
+pub use gradient::GradientEnd;
 pub use viewer::{ANCHOR_POINTS, ScaleHandle};
 
 /// The view range never shrinks below this many frames, so zooming in stops at a readable level.
@@ -126,18 +128,18 @@ pub enum ColorTarget {
     Current,
 }
 
-/// A paint's angle, if it is a linear gradient.
-fn paint_angle(paint: Option<Paint>) -> f32 {
+/// A linear gradient's angle on a box of `size` pixels (other paints have none).
+fn paint_angle(paint: Option<Paint>, size: Vec2) -> f32 {
     match paint {
-        Some(Paint::Linear { angle, .. }) => angle,
+        Some(Paint::Linear(gradient)) => gradient.angle(size),
         _ => 0.0,
     }
 }
 
-/// Sets a linear gradient's angle (other paints have none).
-fn set_angle(paint: &mut Paint, value: f32) {
-    if let Paint::Linear { angle, .. } = paint {
-        *angle = value;
+/// Turns a linear gradient to `value` degrees on a box of `size` pixels (other paints have none).
+fn set_angle(paint: &mut Paint, value: f32, size: Vec2) {
+    if let Paint::Linear(gradient) = paint {
+        *gradient = gradient.with_angle(value, size);
     }
 }
 
@@ -153,8 +155,8 @@ impl ShapeSetting {
             Self::CornerRadius => style.corner_radius,
             Self::Points => style.points as f32,
             Self::StrokeWidth => style.stroke.map_or(0.0, |stroke| stroke.width),
-            Self::FillAngle => paint_angle(style.fill),
-            Self::StrokeAngle => paint_angle(style.stroke.map(|stroke| stroke.paint)),
+            Self::FillAngle => paint_angle(style.fill, size),
+            Self::StrokeAngle => paint_angle(style.stroke.map(|stroke| stroke.paint), size),
         }
     }
 }
@@ -229,6 +231,8 @@ pub struct EditorState {
     pub scale_linked: bool,
     /// When on, a shape's width and height change together.
     pub shape_size_linked: bool,
+    /// When on, a video or image layer's Size width and height change together.
+    pub media_size_linked: bool,
     /// Whether anchor points snap to their layer's corners, edge middles and center in the viewer.
     pub viewer_snapping: bool,
     /// Which folder imported files go into, by kind (from Settings).
@@ -297,6 +301,7 @@ impl EditorState {
             expanded_rows: HashSet::new(),
             align_target: AlignTarget::Composition,
             scale_linked: true,
+            media_size_linked: true,
             shape_size_linked: false,
             viewer_snapping: settings.anchor_snapping,
             // Tests import into the top level unless they say otherwise.
@@ -474,7 +479,38 @@ impl EditorState {
     }
 
     /// Resets a layer's transform to its defaults at the playhead (keyframing animated properties).
+    /// A video or image layer's size, in pixels (`None` for other layers).
+    pub fn media_size(&self, layer: Id) -> Option<Vec2> {
+        let layer = self.composition().layer(layer)?;
+        matches!(layer.content, LayerContent::Footage { .. } | LayerContent::Image { .. }).then_some(layer.size)
+    }
+
+    /// Sets one side (0 width, 1 height) of a video or image layer's Size; with the sides
+    /// linked, the other follows in proportion.
+    pub fn set_media_size_side(&mut self, layer: Id, side: usize, value: f32) {
+        let Some(size) = self.media_size(layer) else { return };
+        let ratio = size.y / size.x.max(f32::EPSILON);
+        let new_size = match (side, self.media_size_linked) {
+            (0, true) => Vec2::new(value, value * ratio),
+            (0, false) => Vec2::new(value, size.y),
+            (_, true) => Vec2::new(value / ratio.max(f32::EPSILON), value),
+            (_, false) => Vec2::new(size.x, value),
+        };
+        edit::set_media_size(self.composition_mut(), layer, new_size);
+    }
+
+    /// The size a video or image layer's media was made at (its Project item's size).
+    fn native_media_size(&self, layer: Id) -> Option<Vec2> {
+        let (LayerContent::Footage { item } | LayerContent::Image { item }) = self.composition().layer(layer)?.content else { return None };
+        self.project.item(item)?.size
+    }
+
+    /// Puts a layer's transform back as new: centered, unscaled, unturned, opaque, with its
+    /// anchor in the middle. A video or image goes back to the size it was made at, too.
     pub fn reset_transform(&mut self, layer_id: Id) {
+        if let Some(native) = self.native_media_size(layer_id) {
+            edit::set_media_size(self.composition_mut(), layer_id, native);
+        }
         let frame = self.current_frame;
         let comp_center = self.composition().size() * 0.5;
         let Some(layer) = self.composition_mut().layer_mut(layer_id) else { return };
@@ -764,8 +800,8 @@ impl EditorState {
                     stroke.width = value;
                 }
             }
-            ShapeSetting::FillAngle => style.fill.iter_mut().for_each(|paint| set_angle(paint, value)),
-            ShapeSetting::StrokeAngle => style.stroke.iter_mut().for_each(|stroke| set_angle(&mut stroke.paint, value)),
+            ShapeSetting::FillAngle => style.fill.iter_mut().for_each(|paint| set_angle(paint, value, size)),
+            ShapeSetting::StrokeAngle => style.stroke.iter_mut().for_each(|stroke| set_angle(&mut stroke.paint, value, size)),
             ShapeSetting::Width | ShapeSetting::Height | ShapeSetting::OuterRadius => {}
         });
     }
@@ -901,6 +937,22 @@ impl EditorState {
         Some(clip)
     }
 
+    /// Renames a project item (and a composition with it). Blank names are ignored.
+    pub fn rename_item(&mut self, item: Id, name: &str) {
+        edit::rename_item(&mut self.project, item, name);
+    }
+
+    /// Duplicates a Project panel item and selects the copy. Folders aren't duplicated.
+    pub fn duplicate_item(&mut self, item: Id) -> Option<Id> {
+        let copy = studio_core::copy::duplicate_item(&mut self.project, item)?;
+        self.selected_item = Some(copy);
+        Some(copy)
+    }
+
+    pub fn set_item_label(&mut self, item: Id, label: studio_core::model::LabelColor) {
+        edit::set_item_label(&mut self.project, item, label);
+    }
+
     /// Renames a layer. Blank names are ignored.
     pub fn rename_layer(&mut self, layer: Id, name: &str) {
         let name = name.trim();
@@ -1010,6 +1062,19 @@ impl EditorState {
 
     pub fn apply_speed_ramp(&mut self, layer: Id, ramp: studio_core::speed::Ramp) {
         studio_core::speed::apply_ramp(self.composition_mut(), layer, ramp);
+    }
+
+    /// Puts a clip back to a steady 100%, playing forwards.
+    pub fn reset_speed(&mut self, layer: Id) {
+        // A ramp comes off first, so the clip's length follows from the speed it had before.
+        self.remove_speed_ramp(layer);
+        self.set_speed(layer, 100.0);
+        self.set_reverse(layer, false);
+    }
+
+    /// Takes a clip's speed ramp off, back to the speed it had before.
+    pub fn remove_speed_ramp(&mut self, layer: Id) {
+        studio_core::speed::remove_ramp(self.composition_mut(), layer);
     }
 
     /// Moves a video clip's sound onto its own audio clip, and selects that.

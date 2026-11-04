@@ -6,13 +6,13 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::{AnyElement, Context, ElementId, IntoElement, ParentElement, Styled, div, px};
 use studio_core::model::{Id, Layer};
 use studio_core::property::PropertyPath;
 
-use super::chrome::{CardHeading, card, card_list, hint};
+use super::chrome::{CardHeading, card, card_list, hint, list_row};
 use super::fields::property_row;
 use crate::theme::{color, hsla, size};
 use crate::workspace::Workspace;
@@ -40,21 +40,22 @@ fn category_icon(effect: &str) -> IconName {
     }
 }
 
-/// The line at the top of the tab: which layer's effects these are.
-fn layer_line(layer: &Layer) -> impl IntoElement {
+/// The line at the top of the tab: which layer's effects these are, and the Add Effect menu.
+fn layer_line(layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoElement {
     let count = match layer.effects.len() {
         0 => "no effects".to_owned(),
         1 => "1 effect".to_owned(),
         count => format!("{count} effects"),
     };
-    div()
+    list_row()
         .flex()
         .items_center()
         .gap_1p5()
         .text_size(px(size::SMALL_TEXT))
         .text_color(hsla(color::TEXT))
         .child(Icon::new(IconName::Layers).size(px(12.0)).text_color(hsla(color::MUTED)))
-        .child(div().min_w_0().truncate().child(format!("{} · {count}", layer.name)))
+        .child(div().flex_1().min_w_0().truncate().child(format!("{} · {count}", layer.name)))
+        .child(add_effect_menu(layer, cx))
 }
 
 /// The Add Effect menu: every effect the renderer draws that suits the layer, by category.
@@ -67,7 +68,7 @@ fn add_effect_menu(layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoEleme
         .filter(|(_, effects)| !effects.is_empty())
         .collect();
     let weak = cx.weak_entity();
-    Button::new("fx-add").ghost().small().w_full().icon(Icon::new(IconName::Plus)).label("Add Effect").dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+    Button::new("fx-add").outline().small().icon(Icon::new(IconName::Plus)).tooltip("Add Effect (or drag one from the Effects panel onto a clip)").dropdown_menu(move |menu, _, _| {
         let mut menu = menu.scrollable(true).max_h(px(420.0));
         for (index, (category, effects)) in categories.iter().enumerate() {
             if index > 0 {
@@ -119,9 +120,9 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         return hint(message).into_any_element();
     };
     let layer_id = layer.id;
-    let mut list = card_list("effect-controls").child(layer_line(layer));
+    let mut list = card_list("effect-controls").child(layer_line(layer, cx));
     if layer.effects.is_empty() {
-        list = list.child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Add an effect here, or drag one from the Effects panel onto a clip."));
+        list = list.child(list_row().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("No effects yet. Press + to add one."));
     }
     for effect in &layer.effects {
         let effect_id = effect.id;
@@ -132,6 +133,7 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             id: ElementId::Name(format!("fx-twirl:{}", effect_id.0).into()),
             icon: Some(category_icon(&effect.name)),
             title: effect.name.clone().into(),
+            info: None,
             open,
             muted: !effect.enabled,
             trailing: super::color_grade::effect_buttons(|part| format!("fx-{part}:{}", effect_id.0), layer_id, effect_id, effect.enabled, cx),
@@ -142,7 +144,7 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             cx.notify();
         }), body));
     }
-    list.child(add_effect_menu(layer, cx)).into_any_element()
+    list.into_any_element()
 }
 
 /// Puts every parameter of an effect back to its catalog default (keyframing animated ones).

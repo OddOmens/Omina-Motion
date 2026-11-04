@@ -1223,6 +1223,36 @@ fn files_dropped_on_a_track_become_clips_there_one_after_another(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
+fn files_dropped_on_the_viewer_become_layers_at_the_playhead(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_current_frame(12); cx.notify(); }));
+    render(visual);
+    // A sound file: video under the playhead would start a decoder thread, which the headless
+    // test scheduler refuses.
+    let at = screen_point(&workspace, visual, Vec2::new(960.0, 540.0));
+    drop_files(visual, vec![fixture("tone.wav")], at);
+    let added = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().layers.iter().filter(|layer| layer.name == "tone.wav").map(|layer| layer.in_frame).collect::<Vec<_>>()
+    });
+    assert_eq!(added, vec![12], "imported and added at the playhead");
+}
+
+#[gpui_kit::test]
+fn project_items_dropped_on_the_viewer_land_where_they_are_let_go(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let item = center_of(visual, ("project-item", studio_core::sample::ids::GRAY_SOLID.0 as usize));
+    let to = screen_point(&workspace, visual, Vec2::new(500.0, 400.0));
+    visual.update(|window, cx| window.drag(item, to, cx));
+    render(visual);
+    let content = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.selected_layers.first().and_then(|id| state.composition().layer(*id)).map(|layer| layer.content.clone())
+    });
+    assert!(matches!(content, Some(studio_core::model::LayerContent::Solid { .. })), "the solid was added and selected: {content:?}");
+}
+
+#[gpui_kit::test]
 fn dropping_a_folder_imports_the_media_inside_it(cx: &mut TestAppContext) {
     let folder = scratch_folder("drop-folder");
     std::fs::copy(fixture("tone.wav"), folder.join("a.wav")).unwrap();
@@ -1699,8 +1729,8 @@ fn fills_become_gradients_and_strokes_turn_on(cx: &mut TestAppContext) {
     click_label(visual, "Linear Gradient");
     render(visual);
     assert!(matches!(shape_style(&workspace, visual, layer).fill, Some(Paint::Linear { .. })));
-    // A gradient has two colors to pick, and an angle.
-    assert!(visual.update(|window, _| window.try_find("shape-fill-color:1")).is_some());
+    // A gradient shows a stop marker for each of its two colors.
+    assert!(visual.update(|window, _| window.try_find("gradient-stop:fill:1")).is_some());
     visual.update(|window, cx| window.click("shape-fill-type", cx));
     render(visual);
     click_label(visual, "Radial Gradient");
@@ -1714,6 +1744,44 @@ fn fills_become_gradients_and_strokes_turn_on(cx: &mut TestAppContext) {
     visual.update(|window, cx| window.click("shape-fill-on", cx));
     render(visual);
     assert_eq!(shape_style(&workspace, visual, layer).fill, None, "an outline only");
+}
+
+#[gpui_kit::test]
+fn gradient_stops_are_added_moved_and_deleted_and_its_ends_drag_in_the_viewer(cx: &mut TestAppContext) {
+    use crate::state::PaintSlot;
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    visual.update(|window, cx| window.click("shape-fill-type", cx));
+    render(visual);
+    click_label(visual, "Linear Gradient");
+    render(visual);
+    let gradient = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.shape_gradient(layer, PaintSlot::Fill).unwrap());
+    // A click in the middle of the bar adds a stop there.
+    let bar = visual.update(|window, _| window.find("gradient-bar:fill").bounds());
+    visual.update(|window, cx| window.click_at("gradient-bar:fill", point(bar.size.width / 2.0, px(6.0)), cx));
+    render(visual);
+    let stops = gradient(visual).stops().to_vec();
+    assert_eq!(stops.len(), 3, "{stops:?}");
+    assert!((stops[1].at - 0.5).abs() < 0.03, "added half way: {stops:?}");
+    // Dragging its marker a quarter of the bar to the right moves it.
+    let marker = center_of(visual, "gradient-stop:fill:1");
+    visual.update(|window, cx| window.drag(marker, point(marker.x + bar.size.width / 4.0, marker.y), cx));
+    render(visual);
+    let moved = gradient(visual).stops()[1].at;
+    assert!((moved - 0.75).abs() < 0.04, "moved to about 75%: {moved}");
+    // Delete removes the picked stop.
+    visual.update(|window, cx| window.click("gradient-delete:fill", cx));
+    render(visual);
+    assert_eq!(gradient(visual).stops().len(), 2);
+    // The gradient's end handle drags in the viewer.
+    let before = gradient(visual).to;
+    let handle = center_of(visual, ElementId::Name(format!("gradient-to:{}", layer.0).into()));
+    visual.update(|window, cx| window.drag(handle, point(handle.x - px(30.0), handle.y + px(20.0)), cx));
+    render(visual);
+    let after = gradient(visual).to;
+    assert!(after.x < before.x && after.y > before.y, "the end moved left and down: {before:?} → {after:?}");
 }
 
 #[gpui_kit::test]
@@ -2037,6 +2105,40 @@ fn an_effect_dropped_on_the_viewer_goes_on_the_layer_under_it(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn the_viewer_zooms_with_the_wheel_and_cmd_plus_minus(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let zoom = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.viewer_zoom);
+    assert_eq!(zoom(visual), None, "starts at Fit");
+    // Scrolling up over the picture zooms in.
+    visual.update(|window, cx| window.scroll("viewer", gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(120.0))), cx));
+    render(visual);
+    let wheel = zoom(visual).expect("a set zoom after scrolling");
+    visual.update(|window, cx| window.press("cmd-=", cx));
+    render(visual);
+    let stepped = zoom(visual).unwrap();
+    assert!(stepped > wheel, "Cmd+= zooms in: {wheel} → {stepped}");
+    visual.update(|window, cx| window.press("cmd--", cx));
+    render(visual);
+    assert!(zoom(visual).unwrap() < stepped, "Cmd+- zooms out");
+}
+
+#[gpui_kit::test]
+fn cmd_brackets_step_one_frame_and_five_with_shift(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let frame = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.current_frame);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_current_frame(20); cx.notify(); }));
+    render(visual);
+    visual.update(|window, cx| window.press("cmd-]", cx));
+    assert_eq!(frame(visual), 21);
+    visual.update(|window, cx| window.press("cmd-[", cx));
+    assert_eq!(frame(visual), 20);
+    visual.update(|window, cx| window.press("cmd-shift-]", cx));
+    assert_eq!(frame(visual), 25);
+    visual.update(|window, cx| window.press("cmd-shift-[", cx));
+    assert_eq!(frame(visual), 20);
+}
+
+#[gpui_kit::test]
 fn right_column_panels_collapse_to_their_headers(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     let align_top = center_of(visual, "collapse:Align").y;
@@ -2171,6 +2273,9 @@ fn precomposing_then_double_clicking_the_clip_opens_the_new_composition(cx: &mut
     }));
     render(visual);
     visual.update(|window, cx| window.press("cmd-shift-c", cx));
+    render(visual);
+    // The Pre-compose dialog opens; OK makes the composition.
+    visual.update(|window, cx| window.click("precompose-ok", cx));
     render(visual);
     let (main, layer) = visual.update(|_, cx| {
         let state = &workspace.read(cx).state;
@@ -2343,7 +2448,7 @@ fn picking_a_subject_places_clicks_on_the_picture_and_asks_before_downloading(cx
         })
     });
     tall_window(visual);
-    visual.update(|window, cx| window.click("cutout-pick", cx));
+    visual.update(|window, cx| window.click("cutout-add", cx));
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.cutout_pick), Some(layer));
     // A click on the subject (the image's top-left quarter). The model is not on this (test)
@@ -2714,7 +2819,162 @@ fn speed_and_reverse_change_a_footage_clip(cx: &mut TestAppContext) {
     render(visual);
     assert!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().time.reverse));
     // Track Motion is offered for graphics, not for the footage itself.
-    assert!(visual.update(|window, _| window.try_find("track-motion")).is_none());
+    assert!(visual.update(|window, _| window.try_find("track-motion-add")).is_none());
+}
+
+#[gpui_kit::test]
+fn a_speed_ramp_comes_off_with_one_click(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let clip = first_footage(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(clip, false);
+        ws.state.set_speed(clip, 50.0);
+        cx.notify();
+    }));
+    tall_window(visual);
+    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().clone());
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.apply_speed_ramp(clip, studio_core::speed::Ramp::Punch);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("speed-unramp", cx));
+    render(visual);
+    let after = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().clone());
+    assert_eq!(after, before, "back to a steady 50%, with the same length");
+    // The Ramp menu's No Ramp does the same.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.apply_speed_ramp(clip, studio_core::speed::Ramp::SlowMiddle);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("speed-ramp", cx));
+    render(visual);
+    click_label(visual, "No Ramp");
+    render(visual);
+    let after = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().clone());
+    assert_eq!(after, before);
+}
+
+#[gpui_kit::test]
+fn section_headings_carry_info_and_reset_without_folding(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let clip = first_footage(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(clip, false);
+        ws.state.set_speed(clip, 50.0);
+        ws.state.set_reverse(clip, true);
+        cx.notify();
+    }));
+    tall_window(visual);
+    // The explainer is an info button now, not a paragraph.
+    assert!(visual.update(|window, _| window.try_find("section-speed-info")).is_some());
+    let open = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.section_open("speed"));
+    let was_open = open(visual);
+    visual.update(|window, cx| window.click("reset-speed", cx));
+    render(visual);
+    let time = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().time.clone());
+    assert!(time.is_normal(), "a steady 100%, forwards: {time:?}");
+    assert_eq!(open(visual), was_open, "the heading's button doesn't fold the section");
+}
+
+#[gpui_kit::test]
+fn animate_and_track_motion_headings_add_and_reset(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    tall_window(visual);
+    let animation = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().animation);
+    // + opens In, Out and Loop submenus.
+    visual.update(|window, cx| window.click("animate-add", cx));
+    render(visual);
+    click_label(visual, "Loop");
+    render(visual);
+    click_label(visual, "Wiggle");
+    render(visual);
+    assert_eq!(animation(visual).looping, Some(studio_core::presets::Loop::Wiggle));
+    visual.update(|window, cx| window.click("animate-reset", cx));
+    render(visual);
+    let cleared = animation(visual);
+    assert!(cleared.enter.is_none() && cleared.exit.is_none() && cleared.looping.is_none(), "every animation is off: {cleared:?}");
+    // Track Motion's + starts picking the point to follow.
+    visual.update(|window, cx| window.click("track-motion-add", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.track_pick), Some(TITLE));
+}
+
+#[gpui_kit::test]
+fn a_clips_right_click_menu_flips_resets_and_duplicates(cx: &mut TestAppContext) {
+    use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let scale = |visual: &mut VisualTestContext| visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().layer(TITLE).unwrap().property(PropertyPath::Transform(TransformProperty::Scale), state.current_frame).unwrap().value
+    });
+    let PropertyValue::Pair(before) = scale(visual) else { panic!() };
+    visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Flip Horizontal");
+    render(visual);
+    assert_eq!(scale(visual), PropertyValue::Pair(studio_core::animation::Vec2::new(-before.x, before.y)), "mirrored left to right");
+    visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Reset Transform");
+    render(visual);
+    assert_eq!(scale(visual), PropertyValue::Pair(studio_core::animation::Vec2::new(100.0, 100.0)), "back to 100%");
+    let count = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Duplicate");
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), count + 1);
+}
+
+#[gpui_kit::test]
+fn the_viewers_right_click_menu_acts_on_the_layer_under_the_pointer(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // The title is on top in the middle at frame 40.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_current_frame(40); ws.state.clear_selection(); cx.notify(); }));
+    render(visual);
+    let at = screen_point(&workspace, visual, studio_core::animation::Vec2::new(960.0, 540.0));
+    let viewer = visual.update(|window, _| window.find("viewer").bounds());
+    visual.update(|window, cx| window.click_with_options("viewer", gpui_kit::test::ClickOptions::new().with_offset(at - viewer.origin).with_button(MouseButton::Right), cx));
+    render(visual);
+    click_label(visual, "Pre-compose…");
+    render(visual);
+    visual.update(|window, cx| window.click("precompose-ok", cx));
+    render(visual);
+    let layer = visual.update(|_, cx| workspace.read(cx).state.selected_layers[0]);
+    let inner = visual.update(|_, cx| workspace.read(cx).state.nested_composition(layer)).expect("the title went into a new composition");
+    // And Ungroup brings it back, keeping the composition in the project.
+    visual.update(|window, cx| window.click_with_options("viewer", gpui_kit::test::ClickOptions::new().with_offset(at - viewer.origin).with_button(MouseButton::Right), cx));
+    render(visual);
+    click_label(visual, "Ungroup Composition");
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert!(state.composition().layers.iter().any(|layer| layer.name == "Title"), "the title is back: {:?}", state.composition().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>());
+        assert!(state.project.item(inner).is_some(), "the composition stays in the Project panel");
+    });
+}
+
+#[gpui_kit::test]
+fn holding_the_middle_button_pans_the_viewer(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let middle = center_of(visual, "viewer");
+    visual.update(|window, cx| {
+        window.pointer_move(middle, None, cx);
+        window.pointer_down(middle, MouseButton::Middle, cx);
+        window.pointer_move(point(middle.x + px(40.0), middle.y + px(25.0)), Some(MouseButton::Middle), cx);
+        window.pointer_up(point(middle.x + px(40.0), middle.y + px(25.0)), MouseButton::Middle, cx);
+    });
+    render(visual);
+    let pan = visual.update(|_, cx| workspace.read(cx).ui.viewer_pan);
+    assert_eq!(pan, (40.0, 25.0), "the picture moved with the pointer");
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.middle_pan.is_none()), "letting go ends the pan");
 }
 
 #[gpui_kit::test]
@@ -2725,10 +2985,10 @@ fn track_motion_waits_for_a_click_on_a_video(cx: &mut TestAppContext) {
         cx.notify();
     }));
     tall_window(visual);
-    visual.update(|window, cx| window.click("track-motion", cx));
+    visual.update(|window, cx| window.click("track-motion-add", cx));
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.track_pick), Some(TITLE));
-    visual.update(|window, cx| window.click("track-motion", cx));
+    visual.update(|window, cx| window.click("track-motion-add", cx));
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.track_pick), None, "and can be called off");
 }
@@ -2912,6 +3172,111 @@ fn renaming_a_clip_from_its_right_click_menu(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn project_items_rename_and_take_labels_from_their_right_click_menu(cx: &mut TestAppContext) {
+    use studio_core::model::LabelColor;
+    use studio_core::sample::ids;
+    let (workspace, visual) = open(cx);
+    let item = |visual: &mut VisualTestContext, id| visual.update(|_, cx| workspace.read(cx).state.project.item(id).cloned().unwrap());
+    // Rename the main composition: its composition is renamed too.
+    visual.update(|window, cx| window.right_click(("project-item", ids::MAIN_COMP.0 as usize), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.selected_item, Some(ids::MAIN_COMP), "right-clicking selects the item"));
+    click_label(visual, "Rename…");
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("Intro", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    assert_eq!(item(visual, ids::MAIN_COMP).name, "Intro");
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.project.composition(ids::MAIN_COMP).unwrap().name, "Intro"));
+    // Give the gray solid a blue label.
+    visual.update(|window, cx| window.right_click(("project-item", ids::GRAY_SOLID.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Label");
+    render(visual);
+    click_label(visual, "Blue");
+    render(visual);
+    assert_eq!(item(visual, ids::GRAY_SOLID).label, LabelColor::Blue);
+    // Delete from the menu asks first, as the Delete key does.
+    visual.update(|window, cx| window.right_click(("project-item", ids::GRAY_SOLID.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Delete");
+    render(visual);
+    visual.update(|window, cx| assert!(window.has_active_dialog(cx), "a confirmation opened"));
+}
+
+#[gpui_kit::test]
+fn double_clicking_a_name_renames_it(cx: &mut TestAppContext) {
+    use studio_core::sample::ids;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // A Project item's name.
+    visual.update(|window, cx| window.click_with_options(("project-item-name", ids::LOGO.0 as usize), gpui_kit::test::ClickOptions::new().with_count(2), cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("brand", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.item(ids::LOGO).unwrap().name.clone()), "brand");
+    // A clip's name in the timeline.
+    visual.update(|window, cx| window.click_with_options(("clip-name", TITLE.0 as usize), gpui_kit::test::ClickOptions::new().with_count(2), cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("Headline", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().name.clone()), "Headline");
+}
+
+#[gpui_kit::test]
+fn cmd_d_in_the_project_panel_duplicates_the_selected_item(cx: &mut TestAppContext) {
+    use studio_core::sample::ids;
+    let (workspace, visual) = open(cx);
+    let count = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.project.items.len());
+    let layers = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    let before = count(visual);
+    visual.update(|window, cx| window.click(("project-item", ids::MAIN_COMP.0 as usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.press("cmd-d", cx));
+    render(visual);
+    assert_eq!(count(visual), before + 1, "the composition was duplicated");
+    let selected = visual.update(|_, cx| workspace.read(cx).state.selected_item).unwrap();
+    assert_ne!(selected, ids::MAIN_COMP, "the copy is selected");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), layers, "no layers were duplicated");
+}
+
+#[gpui_kit::test]
+fn videos_take_a_size_above_scale_that_reset_transform_restores(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let clip = first_footage(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(clip, false);
+        if !ws.ui.section_open("transform") {
+            ws.ui.toggle_section("transform");
+        }
+        cx.notify();
+    }));
+    render(visual);
+    let width = FieldTarget::MediaSize { layer: clip, side: 0 };
+    assert!(visual.update(|window, _| window.try_find(field_id(width))).is_some(), "Size shows for video");
+    let native = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().size);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        width.write(&mut ws.state, native.x / 2.0);
+        cx.notify();
+    }));
+    render(visual);
+    let size = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().size);
+    assert_eq!(size, native * 0.5, "linked, so the height follows");
+    visual.update(|window, cx| window.click("reset-transform", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().size), native, "Reset Transform puts the size back");
+}
+
+#[gpui_kit::test]
 fn export_and_replace_puts_a_transparent_render_in_the_layers_place(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     // A short title keeps the render quick.
@@ -2979,7 +3344,7 @@ fn enhance_speech_makes_a_cleaned_copy_that_plays_instead(cx: &mut TestAppContex
     let (workspace, visual) = open(cx);
     let clip = add_tone_clip(&workspace, visual);
     tall_window(visual);
-    visual.update(|window, cx| window.click("enhance-start", cx));
+    visual.update(|window, cx| window.click("enhance-add", cx));
     wait_for_enhance(&workspace, visual);
     let heard = |visual: &mut VisualTestContext| visual.update(|_, cx| {
         let state = &workspace.read(cx).state;

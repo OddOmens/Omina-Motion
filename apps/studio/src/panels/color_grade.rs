@@ -24,7 +24,7 @@ use gpui_kit::{
 use studio_core::model::{Id, LutSource, Rgba};
 use studio_core::property::PropertyPath;
 
-use super::chrome::{CardHeading, EmptyDragView, MeasuredBounds, card, card_list, icon_button};
+use super::chrome::{CardHeading, EmptyDragView, MeasuredBounds, card, card_list, heading_button, list_row};
 use super::fields::{FieldTarget, value_field};
 use crate::state::GradeTarget;
 use crate::theme::{color, hsla, size};
@@ -637,6 +637,7 @@ fn section_card(section: &'static Section, layer: Id, effect: Id, workspace: &Wo
         id: ElementId::Name(format!("{key}-heading").into()),
         icon: Some(section.icon),
         title: section.title.into(),
+        info: Some(section.about.into()),
         open,
         muted: !enabled,
         trailing: effect_buttons(|part| format!("{key}-{part}"), layer, effect, enabled, cx),
@@ -652,28 +653,20 @@ fn section_card(section: &'static Section, layer: Id, effect: Id, workspace: &Wo
 /// The buttons on an effect card's heading: turn the effect off or on, reset it, remove it.
 /// `name` gives each its element id from "on", "reset" or "remove". Used by the Color and
 /// Effects tabs alike.
-pub(crate) fn effect_buttons(name: impl Fn(&str) -> String, layer: Id, effect: Id, enabled: bool, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
-    vec![
-        icon_button(ElementId::Name(name("on").into()), if enabled { IconName::Eye } else { IconName::EyeOff }, if enabled { "Turn Off" } else { "Turn On" }, false, cx.listener(move |this, _, _, cx| {
-            // The heading folds on a click; the buttons in it don't.
-            cx.stop_propagation();
-            this.state.toggle_effect(layer, effect);
-            cx.notify();
-        }))
-        .into_any_element(),
-        icon_button(ElementId::Name(name("reset").into()), IconName::RotateCcw, "Reset", false, cx.listener(move |this, _, _, cx| {
-            cx.stop_propagation();
-            super::effect_controls::reset_effect(this, layer, effect);
-            cx.notify();
-        }))
-        .into_any_element(),
-        icon_button(ElementId::Name(name("remove").into()), IconName::Trash, "Remove", false, cx.listener(move |this, _, _, cx| {
-            cx.stop_propagation();
-            this.state.remove_effect(layer, effect);
-            cx.notify();
-        }))
-        .into_any_element(),
-    ]
+pub(crate) fn effect_buttons(name: impl Fn(&str) -> String, layer: Id, effect: Id, enabled: bool, cx: &mut Context<Workspace>) -> Vec<Option<AnyElement>> {
+    let on = heading_button(ElementId::Name(name("on").into()), if enabled { IconName::Eye } else { IconName::EyeOff }, if enabled { "Turn Off" } else { "Turn On" }, false, cx.listener(move |this, _, _, cx| {
+        this.state.toggle_effect(layer, effect);
+        cx.notify();
+    }));
+    let reset = heading_button(ElementId::Name(name("reset").into()), IconName::RotateCcw, "Reset", false, cx.listener(move |this, _, _, cx| {
+        super::effect_controls::reset_effect(this, layer, effect);
+        cx.notify();
+    }));
+    let remove = heading_button(ElementId::Name(name("remove").into()), IconName::Trash, "Remove", false, cx.listener(move |this, _, _, cx| {
+        this.state.remove_effect(layer, effect);
+        cx.notify();
+    }));
+    vec![Some(on.into_any_element()), Some(reset.into_any_element()), Some(remove.into_any_element())]
 }
 
 /// Adds the correction `section` to what `target` grades, opening its card.
@@ -784,9 +777,9 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let layer_name = layer.and_then(|id| workspace.state.composition().layer(id)).map(|layer| layer.name.clone());
     let mut list = card_list("color-grade")
         .child(workspace.ui.grade_bounds.probe())
-        .child(div().flex().flex_col().gap_1().child(target_switch(target, cx)).child(target_line(target, layer_name.as_deref())));
+        .child(list_row().flex().flex_col().gap_1().child(target_switch(target, cx)).child(target_line(target, layer_name.as_deref())));
     if target == GradeTarget::Clip && layer.is_none() {
-        return list.child(add_tiles(target, false, cx)).into_any_element();
+        return list.child(list_row().child(add_tiles(target, false, cx))).into_any_element();
     }
     // The corrections there are, in the order their effects apply.
     let mut shown: Vec<(usize, Id, Id, &'static Section)> = Vec::new();
@@ -801,13 +794,13 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     }
     shown.sort_by_key(|&(order, ..)| order);
     if shown.is_empty() {
-        return list.child(add_tiles(target, true, cx)).into_any_element();
+        return list.child(list_row().child(add_tiles(target, true, cx))).into_any_element();
     }
     for (_, layer, effect, section) in shown {
         list = list.child(section_card(section, layer, effect, workspace, cx));
     }
     let missing = addable(layer, workspace);
-    list.when(!missing.is_empty(), |list| list.child(add_menu(target, missing, cx))).into_any_element()
+    list.when(!missing.is_empty(), |list| list.child(list_row().child(add_menu(target, missing, cx)))).into_any_element()
 }
 
 #[cfg(test)]

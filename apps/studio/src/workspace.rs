@@ -29,6 +29,10 @@ actions!(studio, [
     PreviousFrame,
     NextTenFrames,
     PreviousTenFrames,
+    NextFiveFrames,
+    PreviousFiveFrames,
+    ZoomViewerIn,
+    ZoomViewerOut,
     FirstFrame,
     LastFrame,
     Delete,
@@ -61,6 +65,10 @@ actions!(studio, [
     Duplicate,
     OpenSettings,
     Precompose,
+    UngroupComposition,
+    FlipHorizontal,
+    FlipVertical,
+    ResetTransform,
     CompositionSettings,
     MagicResize,
     NewComposition,
@@ -95,6 +103,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("pageup", PreviousFrame, Some(NOT_TYPING)),
         KeyBinding::new("shift-pagedown", NextTenFrames, Some(NOT_TYPING)),
         KeyBinding::new("shift-pageup", PreviousTenFrames, Some(NOT_TYPING)),
+        // Cmd+[ and Cmd+] step a frame; with Shift, five. (Shift+[ types "{", so both spellings.)
+        KeyBinding::new("cmd-[", PreviousFrame, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-]", NextFrame, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-shift-[", PreviousFiveFrames, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-shift-]", NextFiveFrames, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-{", PreviousFiveFrames, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-}", NextFiveFrames, Some(NOT_TYPING)),
+        // Cmd+= (or Cmd++) and Cmd+- zoom the composition viewer.
+        KeyBinding::new("cmd-=", ZoomViewerIn, Some(NOT_TYPING)),
+        KeyBinding::new("cmd-+", ZoomViewerIn, Some(NOT_TYPING)),
+        KeyBinding::new("cmd--", ZoomViewerOut, Some(NOT_TYPING)),
         KeyBinding::new("escape", Dismiss, Some(NOT_TYPING)),
         KeyBinding::new("home", FirstFrame, Some(NOT_TYPING)),
         KeyBinding::new("end", LastFrame, Some(NOT_TYPING)),
@@ -184,7 +203,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Copy", Copy),
             MenuItem::action("Paste", Paste),
             MenuItem::action("Duplicate", Duplicate),
-            MenuItem::action("Pre-compose", Precompose),
+            MenuItem::action("Pre-compose…", Precompose),
             MenuItem::separator(),
             MenuItem::action("Trim In Point to Playhead", TrimInToPlayhead),
             MenuItem::action("Trim Out Point to Playhead", TrimOutToPlayhead),
@@ -199,12 +218,23 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("New Adjustment Layer", NewAdjustmentLayer),
             MenuItem::action("New Null Object", NewNull),
             MenuItem::separator(),
+            MenuItem::action("Pre-compose…", Precompose),
+            MenuItem::action("Ungroup Composition", UngroupComposition),
+            MenuItem::action("Flip Horizontal", FlipHorizontal),
+            MenuItem::action("Flip Vertical", FlipVertical),
+            MenuItem::action("Reset Transform", ResetTransform),
+            MenuItem::separator(),
             MenuItem::action("Add or Remove Marker", ToggleMarker),
             MenuItem::separator(),
             MenuItem::action("Sequence Layers", SequenceLayers),
             MenuItem::action("Stagger Layers by 5 Frames", StaggerLayers),
         ]),
-        Menu::new("View").items([MenuItem::action("Safe Areas and Grid", ToggleGuides)]),
+        Menu::new("View").items([
+            MenuItem::action("Zoom In", ZoomViewerIn),
+            MenuItem::action("Zoom Out", ZoomViewerOut),
+            MenuItem::separator(),
+            MenuItem::action("Safe Areas and Grid", ToggleGuides),
+        ]),
     ]
 }
 
@@ -335,6 +365,8 @@ pub enum EditTarget {
     CaptionText(Id, usize, usize),
     /// A layer's name (Rename in a clip's right-click menu).
     LayerName(Id),
+    /// A Project panel item's name (Rename in its right-click menu).
+    ItemName(Id),
 }
 
 /// The text input currently open over a value, and the subscription that commits it.
@@ -395,6 +427,9 @@ pub struct UiState {
     pub viewer_pan: (f32, f32),
     /// The pan when a Hand drag began.
     pub pan_start: (f32, f32),
+    /// While the middle mouse button is held over the viewer (a temporary Hand tool): where the
+    /// pointer was pressed, and the pan then.
+    pub middle_pan: Option<((f32, f32), (f32, f32))>,
     /// Pointer x and starting value of the field being scrubbed.
     pub field_anchor: Option<(f32, f32)>,
     pub editing: Option<EditingField>,
@@ -472,6 +507,14 @@ pub struct UiState {
     pub grade_pressed: bool,
     /// Where the Color panel is drawn, so its color wheels can fit its width.
     pub grade_bounds: panels::chrome::MeasuredBounds,
+    /// The gradient stop picked in Properties (its shape, fill or stroke, and index), whose
+    /// location and Delete button show under the gradient bar.
+    pub gradient_stop: Option<(Id, crate::state::PaintSlot, usize)>,
+    /// Whether the picked gradient stop was dragged since it was pressed (a press without a drag
+    /// opens its color instead).
+    pub gradient_stop_dragged: bool,
+    /// Where the fill's and the stroke's gradient bars were drawn, to turn a click into a location.
+    pub gradient_bars: [panels::chrome::MeasuredBounds; 2],
     /// The LUTs imported into Studio's LUT library, read when it changes.
     pub user_luts: Vec<std::path::PathBuf>,
     /// Pictures of what each LUT does to the current frame.
@@ -742,6 +785,7 @@ impl Workspace {
                 viewer_zoom: None,
                 viewer_pan: (0.0, 0.0),
                 pan_start: (0.0, 0.0),
+                middle_pan: None,
                 field_anchor: None,
                 editing: None,
                 flow_curve: studio_core::animation::EASING_PRESETS[0].1,
@@ -784,6 +828,9 @@ impl Workspace {
                 grade_pressed: false,
                 slider_bounds: Default::default(),
                 grade_bounds: Default::default(),
+                gradient_stop: None,
+                gradient_stop_dragged: false,
+                gradient_bars: Default::default(),
                 user_luts: crate::lut_library::list(),
                 lut_previews: Default::default(),
                 lut_browser: None,
@@ -810,7 +857,24 @@ impl Workspace {
     }
 
     /// Splits layers at the playhead, explaining any that had to be left whole.
-    fn split_layer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Ungroups the selected nested composition (see `state.ungroup_layer`), saying what
+    /// couldn't come along, or why it couldn't be done.
+    pub(crate) fn ungroup_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let [layer] = self.state.selected_layers[..] else {
+            window.push_notification("Select one nested composition's layer to ungroup.", cx);
+            return;
+        };
+        match self.state.ungroup_layer(layer) {
+            Ok(result) if !result.dropped.is_empty() => {
+                window.push_notification(format!("Ungrouped. The composition layer's {} don't carry over to its layers.", result.dropped.join(", ")).as_str(), cx);
+            }
+            Ok(_) => {}
+            Err(error) => window.push_notification(error.to_string().as_str(), cx),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn split_layer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let report = self.state.split_at_playhead();
         let mut reasons = Vec::new();
         if report.locked > 0 {
@@ -979,6 +1043,7 @@ impl Workspace {
             Some(EditTarget::LibraryName(id)) => self.state.rename_library_item(id, &text),
             Some(EditTarget::CaptionText(layer, start, end)) => self.state.set_caption_text(layer, start..end, &text),
             Some(EditTarget::LayerName(layer)) => self.state.rename_layer(layer, &text),
+            Some(EditTarget::ItemName(item)) => self.state.rename_item(item, &text),
         }
         // Hand keyboard focus back to the editor so shortcuts work again.
         window.focus(&self.focus, cx);
@@ -1088,7 +1153,7 @@ impl Workspace {
 
     /// Delete key. In the Project panel it asks before deleting the selected item (and the layers
     /// that use it); elsewhere it deletes selected keyframes, or else the selected layers.
-    fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.ui.active_panel != PanelId::Project {
             self.state.delete_selection();
             cx.notify();
@@ -1227,6 +1292,16 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &PreviousFrame, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &NextTenFrames, _, cx| this.step(10, cx)))
             .on_action(cx.listener(|this, _: &PreviousTenFrames, _, cx| this.step(-10, cx)))
+            .on_action(cx.listener(|this, _: &NextFiveFrames, _, cx| this.step(5, cx)))
+            .on_action(cx.listener(|this, _: &PreviousFiveFrames, _, cx| this.step(-5, cx)))
+            .on_action(cx.listener(|this, _: &ZoomViewerIn, _, cx| {
+                panels::viewer::zoom_step(this, true);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ZoomViewerOut, _, cx| {
+                panels::viewer::zoom_step(this, false);
+                cx.notify();
+            }))
             // Escape closes the template gallery.
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
                 if this.ui.template_gallery {
@@ -1331,10 +1406,21 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| panels::settings::open(this, window, cx)))
-            .on_action(cx.listener(|this, _: &Precompose, _, cx| {
-                if this.state.precompose_selection().is_some() {
+            .on_action(cx.listener(|this, _: &Precompose, window, cx| panels::precompose::open(this, window, cx)))
+            .on_action(cx.listener(|this, _: &UngroupComposition, window, cx| this.ungroup_selected(window, cx)))
+            .on_action(cx.listener(|this, _: &FlipHorizontal, _, cx| {
+                if this.state.flip_selection(true) {
                     cx.notify();
                 }
+            }))
+            .on_action(cx.listener(|this, _: &FlipVertical, _, cx| {
+                if this.state.flip_selection(false) {
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ResetTransform, _, cx| {
+                this.state.reset_selection_transform();
+                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Copy, _, cx| {
                 this.state.copy_selection();
@@ -1345,8 +1431,15 @@ impl Render for Workspace {
                     cx.notify();
                 }
             }))
-            .on_action(cx.listener(|this, _: &Duplicate, _, cx| {
-                if !this.state.duplicate_selection().is_empty() {
+            // In the Project panel, Duplicate copies the selected item; elsewhere, the selected layers.
+            .on_action(cx.listener(|this, _: &Duplicate, window, cx| {
+                if this.ui.active_panel == PanelId::Project {
+                    let Some(item) = this.state.selected_item else { return };
+                    if this.state.duplicate_item(item).is_none() {
+                        window.push_notification("Folders can't be duplicated. Select a composition or media item.", cx);
+                    }
+                    cx.notify();
+                } else if !this.state.duplicate_selection().is_empty() {
                     cx.notify();
                 }
             }))

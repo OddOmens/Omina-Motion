@@ -33,6 +33,7 @@ pub fn set_speed(composition: &mut Composition, layer_id: Id, percent: f32) -> b
     layer.start_frame = layer.in_frame - (shown / new).round() as i64;
     layer.out_frame = layer.in_frame + ((played / new).round() as i64).max(1);
     layer.time.speed = Animated::constant(percent);
+    layer.time.speed_before_ramp = None;
     true
 }
 
@@ -105,13 +106,30 @@ impl Ramp {
     }
 }
 
-/// Puts a speed ramp across the clip, keeping its length.
+/// Puts a speed ramp across the clip, keeping its length. The speed the clip had before is
+/// remembered (switching from one ramp to another keeps the original) for `remove_ramp`.
 pub fn apply_ramp(composition: &mut Composition, layer_id: Id, ramp: Ramp) -> bool {
     let Some(layer) = composition.layer_mut(layer_id).filter(|layer| has_speed(&layer.content) && !layer.switches.locked) else { return false };
     let (start, length) = (layer.in_frame, (layer.out_frame - layer.in_frame) as f64);
     let smooth = Easing::Curve(CubicBezier::new(0.45, 0.0, 0.55, 1.0));
     let keys = ramp.points().iter().map(|&(at, speed)| Keyframe { frame: start + (at * length).round() as i64, value: speed, easing: smooth }).collect();
+    if let Some(factor) = layer.time.constant_factor() {
+        layer.time.speed_before_ramp = Some((factor * 100.0) as f32);
+    }
     layer.time.speed = Animated::keyframed(keys);
+    true
+}
+
+/// Takes a ramp off, putting back the constant speed the clip had before it. A ramp only
+/// changes the speed (never the clip's start, in or out), so the clip is as it was. Ramps from
+/// projects saved before the speed was remembered go back to 100%. Returns whether it changed.
+pub fn remove_ramp(composition: &mut Composition, layer_id: Id) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id).filter(|layer| has_speed(&layer.content) && !layer.switches.locked) else { return false };
+    if layer.time.constant_factor().is_some() {
+        return false;
+    }
+    let percent = layer.time.speed_before_ramp.take().unwrap_or(100.0);
+    layer.time.speed = Animated::constant(percent.clamp(LayerTime::SPEED_RANGE.0, LayerTime::SPEED_RANGE.1));
     true
 }
 
@@ -208,6 +226,31 @@ mod tests {
         comp.layer_mut(id).unwrap().shift_in_time(100);
         let after: Vec<i64> = (124..220).map(|frame| comp.layer(id).unwrap().source_frame(frame, rate, rate)).collect();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn removing_a_ramp_puts_the_clip_back_as_it_was() {
+        let (mut project, id) = clip();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        assert!(set_speed(comp, id, 50.0));
+        let before = comp.layer(id).unwrap().clone();
+        // Two ramps in a row: removing goes back to the speed before the first.
+        assert!(apply_ramp(comp, id, Ramp::SpeedUp));
+        assert!(apply_ramp(comp, id, Ramp::Punch));
+        assert!(remove_ramp(comp, id));
+        assert_eq!(*comp.layer(id).unwrap(), before, "speed, start, in and out all as before");
+        assert!(!remove_ramp(comp, id), "nothing to remove now");
+    }
+
+    #[test]
+    fn a_ramp_without_a_remembered_speed_goes_back_to_normal() {
+        let (mut project, id) = clip();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        assert!(apply_ramp(comp, id, Ramp::SlowDown));
+        // As a project saved before the speed was remembered loads.
+        comp.layer_mut(id).unwrap().time.speed_before_ramp = None;
+        assert!(remove_ramp(comp, id));
+        assert!(comp.layer(id).unwrap().time.is_normal());
     }
 
     #[test]

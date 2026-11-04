@@ -102,7 +102,6 @@ fn tools(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
 /// The New Layer button: a menu of the layers made from nothing (a solid in the eyedropper's
 /// current color, an adjustment layer, a null object), each added from the playhead on.
 fn new_layer_button(cx: &mut Context<Workspace>) -> impl IntoElement {
-    use gpui_kit::component::Sizable as _;
     use gpui_kit::component::button::{Button, ButtonVariants as _};
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     let weak = cx.weak_entity();
@@ -112,7 +111,19 @@ fn new_layer_button(cx: &mut Context<Workspace>) -> impl IntoElement {
             weak.update(cx, |this, cx| this.new_layer(kind, cx)).ok();
         })
     };
-    Button::new("tool-new-layer").ghost().small().icon(Icon::new(IconName::Layers)).tooltip("New Layer").dropdown_menu(move |menu, _, _| {
+    // Sized, colored and marked like the tool buttons beside it (`tool_button_look`); it stays a
+    // Button because only Buttons open dropdown menus.
+    Button::new("tool-new-layer")
+        .ghost()
+        .relative()
+        .w(px(TOOL_WIDTH))
+        .h(px(TOOL_HEIGHT))
+        .rounded(px(6.0))
+        .text_color(hsla(color::MUTED))
+        .icon(Icon::new(IconName::Layers).size(px(16.0)))
+        .child(menu_mark())
+        .tooltip("New Layer")
+        .dropdown_menu(move |menu, _, _| {
         menu.label("New Layer")
             .item(item("Solid (⌘Y)", IconName::Square, NewLayer::Solid))
             .item(item("Adjustment Layer (⌥⌘Y)", IconName::Layers, NewLayer::Adjustment))

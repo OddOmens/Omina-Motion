@@ -4,7 +4,7 @@
 use crate::animation::Vec2;
 use crate::transform::Affine;
 use crate::model::{
-    BlendMode, Composition, INNER_RADIUS_RANGE, Id, Layer, LayerContent, LayerSwitches, MAX_SHAPE_POINTS, MAX_STROKE_WIDTH, Paint,
+    BlendMode, Composition, INNER_RADIUS_RANGE, Id, LabelColor, Layer, LayerContent, LayerSwitches, MAX_SHAPE_POINTS, MAX_STROKE_WIDTH, Paint,
     Project, ProjectItem, ProjectItemKind, Rgba, ShapeKind, ShapeStyle, TextStyle, TrackMatte, Transform,
 };
 use crate::time::FrameRate;
@@ -166,19 +166,26 @@ pub fn contains_composition(project: &Project, outer: Id, inner: Id) -> bool {
 }
 
 /// Moves `ids` (with any track mattes they use) into a new composition named `name`, the
-/// same size, rate and length as this one, and puts a layer showing it where they were, as
-/// After Effects' Pre-compose does. The layers keep their timing. Parenting and masks that would
+/// same size and rate as this one, and puts a layer showing it where they were, as After
+/// Effects' Pre-compose does. The new composition is as long as this one, or with `trim`, just
+/// as long as the moved layers' span (they move to its start, and its layer sits where they
+/// were). Either way they play at the same moments as before. Parenting and masks that would
 /// cross between the two compositions are let go. Returns the new composition's layer.
-pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str) -> Option<Id> {
+pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str, trim: bool) -> Option<Id> {
     let parent = project.composition(comp_id)?;
     let moving: Vec<Id> = crate::copy::layers_to_copy(parent, ids).iter().map(|layer| layer.id).collect();
     let top = parent.layers.iter().position(|layer| moving.contains(&layer.id))?;
+    let moved_layers = || parent.layers.iter().filter(|layer| moving.contains(&layer.id));
+    let span_start = moved_layers().map(|layer| layer.in_frame).min()?;
+    let span_end = moved_layers().map(|layer| layer.out_frame).max()?;
+    // Where the new composition starts in this one: at the span's start when trimmed.
+    let (offset, duration_frames) = if trim { (span_start.max(0), (span_end - span_start.max(0)).max(1)) } else { (0, parent.duration_frames) };
     let settings = CompositionSettings {
         name: name.to_owned(),
         width: parent.width,
         height: parent.height,
         frame_rate: parent.frame_rate,
-        duration_frames: parent.duration_frames,
+        duration_frames,
         background: Rgba::TRANSPARENT,
     };
     let inner_id = new_composition(project, &settings).ok()?;
@@ -207,14 +214,17 @@ pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str) ->
             layer.text_path = None;
         }
     }
+    for layer in &mut moved {
+        layer.shift_in_time(-offset);
+    }
     let inner = project.composition_mut(inner_id)?;
     inner.layers = moved;
     crate::tracks::normalize(inner);
-    // The layer showing it, in the moved layers' place, for the whole composition.
+    // The layer showing it, in the moved layers' place, starting where the new composition does.
     let layer_id = project.allocate_id();
     let item = project.item(inner_id)?.clone();
     let parent = project.composition_mut(comp_id)?;
-    let mut layer = layer_from_item(&item, parent, 0, layer_id)?;
+    let mut layer = layer_from_item(&item, parent, offset, layer_id)?;
     let index = keep_matte_pairs(parent, top.min(parent.layers.len()));
     layer.track = crate::tracks::make_room_at(parent, index, false);
     parent.layers.insert(index, layer);
@@ -529,6 +539,28 @@ pub fn new_composition(project: &mut Project, settings: &CompositionSettings) ->
     Ok(id)
 }
 
+/// Renames a project item. A composition's own name changes with it, as Composition Settings
+/// does. Blank names are refused. Returns whether anything changed.
+pub fn rename_item(project: &mut Project, id: Id, name: &str) -> bool {
+    let name = name.trim();
+    let Some(item) = project.items.iter_mut().find(|item| item.id == id).filter(|_| !name.is_empty()) else { return false };
+    if item.name == name {
+        return false;
+    }
+    item.name = name.to_owned();
+    if let Some(composition) = project.composition_mut(id) {
+        composition.name = name.to_owned();
+    }
+    true
+}
+
+/// Sets a project item's label color. Returns whether the item exists.
+pub fn set_item_label(project: &mut Project, id: Id, label: LabelColor) -> bool {
+    let Some(item) = project.items.iter_mut().find(|item| item.id == id) else { return false };
+    item.label = label;
+    true
+}
+
 /// Applies new settings to an existing composition. Layers keep their positions; the
 /// work area and layers are not trimmed when the duration shrinks, as in After Effects.
 pub fn apply_composition_settings(project: &mut Project, id: Id, settings: &CompositionSettings) -> Result<(), String> {
@@ -786,8 +818,8 @@ pub fn edit_shape(composition: &mut Composition, layer_id: Id, edit: impl FnOnce
         stroke.width = finite_or(stroke.width, 1.0).clamp(0.0, MAX_STROKE_WIDTH);
     }
     for paint in style.fill.iter_mut().chain(style.stroke.as_mut().map(|stroke| &mut stroke.paint)) {
-        if let Paint::Linear { angle, .. } = paint {
-            *angle = finite_or(*angle, 0.0).rem_euclid(360.0);
+        if let Some(gradient) = paint.gradient() {
+            *paint = paint.with_gradient(gradient.sanitized());
         }
     }
     true
@@ -910,6 +942,35 @@ pub fn set_shape_size(composition: &mut Composition, layer_id: Id, size: Vec2) -
     edit_shape(composition, layer_id, |_| {})
 }
 
+/// Sets the size a video or image layer is drawn at, in pixels, before its Scale (so Scale can
+/// keep animating from 0 to 100% of that). The picture stretches to fill it, and the anchor
+/// point keeps its relative spot, so the layer stays where it is. Sides are kept from 1 to
+/// `MAX_SHAPE_SIZE` pixels. Locked layers and other kinds of layer are left alone. Returns
+/// whether it changed.
+pub fn set_media_size(composition: &mut Composition, layer_id: Id, size: Vec2) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    if !matches!(layer.content, LayerContent::Footage { .. } | LayerContent::Image { .. }) || layer.switches.locked {
+        return false;
+    }
+    let side = |value: f32| if value.is_finite() { value.clamp(1.0, MAX_SHAPE_SIZE) } else { 1.0 };
+    let size = Vec2::new(side(size.x), side(size.y));
+    if size == layer.size {
+        return false;
+    }
+    resize_box(layer, size);
+    true
+}
+
+/// Mirrors a layer across its anchor point, left to right (`horizontal`) or top to bottom, by
+/// turning its Scale negative on that axis, keyframes included (flipping again undoes it).
+/// Locked layers and layers without a transform are left alone. Returns whether it flipped.
+pub fn flip_layer(composition: &mut Composition, layer_id: Id, horizontal: bool) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id).filter(|layer| !layer.switches.locked) else { return false };
+    let Some(transform) = layer.transform.as_mut() else { return false };
+    transform.scale.map_values(|scale| if horizontal { Vec2::new(-scale.x, scale.y) } else { Vec2::new(scale.x, -scale.y) });
+    true
+}
+
 /// Changes a layer's box to `size`, keeping its anchor point in the same relative spot.
 fn resize_box(layer: &mut Layer, size: Vec2) {
     if let Some(transform) = layer.transform.as_mut() {
@@ -1002,6 +1063,62 @@ pub fn set_parent(composition: &mut Composition, layer_id: Id, parent: Option<Id
 mod tests {
     use super::*;
     use crate::sample::{self, ids};
+
+    #[test]
+    fn flipping_mirrors_the_scale_keyframes_too_and_twice_undoes_it() {
+        use crate::property::{PropertyPath, PropertyValue, TransformProperty};
+        let mut project = sample::sample_project();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let title = comp.layers[0].id;
+        let scale = PropertyPath::Transform(TransformProperty::Scale);
+        let key = |frame, x, y| crate::animation::Keyframe { frame, value: Vec2::new(x, y), easing: crate::animation::Easing::Linear };
+        comp.layer_mut(title).unwrap().transform.as_mut().unwrap().scale = crate::animation::Animated::keyframed(vec![key(30, 80.0, 90.0), key(60, 120.0, 110.0)]);
+        let before = comp.layer(title).unwrap().clone();
+        assert!(flip_layer(comp, title, true));
+        let value = |comp: &Composition, frame| comp.layer(title).unwrap().property(scale, frame).unwrap().value;
+        assert_eq!(value(comp, 30), PropertyValue::Pair(Vec2::new(-80.0, 90.0)));
+        assert_eq!(value(comp, 60), PropertyValue::Pair(Vec2::new(-120.0, 110.0)));
+        assert!(flip_layer(comp, title, true));
+        assert_eq!(*comp.layer(title).unwrap(), before, "flipping twice is no change");
+        assert!(flip_layer(comp, title, false));
+        assert_eq!(value(comp, 30), PropertyValue::Pair(Vec2::new(80.0, -90.0)));
+    }
+
+    #[test]
+    fn a_video_layer_takes_a_size_keeping_its_anchor_in_place() {
+        let mut project = sample::sample_project();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let video = comp.layers.iter().find(|layer| matches!(layer.content, LayerContent::Footage { .. })).unwrap().id;
+        let before = comp.layer(video).unwrap().clone();
+        assert!(set_media_size(comp, video, Vec2::new(before.size.x / 2.0, before.size.y / 2.0)));
+        let after = comp.layer(video).unwrap();
+        assert_eq!(after.size, before.size * 0.5);
+        let anchor = |layer: &Layer| layer.transform.as_ref().unwrap().anchor_point.value;
+        assert_eq!(anchor(after), anchor(&before) * 0.5, "the anchor keeps its relative spot");
+        // Text and shapes have their own sizes.
+        let text = comp.layers.iter().find(|layer| matches!(layer.content, LayerContent::Text { .. })).unwrap().id;
+        assert!(!set_media_size(comp, text, Vec2::new(10.0, 10.0)));
+    }
+
+    #[test]
+    fn renaming_a_composition_item_renames_the_composition() {
+        let mut project = sample::sample_project();
+        assert!(rename_item(&mut project, ids::MAIN_COMP, "  Intro  "));
+        assert_eq!(project.item(ids::MAIN_COMP).unwrap().name, "Intro");
+        assert_eq!(project.composition(ids::MAIN_COMP).unwrap().name, "Intro");
+        assert!(!rename_item(&mut project, ids::MAIN_COMP, "   "), "blank names are refused");
+        assert!(!rename_item(&mut project, ids::MAIN_COMP, "Intro"), "nothing to change");
+        assert!(rename_item(&mut project, ids::LOGO, "brand.png"));
+        assert_eq!(project.item(ids::LOGO).unwrap().name, "brand.png");
+    }
+
+    #[test]
+    fn items_take_a_label_color() {
+        let mut project = sample::sample_project();
+        assert!(set_item_label(&mut project, ids::LOGO, LabelColor::Blue));
+        assert_eq!(project.item(ids::LOGO).unwrap().label, LabelColor::Blue);
+        assert!(!set_item_label(&mut project, Id(9999), LabelColor::Red));
+    }
 
     #[test]
     fn the_global_grade_is_one_full_length_adjustment_layer_on_top() {
@@ -1138,7 +1255,7 @@ mod tests {
         let (title, second) = (comp.layers[0].id, comp.layers[1].id);
         let count = comp.layers.len();
         let (in_frame, out_frame) = (comp.layers[0].in_frame, comp.layers[0].out_frame);
-        let layer = precompose(&mut project, ids::MAIN_COMP, &[title, second], "Title Card").unwrap();
+        let layer = precompose(&mut project, ids::MAIN_COMP, &[title, second], "Title Card", false).unwrap();
         let comp = project.composition(ids::MAIN_COMP).unwrap();
         assert_eq!(comp.layers.len(), count - 1, "two layers became one");
         let LayerContent::Composition { composition } = comp.layer(layer).unwrap().content else { panic!() };

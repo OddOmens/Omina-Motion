@@ -23,13 +23,19 @@ struct LayerUniform {
     // The shape's box within the drawn rectangle (which is larger by the stroke): origin, size.
     // For textures, the part of the texture drawn (uv origin, size).
     shape_box: vec4<f32>,
-    // Fill and stroke paints: two premultiplied linear colors each (one for a solid).
-    fill_a: vec4<f32>,
-    fill_b: vec4<f32>,
-    stroke_a: vec4<f32>,
-    stroke_b: vec4<f32>,
-    // x fill mode, z stroke mode (0 none, 1 solid, 2 linear, 3 radial); y, w their angles in radians.
-    paint: vec4<f32>,
+    // Fill and stroke paints (see `Paint` below).
+    fill: Paint,
+    stroke: Paint,
+};
+
+// A fill or stroke: x mode (0 none, 1 solid, 2 linear, 3 radial), y how many stops; its stops'
+// premultiplied linear colors (one for a solid) and locations (0-1, four to a vec4); and the
+// gradient's from and to points in fractions of the shape's box.
+struct Paint {
+    mode: vec4<f32>,
+    colors: array<vec4<f32>, 8>,
+    stops: array<vec4<f32>, 2>,
+    points: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: LayerUniform;
@@ -86,14 +92,14 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // About one output pixel of soft edge, whatever the layer's scale.
         let edge = max(fwidth(d), 1e-4);
         var out = vec4(0.0);
-        if (u.paint.x > 0.5) {
-            out = paint_at(p, half, u32(u.paint.x), u.paint.y, u.fill_a, u.fill_b) * clamp(0.5 - d / edge, 0.0, 1.0);
+        if (u.fill.mode.x > 0.5) {
+            out = paint_at(p, half, u.fill) * clamp(0.5 - d / edge, 0.0, 1.0);
         }
         let width = u.params.z;
-        if (u.paint.z > 0.5 && width > 0.0) {
+        if (u.stroke.mode.x > 0.5 && width > 0.0) {
             // Centered on the outline, drawn over the fill.
             let band = abs(d) - width * 0.5;
-            let stroke = paint_at(p, half, u32(u.paint.z), u.paint.w, u.stroke_a, u.stroke_b) * clamp(0.5 - band / edge, 0.0, 1.0);
+            let stroke = paint_at(p, half, u.stroke) * clamp(0.5 - band / edge, 0.0, 1.0);
             out = stroke + out * (1.0 - stroke.a);
         }
         return out;
@@ -103,19 +109,45 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
 const PI: f32 = 3.14159265;
 
-// A paint's color at `p` (pixels from the box center): one color, or a gradient across the box.
-// Linear gradients run along `angle` (0 left to right) from edge to edge of the box; radial ones
-// from the center to the box's edge.
-fn paint_at(p: vec2<f32>, half: vec2<f32>, mode: u32, angle: f32, a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+// A paint's color at `p` (pixels from the box center), for a box with half size `half`: one
+// color, or a gradient. A linear gradient runs between its points measured in pixels, so its
+// bands stay square to the line; a radial one is measured in fractions of the box, so its
+// circle stretches with the box as an ellipse (as `path.rs` draws the same paint).
+fn paint_at(p: vec2<f32>, half: vec2<f32>, paint: Paint) -> vec4<f32> {
+    let mode = u32(paint.mode.x);
+    if (mode == 1u) {
+        return paint.colors[0];
+    }
+    let size = max(2.0 * half, vec2(1e-4));
+    let f = p / size + 0.5;
+    var t = 0.0;
     if (mode == 2u) {
-        let direction = vec2(cos(angle), sin(angle));
-        let reach = abs(direction.x) * half.x + abs(direction.y) * half.y;
-        return mix(a, b, clamp(0.5 + dot(p, direction) / max(2.0 * reach, 1e-4), 0.0, 1.0));
+        let a = paint.points.xy * size;
+        let along = paint.points.zw * size - a;
+        t = dot(f * size - a, along) / max(dot(along, along), 1e-4);
+    } else {
+        t = length(f - paint.points.xy) / max(length(paint.points.zw - paint.points.xy), 1e-4);
     }
-    if (mode == 3u) {
-        return mix(a, b, clamp(length(p / max(half, vec2(1e-4))), 0.0, 1.0));
+    return gradient_color(clamp(t, 0.0, 1.0), paint);
+}
+
+// The color `t` (0-1) along a gradient, blended between the stops on either side of it.
+fn gradient_color(t: f32, paint: Paint) -> vec4<f32> {
+    // Copied to locals so they can be indexed by a loop counter.
+    var colors = paint.colors;
+    var stops = paint.stops;
+    let count = clamp(u32(paint.mode.y), 1u, 8u);
+    if (t <= stops[0].x) {
+        return colors[0];
     }
-    return a;
+    for (var i = 1u; i < count; i = i + 1u) {
+        let b = stops[i / 4u][i % 4u];
+        if (t <= b) {
+            let a = stops[(i - 1u) / 4u][(i - 1u) % 4u];
+            return mix(colors[i - 1u], colors[i], (t - a) / max(b - a, 1e-6));
+        }
+    }
+    return colors[count - 1u];
 }
 
 // Signed distance to the layer's shape at `p` (source pixels from the box center), for a box

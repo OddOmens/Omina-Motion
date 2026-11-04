@@ -105,7 +105,7 @@ pub(super) fn post_card(b: &mut Builder) {
     b.effect(card, "Drop Shadow", &[(0, 35.0), (2, 16.0), (3, 40.0)]);
     let top = center.y - (height * 0.5 - 80.0) * unit;
     let left = center.x - (width * 0.5 - 60.0) * unit;
-    let avatar = b.shape(ShapeKind::Ellipse, Vec2::new(84.0, 84.0), Vec2::new(left + 42.0 * unit, top), Some(Paint::Linear { start: Rgba::hex(p.accent), end: Rgba::hex(p.background_2), angle: 45.0 }), None, 0.0, 0.5, "Drop your profile photo here");
+    let avatar = b.shape(ShapeKind::Ellipse, Vec2::new(84.0, 84.0), Vec2::new(left + 42.0 * unit, top), Some(Paint::linear(Rgba::hex(p.accent), Rgba::hex(p.background_2), 45.0)), None, 0.0, 0.5, "Drop your profile photo here");
     b.pop_in(avatar, 0.5);
     for (words, size, ink, weight, dy) in [(name, 38.0, 0x111111, b.heavy(), -20.0), (handle, 30.0, 0x71717a, 500, 22.0)] {
         let x = left + 110.0 * unit;

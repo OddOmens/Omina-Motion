@@ -10,7 +10,7 @@ use crate::model::{Id, Paint, Rgba, ShapeKind, TextAlign};
 
 /// A round spot for a photo (a profile picture), filled like the other drop spots.
 fn round_photo(b: &mut Builder, diameter: f32, at: Vec2, from: f64, what: &str) -> Id {
-    let fill = Paint::Linear { start: Rgba::hex(0x3f3f46), end: Rgba::hex(0x27272a), angle: 60.0 };
+    let fill = Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0);
     b.shape(ShapeKind::Ellipse, Vec2::new(diameter, diameter), at, Some(fill), Some((0x71717a, 2.0)), 0.0, from, &format!("Drop your {what} here"))
 }
 
@@ -224,7 +224,7 @@ pub(super) fn story_frame(b: &mut Builder) {
     }
     // Who posted it and when.
     let header_y = top + 70.0 * unit;
-    let avatar = b.shape(ShapeKind::Ellipse, Vec2::new(70.0, 70.0), Vec2::new(left + 35.0 * unit, header_y), Some(Paint::Linear { start: Rgba::hex(p.accent), end: Rgba::hex(p.background_2), angle: 45.0 }), Some((0xffffff, 3.0)), 0.0, 0.3, "Drop your profile photo here");
+    let avatar = b.shape(ShapeKind::Ellipse, Vec2::new(70.0, 70.0), Vec2::new(left + 35.0 * unit, header_y), Some(Paint::linear(Rgba::hex(p.accent), Rgba::hex(p.background_2), 45.0)), Some((0xffffff, 3.0)), 0.0, 0.3, "Drop your profile photo here");
     b.pop_in(avatar, 0.3);
     let (name, time, caption, reply) = (b.copy(0), b.copy(1), b.copy(2), b.copy(3));
     let poster = text_left(b, name, Vec2::new(left + 90.0 * unit, header_y), 32.0, 0xffffff, b.heavy(), 0.4);
