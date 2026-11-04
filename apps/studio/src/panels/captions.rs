@@ -92,7 +92,7 @@ fn run(source: (PathBuf, f64, f64), report: &Mutex<Report>, cancelled: &dyn Fn()
     let phrases = transcriber
         .transcribe(&speech, None, &mut |fraction| lock(report).fraction = fraction, cancelled)
         .map_err(|error| error.to_string())?;
-    Ok(studio_captions::words(&phrases).into_iter().map(|word| HeardWord { text: word.text, start: word.start, end: word.end }).collect())
+    Ok(studio_captions::words(&phrases, &speech).into_iter().map(|word| HeardWord { text: word.text, start: word.start, end: word.end }).collect())
 }
 
 /// Makes captions for `clip`, asking first if the model has to be downloaded.
@@ -247,7 +247,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             .on_click(cx.listener(move |this, _, _, cx| {
                 for &layer in &selected {
                     let look = look.clone();
-                    this.state.edit_captions(layer, |current| *current = look);
+                    // A look changes how captions appear, not when: their sync stays.
+                    this.state.edit_captions(layer, |current| *current = studio_core::captions::CaptionStyle { offset: current.offset, ..look });
                 }
                 cx.notify();
             }))

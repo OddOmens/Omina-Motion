@@ -1,8 +1,7 @@
-//! Exporting the open composition to a movie (File ▸ Export…, ⌘M). The dialog picks the
-//! format (H.264 or a ProRes flavor), for H.264 its quality and encoding speed, the output
-//! size, the frames, and the sound; then a background thread renders and
-//! encodes a snapshot of the project, so editing can carry on meanwhile. Progress and a
-//! Cancel button show in the toolbar.
+//! Exporting the open composition (File ▸ Export…, ⌘M). The dialog (`export_dialog`) picks
+//! the format, picture, frames and sound; then a background thread renders and encodes a
+//! snapshot of the project, so editing can carry on meanwhile. Progress and a Cancel button
+//! show in the toolbar.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,17 +10,12 @@ use std::time::Duration;
 
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::progress::Progress;
-use gpui_kit::component::radio::Radio;
-use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{Disableable as _, Sizable as _};
-use gpui_kit::{Context, IntoElement, ParentElement, Styled, WeakEntity, Window, div, prelude::FluentBuilder as _, px};
-use studio_core::audio::composition_audio;
+use gpui_kit::component::Sizable as _;
+use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, div, px};
 use studio_core::model::Id;
-use studio_core::time::format_timecode as timecode;
-use studio_export::{ExportRequest, Outcome};
+use studio_core::time::FrameRate;
+use studio_export::{ExportFormat, ExportRequest, Outcome};
 use studio_media::{EncodeSpeed, MovieFormat, VideoQuality};
 
 use crate::theme::{color, hsla};
@@ -30,7 +24,9 @@ use crate::workspace::Workspace;
 /// The choices in the Export dialog. Kept between exports.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExportChoice {
-    pub format: MovieFormat,
+    pub format: ExportFormat,
+    /// The output's frame rate, or `None` for the composition's.
+    pub frame_rate: Option<FrameRate>,
     /// Export only the work area, rather than the whole composition.
     pub work_area_only: bool,
     pub include_audio: bool,
@@ -43,33 +39,8 @@ pub struct ExportChoice {
 
 impl Default for ExportChoice {
     fn default() -> Self {
-        Self { format: MovieFormat::H264, work_area_only: true, include_audio: true, scale: 1.0, quality: VideoQuality::High, speed: EncodeSpeed::Balanced, audio_kbps: 320 }
+        Self { format: ExportFormat::Movie(MovieFormat::H264), frame_rate: None, work_area_only: true, include_audio: true, scale: 1.0, quality: VideoQuality::High, speed: EncodeSpeed::Balanced, audio_kbps: 320 }
     }
-}
-
-/// Output sizes offered, as fractions of the composition.
-const SCALES: [(f32, &str); 4] = [(1.0, "Full size"), (0.75, "Three quarters"), (0.5, "Half"), (0.25, "Quarter")];
-/// Fixed bitrates offered for H.264, in kilobits per second, with what they suit.
-const BITRATES: [(u32, &str); 4] = [(8_000, "social 1080p"), (16_000, "YouTube 1080p"), (35_000, "YouTube 4K"), (50_000, "broadcast")];
-/// AAC sound bitrates offered, in kilobits per second.
-const AUDIO_BITRATES: [u32; 4] = [128, 192, 256, 320];
-
-/// A dropdown in the Export dialog whose choices set the workspace's export choice.
-fn choice_menu<T: Clone + 'static>(id: &'static str, label: String, choices: Vec<(String, bool, T)>, set: fn(&mut ExportChoice, T), target: WeakEntity<Workspace>) -> impl IntoElement {
-    let choices = std::rc::Rc::new(choices);
-    Button::new(id).outline().small().label(label).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
-        choices.iter().fold(menu, |menu, (label, checked, value)| {
-            let (target, value) = (target.clone(), value.clone());
-            menu.item(PopupMenuItem::new(label.clone()).checked(*checked).on_click(move |_, _, cx| {
-                target
-                    .update(cx, |this, cx| {
-                        set(&mut this.ui.export_choice, value.clone());
-                        cx.notify();
-                    })
-                    .ok();
-            }))
-        })
-    })
 }
 
 /// An export running in the background.
@@ -90,112 +61,6 @@ struct Report {
     outcome: Option<Result<Outcome, String>>,
 }
 
-/// Opens the Export dialog for the open composition.
-pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    if workspace.ui.export_job.is_some() {
-        window.push_notification("An export is already running. Cancel it or wait for it to finish.", cx);
-        return;
-    }
-    let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, _, cx| {
-        let Some(workspace) = target.upgrade() else { return dialog };
-        let ws = workspace.read(cx);
-        let choice = ws.ui.export_choice;
-        let comp = ws.state.composition();
-        let has_audio = !composition_audio(&ws.state.project, comp).is_empty();
-        let rate = comp.frame_rate;
-        let work_area = format!(
-            "Work area ({} – {})",
-            timecode(ws.state.work_area.start as i64, rate),
-            timecode(ws.state.work_area.end as i64, rate)
-        );
-        let whole = format!("Entire composition ({})", timecode(comp.duration_frames, rate));
-
-        // Each control writes its choice into the workspace; the dialog redraws from it.
-        let set = |change: fn(&mut ExportChoice, bool)| {
-            let target = target.clone();
-            move |checked: &bool, _: &mut Window, cx: &mut gpui_kit::App| {
-                let checked = *checked;
-                target.update(cx, |this, cx| {
-                    change(&mut this.ui.export_choice, checked);
-                    cx.notify();
-                }).ok();
-            }
-        };
-        let formats = MovieFormat::ALL.iter().map(|&format| (format.label().to_owned(), choice.format == format, format)).collect();
-        let format_menu = choice_menu("export-format", choice.format.label().to_owned(), formats, |c, format| c.format = format, target.clone());
-        let mut qualities: Vec<(String, bool, VideoQuality)> = VideoQuality::PRESETS.iter().map(|&quality| (quality.label(), choice.quality == quality, quality)).collect();
-        qualities.extend(BITRATES.iter().map(|&(kbps, suits)| (format!("{} ({suits})", VideoQuality::Bitrate(kbps).label()), choice.quality == VideoQuality::Bitrate(kbps), VideoQuality::Bitrate(kbps))));
-        let quality_menu = choice_menu("export-quality", choice.quality.label(), qualities, |c, quality| c.quality = quality, target.clone());
-        let speeds = EncodeSpeed::ALL.iter().map(|&speed| (speed.label().to_owned(), choice.speed == speed, speed)).collect();
-        let speed_menu = choice_menu("export-speed", choice.speed.label().to_owned(), speeds, |c, speed| c.speed = speed, target.clone());
-        let size_label = |scale: f32, name: &str| {
-            let request = ExportRequest { scale, ..ExportRequest::new(comp.id, 0..1, choice.format, PathBuf::new()) };
-            let (width, height) = request.output_size(comp.width, comp.height);
-            format!("{name} ({width} × {height})")
-        };
-        let current_size = SCALES.iter().find(|(scale, _)| *scale == choice.scale).map_or("Full size", |(_, name)| name);
-        let sizes = SCALES.iter().map(|&(scale, name)| (size_label(scale, name), choice.scale == scale, scale)).collect();
-        let size_menu = choice_menu("export-size", size_label(choice.scale, current_size), sizes, |c, scale| c.scale = scale, target.clone());
-        let audio_rates = AUDIO_BITRATES.iter().map(|&kbps| (format!("{kbps} kbps"), choice.audio_kbps == kbps, kbps)).collect();
-        let audio_menu = choice_menu("export-audio-bitrate", format!("{} kbps", choice.audio_kbps), audio_rates, |c, kbps| c.audio_kbps = kbps, target.clone());
-        let h264 = !choice.format.is_prores();
-        let labeled = |label: &'static str, control: gpui_kit::AnyElement| div().flex().items_center().gap_3().child(div().w(px(70.0)).text_color(hsla(color::MUTED)).child(label)).child(control);
-        let start = target.clone();
-        dialog
-            .title(format!("Export “{}”", comp.name))
-            .w(px(480.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(section(
-                        "Video",
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1p5()
-                            .child(labeled("Format", format_menu.into_any_element()))
-                            .when(h264, |video| video.child(labeled("Quality", quality_menu.into_any_element())).child(labeled("Speed", speed_menu.into_any_element())))
-                            .child(labeled("Size", size_menu.into_any_element())),
-                    ))
-                    .child(section(
-                        "Frames",
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(Radio::new("export-work-area").label(work_area).checked(choice.work_area_only).on_click(set(|c, _| c.work_area_only = true)))
-                            .child(Radio::new("export-whole").label(whole).checked(!choice.work_area_only).on_click(set(|c, _| c.work_area_only = false))),
-                    ))
-                    .child(section(
-                        "Sound",
-                        Checkbox::new("export-audio")
-                            .label(if has_audio { "Include audio" } else { "Include audio (this composition has no audible layers)" })
-                            .checked(has_audio && choice.include_audio)
-                            .disabled(!has_audio)
-                            .on_click(set(|c, checked| c.include_audio = checked)),
-                    ))
-                    // AAC's bitrate; ProRes movies carry uncompressed sound.
-                    .when(h264 && has_audio && choice.include_audio, |column| column.child(labeled("Bitrate", audio_menu.into_any_element()))),
-            )
-            .footer(
-                DialogFooter::new()
-                    .child(DialogClose::new().trigger(|button| button.outline().label("Cancel")))
-                    .child(DialogAction::new().child(Button::new("export-ok").primary().label("Export…"))),
-            )
-            .on_ok(move |_, window, cx| {
-                start.update(cx, |this, cx| choose_file(this, window, cx)).ok();
-                true
-            })
-    });
-}
-
-fn section(title: &'static str, body: impl IntoElement) -> impl IntoElement {
-    div().flex().flex_col().gap_1().child(div().text_color(hsla(color::MUTED)).child(title)).child(body)
-}
-
 /// Where the save dialog starts: next to the project if it has been saved, else Movies.
 fn starting_folder(project_file: Option<&Path>) -> PathBuf {
     project_file
@@ -205,16 +70,23 @@ fn starting_folder(project_file: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Asks where to save the movie, then starts the export.
-fn choose_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+/// Asks where to save the export, then starts it. A PNG sequence is saved as a folder of
+/// that name.
+pub fn choose_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let format = workspace.ui.export_choice.format;
-    let suggested = format!("{}.{}", workspace.state.composition().name, format.extension());
+    let name = &workspace.state.composition().name;
+    let suggested = match format.extension() {
+        Some(extension) => format!("{name}.{extension}"),
+        None => name.clone(),
+    };
     let chosen = cx.prompt_for_new_path(&starting_folder(workspace.state.file()), Some(&suggested));
     cx.spawn_in(window, async move |this, cx| {
         let Ok(Ok(Some(mut path))) = chosen.await else { return };
         // The file's extension must match what it holds, or players may refuse it.
-        if path.extension().and_then(|e| e.to_str()).is_none_or(|e| !e.eq_ignore_ascii_case(format.extension())) {
-            path.set_extension(format.extension());
+        if let Some(extension) = format.extension()
+            && path.extension().and_then(|e| e.to_str()).is_none_or(|e| !e.eq_ignore_ascii_case(extension))
+        {
+            path.set_extension(extension);
         }
         this.update_in(cx, |this, window, cx| start(this, path, window, cx)).ok();
     })
@@ -285,16 +157,22 @@ pub fn quick_export_layer(workspace: &mut Workspace, layer: Id, replace: bool, w
     run(workspace, project, request, after, window, cx);
 }
 
+/// The composition frames `choice` exports: the work area, or the whole composition.
+pub fn chosen_frames(state: &crate::state::EditorState, choice: &ExportChoice) -> std::ops::Range<i64> {
+    if choice.work_area_only {
+        state.work_area.start as i64..state.work_area.end as i64
+    } else {
+        0..state.composition().duration_frames
+    }
+}
+
 /// Starts exporting a snapshot of the project to `path` on a background thread.
 pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
     let choice = workspace.ui.export_choice;
     let state = &workspace.state;
-    let frames = if choice.work_area_only {
-        state.work_area.start as i64..state.work_area.end as i64
-    } else {
-        0..state.composition().duration_frames
-    };
+    let frames = chosen_frames(state, &choice);
     let request = ExportRequest {
+        frame_rate: choice.frame_rate,
         include_audio: choice.include_audio,
         scale: choice.scale,
         quality: choice.quality,
@@ -311,8 +189,8 @@ pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: 
 pub fn remove_unfinished_export() {
     let Some(target) = crate::app_settings::load().export_in_progress else { return };
     let unfinished = studio_export::temporary_path(&target);
-    if unfinished.is_file() {
-        let _ = std::fs::remove_file(&unfinished);
+    if unfinished.exists() {
+        studio_export::discard(&unfinished);
     }
     crate::app_settings::update(|settings| settings.export_in_progress = None);
 }
@@ -323,7 +201,8 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
     let cancel = Arc::new(AtomicBool::new(false));
     let file_name = request.path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let path = request.path.clone();
-    workspace.ui.export_job = Some(ExportJob { file_name: file_name.clone(), done: 0, total: request.frames.end - request.frames.start, cancel: cancel.clone() });
+    let total = project.composition(request.composition).map_or(request.frames.end - request.frames.start, |comp| request.output_frame_count(comp.frame_rate));
+    workspace.ui.export_job = Some(ExportJob { file_name: file_name.clone(), done: 0, total, cancel: cancel.clone() });
     cx.notify();
 
     // The export runs on its own thread (it is long, steady work); the editor checks on it

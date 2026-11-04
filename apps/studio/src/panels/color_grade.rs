@@ -1,14 +1,14 @@
 //! The Color tab of the Properties panel, after Premiere's Lumetri Color: grading for the
-//! selected clip or for the whole video.
+//! selected clip. To grade the whole video, select an adjustment layer over it and grade that.
 //!
-//! The tab starts empty, with a tile for each kind of correction. Each correction is a card
-//! holding one catalog effect (Basic Correction, a LUT, Color Wheels, Tone Curve, Levels,
-//! Vignette) on the graded layer, listed in the order the effects apply. Its controls are
-//! sliders over the effect's own parameters, with tracks colored by what they do (blue to amber
-//! for temperature, say); each also takes a typed or scrubbed value, and a double-click puts it
-//! back. Keyframing is in the Effects tab, which shows the same effects. Grading the whole video
-//! puts the effects on the Color Grade adjustment layer at the top of the timeline (made the
-//! first time; see `state::grade`).
+//! Like the Properties tab, it is a list of cards, one per kind of correction (Basic
+//! Correction, a LUT, Color Wheels, Tone Curve, Levels, Vignette), each one catalog effect on
+//! the clip. A correction the clip has shows its controls, with buttons in its heading to turn
+//! it off, reset it or remove it; the ones it has are listed first, in the order they apply.
+//! A correction it doesn't have yet is a folded card with a + to add it. The controls are
+//! sliders over the effect's own parameters, with tracks colored by what they do (blue to
+//! amber for temperature, say); each also takes a typed or scrubbed value, and a double-click
+//! puts it back. Keyframing is in the Effects tab, which shows the same effects.
 
 use std::sync::{Arc, OnceLock};
 
@@ -26,7 +26,6 @@ use studio_core::property::PropertyPath;
 
 use super::chrome::{CardHeading, EmptyDragView, MeasuredBounds, card, card_list, heading_button, list_row};
 use super::fields::{FieldTarget, value_field};
-use crate::state::GradeTarget;
 use crate::theme::{color, hsla, size};
 use crate::workspace::Workspace;
 
@@ -38,7 +37,7 @@ pub struct Section {
     /// Names its card's elements, and remembers whether the card is folded.
     key: &'static str,
     icon: IconName,
-    /// A few words on what it is for, on its tile in the empty tab.
+    /// A few words on what it is for, behind the info button on its card.
     about: &'static str,
 }
 
@@ -669,9 +668,9 @@ pub(crate) fn effect_buttons(name: impl Fn(&str) -> String, layer: Id, effect: I
     vec![Some(on.into_any_element()), Some(reset.into_any_element()), Some(remove.into_any_element())]
 }
 
-/// Adds the correction `section` to what `target` grades, opening its card.
-fn add_section(workspace: &mut Workspace, target: GradeTarget, section: &Section, window: &mut Window, cx: &mut Context<Workspace>) {
-    match workspace.state.add_grade_effect(target, section.effect) {
+/// Adds the correction `section` to the graded clip, opening its card.
+fn add_section(workspace: &mut Workspace, section: &Section, window: &mut Window, cx: &mut Context<Workspace>) {
+    match workspace.state.add_grade_effect(section.effect) {
         Some((_, effect)) => {
             workspace.ui.toggled_sections.remove(section.key);
             // A new LUT opens its browser, since it has no LUT yet.
@@ -684,123 +683,52 @@ fn add_section(workspace: &mut Workspace, target: GradeTarget, section: &Section
     cx.notify();
 }
 
-/// The corrections not on `layer` yet (all of them when there is no layer).
-fn addable(layer: Option<Id>, workspace: &Workspace) -> Vec<&'static Section> {
-    SECTIONS.iter().filter(|section| layer.is_none_or(|layer| workspace.state.effect_named(layer, section.effect).is_none())).collect()
-}
-
-/// The empty tab: a tile for each correction, saying what it is for. Grading a clip with none
-/// selected shows the same tiles, dimmed and doing nothing, so both ways of grading look alike.
-fn add_tiles(target: GradeTarget, usable: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let tiles = SECTIONS.iter().map(|section| {
-        let tile = div()
-            .id(ElementId::Name(format!("grade-add:{}", section.key).into()))
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_2p5()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(hsla(color::HAIRLINE))
-            .bg(hsla(color::RAISED))
-            .child(div().flex().items_center().gap_1p5().child(Icon::new(section.icon).size(px(14.0)).text_color(hsla(color::ACCENT))).child(div().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(section.title)))
-            .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(section.about));
-        let tile = if usable {
-            tile.cursor_pointer().hover(|style| style.bg(hsla(color::HOVER)).border_color(hsla(color::ACCENT))).on_click(cx.listener(move |this, _, window, cx| add_section(this, target, section, window, cx)))
-        } else {
-            tile.opacity(0.45)
-        };
-        tile.test_support()
-    });
-    let hint = if usable { "Add a correction to start grading." } else { "Select a clip to add corrections to it." };
-    div().flex().flex_col().gap_2().pt_1().child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(hint)).child(div().grid().grid_cols(2).gap_2().children(tiles))
-}
-
-/// The Add Correction menu under the cards: each correction not added yet.
-fn add_menu(target: GradeTarget, missing: Vec<&'static Section>, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let weak = cx.weak_entity();
-    Button::new("grade-add").ghost().small().w_full().icon(Icon::new(IconName::Plus)).label("Add Correction").dropdown_caret(true).dropdown_menu(move |menu, _, _| {
-        missing.iter().fold(menu, |menu, &section| {
-            let weak = weak.clone();
-            menu.item(PopupMenuItem::new(section.title).icon(Icon::new(section.icon)).on_click(move |_, window, cx| {
-                weak.update(cx, |this, cx| add_section(this, target, section, window, cx)).ok();
-            }))
-        })
-    })
-}
-
-/// The switch at the top: grade the selected clip or the whole video, as one segmented control.
-fn target_switch(target: GradeTarget, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let choice = |id: &'static str, label: &'static str, which: GradeTarget, cx: &mut Context<Workspace>| {
-        Button::new(id)
-            .small()
-            .label(label)
-            .flex_1()
-            .map(|button| if target == which { button.primary() } else { button.ghost() })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.ui.grade_target = which;
-                cx.notify();
-            }))
+/// The card for a correction the clip doesn't have yet: folded at first (it holds only a note),
+/// with a + in its heading that adds it.
+fn missing_card(section: &'static Section, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let key = section.key;
+    // Unlike a correction's own card, this one starts folded; unfolding it is remembered.
+    let open = workspace.ui.toggled_sections.contains(key);
+    let add = heading_button(ElementId::Name(format!("grade-add:{key}").into()), IconName::Plus, "Add", false, cx.listener(move |this, _, window, cx| {
+        add_section(this, section, window, cx);
+    }));
+    let heading = CardHeading {
+        id: ElementId::Name(format!("{key}-heading").into()),
+        icon: Some(section.icon),
+        title: section.title.into(),
+        info: Some(section.about.into()),
+        open,
+        muted: false,
+        trailing: vec![Some(add.into_any_element())],
     };
-    div()
-        .flex()
-        .gap_0p5()
-        .p_0p5()
-        .rounded(px(7.0))
-        .bg(hsla(color::INSET))
-        .child(choice("grade-target-clip", "This Clip", GradeTarget::Clip, cx))
-        .child(choice("grade-target-video", "Whole Video", GradeTarget::Video, cx))
-}
-
-/// The line under the switch: what is being graded.
-fn target_line(target: GradeTarget, layer_name: Option<&str>) -> impl IntoElement {
-    let (icon, text) = match (target, layer_name) {
-        (GradeTarget::Clip, Some(name)) => (IconName::Film, name.to_owned()),
-        (GradeTarget::Clip, None) => (IconName::Film, "Select one clip in the timeline to grade it.".to_owned()),
-        (GradeTarget::Video, Some(name)) => (IconName::Layers, format!("{name} · over everything below it")),
-        (GradeTarget::Video, None) => (IconName::Layers, "A Color Grade layer goes on top, over the whole video.".to_owned()),
-    };
-    div()
-        .flex()
-        .items_center()
-        .gap_1p5()
-        .py_1()
-        .text_size(px(size::SMALL_TEXT))
-        .text_color(hsla(if layer_name.is_some() { color::TEXT } else { color::MUTED }))
-        .child(Icon::new(icon).size(px(12.0)).text_color(hsla(color::MUTED)))
-        .child(div().min_w_0().truncate().child(text))
+    let body = open.then(|| super::properties::add_note().into_any_element());
+    card(heading, cx.listener(move |this, _, _, cx| {
+        this.ui.toggle_section(key);
+        cx.notify();
+    }), body)
+    .into_any_element()
 }
 
 pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    let target = workspace.ui.grade_target;
-    let layer = workspace.state.grade_layer(target);
-    let layer_name = layer.and_then(|id| workspace.state.composition().layer(id)).map(|layer| layer.name.clone());
-    let mut list = card_list("color-grade")
-        .child(workspace.ui.grade_bounds.probe())
-        .child(list_row().flex().flex_col().gap_1().child(target_switch(target, cx)).child(target_line(target, layer_name.as_deref())));
-    if target == GradeTarget::Clip && layer.is_none() {
-        return list.child(list_row().child(add_tiles(target, false, cx))).into_any_element();
-    }
-    // The corrections there are, in the order their effects apply.
-    let mut shown: Vec<(usize, Id, Id, &'static Section)> = Vec::new();
-    if let Some(layer) = layer {
-        let effects = workspace.state.composition().layer(layer).map(|layer| layer.effects.as_slice()).unwrap_or_default();
-        for section in &SECTIONS {
-            if let Some(effect) = workspace.state.effect_named(layer, section.effect) {
-                let order = effects.iter().position(|candidate| candidate.id == effect).unwrap_or(usize::MAX);
-                shown.push((order, layer, effect, section));
-            }
+    let list = card_list("color-grade").child(workspace.ui.grade_bounds.probe());
+    let Some(layer) = workspace.state.grade_layer() else {
+        let hint = "Select a clip to grade it. To grade the whole video, select an adjustment layer over it.";
+        return list.child(list_row().child(super::properties::status_line(hint))).into_any_element();
+    };
+    // The corrections the clip has, in the order their effects apply, then the ones it hasn't.
+    let effects = workspace.state.composition().layer(layer).map(|layer| layer.effects.as_slice()).unwrap_or_default();
+    let mut added: Vec<(usize, Id, &'static Section)> = Vec::new();
+    let mut missing: Vec<&'static Section> = Vec::new();
+    for section in &SECTIONS {
+        match workspace.state.effect_named(layer, section.effect) {
+            Some(effect) => added.push((effects.iter().position(|candidate| candidate.id == effect).unwrap_or(usize::MAX), effect, section)),
+            None => missing.push(section),
         }
     }
-    shown.sort_by_key(|&(order, ..)| order);
-    if shown.is_empty() {
-        return list.child(list_row().child(add_tiles(target, true, cx))).into_any_element();
-    }
-    for (_, layer, effect, section) in shown {
-        list = list.child(section_card(section, layer, effect, workspace, cx));
-    }
-    let missing = addable(layer, workspace);
-    list.when(!missing.is_empty(), |list| list.child(list_row().child(add_menu(target, missing, cx)))).into_any_element()
+    added.sort_by_key(|&(order, ..)| order);
+    let mut cards: Vec<AnyElement> = added.into_iter().map(|(_, effect, section)| section_card(section, layer, effect, workspace, cx)).collect();
+    cards.extend(missing.into_iter().map(|section| missing_card(section, workspace, cx)));
+    list.children(cards).into_any_element()
 }
 
 #[cfg(test)]

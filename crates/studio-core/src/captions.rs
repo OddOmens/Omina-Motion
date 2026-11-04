@@ -59,6 +59,14 @@ pub struct CaptionStyle {
     pub uppercase: bool,
     /// A box behind the text, as social captions often have.
     pub background: Option<Rgba>,
+    /// Sync: how many frames later (or, negative, earlier) every caption shows than its
+    /// words' times, to line captions up with the sound. Kept when another look is applied.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 /// The most words a phrase can hold.
@@ -71,7 +79,7 @@ const ANIMATION_TIME: f64 = 0.15;
 impl Default for CaptionStyle {
     fn default() -> Self {
         let text = TextStyle { font_size: 72.0, line_height: 86.0, font_weight: 800, stroke: Some((Rgba::hex(0x000000), 6.0)), ..TextStyle::default() };
-        Self { text, highlight: Rgba::hex(0xd4f25c), animation: CaptionAnimation::default(), words_per_phrase: 3, uppercase: true, background: None }
+        Self { text, highlight: Rgba::hex(0xd4f25c), animation: CaptionAnimation::default(), words_per_phrase: 3, uppercase: true, background: None, offset: 0 }
     }
 }
 
@@ -88,12 +96,12 @@ pub fn presets() -> Vec<(&'static str, CaptionStyle)> {
         ..TextStyle::default()
     };
     vec![
-        ("Bold Pop", CaptionStyle { text: text("Avenir Next", 800, 80.0, 0xffffff, Some((0x000000, 7.0))), highlight: Rgba::hex(0xfacc15), animation: CaptionAnimation::Pop, words_per_phrase: 3, uppercase: true, background: None }),
-        ("Karaoke", CaptionStyle { text: text("Helvetica Neue", 800, 72.0, 0xffffff, Some((0x000000, 6.0))), highlight: Rgba::hex(0x22c55e), animation: CaptionAnimation::Highlight, words_per_phrase: 4, uppercase: true, background: None }),
-        ("One Word", CaptionStyle { text: text("Impact", 400, 110.0, 0xffffff, Some((0x000000, 8.0))), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::Pop, words_per_phrase: 1, uppercase: true, background: None }),
-        ("Boxed", CaptionStyle { text: text("Avenir Next", 700, 60.0, 0x111111, None), highlight: Rgba::hex(0x7c3aed), animation: CaptionAnimation::Highlight, words_per_phrase: 4, uppercase: false, background: Some(Rgba::hex(0xffffff)) }),
-        ("Word by Word", CaptionStyle { text: text("Futura", 700, 70.0, 0xffffff, Some((0x000000, 5.0))), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::WordByWord, words_per_phrase: 5, uppercase: false, background: None }),
-        ("Subtitle", CaptionStyle { text: text("Helvetica Neue", 500, 48.0, 0xffffff, None), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::Fade, words_per_phrase: 8, uppercase: false, background: Some(Rgba::hex(0x000000).with_alpha(0.65)) }),
+        ("Bold Pop", CaptionStyle { text: text("Avenir Next", 800, 80.0, 0xffffff, Some((0x000000, 7.0))), highlight: Rgba::hex(0xfacc15), animation: CaptionAnimation::Pop, words_per_phrase: 3, uppercase: true, background: None, offset: 0 }),
+        ("Karaoke", CaptionStyle { text: text("Helvetica Neue", 800, 72.0, 0xffffff, Some((0x000000, 6.0))), highlight: Rgba::hex(0x22c55e), animation: CaptionAnimation::Highlight, words_per_phrase: 4, uppercase: true, background: None, offset: 0 }),
+        ("One Word", CaptionStyle { text: text("Impact", 400, 110.0, 0xffffff, Some((0x000000, 8.0))), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::Pop, words_per_phrase: 1, uppercase: true, background: None, offset: 0 }),
+        ("Boxed", CaptionStyle { text: text("Avenir Next", 700, 60.0, 0x111111, None), highlight: Rgba::hex(0x7c3aed), animation: CaptionAnimation::Highlight, words_per_phrase: 4, uppercase: false, background: Some(Rgba::hex(0xffffff)), offset: 0 }),
+        ("Word by Word", CaptionStyle { text: text("Futura", 700, 70.0, 0xffffff, Some((0x000000, 5.0))), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::WordByWord, words_per_phrase: 5, uppercase: false, background: None, offset: 0 }),
+        ("Subtitle", CaptionStyle { text: text("Helvetica Neue", 500, 48.0, 0xffffff, None), highlight: Rgba::hex(0xffffff), animation: CaptionAnimation::Fade, words_per_phrase: 8, uppercase: false, background: Some(Rgba::hex(0x000000).with_alpha(0.65)), offset: 0 }),
         ("Studio Default", base),
     ]
 }
@@ -136,6 +144,8 @@ pub fn phrases(words: &[CaptionWord], per_phrase: u32, fps: f64) -> Vec<std::ops
 
 /// What a caption layer shows at `frame` (from its start frame), or `None` between phrases.
 pub fn frame_at(words: &[CaptionWord], style: &CaptionStyle, frame: i64, fps: f64) -> Option<CaptionFrame> {
+    // Sync: shown `offset` frames after the words' own times.
+    let frame = frame - style.offset;
     let groups = phrases(words, style.words_per_phrase, fps);
     // A phrase stays up from its first word until the next phrase starts, or a pause after it.
     let hold = (PHRASE_PAUSE * fps).round() as i64;
@@ -174,9 +184,69 @@ pub fn frame_at(words: &[CaptionWord], style: &CaptionStyle, frame: i64, fps: f6
     Some(CaptionFrame { words: words_shown, opacity, scale })
 }
 
+/// Moves one end of the phrase made of `words[range]` to `frame` (from the layer's start):
+/// its start with `start`, else its end. The phrase's words stretch or squeeze to fit, keeping
+/// their share of it; it can't overlap the words either side of it, and each word keeps at
+/// least one frame. Returns whether anything changed.
+pub fn retime_phrase(words: &mut [CaptionWord], range: std::ops::Range<usize>, start: bool, frame: i64) -> bool {
+    if range.start >= range.end || range.end > words.len() {
+        return false;
+    }
+    let count = (range.end - range.start) as i64;
+    let (old_start, old_end) = (words[range.start].start, words[range.end - 1].end);
+    let (new_start, new_end) = if start {
+        let earliest = if range.start > 0 { words[range.start - 1].end } else { i64::MIN / 4 };
+        (frame.clamp(earliest, old_end - count), old_end)
+    } else {
+        let latest = words.get(range.end).map_or(i64::MAX / 4, |next| next.start);
+        (old_start, frame.clamp(old_start + count, latest.max(old_start + count)))
+    };
+    if (new_start, new_end) == (old_start, old_end) {
+        return false;
+    }
+    let span = (old_end - old_start).max(1) as f64;
+    let place = |at: i64| new_start + ((at - old_start) as f64 / span * (new_end - new_start) as f64).round() as i64;
+    let mut previous_end = new_start;
+    for (index, word) in words[range.clone()].iter_mut().enumerate() {
+        let remaining = count - index as i64;
+        word.start = place(word.start).max(previous_end).min(new_end - remaining);
+        word.end = place(word.end).max(word.start + 1).min(new_end - remaining + 1);
+        previous_end = word.end;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_shows_every_caption_later_or_earlier() {
+        let words = [word("hello", 10, 20)];
+        let later = CaptionStyle { offset: 30, ..CaptionStyle::default() };
+        assert!(frame_at(&words, &later, 15, 24.0).is_none(), "not yet");
+        assert!(frame_at(&words, &later, 45, 24.0).is_some(), "thirty frames later");
+        let earlier = CaptionStyle { offset: -10, ..CaptionStyle::default() };
+        assert!(frame_at(&words, &earlier, 2, 24.0).is_some());
+    }
+
+    #[test]
+    fn a_phrase_retimes_without_crossing_its_neighbors() {
+        let mut words = vec![word("a", 0, 10), word("b", 20, 30), word("c", 30, 40), word("d", 50, 60)];
+        // Start the middle phrase (b c) five frames earlier: both words stretch to fill it.
+        assert!(retime_phrase(&mut words, 1..3, true, 15));
+        assert_eq!((words[1].start, words[2].end), (15, 40));
+        assert!(words[1].end <= words[2].start && words[1].end > 15);
+        // It can't start before the word before it ends, or end after the next one starts.
+        retime_phrase(&mut words, 1..3, true, 0);
+        assert_eq!(words[1].start, 10);
+        retime_phrase(&mut words, 1..3, false, 99);
+        assert_eq!(words[2].end, 50);
+        // Each word keeps at least a frame.
+        retime_phrase(&mut words, 1..3, false, 0);
+        assert_eq!((words[1].start, words[1].end, words[2].start, words[2].end), (10, 11, 11, 12));
+        assert!(!retime_phrase(&mut words, 3..9, true, 0), "a range outside the words does nothing");
+    }
 
     fn word(text: &str, start: i64, end: i64) -> CaptionWord {
         CaptionWord { text: text.into(), start, end }

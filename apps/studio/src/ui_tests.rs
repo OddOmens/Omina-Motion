@@ -289,7 +289,7 @@ fn the_type_tool_places_text_and_typing_sets_it(cx: &mut TestAppContext) {
     render(visual);
     visual.update(|window, cx| {
         window.input("Hello", cx);
-        window.press("enter", cx);
+        window.press("cmd-enter", cx);
     });
     render(visual);
     visual.update(|_, cx| {
@@ -316,7 +316,7 @@ fn typing_in_a_field_never_triggers_editor_shortcuts(cx: &mut TestAppContext) {
         for key in ["s", "space", "v", "alt-["] {
             window.press(key, cx);
         }
-        window.press("enter", cx);
+        window.press("cmd-enter", cx);
     });
     render(visual);
     visual.update(|_, cx| {
@@ -802,6 +802,65 @@ fn exporting_writes_the_chosen_format_in_the_background(cx: &mut TestAppContext)
     let movie = folder.join("Main Comp.mov");
     let info = studio_media::probe(&movie).unwrap();
     assert_eq!((info.codec.as_str(), info.width, info.height, info.frame_count), ("prores", 960, 540, 12), "half size, as chosen");
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
+fn the_export_preview_shows_the_frame_picked_on_its_scrubber(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // The work area is frames 0–11 and the playhead is at 0.
+    open_export_dialog(&workspace, visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.export_preview.drawn_frame(), Some(0), "the playhead's frame is drawn"));
+    click_at_fraction(visual, "export-scrub", (0.999, 0.5));
+    render(visual);
+    visual.update(|_, cx| {
+        let preview = &workspace.read(cx).ui.export_preview;
+        assert_eq!((preview.frame, preview.drawn_frame()), (Some(11), Some(11)), "the end of the scrubber is the last exported frame");
+    });
+    visual.update(|window, cx| window.click("export-preview-back", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.export_preview.drawn_frame(), Some(10), "the arrow steps back one frame"));
+    // Exporting the whole composition widens what the scrubber covers.
+    visual.update(|window, cx| window.click("export-whole", cx));
+    render(visual);
+    click_at_fraction(visual, "export-scrub", (0.999, 0.5));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.ui.export_preview.frame, Some(ws.state.composition().duration_frames - 1));
+    });
+}
+
+#[gpui_kit::test]
+fn a_gif_export_runs_at_the_chosen_frame_rate_without_sound(cx: &mut TestAppContext) {
+    let folder = scratch_folder("export-gif");
+    let (workspace, visual) = open(cx);
+    open_export_dialog(&workspace, visual);
+    visual.update(|window, cx| window.click("export-format", cx));
+    render(visual);
+    click_label(visual, "Animated GIF");
+    render(visual);
+    // GIF has fixed quality and no sound.
+    assert!(visual.update(|window, _| window.try_find("export-quality")).is_none());
+    visual.update(|window, cx| window.click("export-frame-rate", cx));
+    render(visual);
+    click_label(visual, "15 fps");
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.export_choice.frame_rate, Some(studio_core::time::FrameRate::new(15, 1))));
+    visual.update(|window, cx| window.click("export-size", cx));
+    render(visual);
+    click_label(visual, "Quarter (480 × 270)");
+    render(visual);
+    click_label(visual, "Export…");
+    visual.run_until_parked();
+    visual.simulate_new_path_selection(|_| Some(folder.join("Loop")));
+    visual.run_until_parked();
+    render(visual);
+    wait_for_export(&workspace, visual);
+
+    let gif = std::fs::read(folder.join("Loop.gif")).expect("saved with the .gif extension");
+    assert_eq!(&gif[..6], b"GIF89a");
+    assert_eq!((u16::from_le_bytes([gif[6], gif[7]]), u16::from_le_bytes([gif[8], gif[9]])), (480, 270), "quarter size");
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
@@ -1471,12 +1530,23 @@ fn dragging_an_effect_onto_a_clip_adds_it(cx: &mut TestAppContext) {
     tall_window(visual);
     visual.update(|window, cx| window.click("rail-effects", cx));
     render(visual);
+    open_effect_category(visual, "Gaussian Blur");
     let from = center_of(visual, "effect:Gaussian Blur");
     let to = center_of(visual, ("clip", TITLE.0 as usize));
     visual.update(|window, cx| window.drag(from, to, cx));
     render(visual);
     let effects = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.len());
     assert_eq!(effects, 1, "the blur was added to the title");
+}
+
+/// Unfolds the Effects panel category that lists `effect` (categories start folded).
+fn open_effect_category(visual: &mut VisualTestContext, effect: &str) {
+    let index = studio_core::effects::CATEGORIES
+        .iter()
+        .position(|category| category.effects.iter().any(|definition| definition.name == effect))
+        .expect("the effect is in a category");
+    visual.update(|window, cx| window.click(("effect-category", index), cx));
+    render(visual);
 }
 
 #[gpui_kit::test]
@@ -1487,10 +1557,9 @@ fn the_plus_button_adds_an_effect_to_the_selected_clip(cx: &mut TestAppContext) 
     // With nothing selected there is nothing to apply to, so there is no + button.
     assert!(visual.update(|window, _| window.try_find("effect-apply:Sharpen")).is_none());
     visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.select_layer(TITLE, false); cx.notify(); }));
-    // Transitions are listed first; fold them away so Sharpen is in view.
+    // Categories start folded: unfold the one Sharpen is in.
     render(visual);
-    visual.update(|window, cx| window.click("transitions-category", cx));
-    render(visual);
+    open_effect_category(visual, "Sharpen");
     visual.update(|window, cx| window.click("effect-apply:Sharpen", cx));
     render(visual);
     let names = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.iter().map(|e| e.name.clone()).collect::<Vec<_>>());
@@ -1502,6 +1571,11 @@ fn only_effects_that_suit_the_selected_clip_are_listed(cx: &mut TestAppContext) 
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.click("rail-effects", cx));
     let listed = |visual: &mut VisualTestContext, name: &str| visual.update(|window, _| window.try_find(ElementId::Name(format!("effect:{name}").into())).is_some());
+    // Unfold every category, so whatever is offered is listed.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.open_effect_categories.extend(studio_core::effects::CATEGORIES.iter().map(|category| category.name));
+        cx.notify();
+    }));
     render(visual);
     assert!(listed(visual, "Exposure") && listed(visual, "Gaussian Blur"), "everything shows with nothing selected");
     assert!(listed(visual, "Stroke") && listed(visual, "Linear Color Key"), "effects the renderer now draws are listed");
@@ -1522,6 +1596,8 @@ fn the_rail_switches_the_side_panel(cx: &mut TestAppContext) {
     let (_workspace, visual) = open(cx);
     visual.update(|window, cx| window.click("rail-effects", cx));
     render(visual);
+    assert!(visual.update(|window, _| window.try_find("effect:Gaussian Blur")).is_none(), "categories start folded");
+    open_effect_category(visual, "Gaussian Blur");
     assert!(visual.update(|window, _| window.try_find("effect:Gaussian Blur")).is_some());
     visual.update(|window, cx| window.click("rail-media", cx));
     render(visual);
@@ -2069,6 +2145,173 @@ fn the_anchor_grid_is_three_by_three(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_type_tool_types_a_new_text_layer_where_clicked(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // As in the app, Properties sections start folded, so typing can't rely on its Text card.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.sections_start_open = false;
+        ws.ui.tool = crate::workspace::Tool::Type;
+        cx.notify();
+    }));
+    render(visual);
+    let at = screen_point(&workspace, visual, Vec2::new(400.0, 300.0));
+    click_at(visual, at);
+    visual.run_until_parked();
+    render(visual);
+    // The field opens in the viewer, over where the text goes.
+    let editing = visual.update(|_, cx| workspace.read(cx).ui.editing.as_ref().map(|editing| editing.in_viewer));
+    assert_eq!(editing, Some(true));
+    let layer = visual.update(|_, cx| workspace.read(cx).state.selected_layers[0]);
+    let width = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().size.x);
+    let empty_width = width(visual);
+    visual.update(|window, cx| window.input("Hello", cx));
+    render(visual);
+    // Before Enter, the viewer already draws the typed text in the layer's own style (its box
+    // grows to what was drawn), while the project's text is unchanged until it is committed.
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.text_of(layer).unwrap().0, ""));
+    assert!(width(visual) > empty_width + 20.0, "drawn live: {} then {}", empty_width, width(visual));
+    // Return starts a new line, as in After Effects, rather than finishing.
+    let height = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().size.y);
+    let one_line = height(visual);
+    visual.update(|window, cx| window.press("enter", cx));
+    visual.update(|window, cx| window.input("World", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.editing.is_some(), "still typing"));
+    assert!(height(visual) > one_line * 1.5, "the text stacks: {one_line} then {}", height(visual));
+    // Escape finishes, keeping what was typed.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.editing.is_none(), "Escape finished typing"));
+    let typed = visual.update(|_, cx| workspace.read(cx).state.text_of(layer).map(|(text, _)| text.to_owned()));
+    assert_eq!(typed.as_deref(), Some("Hello\nWorld"));
+}
+
+#[gpui_kit::test]
+fn the_type_tool_edits_a_text_layer_it_clicks_with_the_caret_there(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    // The title starts at frame 24 and is centered in the frame.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_current_frame(40);
+        ws.ui.tool = crate::workspace::Tool::Type;
+        cx.notify();
+    }));
+    render(visual);
+    let (before, layers) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.text_of(TITLE).unwrap().0.to_owned(), state.composition().layers.len())
+    });
+    let at = screen_point(&workspace, visual, Vec2::new(960.0, 540.0));
+    click_at(visual, at);
+    visual.run_until_parked();
+    render(visual);
+    let (editing, caret, layers_now) = visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        let editing = ws.ui.editing.as_ref().map(|editing| (editing.target, editing.in_viewer));
+        let caret = ws.ui.editing.as_ref().map(|editing| editing.input.selected_range(cx));
+        (editing, caret, ws.state.composition().layers.len())
+    });
+    assert_eq!(editing, Some((crate::workspace::EditTarget::SourceText(TITLE), true)), "it edits the title");
+    assert_eq!(layers_now, layers, "rather than making a new text layer");
+    let caret = caret.unwrap();
+    assert!(caret.is_empty() && caret.start > 0 && caret.start < before.len(), "a caret inside the text, where clicked: {caret:?} in {before:?}");
+    visual.update(|window, cx| window.input("X", cx));
+    visual.update(|window, cx| window.press("cmd-enter", cx));
+    render(visual);
+    let after = visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().0.to_owned());
+    assert_eq!(after, format!("{}X{}", &before[..caret.start], &before[caret.start..]), "typed at the caret, keeping the rest");
+}
+
+#[gpui_kit::test]
+fn text_being_typed_selects_by_double_click_and_drag_and_a_click_off_it_finishes(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_current_frame(40);
+        ws.ui.tool = crate::workspace::Tool::Type;
+        cx.notify();
+    }));
+    render(visual);
+    let at = screen_point(&workspace, visual, Vec2::new(960.0, 540.0));
+    click_at(visual, at);
+    visual.run_until_parked();
+    render(visual);
+    let text = visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().0.to_owned());
+    let selected = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.editing.as_ref().map(|editing| editing.input.selected_range(cx)));
+    // A double-click on the text selects the word under it, and typing goes on.
+    let offset = point(at.x - visual.update(|window, _| window.find("viewer").bounds().origin.x), at.y - visual.update(|window, _| window.find("viewer").bounds().origin.y));
+    visual.update(|window, cx| window.click_with_options("viewer", gpui_kit::test::ClickOptions::new().with_count(2).with_offset(offset), cx));
+    render(visual);
+    assert_eq!(selected(visual), Some(0..text.len()), "the title is one word: {text:?}");
+    // Dragging from the text's left edge to the middle selects that much.
+    let (left, middle) = visual.update(|_, cx| {
+        let comp = workspace.read(cx).state.composition();
+        let corners = studio_core::transform::layer_corners(comp, TITLE, 40.0).unwrap();
+        (corners[0] + (corners[3] - corners[0]) * 0.5, (corners[0] + corners[2]) * 0.5)
+    });
+    let (from, to) = (screen_point(&workspace, visual, left), screen_point(&workspace, visual, middle));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+    let range = selected(visual).unwrap();
+    assert!(range.start == 0 && range.end > 0 && range.end < text.len(), "part of the title: {range:?}");
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.editing.is_some(), "still typing"));
+    // A click off the text (near the frame's corner) finishes the title; with the Type tool, as
+    // in After Effects, it also starts a new text layer there.
+    let corner = screen_point(&workspace, visual, Vec2::new(40.0, 40.0));
+    click_at(visual, corner);
+    visual.run_until_parked();
+    render(visual);
+    let target = visual.update(|_, cx| workspace.read(cx).ui.editing.as_ref().map(|editing| editing.target));
+    assert!(target.is_some_and(|target| target != crate::workspace::EditTarget::SourceText(TITLE)), "the title is finished: {target:?}");
+}
+
+#[gpui_kit::test]
+fn text_animation_comes_in_by_the_chosen_piece_and_can_be_tuned(cx: &mut TestAppContext) {
+    use studio_core::presets::Phase;
+    use studio_core::text_animation::{TextMotion, TextUnit};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 0);
+        cx.notify();
+    }));
+    render(visual);
+    let animator = |visual: &mut VisualTestContext, phase| visual.update(|_, cx| workspace.read(cx).state.text_animator(TITLE, phase));
+    // The heading's + adds an In animation: rising by character to start.
+    visual.update(|window, cx| window.click("text-animation-add", cx));
+    render(visual);
+    click_label(visual, "Animate In");
+    render(visual);
+    assert_eq!(animator(visual, Phase::In).map(|a| (a.motion, a.unit)), Some((TextMotion::Rise, TextUnit::Character)));
+    // By word, popping in.
+    visual.update(|window, cx| window.click(ElementId::Name("text-animation-in-unit-Word".into()), cx));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("text-animation-in-motion".into()), cx));
+    render(visual);
+    click_label(visual, "Pop");
+    render(visual);
+    assert_eq!(animator(visual, Phase::In).map(|a| (a.motion, a.unit)), Some((TextMotion::Pop, TextUnit::Word)));
+    // Its duration is typed like any value.
+    visual.update(|window, cx| window.click(field_id(FieldTarget::TextAnimationSeconds { layer: TITLE, phase: Phase::In }), cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("2.5", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    assert_eq!(animator(visual, Phase::In).map(|a| a.seconds), Some(2.5));
+    // The Out animation is separate; Remove takes the In one off.
+    visual.update(|window, cx| window.click("text-animation-add", cx));
+    render(visual);
+    click_label(visual, "Animate Out");
+    render(visual);
+    assert!(animator(visual, Phase::Out).is_some());
+    visual.update(|window, cx| window.click(ElementId::Name("text-animation-in-remove".into()), cx));
+    render(visual);
+    assert_eq!(animator(visual, Phase::In), None);
+    assert!(animator(visual, Phase::Out).is_some(), "the Out one stays");
+}
+
+#[gpui_kit::test]
 fn double_clicking_text_in_the_viewer_edits_it_there(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     // The title starts at frame 24.
@@ -2083,7 +2326,7 @@ fn double_clicking_text_in_the_viewer_edits_it_there(cx: &mut TestAppContext) {
     assert_eq!(editing, Some((crate::workspace::EditTarget::SourceText(TITLE), true)));
     visual.update(|window, cx| window.press("cmd-a", cx));
     visual.update(|window, cx| window.input("SALE", cx));
-    visual.update(|window, cx| window.press("enter", cx));
+    visual.update(|window, cx| window.press("cmd-enter", cx));
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().0.to_owned()), "SALE");
 }
@@ -2096,6 +2339,7 @@ fn an_effect_dropped_on_the_viewer_goes_on_the_layer_under_it(cx: &mut TestAppCo
     render(visual);
     visual.update(|window, cx| window.click("rail-effects", cx));
     render(visual);
+    open_effect_category(visual, "Gaussian Blur");
     let from = center_of(visual, "effect:Gaussian Blur");
     let to = screen_point(&workspace, visual, Vec2::new(960.0, 540.0));
     visual.update(|window, cx| window.drag(from, to, cx));
@@ -2259,6 +2503,41 @@ fn a_phrase_in_the_transcript_can_be_corrected(cx: &mut TestAppContext) {
     render(visual);
     let words: Vec<String> = visual.update(|_, cx| workspace.read(cx).state.caption_words(layer).unwrap().iter().map(|w| w.text.clone()).collect());
     assert_eq!(words, ["make", "it", "shine."]);
+}
+
+#[gpui_kit::test]
+fn caption_timing_can_be_synced_and_each_phrase_retimed(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let layer = add_test_captions(&workspace, visual);
+    let type_into = |visual: &mut VisualTestContext, target: FieldTarget, value: &str| {
+        visual.update(|window, cx| window.click(field_id(target), cx));
+        render(visual);
+        visual.update(|window, cx| {
+            window.press("cmd-a", cx);
+            window.input(value, cx);
+            window.press("enter", cx);
+        });
+        render(visual);
+    };
+    let phrase = |visual: &mut VisualTestContext, start| visual.update(|_, cx| workspace.read(cx).state.caption_phrase_frame(layer, 0..3, start).unwrap());
+    let first_shown = phrase(visual, true);
+    // Sync: every caption shows 12 frames later; the words keep their own times.
+    type_into(visual, FieldTarget::CaptionSync { layer }, "12");
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.caption_style(layer).unwrap().offset, 12));
+    assert_eq!(phrase(visual, true), first_shown + 12, "the phrase now shows later");
+    // A new look keeps the sync.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let look = studio_core::captions::presets()[0].1.clone();
+        ws.state.edit_captions(layer, |current| *current = studio_core::captions::CaptionStyle { offset: current.offset, ..look });
+    }));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.caption_style(layer).unwrap().offset, 12));
+    // The phrase's end is typed in seconds of the composition; its words squeeze to fit.
+    let fps = visual.update(|_, cx| workspace.read(cx).state.composition().frame_rate.fps());
+    let end_frame = phrase(visual, true) + 20;
+    type_into(visual, FieldTarget::CaptionPhrase { layer, first: 0, end: 3, start: false }, &format!("{:.4}", end_frame as f64 / fps));
+    assert_eq!(phrase(visual, false), end_frame);
+    let words = visual.update(|_, cx| workspace.read(cx).state.caption_words(layer).unwrap().to_vec());
+    assert!(words.windows(2).all(|pair| pair[0].end <= pair[1].start) && words.iter().all(|word| word.end > word.start), "{words:?}");
 }
 
 // Nested compositions ---------------------------------------------------------------------------
@@ -3043,6 +3322,8 @@ fn a_transitions_plus_puts_it_on_the_selected_clip(cx: &mut TestAppContext) {
     }));
     visual.update(|window, cx| window.click("rail-effects", cx));
     render(visual);
+    visual.update(|window, cx| window.click("transitions-category", cx));
+    render(visual);
     // Cross Dissolve is the first; the title has nothing touching it, so it fades in.
     visual.update(|window, cx| window.click(("transition-apply", 0_usize), cx));
     render(visual);
@@ -3545,22 +3826,26 @@ fn the_eyedropper_tool_keeps_a_current_color_to_apply_and_save(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
-fn the_color_tab_grades_the_whole_video_on_its_adjustment_layer(cx: &mut TestAppContext) {
+fn the_color_tab_grades_an_adjustment_layer_over_the_whole_video(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     tall_window(visual);
     visual.update(|window, cx| window.click("tab:Properties:2", cx));
     render(visual);
-    visual.update(|window, cx| window.click("grade-target-video", cx));
+    // With nothing selected there is nothing to grade, so no corrections are offered.
+    visual.update(|window, _| assert!(window.try_find("grade-add:grade-basic").is_none()));
+    // The whole video is graded by grading an adjustment layer over it.
+    let grade = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let grade = ws.state.add_adjustment_layer().unwrap();
+        cx.notify();
+        grade
+    }));
     render(visual);
-    // The panel starts empty; Add Correction adds a section.
-    visual.update(|window, _| assert!(window.try_find("grade-basic-heading").is_none()));
+    // Every correction is a card; one the layer doesn't have yet has a + to add it.
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.effect_named(grade, "Basic Correction"), None));
     visual.update(|window, cx| window.click("grade-add:grade-basic", cx));
     render(visual);
-    let (grade, basic) = visual.update(|_, cx| {
-        let state = &workspace.read(cx).state;
-        let grade = state.grade_layer(crate::state::GradeTarget::Video).unwrap();
-        (grade, state.effect_named(grade, "Basic Correction").unwrap())
-    });
+    visual.update(|window, _| assert!(window.try_find("grade-add:grade-basic").is_none(), "added, so its + gives way to its own buttons"));
+    let basic = visual.update(|_, cx| workspace.read(cx).state.effect_named(grade, "Basic Correction").unwrap());
     // Its controls are the effect's parameters: typing a temperature sets it.
     let temperature = FieldTarget::Property { layer: grade, path: PropertyPath::Effect { effect: basic, parameter: 0 }, component: 0 };
     visual.update(|window, cx| window.click(field_id(temperature), cx));
@@ -3629,15 +3914,18 @@ fn the_color_tabs_lut_browser_shows_each_look_on_the_frame_and_picks_one(cx: &mu
     visual.update(|window, cx| window.click(ElementId::Name(format!("lut-browse:{}", effect.0).into()), cx));
     render(visual);
     visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.lut_browser, None));
-    // With a correction added, the tiles give way to the Add Correction menu, which offers
-    // only what isn't there yet.
+    // The LUT card has its own buttons now; the corrections not added yet still offer a +.
     visual.update(|window, _| {
-        assert!(window.try_find("grade-add:grade-basic").is_none());
-        assert!(window.try_find("grade-add").is_some());
+        assert!(window.try_find("grade-add:grade-lut").is_none());
+        assert!(window.try_find("grade-add:grade-basic").is_some());
     });
-    visual.update(|window, cx| window.click("grade-add", cx));
+    // A correction not added yet starts folded, and unfolds like any card (to a note on how to add it).
+    let unfolded = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.toggled_sections.contains("grade-levels"));
+    assert!(!unfolded(visual));
+    visual.update(|window, cx| window.click("grade-levels-heading", cx));
     render(visual);
-    click_label(visual, "Levels");
+    assert!(unfolded(visual));
+    visual.update(|window, cx| window.click("grade-add:grade-levels", cx));
     render(visual);
     visual.update(|_, cx| assert!(workspace.read(cx).state.effect_named(A_CAM, "Levels").is_some()));
 }
@@ -3716,9 +4004,8 @@ fn hovering_a_lut_previews_it_in_the_viewer_without_changing_the_project(cx: &mu
     visual.update(|window, cx| window.click("rail-effects", cx));
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.state.select_layer(A_CAM, false);
-        // Fold the other categories so the LUTs are in view.
-        ws.ui.closed_effect_categories.extend(studio_core::effects::CATEGORIES.iter().map(|category| category.name));
-        ws.ui.closed_effect_categories.insert("Transitions");
+        // Categories start folded; unfold the LUTs.
+        ws.ui.open_effect_categories.insert("LUTs");
         cx.notify();
     }));
     render(visual);
@@ -3761,9 +4048,8 @@ fn luts_go_on_clips_from_the_effects_panel_and_change_in_effect_controls(cx: &mu
     visual.update(|window, cx| window.click("rail-effects", cx));
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.state.select_layer(A_CAM, false);
-        // Fold the other categories so the LUTs are in view.
-        ws.ui.closed_effect_categories.extend(studio_core::effects::CATEGORIES.iter().map(|category| category.name));
-        ws.ui.closed_effect_categories.insert("Transitions");
+        // Categories start folded; unfold the LUTs.
+        ws.ui.open_effect_categories.insert("LUTs");
         cx.notify();
     }));
     render(visual);
@@ -3785,14 +4071,6 @@ fn luts_go_on_clips_from_the_effects_panel_and_change_in_effect_controls(cx: &mu
     render(visual);
     assert_eq!(lut(visual), Some(studio_core::model::LutSource::Look("Moody Green".into())));
 
-    // New Adjustment Layer adds one over everything and selects it.
-    visual.update(|window, cx| window.click("new-adjustment-layer", cx));
-    render(visual);
-    let selected = visual.update(|_, cx| {
-        let state = &workspace.read(cx).state;
-        state.selected_layers.first().and_then(|id| state.composition().layer(*id)).map(|layer| layer.content.clone())
-    });
-    assert!(matches!(selected, Some(LayerContent::Adjustment)));
 }
 
 #[gpui_kit::test]

@@ -21,8 +21,8 @@ use crate::workspace::{EditTarget, PanelId, Workspace};
 
 /// A name that can be renamed in place: double-click it to type a new one.
 fn name_label(id: LinkId, name: &str, workspace: &Workspace, cx: &mut Context<Workspace>) -> gpui_kit::AnyElement {
-    if let Some(editing) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::LibraryName(id)) {
-        return div().flex_1().child(Input::new(&editing.input).xsmall()).into_any_element();
+    if let Some(input) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::LibraryName(id)).and_then(|editing| editing.input.line()) {
+        return div().flex_1().child(Input::new(input).xsmall()).into_any_element();
     }
     let current = name.to_owned();
     div()

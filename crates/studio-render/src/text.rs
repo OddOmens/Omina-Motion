@@ -19,6 +19,52 @@ pub struct TextImage {
     pub scale: f32,
 }
 
+/// Where a text layer's characters sit, for drawing a caret and selection over it and for
+/// finding the character under a click (see `TextRenderer::geometry`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextGeometry {
+    pub lines: Vec<TextLine>,
+}
+
+/// One line of text: its top and height, and the caret position between its characters, as
+/// (byte offset in the whole text, x).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextLine {
+    pub top: f32,
+    pub height: f32,
+    pub stops: Vec<(usize, f32)>,
+}
+
+impl TextGeometry {
+    /// The caret before byte `offset`: its x, and the top and height of its line.
+    pub fn caret(&self, offset: usize) -> (f32, f32, f32) {
+        // The last line whose first stop is at or before the offset holds it.
+        let line = self.lines.iter().rev().find(|line| line.stops.first().is_some_and(|&(at, _)| at <= offset)).unwrap_or(&self.lines[0]);
+        let x = line.stops.iter().rev().find(|&&(at, _)| at <= offset).or(line.stops.first()).map_or(0.0, |&(_, x)| x);
+        (x, line.top, line.height)
+    }
+
+    /// The rectangles a selection of bytes `range` covers, one per line: (left, top, width,
+    /// height).
+    pub fn highlight(&self, range: std::ops::Range<usize>) -> Vec<(f32, f32, f32, f32)> {
+        self.lines
+            .iter()
+            .filter_map(|line| {
+                let inside: Vec<f32> = line.stops.iter().filter(|&&(at, _)| at >= range.start && at <= range.end).map(|&(_, x)| x).collect();
+                let (left, right) = inside.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+                (inside.len() >= 2 && right > left).then_some((left, line.top, right - left, line.height))
+            })
+            .collect()
+    }
+
+    /// The byte offset of the caret stop nearest `(x, y)`: on the line at that height (the
+    /// first or last line when above or below the text).
+    pub fn hit(&self, x: f32, y: f32) -> usize {
+        let line = self.lines.iter().find(|line| y < line.top + line.height).unwrap_or_else(|| self.lines.last().expect("there is always a line"));
+        line.stops.iter().min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs())).map_or(0, |&(at, _)| at)
+    }
+}
+
 pub struct TextRenderer {
     fonts: FontSystem,
     glyphs: SwashCache,
@@ -85,6 +131,32 @@ impl TextRenderer {
         let (buffer, _) = self.layout(text, style, 1.0);
         let Some(run) = buffer.layout_runs().next() else { return (Vec::new(), 0.0) };
         (run.glyphs.iter().map(|glyph| (glyph.x, glyph.w)).collect(), run.line_y)
+    }
+
+    /// Where a caret and selection go in `text` as drawn with `style`, for editing it in place.
+    /// Positions are in the layer's source pixels, the same box the text is drawn in.
+    pub fn geometry(&mut self, text: &str, style: &TextStyle) -> TextGeometry {
+        let (buffer, _) = self.layout(text, style, 1.0);
+        // Byte offset in `text` where each line (split at line breaks, as the layout does) starts.
+        let mut line_starts = vec![0];
+        line_starts.extend(text.match_indices('\n').map(|(at, _)| at + 1));
+        let mut lines = Vec::new();
+        for run in buffer.layout_runs() {
+            let start = line_starts.get(run.line_i).copied().unwrap_or(text.len());
+            let line_text = &text[start..text[start..].find('\n').map_or(text.len(), |end| start + end)];
+            // A caret stop at every character boundary of the line, end included.
+            let stops = line_text
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain(std::iter::once(line_text.len()))
+                .map(|at| (start + at, run.cursor_position(&cosmic_text::Cursor::new(run.line_i, at)).unwrap_or(0.0)))
+                .collect();
+            lines.push(TextLine { top: run.line_top, height: run.line_height, stops });
+        }
+        if lines.is_empty() {
+            lines.push(TextLine { top: 0.0, height: style.line_height, stops: vec![(0, 0.0)] });
+        }
+        TextGeometry { lines }
     }
 
     /// Rasterizes the text at `scale` output pixels per source pixel.
@@ -317,6 +389,39 @@ mod tests {
         }
         assert!(left_white > 20 && left_red == 0, "the first word stays white");
         assert!(right_red > 20, "the second word is red");
+    }
+
+    #[test]
+    fn the_caret_follows_the_letters_and_clicks_find_them() {
+        let mut text = TextRenderer::new();
+        let size = text.measure("Hello", &style());
+        let geometry = text.geometry("Hello", &style());
+        let (start, top, height) = geometry.caret(0);
+        let (end, ..) = geometry.caret(5);
+        assert!(start.abs() < 1.0 && (end - size.x).abs() < 1.0, "from the left edge ({start}) to the right ({end} of {})", size.x);
+        assert!(top.abs() < 0.5 && (height - style().line_height).abs() < 0.5);
+        let (middle, ..) = geometry.caret(2);
+        assert!(middle > start && middle < end);
+        assert_eq!(geometry.hit(middle + 0.5, 5.0), 2, "a click finds the gap nearest it");
+        assert_eq!(geometry.hit(-50.0, 5.0), 0);
+        assert_eq!(geometry.hit(size.x + 50.0, 5.0), 5);
+        let rows = geometry.highlight(1..4);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].0 > start && rows[0].0 + rows[0].2 < end);
+    }
+
+    #[test]
+    fn a_second_line_has_its_own_carets() {
+        let mut text = TextRenderer::new();
+        let geometry = text.geometry("AB\nCD", &style());
+        assert_eq!(geometry.lines.len(), 2);
+        let (_, first_top, height) = geometry.caret(1);
+        let (_, second_top, _) = geometry.caret(4);
+        assert!((second_top - first_top - height).abs() < 0.5, "the next line is one line lower");
+        assert_eq!(geometry.hit(0.0, height * 1.5), 3, "a click on the second line's start");
+        assert_eq!(geometry.highlight(1..5).len(), 2, "a selection across the break covers both lines");
+        // Empty text still has a place for the caret.
+        assert_eq!(text.geometry("", &style()).caret(0).2, style().line_height);
     }
 
     #[test]

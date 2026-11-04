@@ -42,7 +42,6 @@ use studio_core::time::FrameRange;
 
 pub use captions::HeardWord;
 pub use cutout::CutoutSource;
-pub use grade::GradeTarget;
 pub use keyframes::KeyframeRef;
 pub use layer_time::LayerTimeEdit;
 pub use gradient::GradientEnd;
@@ -902,6 +901,30 @@ impl EditorState {
     pub fn set_layer_motion(&mut self, layer: Id, phase: studio_core::presets::Phase, motion: Option<studio_core::presets::Motion>, seconds: f32) {
         let comp = self.active_comp;
         studio_core::presets::set_motion(&mut self.project, comp, layer, phase, motion, seconds);
+    }
+
+    /// A text layer's In or Out text animator, if it has one.
+    pub fn text_animator(&self, layer: Id, phase: studio_core::presets::Phase) -> Option<studio_core::text_animation::TextAnimator> {
+        let animation = self.composition().layer(layer)?.animation;
+        match phase {
+            studio_core::presets::Phase::In => animation.text_in,
+            studio_core::presets::Phase::Out => animation.text_out,
+        }
+    }
+
+    /// Sets (or removes, with `None`) how a text layer's characters, words or lines come in or
+    /// go out.
+    pub fn set_text_animator(&mut self, layer: Id, phase: studio_core::presets::Phase, animator: Option<studio_core::text_animation::TextAnimator>) -> bool {
+        let comp = self.active_comp;
+        studio_core::text_animation::set_animator(&mut self.project, comp, layer, phase, animator)
+    }
+
+    /// Changes one setting of a text layer's In or Out text animator, if it has that animator.
+    pub fn edit_text_animator(&mut self, layer: Id, phase: studio_core::presets::Phase, change: impl FnOnce(&mut studio_core::text_animation::TextAnimator)) {
+        if let Some(mut animator) = self.text_animator(layer, phase) {
+            change(&mut animator);
+            self.set_text_animator(layer, phase, Some(animator));
+        }
     }
 
     /// Sets (or removes) what a layer does between coming in and going out.

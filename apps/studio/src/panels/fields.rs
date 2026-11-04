@@ -32,6 +32,15 @@ pub enum FieldTarget {
     MediaSize { layer: Id, side: usize },
     /// Where a gradient stop sits along a shape's gradient, as a percentage.
     GradientStop { layer: Id, slot: crate::state::PaintSlot, stop: usize },
+    /// How long a text layer's In or Out text animation takes, in seconds.
+    TextAnimationSeconds { layer: Id, phase: studio_core::presets::Phase },
+    /// How much the pieces of a text animation overlap, as a percentage.
+    TextAnimationOverlap { layer: Id, phase: studio_core::presets::Phase },
+    /// A caption layer's sync: how many frames later (negative, earlier) its captions show.
+    CaptionSync { layer: Id },
+    /// When the caption phrase made of words `first..end` starts (`start`) or ends, in
+    /// seconds of the composition.
+    CaptionPhrase { layer: Id, first: usize, end: usize, start: bool },
 }
 
 /// How a field's number is shown and how fast it scrubs.
@@ -108,6 +117,23 @@ impl FieldTarget {
                 let at = state.shape_gradient(layer, slot)?.stops().get(stop)?.at;
                 Some((at * 100.0, FieldFormat { step: 0.5, decimals: 1, unit: "%", rotation: false }))
             }
+            Self::TextAnimationSeconds { layer, phase } => {
+                let seconds = state.text_animator(layer, phase)?.seconds;
+                Some((seconds, FieldFormat { step: 0.01, decimals: 2, unit: " s", rotation: false }))
+            }
+            Self::TextAnimationOverlap { layer, phase } => {
+                let overlap = state.text_animator(layer, phase)?.overlap;
+                Some((overlap * 100.0, FieldFormat { step: 0.5, decimals: 0, unit: "%", rotation: false }))
+            }
+            Self::CaptionSync { layer } => {
+                let offset = state.caption_style(layer)?.offset;
+                Some((offset as f32, FieldFormat { step: 0.1, decimals: 0, unit: " fr", rotation: false }))
+            }
+            Self::CaptionPhrase { layer, first, end, start } => {
+                let frame = state.caption_phrase_frame(layer, first..end, start)?;
+                let fps = state.composition().frame_rate.fps();
+                Some(((frame as f64 / fps) as f32, FieldFormat { step: 0.005, decimals: 2, unit: " s", rotation: false }))
+            }
         }
     }
 
@@ -121,6 +147,13 @@ impl FieldTarget {
             Self::Speed { layer } => state.set_speed(layer, value),
             Self::MediaSize { layer, side } => state.set_media_size_side(layer, side, value),
             Self::GradientStop { layer, slot, stop } => state.set_gradient_stop_location(layer, slot, stop, value / 100.0),
+            Self::TextAnimationSeconds { layer, phase } => state.edit_text_animator(layer, phase, |animator| animator.seconds = value),
+            Self::TextAnimationOverlap { layer, phase } => state.edit_text_animator(layer, phase, |animator| animator.overlap = value / 100.0),
+            Self::CaptionSync { layer } => state.edit_captions(layer, |style| style.offset = value.round() as i64),
+            Self::CaptionPhrase { layer, first, end, start } => {
+                let frame = (f64::from(value) * state.composition().frame_rate.fps()).round() as i64;
+                state.retime_caption_phrase(layer, first..end, start, frame);
+            }
         }
     }
 
@@ -169,8 +202,8 @@ impl Workspace {
 pub fn value_field(target: FieldTarget, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let Some((value, format)) = target.read(&workspace.state) else { return div().into_any_element() };
 
-    if let Some(editing) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::Number(target)) {
-        return div().w(px(76.0)).child(Input::new(&editing.input).xsmall()).into_any_element();
+    if let Some(input) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::Number(target)).and_then(|editing| editing.input.line()) {
+        return div().w(px(76.0)).child(Input::new(input).xsmall()).into_any_element();
     }
 
     div()

@@ -64,7 +64,7 @@ struct DrawnFrame {
 
 
 /// A gray checkerboard, made once, shown under transparent parts of the composition.
-fn transparency_grid() -> Arc<RenderImage> {
+pub(crate) fn transparency_grid() -> Arc<RenderImage> {
     static GRID: std::sync::OnceLock<Arc<RenderImage>> = std::sync::OnceLock::new();
     GRID.get_or_init(|| {
         let (size, cell) = (1024u32, 16u32);
@@ -133,6 +133,11 @@ impl ViewerRender {
             .collect();
         let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(size, size, bgra)?;
         Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+    }
+
+    /// Where carets and selections go in `text` drawn with `style`, for typing in the viewer.
+    pub fn text_geometry(&mut self, text: &str, style: &studio_core::model::TextStyle) -> Option<studio_render::text::TextGeometry> {
+        Some(self.renderer.as_mut().ok()?.text_geometry(text, style))
     }
 
     /// The composition's frame drawn `width` × `height` for the LUT previews, from the
@@ -235,6 +240,24 @@ pub(crate) fn lut_preview(workspace: &Workspace) -> Option<studio_core::model::P
     Some(project)
 }
 
+/// What is shown while text is being typed into a text layer: `base` (the project, or a LUT
+/// preview of it) with that layer's text swapped for what is in the field so far, so the viewer
+/// draws it exactly as it will look, in the layer's own font, style and effects. Nothing is
+/// written to the project (or its undo history) until the field is committed.
+fn with_typed_text(workspace: &Workspace, base: Option<studio_core::model::Project>, cx: &gpui_kit::App) -> Option<studio_core::model::Project> {
+    let Some(editing) = workspace.ui.editing.as_ref() else { return base };
+    let EditTarget::SourceText(layer) = editing.target else { return base };
+    let typed = editing.input.value(cx);
+    if workspace.state.text_of(layer).is_some_and(|(text, _)| text == typed.as_ref()) {
+        return base;
+    }
+    let mut project = base.unwrap_or_else(|| workspace.state.project.clone());
+    if let Some(composition) = project.composition_mut(workspace.state.active_comp) {
+        studio_core::edit::edit_text(composition, layer, |text, _| *text = typed.to_string());
+    }
+    Some(project)
+}
+
 /// Renders the frame for the viewer at `width` × `height` device pixels and swaps it on screen.
 ///
 /// The viewer is redrawn far more often than its picture changes: on every edit anywhere, and
@@ -264,7 +287,7 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
         .chain(previewed)
         .collect();
     workspace.render.media.release_unused(|path| footage.contains(path));
-    let previewed = lut_preview(workspace);
+    let previewed = with_typed_text(workspace, lut_preview(workspace), cx);
     let state = &workspace.state;
     let shown = previewed.as_ref().unwrap_or(&state.project);
     // Cut-outs load their masks from disk as they are made, which the project doesn't record,
@@ -770,6 +793,23 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
     let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
     let point = to_comp(workspace, x, y);
     workspace.ui.viewer_anchor = Some((x, y));
+    workspace.ui.text_select = None;
+    // While typing into a text layer here, a press on that text moves the caret (a double-click
+    // selects a word) and a drag selects, as in any text box; a press anywhere else finishes.
+    if let Some(layer) = typing_layer(workspace) {
+        match typed_caret_at(workspace, layer, point, true, cx) {
+            Some(offset) => {
+                let Some(editing) = workspace.ui.editing.as_ref() else { return };
+                let range = if event.click_count >= 2 { word_around(&editing.input.value(cx), offset) } else { offset..offset };
+                editing.input.set_selected_range(range, cx);
+                editing.input.focus(window, cx);
+                workspace.ui.text_select = (event.click_count < 2).then_some((layer, offset));
+                cx.notify();
+                return;
+            }
+            None => workspace.commit_edit(window, cx),
+        }
+    }
     // The color picker's eyedropper takes the color under the pointer.
     if workspace.ui.color_picker.as_ref().is_some_and(|picker| picker.sampling) {
         if let Some(color) = color_at(workspace, point) {
@@ -830,12 +870,32 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         return;
     }
     if workspace.ui.tool == Tool::Type {
+        // On a text layer, the Type tool edits it, with the caret where it was clicked.
+        if let Some((layer, caret)) = text_hit(workspace, point) {
+            let text = workspace.state.text_of(layer).map(|(text, _)| text.to_owned()).unwrap_or_default();
+            workspace.state.select_layer(layer, false);
+            cx.defer_in(window, move |this, window, cx| {
+                this.begin_edit(EditTarget::SourceText(layer), text, window, cx);
+                if let Some(editing) = this.ui.editing.as_mut() {
+                    editing.in_viewer = true;
+                    editing.input.set_selected_range(caret..caret, cx);
+                }
+                cx.notify();
+            });
+            return;
+        }
         if let Some(layer) = workspace.state.add_text_layer("", point) {
             workspace.ui.tabs.insert(PanelId::Properties, 0);
             // Open the text field once this click finishes; focusing it during mouse-down would
             // lose focus to the window as the click completes, closing the field straight away.
+            // It opens right where the text goes, so typing never depends on the Properties
+            // panel's Text card being unfolded.
             cx.defer_in(window, move |this, window, cx| {
                 this.begin_edit(EditTarget::SourceText(layer), String::new(), window, cx);
+                if let Some(editing) = this.ui.editing.as_mut() {
+                    editing.in_viewer = true;
+                }
+                cx.notify();
             });
             cx.notify();
         }
@@ -957,27 +1017,128 @@ fn effect_target(workspace: &Workspace, effect: &str, position: gpui_kit::Point<
     studio_core::effects::suits_layer(effect, content).then_some(layer)
 }
 
-/// The text field for a text layer being edited in the viewer (after a double-click), laid over
-/// the layer's bounds. Enter or clicking elsewhere commits it.
-fn text_editor_overlay(workspace: &Workspace) -> Option<AnyElement> {
+/// The text layer being typed into in the viewer, if any.
+fn typing_layer(workspace: &Workspace) -> Option<Id> {
+    match workspace.ui.editing.as_ref().filter(|editing| editing.in_viewer)?.target {
+        EditTarget::SourceText(layer) => Some(layer),
+        _ => None,
+    }
+}
+
+/// Where in the text being typed into `layer` composition point `point` falls, as a byte offset.
+/// With `inside`, only a point on the text's box (or just around it) counts.
+fn typed_caret_at(workspace: &mut Workspace, layer: Id, point: Vec2, inside: bool, cx: &gpui_kit::App) -> Option<usize> {
+    /// How far outside the text's box, in its own pixels, a press still counts as on it.
+    const MARGIN: f32 = 12.0;
+    let typed = workspace.ui.editing.as_ref()?.input.value(cx).to_string();
+    let style = workspace.state.text_of(layer)?.1.clone();
+    let composition = workspace.state.composition();
+    let size = composition.layer(layer)?.size;
+    let local = studio_core::transform::world_transform(composition, layer, workspace.state.current_frame as f64)?.inverse()?.apply(point);
+    let on_box = (-MARGIN..=size.x + MARGIN).contains(&local.x) && (-MARGIN..=size.y + MARGIN).contains(&local.y);
+    if inside && !on_box {
+        return None;
+    }
+    Some(workspace.render.text_geometry(&typed, &style)?.hit(local.x, local.y))
+}
+
+/// The word in `text` around byte `offset`: the run of letters (or of spaces) it touches.
+fn word_around(text: &str, offset: usize) -> std::ops::Range<usize> {
+    let offset = offset.min(text.len());
+    let is_word = |c: char| c.is_alphanumeric() || c == '\'' || c == '_';
+    // The kind of character at the offset (or just before it, at the end of a word).
+    let kind = text[offset..].chars().next().filter(|&c| is_word(c)).or_else(|| text[..offset].chars().next_back()).is_some_and(is_word);
+    let start = text[..offset].char_indices().rev().take_while(|&(_, c)| is_word(c) == kind && c != '\n').last().map_or(offset, |(at, _)| at);
+    let end = text[offset..].char_indices().find(|&(_, c)| is_word(c) != kind || c == '\n').map_or(text.len(), |(at, _)| offset + at);
+    start..end
+}
+
+/// The unlocked text layer under composition point `point`, and the place in its text nearest
+/// that point (a byte offset, for the caret).
+fn text_hit(workspace: &mut Workspace, point: Vec2) -> Option<(Id, usize)> {
+    let layer = workspace.state.layer_at(point)?;
+    let composition = workspace.state.composition();
+    if composition.layer(layer)?.switches.locked {
+        return None;
+    }
+    let (text, style) = workspace.state.text_of(layer).map(|(text, style)| (text.to_owned(), style.clone()))?;
+    let local = studio_core::transform::world_transform(composition, layer, workspace.state.current_frame as f64)?.inverse()?.apply(point);
+    let geometry = workspace.render.text_geometry(&text, &style)?;
+    Some((layer, geometry.hit(local.x, local.y)))
+}
+
+/// Typing into a text layer in the viewer (with the Type tool, or after a double-click), as in
+/// other design apps: the picture shows the text exactly as it will look (see
+/// `with_typed_text`), with the caret and selection drawn on it, following the layer's
+/// position, scale and rotation. The field that takes the keystrokes is there but unseen.
+/// Enter or clicking elsewhere commits it.
+fn text_editor_overlay(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    /// How wide the caret is drawn, in screen pixels.
+    const CARET_WIDTH: f32 = 2.0;
     let editing = workspace.ui.editing.as_ref().filter(|editing| editing.in_viewer)?;
     let EditTarget::SourceText(layer) = editing.target else { return None };
+    let (typed, selected) = (editing.input.value(cx).to_string(), editing.input.selected_range(cx));
+    let field = editing.input.element();
+    let style = workspace.state.text_of(layer)?.1.clone();
+    let geometry = workspace.render.text_geometry(&typed, &style)?;
     let composition = workspace.state.composition();
-    let bounds = studio_core::align::layer_bounds(composition, layer, workspace.state.current_frame)?;
+    let world = studio_core::transform::world_transform(composition, layer, workspace.state.current_frame as f64)?;
     let (width, height) = (composition.width as f32, composition.height as f32);
-    let (left, top) = (bounds.min.x / width, (bounds.min.y + bounds.max.y) * 0.5 / height);
-    let span = ((bounds.max.x - bounds.min.x) / width).max(0.0);
-    Some(
-        div()
-            .absolute()
-            .left(relative(left.clamp(0.0, 0.9)))
-            .top(relative(top.clamp(0.0, 0.95)))
-            .mt(px(-16.0))
-            .w(relative(span.clamp(0.1, 1.0)))
-            .min_w(px(160.0))
-            .child(gpui_kit::component::input::Input::new(&editing.input))
-            .into_any_element(),
-    )
+    // A point in the layer's own pixels, as a fraction of the frame.
+    let frac = move |x: f32, y: f32| {
+        let at = world.apply(Vec2::new(x, y));
+        (at.x / width, at.y / height)
+    };
+    let selection: Vec<[(f32, f32); 4]> =
+        geometry.highlight(selected.clone()).into_iter().map(|(x, y, w, h)| [frac(x, y), frac(x + w, y), frac(x + w, y + h), frac(x, y + h)]).collect();
+    let caret_line = {
+        let (x, top, line) = geometry.caret(selected.end);
+        (frac(x, top), frac(x, top + line))
+    };
+    // The caret blinks once typing pauses (see `UiState::caret_epoch`).
+    let caret_on = (workspace.ui.caret_epoch.elapsed().as_millis() / crate::workspace::CARET_BLINK.as_millis()).is_multiple_of(2);
+    let caret = (selected.is_empty() && caret_on).then_some(caret_line);
+    let anchor = caret_line.0;
+    let marks = canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let at = |(fx, fy): (f32, f32)| point(bounds.origin.x + bounds.size.width * fx, bounds.origin.y + bounds.size.height * fy);
+        for quad in &selection {
+            let mut path = PathBuilder::fill();
+            path.move_to(at(quad[0]));
+            for corner in &quad[1..] {
+                path.line_to(at(*corner));
+            }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, hsla(color::ACCENT).opacity(0.4));
+            }
+        }
+        if let Some((top, bottom)) = caret {
+            let mut path = PathBuilder::stroke(px(CARET_WIDTH));
+            path.move_to(at(top));
+            path.line_to(at(bottom));
+            if let Ok(path) = path.build() {
+                window.paint_path(path, hsla(color::ACCENT));
+            }
+        }
+    })
+    .absolute()
+    .size_full();
+    // The field itself: unseen, and too small to catch clicks, at the caret (where the system
+    // shows its accent and emoji pickers). Escape finishes, as in After Effects.
+    let field = div()
+        .absolute()
+        .left(relative(anchor.0.clamp(0.0, 1.0)))
+        .top(relative(anchor.1.clamp(0.0, 1.0)))
+        .size(px(1.0))
+        .overflow_hidden()
+        .opacity(0.0)
+        .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+            if event.keystroke.key == "escape" {
+                this.commit_edit(window, cx);
+            }
+        }))
+        .child(field);
+    Some(div().absolute().size_full().child(marks).child(field).into_any_element())
 }
 
 /// The selection outline (the layer's real, possibly rotated rectangle), anchor point and
@@ -1109,6 +1270,8 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         render_frame(workspace, pixels_wide, pixels_high, window, cx);
     }
 
+    // Drawn after the frame, which fits the text layer's box to what is being typed.
+    let typing = text_editor_overlay(workspace, cx);
     let composition = workspace.state.composition();
     let picture = workspace.render.image.clone().map(|image| img(ImageSource::Render(image)).absolute().size_full());
     let problem = match (&workspace.render.renderer, &workspace.render.last_error) {
@@ -1168,7 +1331,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .children(selection_overlay(workspace, cx))
         .children(pen_draft_overlay(workspace))
         .children(cutout_clicks_overlay(workspace))
-        .children(text_editor_overlay(workspace))
+        .children(typing)
         .children(effect_drop_highlight(workspace));
 
     let viewer = div()
@@ -1263,6 +1426,14 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
             cx.notify();
         }))
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ViewerDrag>, _, cx| {
+            // Dragging across text being typed selects it.
+            if let Some((layer, anchor)) = this.ui.text_select {
+                let point = to_comp(this, f32::from(event.event.position.x), f32::from(event.event.position.y));
+                if let (Some(offset), Some(editing)) = (typed_caret_at(this, layer, point, false, cx), this.ui.editing.as_ref()) {
+                    editing.input.set_selected_range(anchor.min(offset)..anchor.max(offset), cx);
+                }
+                return;
+            }
             let Some((x, y)) = this.ui.viewer_anchor else { return };
             if this.ui.tool == Tool::Hand {
                 let position = event.event.position;
@@ -1292,4 +1463,20 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         workspace,
         cx,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_around;
+
+    #[test]
+    fn a_double_click_selects_the_word_it_lands_on() {
+        let text = "Big sale\ntoday";
+        assert_eq!(word_around(text, 1), 0..3, "inside a word");
+        assert_eq!(word_around(text, 3), 0..3, "at its end");
+        assert_eq!(word_around(text, 4), 4..8, "at the next one's start");
+        assert_eq!(word_around(text, 10), 9..14, "words stop at line breaks");
+        assert_eq!(word_around("a   b", 2), 1..4, "between words, the spaces");
+        assert_eq!(word_around("", 0), 0..0);
+    }
 }

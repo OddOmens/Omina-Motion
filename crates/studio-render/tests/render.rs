@@ -1398,3 +1398,53 @@ fn many_copies_of_nested_compositions_still_draw_quickly() {
     renderer.render(&project, Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "took {:?}", started.elapsed());
 }
+
+// Text animators ---------------------------------------------------------------------------------
+
+fn render_at(project: &Project, frame: i64) -> studio_render::RenderedFrame {
+    let mut renderer = Renderer::new().expect("a GPU is available");
+    renderer.render(project, Id(1), frame, SIZE, SIZE, &studio_core::media::NoVideo).expect("the frame renders")
+}
+
+/// How much light the frame has in columns `columns`, and the average height it sits at.
+fn light(frame: &studio_render::RenderedFrame, columns: std::ops::Range<u32>) -> (f32, f32) {
+    let (mut total, mut weighted) = (0.0, 0.0);
+    for y in 0..SIZE {
+        for x in columns.clone() {
+            let value = f32::from(pixel(frame, x, y)[0]);
+            total += value;
+            weighted += value * y as f32;
+        }
+    }
+    (total, if total > 0.0 { weighted / total } else { 0.0 })
+}
+
+#[test]
+fn text_comes_in_a_character_at_a_time_and_ends_as_drawn() {
+    use studio_core::text_animation::{TextAnimator, TextEase, TextMotion, TextUnit};
+    let still = text_layer(2, "AB", Vec2::new(80.0, 48.0), Vec2::new(50.0, 50.0));
+    let mut animated = still.clone();
+    // Ten frames at 24 fps; the two letters fade in one after the other over the first six.
+    animated.animation.text_in = Some(TextAnimator { motion: TextMotion::Fade, unit: TextUnit::Character, ease: TextEase::Linear, seconds: 0.25, overlap: 0.0, ..TextAnimator::default() });
+    let (still, animated) = (project(vec![still]), project(vec![animated]));
+    let whole = render_at(&still, 8);
+    assert_eq!(light(&render_at(&animated, 0), 0..SIZE).0, 0.0, "nothing shows at the in point");
+    // A quarter of the way in, the first letter is half in and the second hasn't started.
+    let early = render_at(&animated, 1);
+    let (left, right) = (light(&early, 0..50).0, light(&early, 50..SIZE).0);
+    assert!(left > 0.0 && right == 0.0, "left {left}, right {right}");
+    assert!(left < light(&whole, 0..50).0 * 0.8, "and only partly");
+    // Once it is over, the text is exactly as drawn without it.
+    assert_eq!(render_at(&animated, 8).bgra, whole.bgra);
+}
+
+#[test]
+fn rising_text_starts_below_its_place() {
+    use studio_core::text_animation::{TextAnimator, TextEase, TextMotion, TextUnit};
+    let still = text_layer(2, "AB", Vec2::new(80.0, 48.0), Vec2::new(50.0, 50.0));
+    let mut animated = still.clone();
+    animated.animation.text_in = Some(TextAnimator { motion: TextMotion::Rise, unit: TextUnit::Word, ease: TextEase::Linear, seconds: 0.4, overlap: 1.0, ..TextAnimator::default() });
+    let home = light(&render_at(&project(vec![still]), 9), 0..SIZE).1;
+    let rising = light(&render_at(&project(vec![animated]), 4), 0..SIZE).1;
+    assert!(rising > home + 3.0, "lower on the way in: {rising} vs {home}");
+}

@@ -1,9 +1,12 @@
-//! Writes movie files: rendered frames and mixed sound in, H.264 (.mp4) or ProRes 422 HQ
+//! Writes movie files: rendered frames and mixed sound in, H.264 or H.265 (.mp4) or ProRes
 //! (.mov) out. Frames must arrive in order; sound may arrive in any block size.
 //!
 //! - **H.264** uses x264 at constant quality (CRF 18, visually lossless for most material)
 //!   with AAC sound at 320 kb/s, and moves the index to the front so files start playing
 //!   before they are fully downloaded. Without x264, the system's hardware encoder is used.
+//! - **H.265 (HEVC)** is the same idea at about half the file size, through x265 when FFmpeg
+//!   has it and the system's hardware encoder otherwise. It is tagged `hvc1`, which Apple's
+//!   players and the Photos app need to play it.
 //! - **ProRes 422 HQ** is 10-bit and intra-only, for finishing and further editing, with
 //!   uncompressed 24-bit sound.
 //!
@@ -26,6 +29,8 @@ use crate::yuv::{Plane, YuvLayout, bgra_to_yuv};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MovieFormat {
     H264,
+    /// H.265, also called HEVC: smaller files than H.264 at the same quality.
+    H265,
     /// Apple ProRes 422 Proxy, LT, standard and HQ: the same 10-bit 4:2:2 picture at rising data rates.
     ProResProxy,
     ProResLt,
@@ -37,11 +42,12 @@ pub enum MovieFormat {
 }
 
 impl MovieFormat {
-    pub const ALL: [Self; 6] = [Self::H264, Self::ProRes4444, Self::ProRes422Hq, Self::ProRes422, Self::ProResLt, Self::ProResProxy];
+    pub const ALL: [Self; 7] = [Self::H264, Self::H265, Self::ProRes4444, Self::ProRes422Hq, Self::ProRes422, Self::ProResLt, Self::ProResProxy];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::H264 => "H.264 (MP4)",
+            Self::H265 => "H.265 / HEVC (MP4)",
             Self::ProResProxy => "ProRes 422 Proxy (MOV)",
             Self::ProResLt => "ProRes 422 LT (MOV)",
             Self::ProRes422 => "ProRes 422 (MOV)",
@@ -53,7 +59,7 @@ impl MovieFormat {
     /// The file name extension, without the dot.
     pub const fn extension(self) -> &'static str {
         match self {
-            Self::H264 => "mp4",
+            Self::H264 | Self::H265 => "mp4",
             _ => "mov",
         }
     }
@@ -61,7 +67,7 @@ impl MovieFormat {
     /// Whether it is a ProRes flavor (which has no quality or speed setting: each flavor is a
     /// fixed data rate, and its sound is uncompressed).
     pub const fn is_prores(self) -> bool {
-        !matches!(self, Self::H264)
+        !matches!(self, Self::H264 | Self::H265)
     }
 
     /// `prores_ks`'s profile number for a ProRes flavor.
@@ -86,7 +92,7 @@ impl MovieFormat {
 
     fn layout(self) -> YuvLayout {
         match self {
-            Self::H264 => YuvLayout::Yuv420p8,
+            Self::H264 | Self::H265 => YuvLayout::Yuv420p8,
             Self::ProRes4444 => YuvLayout::Yuv444p10,
             _ => YuvLayout::Yuv422p10,
         }
@@ -94,7 +100,7 @@ impl MovieFormat {
 
     fn pixel(self) -> Pixel {
         match self {
-            Self::H264 => Pixel::YUV420P,
+            Self::H264 | Self::H265 => Pixel::YUV420P,
             Self::ProRes4444 => Pixel::YUVA444P10LE,
             _ => Pixel::YUV422P10LE,
         }
@@ -136,6 +142,18 @@ impl VideoQuality {
             Self::Good => Some("23"),
             Self::High => Some("18"),
             Self::Maximum => Some("14"),
+            Self::Bitrate(_) => None,
+        }
+    }
+
+    /// x265's constant-quality number. Its scale runs about six steps behind x264's for the
+    /// same look, which is where H.265's smaller files come from.
+    fn x265_crf(self) -> Option<&'static str> {
+        match self {
+            Self::Draft => Some("32"),
+            Self::Good => Some("28"),
+            Self::High => Some("23"),
+            Self::Maximum => Some("19"),
             Self::Bitrate(_) => None,
         }
     }
@@ -192,11 +210,11 @@ pub struct MovieSettings {
     pub frame_rate: FrameRate,
     /// The sound's sample rate, or `None` for a movie without sound.
     pub audio_rate: Option<u32>,
-    /// H.264 only.
+    /// H.264 and H.265 only.
     pub quality: VideoQuality,
-    /// H.264 only.
+    /// H.264 and H.265 only.
     pub speed: EncodeSpeed,
-    /// AAC sound (H.264 movies), in kilobits per second. ProRes sound is uncompressed.
+    /// AAC sound (H.264 and H.265 movies), in kilobits per second. ProRes sound is uncompressed.
     pub audio_kbps: u32,
 }
 
@@ -261,7 +279,7 @@ impl MovieWriter {
         };
 
         let mut options = ffmpeg::Dictionary::new();
-        if settings.format == MovieFormat::H264 {
+        if !settings.format.is_prores() {
             // Put the index first, so the file can play while it downloads.
             options.set("movflags", "+faststart");
         }
@@ -384,6 +402,26 @@ fn open_video(
                 }
             }
         }
+        MovieFormat::H265 => {
+            let mut options = ffmpeg::Dictionary::new();
+            match encoder::find_by_name("libx265") {
+                Some(codec) => {
+                    if let Some(crf) = settings.quality.x265_crf() {
+                        options.set("crf", crf);
+                    }
+                    options.set("preset", settings.speed.preset());
+                    // x265 otherwise prints a page of settings for every export.
+                    options.set("x265-params", "log-level=error");
+                    (codec, options)
+                }
+                None => {
+                    let codec = encoder::find_by_name("hevc_videotoolbox")
+                        .ok_or_else(|| MediaError("this FFmpeg has no H.265 encoder".into()))?;
+                    options.set("profile", "main");
+                    (codec, options)
+                }
+            }
+        }
         _ => {
             let codec = encoder::find_by_name("prores_ks").ok_or_else(|| MediaError("this FFmpeg has no ProRes encoder".into()))?;
             let mut options = ffmpeg::Dictionary::new();
@@ -413,7 +451,7 @@ fn open_video(
         && !settings.format.is_prores()
     {
         video.set_bit_rate(kbps as usize * 1000);
-    } else if codec.name() == "h264_videotoolbox" {
+    } else if codec.name() == "h264_videotoolbox" || codec.name() == "hevc_videotoolbox" {
         // The hardware encoder has no constant-quality mode here, so the quality picks a bitrate.
         let bits = f64::from(width) * f64::from(height) * rate.fps() * settings.quality.bits_per_pixel();
         video.set_bit_rate(bits as usize);
@@ -423,9 +461,25 @@ fn open_video(
     }
     let encoder = video.open_with(std::mem::take(&mut options))?;
     stream.set_parameters(&encoder);
+    if settings.format == MovieFormat::H265 {
+        tag_as_hvc1(&mut stream);
+    }
     stream.set_avg_frame_rate(fps);
     stream.set_time_base(time_base);
     Ok(Track { encoder, stream: index, encoder_time_base: time_base, stream_time_base: time_base, next_pts: 0 })
+}
+
+/// Marks an H.265 stream `hvc1` rather than FFmpeg's default `hev1`: both hold the same video,
+/// but QuickTime, Safari and Photos only play `hvc1`. `ffmpeg-next` has no safe way to set a
+/// stream's tag, so this one field is written directly.
+#[allow(unsafe_code)]
+fn tag_as_hvc1(stream: &mut ffmpeg::format::stream::StreamMut) {
+    // SAFETY: the stream was just added to the open output, so FFmpeg has allocated both it and
+    // its codec parameters; a plain integer field is written before the header is.
+    unsafe {
+        let parameters = (*stream.as_mut_ptr()).codecpar;
+        (*parameters).codec_tag = u32::from_le_bytes(*b"hvc1");
+    }
 }
 
 fn open_audio(output: &mut ffmpeg::format::context::Output, format: MovieFormat, rate: u32, kbps: u32, global_header: bool) -> Result<AudioTrack, MediaError> {

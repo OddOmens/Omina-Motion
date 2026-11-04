@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::{
-    App, AppContext as _, Context, DragMoveEvent, Entity, FocusHandle, InteractiveElement, IntoElement,
+    AnyElement, App, AppContext as _, Context, DragMoveEvent, Entity, FocusHandle, InteractiveElement, IntoElement,
     KeyBinding, ParentElement, Render, StyleRefinement, Styled, Subscription, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
@@ -354,6 +354,9 @@ pub struct TransitionDrag {
     pub transition: studio_core::transitions::Transition,
 }
 
+/// How long the caret drawn over text being typed in the viewer stays on, then off.
+pub const CARET_BLINK: std::time::Duration = std::time::Duration::from_millis(530);
+
 /// What an in-place text input is editing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EditTarget {
@@ -369,16 +372,83 @@ pub enum EditTarget {
     ItemName(Id),
 }
 
+/// The field an in-place edit is typed into: one line for names and numbers, several for a
+/// text layer's text (Return starts a new line there, as in After Effects).
+pub enum EditInput {
+    Line(Entity<InputState>),
+    Lines(Entity<TextareaState>),
+}
+
+impl EditInput {
+    pub fn value(&self, cx: &App) -> gpui_kit::SharedString {
+        match self {
+            Self::Line(input) => input.read(cx).value(),
+            Self::Lines(input) => input.read(cx).value(),
+        }
+    }
+
+    /// The selected bytes of the text; empty at the caret when nothing is selected.
+    pub fn selected_range(&self, cx: &App) -> std::ops::Range<usize> {
+        match self {
+            Self::Line(input) => input.read(cx).selected_range(),
+            Self::Lines(input) => input.read(cx).selected_range(),
+        }
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Line(input) => input.update(cx, |input, cx| input.focus(window, cx)),
+            Self::Lines(input) => input.update(cx, |input, cx| input.focus(window, cx)),
+        }
+    }
+
+    pub fn set_selected_range(&self, range: std::ops::Range<usize>, cx: &mut App) {
+        match self {
+            Self::Line(input) => input.update(cx, |input, cx| input.set_selected_range(range, cx)),
+            Self::Lines(input) => input.update(cx, |input, cx| input.set_selected_range(range, cx)),
+        }
+    }
+
+    /// The one-line field, for every edit but a text layer's text.
+    pub fn line(&self) -> Option<&Entity<InputState>> {
+        match self {
+            Self::Line(input) => Some(input),
+            Self::Lines(_) => None,
+        }
+    }
+
+    /// The field as an element, unstyled.
+    pub fn element(&self) -> AnyElement {
+        match self {
+            Self::Line(input) => gpui_kit::component::input::Input::new(input).into_any_element(),
+            Self::Lines(input) => gpui_kit::component::input::Textarea::new(input).into_any_element(),
+        }
+    }
+}
+
+impl EditTarget {
+    /// Whether the text can run over several lines: only a text layer's text.
+    pub fn is_multi_line(self) -> bool {
+        matches!(self, Self::SourceText(_))
+    }
+}
+
 /// The text input currently open over a value, and the subscription that commits it.
 pub struct EditingField {
     pub target: EditTarget,
-    pub input: Entity<InputState>,
+    pub input: EditInput,
     /// The text the input opened with. Left as it was, nothing is written back: a number shown
     /// rounded would otherwise replace the exact value (and could add a keyframe).
     initial: String,
-    /// Shown over the layer in the viewer (a double-click there) rather than in its panel.
+    /// Typed straight onto the layer in the viewer (the Type tool, or a double-click there)
+    /// rather than in its panel.
     pub in_viewer: bool,
     _events: Subscription,
+    /// Redraws the editor whenever the field changes (text, caret or selection), so text typed
+    /// in the viewer and its caret stay current.
+    _changes: Subscription,
+    /// Redraws now and then while text is typed in the viewer, to blink its caret.
+    _blink: gpui_kit::Task<()>,
 }
 
 /// UI-only state that is not part of the project or the editing model.
@@ -414,8 +484,9 @@ pub struct UiState {
     pub collapsed_panels: HashSet<PanelId>,
     /// Library brands the user folded away (all are open to begin with).
     pub closed_brands: HashSet<studio_core::model::LinkId>,
-    /// Effect categories the user folded away (all are open to begin with).
-    pub closed_effect_categories: HashSet<&'static str>,
+    /// Effect categories the user unfolded (all are closed to begin with, so the panel opens
+    /// as a short list of categories).
+    pub open_effect_categories: HashSet<&'static str>,
     pub viewer_bounds: panels::chrome::MeasuredBounds,
     /// Window-space bounds of the composition frame inside the viewer.
     pub frame_bounds: panels::chrome::MeasuredBounds,
@@ -430,6 +501,12 @@ pub struct UiState {
     /// While the middle mouse button is held over the viewer (a temporary Hand tool): where the
     /// pointer was pressed, and the pan then.
     pub middle_pan: Option<((f32, f32), (f32, f32))>,
+    /// While dragging across text being typed in the viewer: the layer, and the place in its
+    /// text where the drag started (the selection runs from there to the pointer).
+    pub text_select: Option<(Id, usize)>,
+    /// When the text field last changed, so the caret drawn in the viewer stays solid while
+    /// typing and blinks once it rests.
+    pub caret_epoch: Instant,
     /// Pointer x and starting value of the field being scrubbed.
     pub field_anchor: Option<(f32, f32)>,
     pub editing: Option<EditingField>,
@@ -469,6 +546,8 @@ pub struct UiState {
     /// The Export dialog's choices, and the export running now, if any.
     pub export_choice: panels::export::ExportChoice,
     pub export_job: Option<panels::export::ExportJob>,
+    /// The Export dialog's preview: the frame picked and the picture drawn for it.
+    pub export_preview: panels::export_dialog::ExportPreview,
     /// While an effect is dragged over the viewer, the layer it would be dropped on.
     pub effect_drop_layer: Option<Id>,
     /// Captions being made in the background, if any.
@@ -495,8 +574,6 @@ pub struct UiState {
     /// Whether the viewer shows the title and action safe areas, thirds and center (').
     pub guides: bool,
     pub eyedropper_press: bool,
-    /// What the Color panel grades: the selected clip or the whole video.
-    pub grade_target: crate::state::GradeTarget,
     /// The Basic Correction (layer, effect) waiting for a click on something gray in the viewer
     /// to set its white balance.
     pub white_balance_pick: Option<(Id, Id)>,
@@ -776,7 +853,7 @@ impl Workspace {
                 project_drop: None,
                 toggled_sections: HashSet::new(),
                 sections_start_open: cfg!(test),
-                closed_effect_categories: HashSet::new(),
+                open_effect_categories: HashSet::new(),
                 closed_brands: HashSet::new(),
                 collapsed_panels: HashSet::new(),
                 viewer_bounds: Default::default(),
@@ -786,6 +863,8 @@ impl Workspace {
                 viewer_pan: (0.0, 0.0),
                 pan_start: (0.0, 0.0),
                 middle_pan: None,
+                text_select: None,
+                caret_epoch: Instant::now(),
                 field_anchor: None,
                 editing: None,
                 flow_curve: studio_core::animation::EASING_PRESETS[0].1,
@@ -808,6 +887,7 @@ impl Workspace {
                 window_title: String::new(),
                 export_choice: Default::default(),
                 export_job: None,
+                export_preview: Default::default(),
                 dialog_subscriptions: Vec::new(),
                 color_picker: None,
                 caption_job: None,
@@ -822,7 +902,6 @@ impl Workspace {
                 color_well: false,
                 guides: false,
                 eyedropper_press: false,
-                grade_target: crate::state::GradeTarget::Clip,
                 white_balance_pick: None,
                 wheel_bounds: Default::default(),
                 grade_pressed: false,
@@ -1012,17 +1091,68 @@ impl Workspace {
     /// Opens a text input over a value. Enter or clicking elsewhere commits it.
     pub fn begin_edit(&mut self, target: EditTarget, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.commit_edit(window, cx);
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(text.clone()));
-        input.update(cx, |state, cx| {
-            state.focus(window, cx);
-            state.select_all(window, cx);
-        });
-        let events = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                this.commit_edit(window, cx);
+        // Return commits a one-line field. A text layer's field takes Return as a new line, and
+        // is committed with ⌘Return, Escape or a click elsewhere, as in After Effects.
+        let commits = |event: &InputEvent, multi_line: bool| match event {
+            InputEvent::Blur => true,
+            InputEvent::PressEnter { secondary, .. } => !multi_line || *secondary,
+            _ => false,
+        };
+        let (input, events, changes) = if target.is_multi_line() {
+            // The field reports Return rather than acting on it (otherwise ⌘Return would add a
+            // line too); a plain Return is turned into a new line here.
+            let input = cx.new(|cx| TextareaState::new(window, cx).submit_on_enter(true).default_value(text.clone()));
+            input.update(cx, |state, cx| {
+                state.focus(window, cx);
+                state.select_all(window, cx);
+            });
+            let events = cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, window, cx| {
+                if commits(event, true) {
+                    this.commit_edit(window, cx);
+                } else if matches!(event, InputEvent::PressEnter { secondary: false, shift: false }) {
+                    input.update(cx, |input, cx| input.replace("\n", window, cx));
+                }
+            });
+            let changes = cx.observe(&input, |this, _, cx| {
+                this.ui.caret_epoch = Instant::now();
+                cx.notify();
+            });
+            (EditInput::Lines(input), events, changes)
+        } else {
+            let input = cx.new(|cx| InputState::new(window, cx).default_value(text.clone()));
+            input.update(cx, |state, cx| {
+                state.focus(window, cx);
+                state.select_all(window, cx);
+            });
+            let events = cx.subscribe_in(&input, window, move |this, _, event: &InputEvent, window, cx| {
+                if commits(event, false) {
+                    this.commit_edit(window, cx);
+                }
+            });
+            let changes = cx.observe(&input, |this, _, cx| {
+                this.ui.caret_epoch = Instant::now();
+                cx.notify();
+            });
+            (EditInput::Line(input), events, changes)
+        };
+        // The caret drawn in the viewer blinks: redraw at each half beat while typing there.
+        let blink = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CARET_BLINK).await;
+                let typing = this.update(cx, |this, cx| {
+                    let in_viewer = this.ui.editing.as_ref().is_some_and(|editing| editing.in_viewer);
+                    if in_viewer {
+                        cx.notify();
+                    }
+                    this.ui.editing.is_some()
+                });
+                if !matches!(typing, Ok(true)) {
+                    break;
+                }
             }
         });
-        self.ui.editing = Some(EditingField { target, input, initial: text, in_viewer: false, _events: events });
+        self.ui.caret_epoch = Instant::now();
+        self.ui.editing = Some(EditingField { target, input, initial: text, in_viewer: false, _events: events, _changes: changes, _blink: blink });
         cx.notify();
     }
 
@@ -1030,7 +1160,7 @@ impl Workspace {
     /// was, are ignored.
     pub fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editing) = self.ui.editing.take() else { return };
-        let text = editing.input.read(cx).value().to_string();
+        let text = editing.input.value(cx).to_string();
         let target = if text == editing.initial { None } else { Some(editing.target) };
         match target {
             None => {}
@@ -1454,7 +1584,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_as(window, cx)))
             .on_action(cx.listener(|this, _: &Open, window, cx| this.open(window, cx)))
-            .on_action(cx.listener(|this, _: &Export, window, cx| panels::export::open(this, window, cx)))
+            .on_action(cx.listener(|this, _: &Export, window, cx| panels::export_dialog::open(this, window, cx)))
             .on_action(cx.listener(|this, _: &SplitLayer, window, cx| this.split_layer(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSnapping, _, cx| {
                 this.state.snapping = !this.state.snapping;

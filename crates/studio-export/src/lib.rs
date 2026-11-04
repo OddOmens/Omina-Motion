@@ -1,16 +1,25 @@
-//! Exports a composition to a movie file. Each frame is rendered on the GPU at the
-//! composition's full size from full-quality source frames (never proxies), the sound is
-//! mixed to match, and both are encoded together. The file is written under a temporary
-//! name and only takes its real name once complete, so a cancelled or failed export never
-//! leaves a broken movie behind.
+//! Exports a composition to a movie, an animated GIF or a PNG sequence. Each frame is
+//! rendered on the GPU from full-quality source frames (never proxies), the sound is mixed to
+//! match, and both are encoded together. The output can run at another frame rate than the
+//! composition (see `format::source_frame`). The file is written under a temporary name and
+//! only takes its real name once complete, so a cancelled or failed export never leaves a
+//! broken file behind.
+
+mod format;
+mod sink;
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use studio_core::audio::composition_audio;
 use studio_core::model::{Id, Project};
-use studio_media::{CHANNELS, EncodeSpeed, ExactFrames, MixRange, Mixer, MovieFormat, MovieSettings, MovieWriter, VideoQuality};
+use studio_core::time::FrameRate;
+use studio_media::{CHANNELS, EncodeSpeed, ExactFrames, MixRange, Mixer, MovieSettings, VideoQuality};
 use studio_render::Renderer;
+
+pub use format::{ExportFormat, GIF_MAX_RATE, output_frame_count, source_frame};
+pub use sink::discard;
+use sink::Sink;
 
 /// Sample rate of exported sound: the video standard.
 pub const AUDIO_RATE: u32 = 48_000;
@@ -49,24 +58,52 @@ pub struct ExportRequest {
     pub composition: Id,
     /// Composition frames to export: the work area or the whole composition.
     pub frames: Range<i64>,
-    pub format: MovieFormat,
+    pub format: ExportFormat,
+    /// The output's frame rate, or `None` for the composition's own.
+    pub frame_rate: Option<FrameRate>,
     /// Adds a sound track when the composition has audible layers.
     pub include_audio: bool,
     pub path: PathBuf,
     /// The movie's size as a fraction of the composition's (1 for full size).
     pub scale: f32,
-    /// H.264 only.
+    /// H.264 and H.265 only.
     pub quality: VideoQuality,
-    /// H.264 only.
+    /// H.264 and H.265 only.
     pub speed: EncodeSpeed,
-    /// AAC sound bitrate (H.264 movies), in kilobits per second.
+    /// AAC sound bitrate (H.264 and H.265 movies), in kilobits per second.
     pub audio_kbps: u32,
 }
 
 impl ExportRequest {
     /// A full-size, high-quality export of `frames` with sound.
-    pub fn new(composition: Id, frames: Range<i64>, format: MovieFormat, path: PathBuf) -> Self {
-        Self { composition, frames, format, include_audio: true, path, scale: 1.0, quality: VideoQuality::High, speed: EncodeSpeed::Balanced, audio_kbps: 320 }
+    pub fn new(composition: Id, frames: Range<i64>, format: impl Into<ExportFormat>, path: PathBuf) -> Self {
+        Self {
+            composition,
+            frames,
+            format: format.into(),
+            frame_rate: None,
+            include_audio: true,
+            path,
+            scale: 1.0,
+            quality: VideoQuality::High,
+            speed: EncodeSpeed::Balanced,
+            audio_kbps: 320,
+        }
+    }
+
+    /// The output's frame rate for a composition running at `composition`: the one chosen, or
+    /// the composition's, slowed to what the format can play (GIFs top out at 50).
+    pub fn output_rate(&self, composition: FrameRate) -> FrameRate {
+        let rate = self.frame_rate.unwrap_or(composition);
+        match self.format.max_frame_rate() {
+            Some(max) if !self.format.allows_rate(rate) => max,
+            _ => rate,
+        }
+    }
+
+    /// How many frames the output has, for a composition running at `composition`.
+    pub fn output_frame_count(&self, composition: FrameRate) -> i64 {
+        output_frame_count(&self.frames, composition, self.output_rate(composition))
     }
 
     /// The movie's picture size for a composition of `width` × `height`: scaled, at least 16
@@ -107,37 +144,40 @@ pub fn export(
     if frames.is_empty() {
         return Err("There are no frames to export.".into());
     }
-    let clips = if request.include_audio { composition_audio(project, composition) } else { Vec::new() };
+    let clips = if request.include_audio && request.format.has_sound() { composition_audio(project, composition) } else { Vec::new() };
     let rate = composition.frame_rate;
+    let output_rate = request.output_rate(rate);
     let (width, height) = request.output_size(composition.width, composition.height);
+    // Movies need a movie format for their settings; the others only read the size and rate.
+    let movie_format = request.format.movie().unwrap_or(studio_media::MovieFormat::H264);
     let settings = MovieSettings {
         quality: request.quality,
         speed: request.speed,
         audio_kbps: request.audio_kbps,
-        ..MovieSettings::new(request.format, width, height, rate, (!clips.is_empty()).then_some(AUDIO_RATE))
+        ..MovieSettings::new(movie_format, width, height, output_rate, (!clips.is_empty()).then_some(AUDIO_RATE))
     };
+    let total = output_frame_count(&frames, rate, output_rate);
 
     let mut renderer = Renderer::new().map_err(|error| format!("The GPU could not be used: {error}"))?;
     let temporary = temporary_path(&request.path);
-    let mut writer = MovieWriter::create(&temporary, settings).map_err(|error| {
-        // FFmpeg may have created the file before failing (an encoder refusing the size, say).
-        let _ = std::fs::remove_file(&temporary);
-        format!("The movie could not be created: {error}")
-    })?;
+    let mut sink = Sink::create(request.format, &temporary, &request.path, settings, total)?;
     let result = (|| {
         let video = ExactFrames::new();
-        // Sound for each frame: from where the previous frame's sound ended up to this frame's end.
-        let to_sample = |frame: i64| (frame as f64 / rate.fps() * f64::from(AUDIO_RATE)).round() as i64;
-        let range = MixRange { start: to_sample(frames.start), end: to_sample(frames.end), looping: false };
+        // Sound for each output frame: from where the previous frame's sound ended up to the
+        // moment this frame ends.
+        let start_seconds = frames.start as f64 / rate.fps();
+        let to_sample = |seconds: f64| (seconds * f64::from(AUDIO_RATE)).round() as i64;
+        let output_end = |index: i64| start_seconds + index as f64 / output_rate.fps();
+        let range = MixRange { start: to_sample(start_seconds), end: to_sample(frames.end as f64 / rate.fps()), looping: false };
         let mut mixer = Mixer::new(AUDIO_RATE, range, range.start);
-        let mut mixed = to_sample(frames.start);
+        let mut mixed = range.start;
         let mut sound = Vec::new();
-        let total = frames.end - frames.start;
 
-        for frame in frames.clone() {
+        for index in 0..total {
             if cancelled() {
                 return Ok(Outcome::Cancelled);
             }
+            let frame = source_frame(&frames, rate, output_rate, index);
             let picture = renderer
                 .render(project, request.composition, frame, width, height, &video)
                 .map_err(|error| format!("Frame {frame} could not be rendered: {error}"))?;
@@ -145,36 +185,33 @@ pub fn export(
             if let Some((path, error)) = video.errors().into_iter().next() {
                 return Err(format!("{} could not be decoded ({error}).", path.display()));
             }
-            // Most movies have no transparency, so a transparent composition is laid over black;
-            // ProRes 4444 keeps it.
+            // Most formats have no transparency, so a transparent composition is laid over
+            // black; ProRes 4444 and PNG keep it.
             let pixels = if request.format.has_alpha() { picture.bgra } else { over_black(&picture.bgra) };
-            writer.write_video(&pixels, picture.width, picture.height).map_err(|error| format!("Frame {frame} could not be encoded: {error}"))?;
+            sink.write_video(&pixels, picture.width, picture.height).map_err(|error| format!("Frame {frame} could not be encoded: {error}"))?;
             if !clips.is_empty() {
-                let until = to_sample(frame + 1);
+                let until = to_sample(output_end(index + 1)).min(range.end).max(mixed);
                 sound.resize((until - mixed) as usize * CHANNELS, 0.0);
                 let written = mixer.mix(&clips, &mut sound);
-                writer.write_audio(&sound[..written * CHANNELS]).map_err(|error| format!("The sound could not be encoded: {error}"))?;
+                sink.write_audio(&sound[..written * CHANNELS]).map_err(|error| format!("The sound could not be encoded: {error}"))?;
                 mixed = until;
             }
-            progress(Progress { done: frame - frames.start + 1, total });
+            progress(Progress { done: index + 1, total });
         }
         Ok(Outcome::Finished)
     })();
 
     match result {
         Ok(Outcome::Finished) => {
-            let saved = writer
-                .finish()
-                .map_err(|error| format!("The movie could not be finished: {error}"))
-                .and_then(|()| std::fs::rename(&temporary, &request.path).map_err(|error| format!("The movie could not be saved: {error}")));
+            let saved = sink.finish(&temporary, &request.path);
             if saved.is_err() {
-                let _ = std::fs::remove_file(&temporary);
+                discard(&temporary);
             }
             saved.map(|()| Outcome::Finished)
         }
         other => {
-            drop(writer);
-            let _ = std::fs::remove_file(&temporary);
+            drop(sink);
+            discard(&temporary);
             other
         }
     }

@@ -32,6 +32,7 @@ pub mod resize;
 pub mod sample;
 pub mod silence;
 pub mod templates;
+pub mod text_animation;
 pub mod snap;
 pub mod speed;
 pub mod time;

@@ -24,7 +24,10 @@ crates/studio-media  Media probing and video decoding with FFmpeg (hardware or s
                      through the sound card (cpal: CoreAudio, WASAPI, ALSA). And movie writing: H.264 + AAC
                      (.mp4) and ProRes 422 HQ + 24-bit PCM (.mov), converted to BT.709 YUV in `yuv.rs`.
 crates/studio-captions Speech to timed words with OpenAI's Whisper (tiny), run locally with Candle (Metal on
-                     macOS). Reads the model from disk; the app downloads it once, after asking.
+                     macOS). Reads the model from disk; the app downloads it once, after asking. Whisper's
+                     phrase times are loose, so words are timed to where speech is heard in the sound,
+                     with pauses matched to sentence ends. `CAPTIONS_MODEL=<folder> cargo test -p
+                     studio-captions --test whisper -- --ignored` checks timing on real speech (macOS).
 crates/studio-cutout Background removal with MobileSAM, run locally with Candle (Metal on macOS): clicks pick
                      out a subject, and video follows it frame to frame. Reads the model from disk; the app
                      downloads it once (40 MB, checked by SHA-256), after asking.
@@ -33,8 +36,10 @@ crates/studio-enhance Speech cleanup, like Adobe Podcast's Enhance Speech: AI no
                      -16 LUFS loudness (BS.1770) with a peak limiter. Offline, on whole recordings.
                      `ENHANCE_CLEAN=… ENHANCE_NOISY=… ENHANCE_OUT=… cargo test -p studio-enhance --release --test
                      real_speech -- --ignored --nocapture` measures it on a recording.
-crates/studio-export Exports a composition to a movie: GPU render, audio mix and encode, written under a
-                     temporary name and renamed when done. No UI, so it also runs on a headless render machine.
+crates/studio-export Exports a composition to a movie (H.264, H.265, ProRes), an animated GIF or a PNG
+                     sequence, at the composition's frame rate or another: GPU render, audio mix and encode,
+                     written under a temporary name and renamed when done. No UI, so it also runs on a
+                     headless render machine.
 apps/studio          Desktop app (GPUI + gpui-kit). UI only: panels render EditorState and forward input.
 ```
 
@@ -59,6 +64,12 @@ Inside `apps/studio/src`:
   against the picture (`studio_cutout::Mask::refine`), and Settings > AI Models > Run cooler rests the GPU
   between frames. `CUTOUT_MODEL=<folder> cargo test -p studio-cutout --release --test speed -- --ignored
   --nocapture` times each stage.
+- The Export dialog (⌘M, `panels/export_dialog.rs`): a preview of the frames being exported, with a scrubber
+  across exactly that range and frame-step arrows, over a checkerboard when the format keeps transparency;
+  a summary of the file (size, frame rate, length, sound, and its size for a fixed bitrate); and grouped
+  settings: format (H.264, H.265 / HEVC, five ProRes flavors, animated GIF, PNG sequence), quality and speed
+  for H.264 and H.265, size, frame rate (faster rates repeat frames, slower ones skip them; GIFs stop at 50),
+  work area or whole composition, and sound with its AAC bitrate.
 - Quick Export (a clip's right-click menu, `panels/export.rs`): renders one layer alone (`studio-core/src/bake.rs`)
   to ProRes 4444 with transparency in an Exports folder beside the project; Export and Replace imports it
   into the project's Exports folder and puts it in the layer's place.
@@ -76,13 +87,25 @@ Inside `apps/studio/src`:
 - Drops: Media items and files from the Finder can be dropped on the Media panel (import only), on a track
   (clips there, one after another) or on the viewer (`EditorState::add_items_at`: from the playhead on a new
   top track, centered where let go; full-frame pictures stay centered).
+- Typing text in the viewer (`panels/viewer.rs`): the Type tool's click on empty space starts a text layer, and
+  on a text layer edits it with the caret there (as does a double-click with the Selection tool). The picture
+  shows the text as it will look while typing (`with_typed_text`), with a blinking caret and the selection
+  drawn on the real glyphs from the layout (`studio_render::text::TextGeometry`); the field taking the keys is
+  hidden. Return starts a new line; ⌘Return, Escape or a click off the text finishes. Click and drag on the
+  text to place the caret or select; double-click selects a word.
+- Text animators (`studio-core/src/text_animation.rs`, Properties ▸ Text Animation): an In and an Out
+  animation per text layer that moves its characters, words or lines one after another (Fade, Rise, Drop,
+  Slide, Pop, Zoom, Spin, Typewriter), in order, reverse, from the center or shuffled, with an easing, a
+  duration for the whole and how much the pieces overlap. Nothing is keyframed: the renderer works out each
+  piece's pose per frame and draws it as its own part of the text's raster (`draw_text_pieces`).
 - Gradients (`studio-core/src/gradient.rs`): two to eight color stops and a from/to line in fractions of the
   layer's box. `panels/gradient_editor.rs` is the bar under a shape's fill or stroke (click to add a stop, drag
   to move, click a stop for its color, Location, Delete, Reverse); the viewer shows the line with a handle on
   each end to drag (`state/gradient.rs`). Files with the older two-color gradients still open.
-- `panels/color_grade.rs`, `state/grade.rs`: the Color tab (like Lumetri): grade the selected clip or the
-  whole video, which goes on a full-length adjustment layer at the top (made the first time). The tab
-  starts with a tile per correction; each added one is a card for one of the effects Basic Correction
+- `panels/color_grade.rs`, `state/grade.rs`: the Color tab (like Lumetri): grade the selected clip (to grade
+  the whole video, select an adjustment layer over it). Like the Properties tab it is a list of cards, one
+  per correction: those the clip has come first, in the order they apply, with turn off, reset and remove in
+  their headings; the rest are folded with a + to add them. Each is a card for one of the effects Basic Correction
   (grouped into White Balance with a picker, Light and Color), Apply LUT, Color Wheels (sized to the panel,
   each with a brightness slider), Tone Curve, Levels and Vignette. Values are sliders on colored tracks,
   with a typed value and double-click to reset; the same effects keyframe in the Effects tab. LUTs are `.cube` files or the 31 built-in looks in five groups
@@ -134,7 +157,10 @@ Inside `apps/studio/src`:
   is made in the background, kept in Studio's cache under `Enhanced`, and played (and exported) instead of the
   original; settings and the copy are kept in step by `studio-core/src/enhance.rs`.
 - `panels/captions.rs`, `state/captions.rs`: the Captions panel and Generate Captions (download the model, transcribe in the
-  background) and caption layers; their timing and animations are in `studio-core/src/captions.rs`.
+  background) and caption layers; their timing and animations are in `studio-core/src/captions.rs`. In
+  Properties, Sync shows every caption of a layer some frames later or earlier (kept when another look is
+  applied), and each transcript phrase's start and end can be typed or dragged; its words stretch to fit
+  without crossing their neighbors (`captions::retime_phrase`).
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout. Cmd+[ / Cmd+] step a frame
   (with Shift, five); Cmd+= / Cmd+- zoom the viewer, and the scroll wheel over it zooms around the pointer
@@ -170,7 +196,9 @@ Inside `apps/studio/src`:
 FFmpeg's libraries and `pkg-config` (macOS: `brew install ffmpeg pkg-config`;
 Debian/Ubuntu: `apt install libavcodec-dev libavformat-dev libswscale-dev libswresample-dev libasound2-dev pkg-config clang`).
 H.264 export uses x264, which Homebrew's and most Linux distributions' FFmpeg include; without it, the
-system's hardware H.264 encoder is used.
+system's hardware H.264 encoder is used. H.265 export likewise uses x265 when FFmpeg has it (Homebrew's
+does) and the hardware encoder otherwise, which is what release builds use. GIF and PNG export need nothing
+extra.
 
 ## Commands
 

@@ -410,12 +410,12 @@ fn clip_toggle(layer: Id, which: &'static str, on: bool, icons: (IconName, IconN
 /// track row.
 /// A clip's name in its header, or a text field while it is being renamed.
 fn clip_name(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    if let Some(editing) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::LayerName(layer.id)) {
+    if let Some(input) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::LayerName(layer.id)).and_then(|editing| editing.input.line()) {
         return div()
             .flex_1()
             .min_w_0()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(crate::panels::chrome::name_input(&editing.input, CLIP_NAME_TEXT))
+            .child(crate::panels::chrome::name_input(input, CLIP_NAME_TEXT))
             .into_any_element();
     }
     // Double-clicking the name renames the clip (double-clicking the rest of a nested

@@ -517,13 +517,25 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
     let stroke_width = style.text.stroke.map_or(4.0, |(_, width)| width);
 
     let fps = workspace.state.composition().frame_rate.fps();
-    let rate = workspace.state.composition().frame_rate;
     let start_frame = layer.start_frame;
-    let mut transcript = div().flex().flex_col().gap_0p5();
+    let mut transcript = div().flex().flex_col().gap_1();
     for range in studio_core::captions::phrases(words, style.words_per_phrase, fps) {
         let text = words[range.clone()].iter().map(|word| word.text.as_str()).collect::<Vec<_>>().join(" ");
-        let at = start_frame + words[range.start].start;
-        let editing = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::CaptionText(id, range.start, range.end));
+        // When it shows, sync included.
+        let at = start_frame + style.offset + words[range.start].start;
+        let editing = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::CaptionText(id, range.start, range.end)).and_then(|editing| editing.input.line());
+        // Its start and end, each typed or dragged to retime it.
+        let edge = |start: bool| FieldTarget::CaptionPhrase { layer: id, first: range.start, end: range.end, start };
+        let times = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .text_size(px(size::SMALL_TEXT))
+            .text_color(hsla(color::MUTED))
+            .child(value_field(edge(true), workspace, cx))
+            .child("–")
+            .child(value_field(edge(false), workspace, cx));
         let row = div()
             .id(("caption-phrase", range.start))
             .flex()
@@ -532,10 +544,9 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
             .px_1()
             .py_0p5()
             .rounded(px(4.0))
-            .hover(|style| style.bg(hsla(color::HOVER)))
-            .child(div().w(px(70.0)).flex_none().font_family("Menlo").text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(studio_core::time::format_timecode(at, rate)));
+            .hover(|style| style.bg(hsla(color::HOVER)));
         let row = match editing {
-            Some(editing) => row.child(div().flex_1().child(Input::new(&editing.input).xsmall())).into_any_element(),
+            Some(input) => row.child(div().flex_1().child(Input::new(input).xsmall())).into_any_element(),
             None => {
                 let (start, end, current) = (range.start, range.end, text.clone());
                 row.cursor_pointer()
@@ -551,7 +562,7 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
                     .into_any_element()
             }
         };
-        transcript = transcript.child(row);
+        transcript = transcript.child(div().flex().flex_col().child(times).child(row));
     }
 
     div()
@@ -565,6 +576,7 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         .child(paint_row("stroke", "Stroke", style.text.stroke.map(|(color, _)| color), ColorTarget::TextStroke(id), move |this, color| this.state.set_text_stroke(id, color.map(|color| (color, stroke_width))), cx))
         .child(labeled_row("Spoken word", color_picker::swatch("captions-highlight", ColorTarget::CaptionHighlight(id), Some(style.highlight), cx)))
         .child(labeled_row("Background", div().flex().items_center().gap_2().child(background_on).child(color_picker::swatch("captions-background", ColorTarget::CaptionBackground(id), style.background, cx))))
+        .child(labeled_row("Sync", div().flex().items_center().gap_2().child(value_field(FieldTarget::CaptionSync { layer: id }, workspace, cx)).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("+ later, − earlier"))))
         .child(divider())
         .child(section(format!("Transcript · {} words", words.len()), None))
         .child(transcript)
@@ -573,6 +585,7 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
 /// What each section is for, shown by the info button on its heading.
 const TRANSFORM_INFO: &str = "Where the layer sits, its size, turn and opacity. Pick a corner, an edge or the center for the anchor point, or drag the anchor in the viewer.";
 const ANIMATE_INFO: &str = "One-click ways for the layer to come in, go out, and move in between.";
+const TEXT_ANIMATION_INFO: &str = "Brings the text in, or takes it out, a character, word or line at a time, as After Effects' text animators do. The duration covers every piece; overlap sets how much each piece's move runs into the next one's.";
 const SPEED_INFO: &str = "A steady speed changes the clip's length; a ramp keeps it. Sound is silent while a clip ramps or plays backwards.";
 const REFRAME_INFO: &str = "Makes a new composition in another shape, moving the clip to keep its subject in frame. Remove Background clicks pick the subject; otherwise it follows the middle.";
 const TRACK_INFO: &str = "Pins this layer to something moving in a video: its position follows the point you click.";
@@ -580,12 +593,12 @@ const CUTOUT_INFO: &str = "Pick a subject to cut it out of its background, or an
 const ENHANCE_INFO: &str = "Removes background noise and hum, then EQs, de-esses and evens out the voice to podcast loudness. Runs on this Mac; the original file is untouched.";
 
 /// The note in a section that is empty until the heading's + adds something.
-fn add_note() -> Div {
+pub(crate) fn add_note() -> Div {
     status_line("Click + to add this to your layer.")
 }
 
 /// A short line of muted status text inside a section, such as what a job is doing.
-fn status_line(text: impl Into<gpui_kit::SharedString>) -> Div {
+pub(crate) fn status_line(text: impl Into<gpui_kit::SharedString>) -> Div {
     div().py_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(text.into())
 }
 
@@ -599,6 +612,106 @@ fn speed_reset(layer: &Layer, cx: &mut Context<Workspace>) -> AnyElement {
     }))
     .disabled(layer.time.is_normal())
     .into_any_element()
+}
+
+/// The Text Animation heading's buttons: Reset removes both animations (greyed out when there
+/// are none), and + adds the In or Out one that is missing, with Rise by character to start.
+fn text_animation_buttons(layer: &Layer, cx: &mut Context<Workspace>) -> [Option<AnyElement>; 2] {
+    use studio_core::presets::Phase;
+    use studio_core::text_animation::TextAnimator;
+    let id = layer.id;
+    let (has_in, has_out) = (layer.animation.text_in.is_some(), layer.animation.text_out.is_some());
+    let reset = heading_button("text-animation-reset", IconName::RotateCcw, "Remove Text Animations", false, cx.listener(move |this, _, _, cx| {
+        this.state.set_text_animator(id, Phase::In, None);
+        this.state.set_text_animator(id, Phase::Out, None);
+        cx.notify();
+    }))
+    .disabled(!has_in && !has_out);
+    let weak = cx.weak_entity();
+    let add = Button::new("text-animation-add").outline().small().icon(Icon::new(IconName::Plus)).tooltip("Add Text Animation").disabled(has_in && has_out).dropdown_menu(move |menu, _, _| {
+        [(Phase::In, "Animate In", has_in), (Phase::Out, "Animate Out", has_out)].into_iter().fold(menu, |menu, (phase, label, present)| {
+            let weak = weak.clone();
+            menu.item(PopupMenuItem::new(label).disabled(present).on_click(move |_, _, cx| {
+                weak.update(cx, |this, cx| {
+                    this.state.set_text_animator(id, phase, Some(TextAnimator::default()));
+                    cx.notify();
+                })
+                .ok();
+            }))
+        })
+    });
+    [Some(reset.into_any_element()), Some(add.into_any_element())]
+}
+
+/// Text Animation: the text's In and Out animators, each with its motion, the pieces it moves
+/// in (character, word or line), their order and easing, how long it takes and how much the
+/// pieces overlap.
+fn text_animation_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    use studio_core::presets::Phase;
+    let animators = [(Phase::In, "In", layer.animation.text_in), (Phase::Out, "Out", layer.animation.text_out)];
+    if animators.iter().all(|(_, _, animator)| animator.is_none()) {
+        return div().child(add_note());
+    }
+    let mut body = div().flex().flex_col().gap_2();
+    for (phase, title, animator) in animators {
+        if let Some(animator) = animator {
+            body = body.child(text_animator_block(layer.id, phase, title, animator, workspace, cx));
+        }
+    }
+    body
+}
+
+/// A dropdown setting one choice (`set`) of layer `id`'s text animator for `phase`.
+fn animator_menu<T: Clone + 'static>(
+    menu_id: String,
+    label: &str,
+    choices: Vec<(String, bool, T)>,
+    (id, phase): (Id, studio_core::presets::Phase),
+    set: fn(&mut studio_core::text_animation::TextAnimator, T),
+    target: &WeakEntity<Workspace>,
+) -> impl IntoElement {
+    choice_menu(menu_id, label.to_owned(), choices, move |this: &mut Workspace, value: T| this.state.edit_text_animator(id, phase, |animator| set(animator, value)), target.clone())
+}
+
+/// One text animator's settings, under a small heading with its Remove button.
+fn text_animator_block(id: Id, phase: studio_core::presets::Phase, title: &'static str, animator: studio_core::text_animation::TextAnimator, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    use studio_core::text_animation::{TextEase, TextMotion, TextOrder, TextUnit};
+    let key = match phase {
+        studio_core::presets::Phase::In => "in",
+        studio_core::presets::Phase::Out => "out",
+    };
+    let target = cx.weak_entity();
+    let motions = TextMotion::ALL.iter().map(|&motion| (motion.name().to_owned(), motion == animator.motion, motion)).collect();
+    let orders = TextOrder::ALL.iter().map(|&order| (order.name().to_owned(), order == animator.order, order)).collect();
+    let eases = TextEase::ALL.iter().map(|&ease| (ease.name().to_owned(), ease == animator.ease, ease)).collect();
+    let menu_id = |name: &str| format!("text-animation-{key}-{name}");
+    let motion_menu = animator_menu(menu_id("motion"), animator.motion.name(), motions, (id, phase), |animator, motion| animator.motion = motion, &target);
+    let order_menu = animator_menu(menu_id("order"), animator.order.name(), orders, (id, phase), |animator, order| animator.order = order, &target);
+    let ease_menu = animator_menu(menu_id("ease"), animator.ease.name(), eases, (id, phase), |animator, ease| animator.ease = ease, &target);
+    // By: one segmented switch for the three kinds of piece.
+    let units = div().flex().gap_0p5().p_0p5().rounded(px(6.0)).bg(hsla(color::INSET)).children(TextUnit::ALL.map(|unit| {
+        Button::new(ElementId::Name(format!("text-animation-{key}-unit-{}", unit.name()).into()))
+            .xsmall()
+            .label(unit.name())
+            .flex_1()
+            .map(|button| if unit == animator.unit { button.primary() } else { button.ghost() })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.state.edit_text_animator(id, phase, |animator| animator.unit = unit);
+                cx.notify();
+            }))
+    }));
+    let remove = heading_button(ElementId::Name(format!("text-animation-{key}-remove").into()), IconName::Trash, "Remove", false, cx.listener(move |this, _, _, cx| {
+        this.state.set_text_animator(id, phase, None);
+        cx.notify();
+    }));
+    div()
+        .child(div().flex().items_center().h(px(26.0)).child(div().flex_1().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title)).child(remove))
+        .child(labeled_row("Animate", motion_menu))
+        .child(labeled_row("By", units))
+        .child(labeled_row("Order", order_menu))
+        .child(labeled_row("Easing", ease_menu))
+        .child(labeled_row("Duration", value_field(FieldTarget::TextAnimationSeconds { layer: id, phase }, workspace, cx)))
+        .child(labeled_row("Overlap", value_field(FieldTarget::TextAnimationOverlap { layer: id, phase }, workspace, cx)))
 }
 
 /// The Animate heading's buttons: Reset takes every animation off (greyed out when there is
@@ -866,7 +979,8 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
     let current_family = style.font_family.clone();
 
     let source_text = if let Some(editing) = workspace.ui.editing.as_ref().filter(|e| e.target == EditTarget::SourceText(id) && !e.in_viewer) {
-        div().flex_1().child(Input::new(&editing.input).small()).into_any_element()
+        // Several lines: Return starts a new one; ⌘Return or a click elsewhere finishes.
+        div().flex_1().min_h(px(48.0)).p_1().rounded(px(4.0)).border_1().border_color(hsla(color::HAIRLINE)).child(editing.input.element()).into_any_element()
     } else {
         let current = text.to_owned();
         div()
@@ -1101,6 +1215,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(transform)
         .children(text)
         .children(layer.transform.is_some().then(|| fold("animate", "Animate", Some(ANIMATE_INFO), animate_buttons(layer, cx), workspace, cx, |cx| animate_section(layer, cx))))
+        .children(matches!(layer.content, LayerContent::Text { .. }).then(|| fold("textanim", "Text Animation", Some(TEXT_ANIMATION_INFO), text_animation_buttons(layer, cx), workspace, cx, |cx| text_animation_section(layer, workspace, cx))))
         .children(studio_core::speed::has_speed(&layer.content).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
         .children(trackable(layer).then(|| fold("track", "Track Motion", Some(TRACK_INFO), [None, Some(track_add(layer, workspace, cx))], workspace, cx, |_| track_section(layer, workspace))))
         .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", Some(CUTOUT_INFO), [None, Some(cutout_button(layer, workspace, cx))], workspace, cx, |cx| cutout_section(layer, workspace, cx))))
@@ -1149,6 +1264,7 @@ fn section_icon(key: &str) -> IconName {
         "shape" => IconName::Shapes,
         "captions" => IconName::Captions,
         "animate" => IconName::Sparkles,
+        "textanim" => IconName::ALargeSmall,
         "speed" => IconName::Hourglass,
         "track" => IconName::Crosshair,
         "cutout" => IconName::Eraser,

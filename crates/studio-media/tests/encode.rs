@@ -76,6 +76,17 @@ fn writes_h264_with_aac_sound() {
 }
 
 #[test]
+fn writes_h265_tagged_for_apple_players() {
+    let path = scratch("out-hevc.mp4");
+    write_movie(&path, MovieFormat::H265, 64, 36);
+    check_movie(&path, "hevc");
+    // QuickTime and Photos only play H.265 tagged `hvc1`; the tag sits in the sample description.
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.windows(4).any(|window| window == b"hvc1"), "tagged hvc1");
+    assert!(!bytes.windows(4).any(|window| window == b"hev1"), "not FFmpeg's default hev1");
+}
+
+#[test]
 fn every_prores_flavor_writes_and_proxy_is_smallest() {
     let size = |format: MovieFormat, name: &str| {
         let path = scratch(name);

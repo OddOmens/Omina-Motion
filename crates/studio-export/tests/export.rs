@@ -8,7 +8,7 @@ use studio_core::animation::Vec2;
 use studio_core::edit::{self, CompositionSettings, FootageInfo};
 use studio_core::model::{Id, Project, Rgba};
 use studio_core::time::FrameRate;
-use studio_export::{ExportRequest, Outcome, Progress, export};
+use studio_export::{ExportFormat, ExportRequest, Outcome, Progress, export};
 use studio_media::{AudioDecoder, CHANNELS, MovieFormat, VideoDecoder, probe, probe_audio};
 
 fn fixture(name: &str) -> PathBuf {
@@ -42,7 +42,7 @@ fn project() -> (Project, Id) {
     (project, comp)
 }
 
-fn request(comp: Id, path: PathBuf, format: MovieFormat) -> ExportRequest {
+fn request(comp: Id, path: PathBuf, format: impl Into<ExportFormat>) -> ExportRequest {
     ExportRequest::new(comp, 0..48, format, path)
 }
 
@@ -93,6 +93,97 @@ fn exports_h264_with_sound() {
 #[test]
 fn exports_prores_with_sound() {
     exports_picture_and_sound(MovieFormat::ProRes422Hq, "comp.mov");
+}
+
+#[test]
+fn exports_h265_with_sound() {
+    exports_picture_and_sound(MovieFormat::H265, "comp-hevc.mp4");
+}
+
+#[test]
+fn a_slower_frame_rate_keeps_the_length_and_the_timing() {
+    let (project, comp) = project();
+    let path = scratch("twelve.mp4");
+    let request = ExportRequest { frame_rate: Some(FrameRate::new(12, 1)), ..request(comp, path.clone(), MovieFormat::H264) };
+    let mut last = None;
+    export(&project, &request, &mut |p| last = Some(p), &|| false).unwrap();
+    assert_eq!(last, Some(Progress { done: 24, total: 24 }), "two seconds at 12 fps");
+    let info = probe(&path).unwrap();
+    assert_eq!((info.frame_rate, info.frame_count), (FrameRate::new(12, 1), 24));
+    // Each color shows for half a second: six frames at 12 fps.
+    assert_eq!(["red", "green", "blue", "white"].map(String::from), [3, 9, 15, 21].map(|f| color_at(&path, f).to_owned()));
+    let sound = probe_audio(&path).unwrap();
+    assert!((sound.duration_seconds - 2.0).abs() < 0.05, "the sound still lasts {} s", sound.duration_seconds);
+    assert!(loudness(&path, 1.2, 1.8) > 0.05, "and the tone is still in the second second");
+}
+
+/// The frames of an exported GIF: each one's delay (hundredths of a second) and the color at its center.
+fn gif_frames(path: &Path) -> Vec<(u16, [u8; 3])> {
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut decoder = options.read_info(std::fs::File::open(path).unwrap()).unwrap();
+    let (width, height) = (usize::from(decoder.width()), usize::from(decoder.height()));
+    let mut frames = Vec::new();
+    while let Some(frame) = decoder.read_next_frame().unwrap() {
+        let i = (height / 2 * width + width / 2) * 4;
+        frames.push((frame.delay, [frame.buffer[i], frame.buffer[i + 1], frame.buffer[i + 2]]));
+    }
+    frames
+}
+
+#[test]
+fn exports_a_looping_gif_that_keeps_time() {
+    let (project, comp) = project();
+    let path = scratch("comp.gif");
+    let request = ExportRequest { frame_rate: Some(FrameRate::new(15, 1)), ..request(comp, path.clone(), ExportFormat::Gif) };
+    export(&project, &request, &mut |_| {}, &|| false).unwrap();
+    let frames = gif_frames(&path);
+    assert_eq!(frames.len(), 30, "two seconds at 15 fps");
+    assert_eq!(frames.iter().map(|(delay, _)| u32::from(*delay)).sum::<u32>(), 200, "and it lasts two seconds");
+    let [red, _, blue] = frames[2].1;
+    assert!(red > 160 && blue < 90, "starts red: {:?}", frames[2].1);
+    let [red, _, blue] = frames[17].1;
+    assert!(blue > 160 && red < 90, "blue after a second: {:?}", frames[17].1);
+}
+
+#[test]
+fn a_gif_never_runs_faster_than_browsers_play() {
+    let (project, comp) = project();
+    let request = ExportRequest { frame_rate: Some(FrameRate::new(60, 1)), ..request(comp, scratch("fast.gif"), ExportFormat::Gif) };
+    assert_eq!(request.output_rate(FrameRate::new(24, 1)), studio_export::GIF_MAX_RATE);
+    let path = request.path.clone();
+    export(&project, &request, &mut |_| {}, &|| false).unwrap();
+    assert!(gif_frames(&path).iter().all(|(delay, _)| *delay >= 2));
+}
+
+#[test]
+fn exports_a_numbered_png_sequence_into_its_own_folder() {
+    let (project, comp) = project();
+    let folder = scratch("Sequence");
+    let _ = std::fs::remove_dir_all(&folder);
+    let request = ExportRequest { frames: 0..12, ..request(comp, folder.clone(), ExportFormat::PngSequence) };
+    export(&project, &request, &mut |_| {}, &|| false).unwrap();
+    let mut names: Vec<String> = std::fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names.len(), 12);
+    assert_eq!((names[0].as_str(), names[11].as_str()), ("Sequence_00000.png", "Sequence_00011.png"));
+    let picture = image::open(folder.join(&names[0])).unwrap().to_rgba8();
+    assert_eq!(picture.dimensions(), (64, 36));
+    let center = picture.get_pixel(32, 18).0;
+    assert!(center[0] > 160 && center[2] < 90 && center[3] == 255, "red: {center:?}");
+    // A second export to the same folder is refused rather than mixed in with the first.
+    let error = export(&project, &request, &mut |_| {}, &|| false).unwrap_err();
+    assert!(error.contains("already exists"), "{error}");
+}
+
+#[test]
+fn a_cancelled_png_sequence_leaves_no_folder() {
+    let (project, comp) = project();
+    let folder = scratch("Cancelled Sequence");
+    let done = std::cell::Cell::new(0);
+    let outcome = export(&project, &request(comp, folder.clone(), ExportFormat::PngSequence), &mut |p| done.set(p.done), &|| done.get() >= 3).unwrap();
+    assert_eq!(outcome, Outcome::Cancelled);
+    assert!(!folder.exists() && !studio_export::temporary_path(&folder).exists());
 }
 
 #[test]

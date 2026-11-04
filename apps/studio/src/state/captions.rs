@@ -75,6 +75,26 @@ impl EditorState {
         }
     }
 
+    /// When phrase `range` of caption layer `layer` starts (`start`) or ends, in composition
+    /// frames, with the layer's sync applied: when it shows.
+    pub fn caption_phrase_frame(&self, layer: Id, range: std::ops::Range<usize>, start: bool) -> Option<i64> {
+        let layer = self.composition().layer(layer)?;
+        let LayerContent::Captions { words, style } = &layer.content else { return None };
+        let at = if start { words.get(range.start)?.start } else { words.get(range.end.checked_sub(1)?)?.end };
+        Some(layer.start_frame + style.offset + at)
+    }
+
+    /// Moves when phrase `range` of caption layer `layer` starts (`start`) or ends to
+    /// composition frame `frame`; its words stretch or squeeze to fit (see
+    /// `captions::retime_phrase`).
+    pub fn retime_caption_phrase(&mut self, layer: Id, range: std::ops::Range<usize>, start: bool, frame: i64) {
+        let Some(layer) = self.composition_mut().layer_mut(layer) else { return };
+        let start_frame = layer.start_frame;
+        if let LayerContent::Captions { words, style } = &mut layer.content {
+            studio_core::captions::retime_phrase(words, range, start, frame - start_frame - style.offset);
+        }
+    }
+
     /// Replaces words `range` with `text`, sharing their time among the new words by length.
     /// An empty text deletes them.
     pub fn set_caption_text(&mut self, layer: Id, range: std::ops::Range<usize>, text: &str) {

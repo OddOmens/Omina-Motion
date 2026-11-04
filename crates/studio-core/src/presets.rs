@@ -89,6 +89,12 @@ pub struct LayerAnimation {
     pub exit: Option<(Motion, f32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub looping: Option<Loop>,
+    /// A text layer's characters, words or lines coming in, and going out (see
+    /// `text_animation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_in: Option<crate::text_animation::TextAnimator>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_out: Option<crate::text_animation::TextAnimator>,
 }
 
 impl LayerAnimation {

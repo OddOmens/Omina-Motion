@@ -85,7 +85,7 @@ pub fn chosen_effect(workspace: &Workspace) -> Option<(Id, Id)> {
     if workspace.ui.tab(PanelId::Properties) != 2 {
         return None;
     }
-    let layer = workspace.state.grade_layer(workspace.ui.grade_target)?;
+    let layer = workspace.state.grade_layer()?;
     Some((layer, workspace.state.effect_named(layer, "Apply LUT")?))
 }
 

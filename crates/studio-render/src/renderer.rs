@@ -113,9 +113,9 @@ enum Source<'a> {
     Texture(&'a wgpu::TextureView),
     /// A texture drawn at an opacity (0–1), for caption fades.
     FadedTexture(&'a wgpu::TextureView, f32),
-    /// A vertical slice of a texture, from `u` 0–1 across it and that wide: one letter of text
-    /// set along a path.
-    TextureSlice(&'a wgpu::TextureView, f32, f32),
+    /// Part of a texture, as fractions of it (left, top, width, height), drawn at an opacity
+    /// (0–1): one letter of text set along a path, or one piece of animated text.
+    TexturePart(&'a wgpu::TextureView, [f32; 4], f32),
     /// Media that is not decoded yet: a checker in this premultiplied linear color.
     Placeholder([f32; 4]),
     /// A shape filling a box: its origin and size, in the same pixels as the drawn rectangle
@@ -181,6 +181,15 @@ struct PathText {
     letter_scale: f32,
 }
 
+/// One piece of animated text for one frame (see `studio_core::text_animation`): the part of
+/// the text's raster it is, in the text's own pixels (origin and size, padding included where
+/// it is at an edge), and how it sits.
+struct TextPiece {
+    origin: Vec2,
+    size: Vec2,
+    pose: studio_core::text_animation::UnitPose,
+}
+
 /// Padding around caption text inside its background box, in layer pixels.
 const CAPTION_PADDING: Vec2 = Vec2::new(28.0, 14.0);
 
@@ -231,6 +240,8 @@ pub struct Renderer {
     paths: HashMap<Id, u64>,
     /// Text set along a path this frame, by layer.
     path_text: HashMap<Id, PathText>,
+    /// Text being animated piece by piece this frame, by layer.
+    text_pieces: HashMap<Id, Vec<TextPiece>>,
     /// The background-removal mask each cut-out layer on screen uses, with the file it came
     /// from (so it is loaded again only when the frame's mask changes).
     cutouts: HashMap<Id, (PathBuf, MediaTexture)>,
@@ -501,6 +512,7 @@ impl Renderer {
             path_cache: HashMap::new(),
             paths: HashMap::new(),
             path_text: HashMap::new(),
+            text_pieces: HashMap::new(),
             cutouts: HashMap::new(),
             text_boxes: HashMap::new(),
             images: HashMap::new(),
@@ -514,6 +526,11 @@ impl Renderer {
     /// The text box size for a style, in source pixels (no GPU work).
     pub fn measure_text(&mut self, text: &str, style: &TextStyle) -> Vec2 {
         self.text.measure(text, style)
+    }
+
+    /// Where carets and selections go in `text` drawn with `style` (no GPU work).
+    pub fn text_geometry(&mut self, text: &str, style: &TextStyle) -> crate::text::TextGeometry {
+        self.text.geometry(text, style)
     }
 
     /// The index of a set of work textures `width` × `height`, made if needed. A few sizes are
@@ -642,7 +659,7 @@ impl Renderer {
             Source::Solid(color) => (0.0, *color, &self.blank, 0.0),
             Source::Texture(view) => (1.0, [1.0; 4], *view, 0.0),
             Source::FadedTexture(view, opacity) => (1.0, [*opacity; 4], *view, 0.0),
-            Source::TextureSlice(view, ..) => (1.0, [1.0; 4], *view, 0.0),
+            Source::TexturePart(view, _, opacity) => (1.0, [*opacity; 4], *view, 0.0),
             Source::Placeholder(color) => (2.0, *color, &self.blank, 40.0),
             Source::Shape(..) => (3.0, [0.0; 4], &self.blank, 0.0),
         };
@@ -657,7 +674,7 @@ impl Renderer {
                 paint_uniform(style.stroke.map(|stroke| stroke.paint)),
             ),
             // For textures, the part drawn: a slice, or all of it.
-            Source::TextureSlice(_, from, width) => ([0.0; 4], [*from, 0.0, *width, 1.0], 0.0, paint_uniform(None), paint_uniform(None)),
+            Source::TexturePart(_, part, _) => ([0.0; 4], *part, 0.0, paint_uniform(None), paint_uniform(None)),
             Source::Texture(_) | Source::FadedTexture(..) => ([0.0; 4], [0.0, 0.0, 1.0, 1.0], 0.0, paint_uniform(None), paint_uniform(None)),
             _ => ([0.0; 4], [0.0; 4], 0.0, paint_uniform(None), paint_uniform(None)),
         };
@@ -1136,6 +1153,7 @@ impl Renderer {
         self.captions.clear();
         self.paths.clear();
         self.path_text.clear();
+        self.text_pieces.clear();
         for layer in composition.layers.iter().filter(|layer| layer.is_active_at(frame)) {
             for source in layer.effects.iter().filter(|effect| effect.enabled).filter_map(|effect| effect.lut.as_ref()) {
                 self.prepare_lut(source);
@@ -1189,6 +1207,9 @@ impl Renderer {
                             let letter_scale = layer.transform.as_ref().map_or(1.0, |transform| transform.scale.value_at(at_time).x / 100.0);
                             self.path_text.insert(layer.id, PathText { letters, baseline, walk, start: on.start, letter_scale });
                         }
+                    } else if let Some(poses) = studio_core::text_animation::layer_poses(layer, text, style.font_size, at_time, composition.frame_rate) {
+                        let pieces = self.text_pieces(text, style, &poses, prepared.1, prepared.2);
+                        self.text_pieces.insert(layer.id, pieces);
                     }
                 }
                 LayerContent::Image { item } => {
@@ -1349,8 +1370,66 @@ impl Renderer {
                 .then(Affine::scale(Vec2::new(letter_scale, letter_scale)))
                 .then(Affine::rotate(angle.to_degrees()))
                 .then(Affine::translate(point));
-            let slice = Source::TextureSlice(&texture.view, (from + pad.x) / total, (to - from) / total);
+            let slice = Source::TexturePart(&texture.view, [(from + pad.x) / total, 0.0, (to - from) / total, 1.0], 1.0);
             sources.push((world, slice, (Vec2::new(from, -pad.y), Vec2::new(to - from, texture.size.y))));
+        }
+        let drawn: Vec<(Affine, &Source, (Vec2, Vec2))> = sources.iter().map(|(world, source, rect)| (*world, source, *rect)).collect();
+        if !drawn.is_empty() {
+            self.draw_sources(encoder, targets, target, scale, &drawn);
+        }
+    }
+
+    /// Where each animated piece of `text` is in its raster (from the caret positions of its
+    /// layout), with the pose `poses` gives it. Pieces at the start or end of a line, and on the
+    /// first or last line, reach out over the raster's padding so strokes aren't cut off.
+    fn text_pieces(&mut self, text: &str, style: &studio_core::model::TextStyle, poses: &[(std::ops::Range<usize>, studio_core::text_animation::UnitPose)], measured: Vec2, pad: Vec2) -> Vec<TextPiece> {
+        let geometry = self.text.geometry(text, style);
+        let last_line = geometry.lines.len().saturating_sub(1);
+        let line_of = |offset: usize| geometry.lines.iter().rposition(|line| line.stops.first().is_some_and(|&(at, _)| at <= offset)).unwrap_or(0);
+        poses
+            .iter()
+            .map(|(range, pose)| {
+                let line_index = line_of(range.start);
+                let line = &geometry.lines[line_index];
+                let (start, _, _) = geometry.caret(range.start);
+                let (end, _, _) = geometry.caret(range.end);
+                let (mut left, mut right) = (start.min(end), start.max(end));
+                // At the ends of its line, the piece takes the padding (and any space) there.
+                let first_on_line = poses.iter().all(|(other, _)| line_of(other.start) != line_index || other.start >= range.start);
+                let last_on_line = poses.iter().all(|(other, _)| line_of(other.start) != line_index || other.end <= range.end);
+                if first_on_line {
+                    left = -pad.x;
+                }
+                if last_on_line {
+                    right = measured.x + pad.x;
+                }
+                let top = if line_index == 0 { -pad.y } else { line.top };
+                let bottom = if line_index == last_line { measured.y + pad.y } else { line.top + line.height };
+                TextPiece { origin: Vec2::new(left, top), size: Vec2::new((right - left).max(0.0), (bottom - top).max(0.0)), pose: *pose }
+            })
+            .collect()
+    }
+
+    /// Draws a text layer piece by piece, each moved, scaled, turned and faded about its own
+    /// middle as its animation says.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_pieces(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, layer: &Layer, world: Affine, scale: f32, text_keys: &HashMap<Id, (u64, Vec2, Vec2)>, target: usize) {
+        let (Some((key, measured, pad)), Some(pieces)) = (text_keys.get(&layer.id), self.text_pieces.get(&layer.id)) else { return };
+        let texture = &self.text_cache[key];
+        let total = Vec2::new(texture.size.x.max(1.0), texture.size.y.max(1.0));
+        // Fit the text box to the layer's box, as when the text is drawn whole.
+        let fit = Vec2::new(layer.size.x / measured.x.max(1.0), layer.size.y / measured.y.max(1.0));
+        let mut sources = Vec::new();
+        for piece in pieces.iter().filter(|piece| piece.pose.opacity > 0.001 && piece.pose.scale > 0.0001 && piece.size.x > 0.0) {
+            let middle = piece.origin + piece.size * 0.5;
+            let placed = Affine::translate(Vec2::new(-middle.x, -middle.y))
+                .then(Affine::scale(Vec2::new(piece.pose.scale, piece.pose.scale)))
+                .then(Affine::rotate(piece.pose.rotation))
+                .then(Affine::translate(middle + piece.pose.offset))
+                .then(Affine::scale(fit))
+                .then(world);
+            let part = [(piece.origin.x + pad.x) / total.x, (piece.origin.y + pad.y) / total.y, piece.size.x / total.x, piece.size.y / total.y];
+            sources.push((placed, Source::TexturePart(&texture.view, part, piece.pose.opacity), (piece.origin, piece.size)));
         }
         let drawn: Vec<(Affine, &Source, (Vec2, Vec2))> = sources.iter().map(|(world, source, rect)| (*world, source, *rect)).collect();
         if !drawn.is_empty() {
@@ -1408,6 +1487,7 @@ impl Renderer {
                 self.draw_source(encoder, targets, target, world, scale, &Source::Shape(*style, Vec2::default(), layer.size), rect);
             }
             LayerContent::Text { .. } if self.path_text.contains_key(&layer.id) => self.draw_text_on_path(encoder, targets, layer, scale, text_keys, target),
+            LayerContent::Text { .. } if self.text_pieces.contains_key(&layer.id) => self.draw_text_pieces(encoder, targets, layer, world, scale, text_keys, target),
             LayerContent::Text { .. } => {
                 if let Some((key, measured, pad)) = text_keys.get(&layer.id) {
                     let texture = &self.text_cache[key];

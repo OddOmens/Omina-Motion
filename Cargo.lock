@@ -7644,6 +7644,8 @@ dependencies = [
 name = "studio-export"
 version = "0.1.0"
 dependencies = [
+ "gif 0.14.2",
+ "image",
  "studio-core",
  "studio-media",
  "studio-render",

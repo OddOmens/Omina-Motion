@@ -301,12 +301,12 @@ fn type_label(item: &ProjectItem, workspace: &Workspace) -> String {
 
 /// An item's name in its row, or a text field while it is being renamed.
 fn item_name(item: &ProjectItem, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    if let Some(editing) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::ItemName(item.id)) {
+    if let Some(input) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::ItemName(item.id)).and_then(|editing| editing.input.line()) {
         return div()
             .flex_1()
             .min_w_0()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(super::chrome::name_input(&editing.input, size::TEXT))
+            .child(super::chrome::name_input(input, size::TEXT))
             .into_any_element();
     }
     // Double-clicking the name renames the item (double-clicking the rest of the row opens it).

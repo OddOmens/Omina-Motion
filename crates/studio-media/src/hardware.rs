@@ -1,7 +1,7 @@
 //! Hardware video decoding through FFmpeg: VideoToolbox on macOS, VAAPI on Linux and
 //! D3D11 on Windows. `ffmpeg-next` has no safe wrapper for this, so this module calls
-//! FFmpeg directly. It and `color` are the only `unsafe` code in Studio; every block states
-//! why it is sound. Anything that fails here falls back to software decoding.
+//! FFmpeg directly. It, `color` and `encode::tag_as_hvc1` are the only `unsafe` code in
+//! Studio; every block states why it is sound. Anything that fails here falls back to software decoding.
 #![allow(unsafe_code)]
 
 use std::ptr;

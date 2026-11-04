@@ -1,7 +1,8 @@
 //! The Effects panel, opened from the rail: the built-in effects by category. Only effects the
 //! renderer draws are listed, and with a clip selected only the ones that change how that clip
 //! looks (no colour correction on text, nothing on audio). Each effect can be dragged onto a
-//! clip in the timeline, or added to the selected clips with its + button.
+//! clip in the timeline, or added to the selected clips with its + button. Categories start
+//! folded, so the panel opens as a short list; each one opens with a click.
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -63,21 +64,10 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         [(_, name, _)] => format!("Effects for {name}"),
         clips => format!("Effects for {} clips", clips.len()),
     }));
-    // Effects on an adjustment layer change everything under it.
-    list = list.child(
-        div().px_3().pb_2().child(
-            Button::new("new-adjustment-layer").outline().small().w_full().icon(Icon::new(IconName::Layers)).label("New Adjustment Layer").tooltip("A layer over everything, from the playhead on, whose effects change what is under it").on_click(cx.listener(|this, _, _, cx| {
-                this.state.add_adjustment_layer();
-                this.ui.tabs.insert(PanelId::Properties, 1);
-                cx.notify();
-            })),
-        ),
-    );
-
     // Transitions first: dragged onto the start or end of a clip, they go on that cut.
     let pictures = selected.iter().all(|(_, _, content)| !matches!(content, LayerContent::Audio { .. }));
     if pictures {
-        let open = !workspace.ui.closed_effect_categories.contains("Transitions");
+        let open = workspace.ui.open_effect_categories.contains("Transitions");
         list = list.child(
             div()
                 .id("transitions-category")
@@ -91,8 +81,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                 .text_color(hsla(color::MUTED))
                 .hover(|style| style.bg(hsla(color::HOVER)))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.ui.closed_effect_categories.remove("Transitions") {
-                        this.ui.closed_effect_categories.insert("Transitions");
+                    if !this.ui.open_effect_categories.remove("Transitions") {
+                        this.ui.open_effect_categories.insert("Transitions");
                     }
                     cx.notify();
                 }))
@@ -120,7 +110,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         }
         shown += effects.len();
         let name = category.name;
-        let is_open = !workspace.ui.closed_effect_categories.contains(name);
+        let is_open = workspace.ui.open_effect_categories.contains(name);
         list = list.child(
             div()
                 .id(("effect-category", category_index))
@@ -134,8 +124,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                 .text_color(hsla(color::MUTED))
                 .hover(|style| style.bg(hsla(color::HOVER)))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.ui.closed_effect_categories.remove(name) {
-                        this.ui.closed_effect_categories.insert(name);
+                    if !this.ui.open_effect_categories.remove(name) {
+                        this.ui.open_effect_categories.insert(name);
                     }
                     cx.notify();
                 }))
@@ -163,7 +153,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
 
 /// The LUTs category: each look and imported LUT, then Import.
 fn lut_category(workspace: &Workspace, can_apply: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let open = !workspace.ui.closed_effect_categories.contains("LUTs");
+    let open = workspace.ui.open_effect_categories.contains("LUTs");
     let heading = div()
         .id("luts-category")
         .h(px(size::ROW_HEIGHT + 4.0))
@@ -176,8 +166,8 @@ fn lut_category(workspace: &Workspace, can_apply: bool, cx: &mut Context<Workspa
         .text_color(hsla(color::MUTED))
         .hover(|style| style.bg(hsla(color::HOVER)))
         .on_click(cx.listener(|this, _, _, cx| {
-            if !this.ui.closed_effect_categories.remove("LUTs") {
-                this.ui.closed_effect_categories.insert("LUTs");
+            if !this.ui.open_effect_categories.remove("LUTs") {
+                this.ui.open_effect_categories.insert("LUTs");
             }
             cx.notify();
         }))

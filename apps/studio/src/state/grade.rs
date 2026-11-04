@@ -1,9 +1,8 @@
 //! Color grading and the eyedropper's colors.
 //!
-//! Grading works on one clip or on the whole video. The whole video is graded by an adjustment
-//! layer on top of everything that lasts the full composition (made the first time it is
-//! needed; see `edit::ensure_color_grade_layer`), so the grade is a layer like any other: it can
-//! be hidden, trimmed, masked or have its effects keyframed.
+//! Grading works on the one selected clip. To grade the whole video, select an adjustment layer
+//! over it and grade that: its corrections change everything under it, and as a layer like any
+//! other it can be hidden, trimmed, masked or have its effects keyframed.
 //!
 //! The eyedropper keeps a current color, as Photoshop keeps a foreground color. Its recent picks
 //! and the saved swatches are shared by every project and kept in Settings.
@@ -13,15 +12,6 @@ use studio_core::model::{Id, LayerContent, LutSource, Rgba};
 use studio_core::property::PropertyPath;
 
 use super::EditorState;
-
-/// What the Color panel grades.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GradeTarget {
-    /// The one selected clip.
-    Clip,
-    /// Everything, through the Color Grade adjustment layer.
-    Video,
-}
 
 /// The most recent eyedropper picks kept.
 pub const RECENT_COLORS: usize = 10;
@@ -42,24 +32,11 @@ impl EditorState {
         Some(id)
     }
 
-    /// The layer `target` grades, if there is one already: the selected clip (when exactly one
-    /// is selected and color correction suits it), or the whole video's Color Grade layer.
-    pub fn grade_layer(&self, target: GradeTarget) -> Option<Id> {
-        match target {
-            GradeTarget::Clip => {
-                let [id] = self.selected_layers.as_slice() else { return None };
-                self.composition().layer(*id).filter(|layer| takes_grading(&layer.content)).map(|layer| layer.id)
-            }
-            GradeTarget::Video => edit::color_grade_layer(self.composition()),
-        }
-    }
-
-    /// Like `grade_layer`, but makes the whole video's Color Grade layer if it is missing.
-    pub fn ensure_grade_layer(&mut self, target: GradeTarget) -> Option<Id> {
-        match target {
-            GradeTarget::Clip => self.grade_layer(target),
-            GradeTarget::Video => edit::ensure_color_grade_layer(&mut self.project, self.active_comp),
-        }
+    /// The layer the Color panel grades: the selected clip, when exactly one is selected and
+    /// color correction suits it (an adjustment layer counts, and grades what is under it).
+    pub fn grade_layer(&self) -> Option<Id> {
+        let [id] = self.selected_layers.as_slice() else { return None };
+        self.composition().layer(*id).filter(|layer| takes_grading(&layer.content)).map(|layer| layer.id)
     }
 
     /// The first effect called `name` on `layer`.
@@ -67,10 +44,10 @@ impl EditorState {
         self.composition().layer(layer)?.effects.iter().find(|effect| effect.name == name).map(|effect| effect.id)
     }
 
-    /// Adds the catalog effect `name` to what `target` grades (making the Color Grade layer if
-    /// needed). Returns the layer and the new effect.
-    pub fn add_grade_effect(&mut self, target: GradeTarget, name: &str) -> Option<(Id, Id)> {
-        let layer = self.ensure_grade_layer(target)?;
+    /// Adds the catalog effect `name` to the graded clip (see `grade_layer`). Returns the layer
+    /// and the new effect.
+    pub fn add_grade_effect(&mut self, name: &str) -> Option<(Id, Id)> {
+        let layer = self.grade_layer()?;
         if self.composition().layer(layer).is_some_and(|layer| layer.switches.locked) {
             return None;
         }
@@ -174,31 +151,25 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_video_is_graded_on_one_adjustment_layer() {
+    fn an_adjustment_layer_is_graded_like_a_clip() {
         let mut state = EditorState::new();
-        // The sample's Grade layer lasts the whole composition, so it is the one used.
-        let existing = state.grade_layer(GradeTarget::Video).unwrap();
-        let (layer, effect) = state.add_grade_effect(GradeTarget::Video, "Basic Correction").unwrap();
-        assert_eq!(layer, existing);
+        let adjustment = state.add_adjustment_layer().unwrap();
+        assert!(matches!(state.composition().layer(adjustment).unwrap().content, LayerContent::Adjustment));
+        assert_eq!(state.grade_layer(), Some(adjustment), "it was selected when made");
+        let (layer, effect) = state.add_grade_effect("Basic Correction").unwrap();
+        assert_eq!(layer, adjustment);
         assert_eq!(state.effect_named(layer, "Basic Correction"), Some(effect));
-        // Without it, the first grading effect makes a Color Grade layer on top.
-        studio_core::edit::delete_layers(state.composition_mut_for_test(), &[existing]);
-        assert_eq!(state.grade_layer(GradeTarget::Video), None);
-        let (made, _) = state.add_grade_effect(GradeTarget::Video, "Levels").unwrap();
-        assert_eq!(state.composition().layers[0].id, made);
-        assert!(matches!(state.composition().layer(made).unwrap().content, LayerContent::Adjustment));
-        assert_eq!(state.add_grade_effect(GradeTarget::Video, "Tone Curve").unwrap().0, made, "and reuses it");
     }
 
     #[test]
     fn a_clip_is_graded_only_when_one_picture_clip_is_selected() {
         let mut state = EditorState::new();
-        assert_eq!(state.grade_layer(GradeTarget::Clip), None, "nothing selected");
+        assert_eq!(state.grade_layer(), None, "nothing selected");
         state.selected_layers = vec![TITLE];
-        assert_eq!(state.grade_layer(GradeTarget::Clip), None, "text is colored directly, not graded");
+        assert_eq!(state.grade_layer(), None, "text is colored directly, not graded");
         state.selected_layers = vec![A_CAM];
-        assert_eq!(state.grade_layer(GradeTarget::Clip), Some(A_CAM));
-        let (_, effect) = state.add_grade_effect(GradeTarget::Clip, "Basic Correction").unwrap();
+        assert_eq!(state.grade_layer(), Some(A_CAM));
+        let (_, effect) = state.add_grade_effect("Basic Correction").unwrap();
         assert!(state.composition().layer(A_CAM).unwrap().effects.iter().any(|e| e.id == effect));
     }
 
@@ -219,7 +190,7 @@ mod tests {
         let layer = A_CAM;
         let (_, effect) = {
             state.selected_layers = vec![layer];
-            state.add_grade_effect(GradeTarget::Clip, "Basic Correction").unwrap()
+            state.add_grade_effect("Basic Correction").unwrap()
         };
         // A bluish gray needs warming.
         state.neutralize(layer, effect, Rgba::hex(0x8090b0));
