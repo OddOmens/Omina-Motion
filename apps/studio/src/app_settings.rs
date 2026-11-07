@@ -73,6 +73,10 @@ pub struct AppSettings {
     pub cooler_background_removal: bool,
     /// Which AI features are shown (Settings > AI Models).
     pub ai: AiFeatures,
+    /// Tools and features turned off (Settings > Features; see `features`). The AI ones live
+    /// in `ai` instead.
+    #[serde(deserialize_with = "crate::features::read_features_off")]
+    pub features_off: std::collections::BTreeSet<crate::features::Feature>,
     /// Keyboard shortcuts: a starting set and the person's own changes.
     pub shortcuts: crate::keymap::Shortcuts,
     /// Earlier versions of projects, kept to roll back to (see `versions`).
@@ -300,6 +304,7 @@ impl Default for AppSettings {
             compact_timeline: false,
             cooler_background_removal: false,
             ai: AiFeatures::default(),
+            features_off: std::collections::BTreeSet::new(),
             shortcuts: crate::keymap::Shortcuts::default(),
             versions: VersionSettings::default(),
             // Tests turn it on where they need it, so the viewer stays predictable elsewhere.

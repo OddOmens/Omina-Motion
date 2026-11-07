@@ -161,6 +161,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut gpui_kit::C
         let Some(workspace) = target.upgrade() else { return dialog };
         let start = target.clone();
         let close = target.clone();
+        let queue_on = workspace.read(cx).has(crate::features::Feature::ExportQueue);
         dialog
             .title(dialog_title(&workspace, cx))
             .w(px(DIALOG_WIDTH))
@@ -168,14 +169,14 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut gpui_kit::C
             .footer(
                 DialogFooter::new()
                     .child(DialogClose::new().trigger(|button| button.outline().label("Cancel").w(px(100.0))))
-                    .child({
+                    .when(queue_on, |footer| footer.child({
                         // Saves these settings as a queued export, to run later with others.
                         let queue = target.clone();
                         Button::new("export-queue-add").outline().label("Add to Queue…").on_click(move |_, window, cx| {
                             window.close_dialog(cx);
                             queue.update(cx, |this, cx| super::export::choose_file_then(this, true, window, cx)).ok();
                         })
-                    })
+                    }))
                     .child(DialogAction::new().child(Button::new("export-ok").primary().icon(IconName::Download).label("Export…").w(px(132.0)))),
             )
             .on_ok(move |_, window, cx| {

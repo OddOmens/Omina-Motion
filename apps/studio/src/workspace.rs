@@ -126,7 +126,7 @@ pub(crate) const NOT_TYPING: &str = "Studio && !Input";
 
 pub fn bind_keys(cx: &mut App) {
     // The shortcuts in use (Settings ▸ Keyboard Shortcuts), on top of the components' own.
-    crate::keymap::init(&crate::app_settings::load().shortcuts, cx);
+    crate::keymap::init(&crate::app_settings::load(), cx);
     // The editor window handles Quit itself, to offer saving first. This only runs when no
     // window does (none is open).
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -141,18 +141,23 @@ pub fn refresh_menus(cx: &mut App) {
     cx.set_menus(menus());
 }
 
-/// The menu bar. Shortcuts shown in it come from the key bindings above.
+/// The menu bar. Shortcuts shown in it come from the key bindings above. Items for features
+/// turned off in Settings ▸ Features are left out.
 pub fn menus() -> Vec<gpui_kit::Menu> {
+    use crate::features::Feature;
     use gpui_kit::{Menu, MenuItem, OsAction, SystemMenuType};
+    let settings = crate::app_settings::load();
+    // An item that is only there while its feature is on.
+    let gated = |feature: Feature, item: MenuItem| settings.feature_on(feature).then_some(item);
     // The projects used lately that are still on disk, newest first.
-    let recent: Vec<MenuItem> = crate::app_settings::load()
+    let recent: Vec<MenuItem> = settings
         .recent_projects
-        .into_iter()
+        .iter()
         .filter(|project| project.path.exists())
         .take(10)
         .map(|project| {
             let name = project.path.file_stem().map_or_else(|| project.path.display().to_string(), |name| name.to_string_lossy().into_owned());
-            MenuItem::action(name, OpenRecent { path: project.path })
+            MenuItem::action(name, OpenRecent { path: project.path.clone() })
         })
         .collect();
     let mut open_recent = Menu::new("Open Recent").items(recent);
@@ -173,68 +178,72 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::separator(),
             MenuItem::action("Quit Studio", Quit),
         ]),
-        Menu::new("File").items([
-            MenuItem::action("New Project", NewProject),
-            MenuItem::action("Open…", Open),
-            MenuItem::submenu(open_recent),
-            MenuItem::action("Close Project", CloseProject),
-            MenuItem::action("Start Screen", ShowStartScreen),
-            MenuItem::separator(),
-            MenuItem::action("Save", Save),
-            MenuItem::action("Save As…", SaveAs),
-            MenuItem::action("Browse Versions…", BrowseVersions),
-            MenuItem::separator(),
-            MenuItem::action("Export…", Export),
-            MenuItem::action("Export Queue…", ExportQueue),
-            MenuItem::action("Package…", Package),
-            MenuItem::separator(),
-            MenuItem::action("Import…", Import),
-            MenuItem::action("New Composition…", NewComposition),
-        ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Undo", Undo, OsAction::Undo),
-            MenuItem::os_action("Redo", Redo, OsAction::Redo),
-            MenuItem::separator(),
-            MenuItem::os_action("Cut", Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", Copy, OsAction::Copy),
-            MenuItem::os_action("Paste", Paste, OsAction::Paste),
-            MenuItem::action("Paste Attributes…", PasteAttributes),
-            MenuItem::action("Duplicate", Duplicate),
-            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
-            MenuItem::action("Pre-compose…", Precompose),
-            MenuItem::separator(),
-            MenuItem::action("Trim In Point to Playhead", TrimInToPlayhead),
-            MenuItem::action("Trim Out Point to Playhead", TrimOutToPlayhead),
-            MenuItem::action("Split Layer", SplitLayer),
-            MenuItem::action("Ripple Delete", RippleDelete),
-            MenuItem::action("Close Gaps", CloseGaps),
-            MenuItem::separator(),
-            MenuItem::action("Snapping", ToggleSnapping),
-        ]),
-        Menu::new("Composition").items([MenuItem::action("Composition Settings…", CompositionSettings), MenuItem::action("Magic Resize…", MagicResize), MenuItem::action("Magic Move…", MagicMove)]),
-        Menu::new("Layer").items([
-            MenuItem::action("New Solid", NewSolid),
-            MenuItem::action("New Adjustment Layer", NewAdjustmentLayer),
-            MenuItem::action("New Null Object", NewNull),
-            MenuItem::separator(),
-            MenuItem::action("Pre-compose…", Precompose),
-            MenuItem::action("Ungroup Composition", UngroupComposition),
-            MenuItem::action("Morph To…", MorphTo),
-            MenuItem::action("Flip Horizontal", FlipHorizontal),
-            MenuItem::action("Flip Vertical", FlipVertical),
-            MenuItem::action("Reset Transform", ResetTransform),
-            MenuItem::separator(),
-            MenuItem::action("Add or Remove Marker", ToggleMarker),
-            MenuItem::separator(),
-            MenuItem::action("Sequence Layers", SequenceLayers),
-            MenuItem::action("Stagger Layers by 5 Frames", StaggerLayers),
-        ]),
-        Menu::new("View").items([
-            MenuItem::action("Zoom In", ZoomViewerIn),
-            MenuItem::action("Zoom Out", ZoomViewerOut),
-            MenuItem::separator(),
-            MenuItem::action("Show Guides", ToggleGuides),
-        ]),
+        Menu::new("File").items(tidy_menu([
+            Some(MenuItem::action("New Project", NewProject)),
+            Some(MenuItem::action("Open…", Open)),
+            Some(MenuItem::submenu(open_recent)),
+            Some(MenuItem::action("Close Project", CloseProject)),
+            Some(MenuItem::action("Start Screen", ShowStartScreen)),
+            Some(MenuItem::separator()),
+            Some(MenuItem::action("Save", Save)),
+            Some(MenuItem::action("Save As…", SaveAs)),
+            Some(MenuItem::action("Browse Versions…", BrowseVersions)),
+            Some(MenuItem::separator()),
+            gated(Feature::Export, MenuItem::action("Export…", Export)),
+            gated(Feature::ExportQueue, MenuItem::action("Export Queue…", ExportQueue)),
+            gated(Feature::Package, MenuItem::action("Package…", Package)),
+            Some(MenuItem::separator()),
+            Some(MenuItem::action("Import…", Import)),
+            Some(MenuItem::action("New Composition…", NewComposition)),
+        ])),
+        Menu::new("Edit").items(tidy_menu([
+            Some(MenuItem::os_action("Undo", Undo, OsAction::Undo)),
+            Some(MenuItem::os_action("Redo", Redo, OsAction::Redo)),
+            Some(MenuItem::separator()),
+            Some(MenuItem::os_action("Cut", Cut, OsAction::Cut)),
+            Some(MenuItem::os_action("Copy", Copy, OsAction::Copy)),
+            Some(MenuItem::os_action("Paste", Paste, OsAction::Paste)),
+            gated(Feature::PasteAttributes, MenuItem::action("Paste Attributes…", PasteAttributes)),
+            Some(MenuItem::action("Duplicate", Duplicate)),
+            Some(MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll)),
+            gated(Feature::Precompose, MenuItem::action("Pre-compose…", Precompose)),
+            Some(MenuItem::separator()),
+            Some(MenuItem::action("Trim In Point to Playhead", TrimInToPlayhead)),
+            Some(MenuItem::action("Trim Out Point to Playhead", TrimOutToPlayhead)),
+            Some(MenuItem::action("Split Layer", SplitLayer)),
+            Some(MenuItem::action("Ripple Delete", RippleDelete)),
+            gated(Feature::CloseGaps, MenuItem::action("Close Gaps", CloseGaps)),
+            Some(MenuItem::separator()),
+            Some(MenuItem::action("Snapping", ToggleSnapping)),
+        ])),
+        Menu::new("Composition").items(tidy_menu([
+            Some(MenuItem::action("Composition Settings…", CompositionSettings)),
+            gated(Feature::MagicResize, MenuItem::action("Magic Resize…", MagicResize)),
+            gated(Feature::MagicMove, MenuItem::action("Magic Move…", MagicMove)),
+        ])),
+        Menu::new("Layer").items(tidy_menu([
+            gated(Feature::NewLayer, MenuItem::action("New Solid", NewSolid)),
+            gated(Feature::NewLayer, MenuItem::action("New Adjustment Layer", NewAdjustmentLayer)),
+            gated(Feature::NewLayer, MenuItem::action("New Null Object", NewNull)),
+            Some(MenuItem::separator()),
+            gated(Feature::Precompose, MenuItem::action("Pre-compose…", Precompose)),
+            Some(MenuItem::action("Ungroup Composition", UngroupComposition)),
+            gated(Feature::Morph, MenuItem::action("Morph To…", MorphTo)),
+            Some(MenuItem::action("Flip Horizontal", FlipHorizontal)),
+            Some(MenuItem::action("Flip Vertical", FlipVertical)),
+            Some(MenuItem::action("Reset Transform", ResetTransform)),
+            Some(MenuItem::separator()),
+            gated(Feature::Markers, MenuItem::action("Add or Remove Marker", ToggleMarker)),
+            Some(MenuItem::separator()),
+            gated(Feature::SequenceLayers, MenuItem::action("Sequence Layers", SequenceLayers)),
+            gated(Feature::SequenceLayers, MenuItem::action("Stagger Layers by 5 Frames", StaggerLayers)),
+        ])),
+        Menu::new("View").items(tidy_menu([
+            Some(MenuItem::action("Zoom In", ZoomViewerIn)),
+            Some(MenuItem::action("Zoom Out", ZoomViewerOut)),
+            Some(MenuItem::separator()),
+            gated(Feature::Guides, MenuItem::action("Show Guides", ToggleGuides)),
+        ])),
         Menu::new("Window").items([
             MenuItem::action("Minimize", MinimizeWindow),
             MenuItem::action("Zoom", ZoomWindow),
@@ -242,6 +251,24 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Enter Full Screen", ToggleFullScreen),
         ]),
     ]
+}
+
+/// A menu's items without the ones left out (`None`), and without the separators that would
+/// leave behind: none at either end, and never two in a row.
+fn tidy_menu(items: impl IntoIterator<Item = Option<gpui_kit::MenuItem>>) -> Vec<gpui_kit::MenuItem> {
+    use gpui_kit::MenuItem;
+    let mut kept: Vec<MenuItem> = Vec::new();
+    for item in items.into_iter().flatten() {
+        let is_separator = matches!(item, MenuItem::Separator);
+        if is_separator && kept.last().is_none_or(|last| matches!(last, MenuItem::Separator)) {
+            continue;
+        }
+        kept.push(item);
+    }
+    if kept.last().is_some_and(|last| matches!(last, MenuItem::Separator)) {
+        kept.pop();
+    }
+    kept
 }
 
 /// What the panel beside the rail shows.
@@ -1210,7 +1237,16 @@ impl Workspace {
         }
     }
 
+    /// Whether a feature is turned on in Settings ▸ Features.
+    pub fn has(&self, feature: crate::features::Feature) -> bool {
+        self.ui.settings.feature_on(feature)
+    }
+
     pub fn set_tool(&mut self, tool: Tool) {
+        // A tool turned off in Settings ▸ Features can't be picked, by key or otherwise.
+        if !self.ui.settings.tool_on(tool) {
+            return;
+        }
         if tool != Tool::Pen {
             self.state.finish_pen(false);
         }

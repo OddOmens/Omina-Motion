@@ -14,6 +14,7 @@ use studio_core::model::Id;
 use studio_core::subtitles::SubtitleFormat;
 
 use super::analysis::SceneCutAction;
+use crate::features::Feature;
 use crate::workspace::{EditTarget, Workspace};
 
 /// Finds the scene cuts in the selected clip (the one the menu was opened on).
@@ -91,6 +92,15 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         let can_export_layer = single.is_some() && has_picture;
         let (is_video, is_footage) = (video_clip.is_some(), footage.is_some());
 
+        // Features turned off in Settings ▸ Features are left out of the menu.
+        let on = |feature: Feature| workspace.has(feature);
+        let (paste_attributes, precompose, morph) = (on(Feature::PasteAttributes), on(Feature::Precompose), can_morph && on(Feature::Morph));
+        let (freeze, find_cuts, close_gaps) = (is_video && on(Feature::FreezeFrame), is_video && on(Feature::SceneCuts), on(Feature::CloseGaps));
+        let stabilize = is_footage && on(Feature::Stabilize);
+        let export_layer = can_export_layer && on(Feature::Export);
+        let caption_files = is_captions && on(Feature::CaptionFiles);
+        let structure = precompose || nested.is_some() || morph || is_box_shape;
+
         // The main list: naming, copying and structure, then the everyday cuts. Items that can't
         // apply to this kind of layer are left out; ones waiting on something (a copy to paste,
         // a job to finish) are shown greyed so they can still be found.
@@ -106,9 +116,9 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
             .item(item("Duplicate", &layers, some, &weak, |this, _, _| {
                 this.state.duplicate_selection();
             }))
-            .item(item("Paste Attributes…", &layers, can_paste_attributes, &weak, super::paste_attributes::open))
-            .separator()
-            .item(item("Pre-compose…", &layers, some, &weak, super::precompose::open));
+            .when(paste_attributes, |menu| menu.item(item("Paste Attributes…", &layers, can_paste_attributes, &weak, super::paste_attributes::open)))
+            .when(structure, |menu| menu.separator())
+            .when(precompose, |menu| menu.item(item("Pre-compose…", &layers, some, &weak, super::precompose::open)));
         if let Some(inner) = nested {
             let weak = weak.clone();
             menu = menu.item(item("Ungroup Composition", &layers, true, &weak, |this, window, cx| this.ungroup_selected(window, cx))).item(PopupMenuItem::new("Open Composition").on_click(move |_, _, cx| {
@@ -119,7 +129,7 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
                 .ok();
             }));
         }
-        if can_morph {
+        if morph {
             menu = menu.item(item("Morph To…", &layers, true, &weak, super::morph::open));
         }
         if is_box_shape {
@@ -138,24 +148,30 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
             .separator();
 
         // Time: freeze frames, scene cuts and gaps.
-        let (time_layers, time_weak) = (layers.clone(), weak.clone());
-        menu = menu.submenu("Time", window, cx, move |menu, _, _| {
-            let (layers, weak) = (&time_layers, &time_weak);
-            menu.when(is_video, |menu| {
-                menu.item(item("Insert Freeze Frame", layers, can_freeze, weak, |this, _, _| {
-                    if let Some(&layer) = this.state.selected_layers.first() {
-                        this.state.insert_freeze_frame(layer);
-                    }
-                }))
-                .item(item("Split at Scene Cuts", layers, can_find_cuts, weak, |this, window, cx| scene_cuts(this, SceneCutAction::Split, window, cx)))
-                .item(item("Mark Scene Cuts", layers, can_find_cuts, weak, |this, window, cx| scene_cuts(this, SceneCutAction::Mark, window, cx)))
-            })
-            .item(item("Close Gaps on Track", layers, true, weak, |this, window, cx| {
-                if this.state.close_gaps() == 0 {
-                    window.push_notification("There are no gaps to close.", cx);
-                }
-            }))
-        });
+        if freeze || find_cuts || close_gaps {
+            let (time_layers, time_weak) = (layers.clone(), weak.clone());
+            menu = menu.submenu("Time", window, cx, move |menu, _, _| {
+                let (layers, weak) = (&time_layers, &time_weak);
+                menu.when(freeze, |menu| {
+                    menu.item(item("Insert Freeze Frame", layers, can_freeze, weak, |this, _, _| {
+                        if let Some(&layer) = this.state.selected_layers.first() {
+                            this.state.insert_freeze_frame(layer);
+                        }
+                    }))
+                })
+                .when(find_cuts, |menu| {
+                    menu.item(item("Split at Scene Cuts", layers, can_find_cuts, weak, |this, window, cx| scene_cuts(this, SceneCutAction::Split, window, cx)))
+                        .item(item("Mark Scene Cuts", layers, can_find_cuts, weak, |this, window, cx| scene_cuts(this, SceneCutAction::Mark, window, cx)))
+                })
+                .when(close_gaps, |menu| {
+                    menu.item(item("Close Gaps on Track", layers, true, weak, |this, window, cx| {
+                        if this.state.close_gaps() == 0 {
+                            window.push_notification("There are no gaps to close.", cx);
+                        }
+                    }))
+                })
+            });
+        }
 
         // Transform: flips, reset and (for video) stabilizing.
         let (move_layers, move_weak) = (layers.clone(), weak.clone());
@@ -168,7 +184,7 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
                 this.state.flip_selection(false);
             }))
             .item(item("Reset Transform", layers, true, weak, |this, _, _| this.state.reset_selection_transform()))
-            .when(is_footage, |menu| {
+            .when(stabilize, |menu| {
                 menu.separator().item(if stabilized {
                     item("Remove Stabilization", layers, true, weak, |this, _, _| {
                         if let Some(&layer) = this.state.selected_layers.first() {
@@ -186,11 +202,11 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         });
 
         // Export: the layer alone, and a caption layer as subtitles.
-        if can_export_layer || is_captions {
+        if export_layer || caption_files {
             let (export_layers, export_weak) = (layers.clone(), weak.clone());
             menu = menu.submenu("Export", window, cx, move |menu, _, _| {
                 let (layers, weak) = (&export_layers, &export_weak);
-                menu.when(can_export_layer, |menu| {
+                menu.when(export_layer, |menu| {
                     menu.item(item("Quick Export Layer", layers, !busy, weak, |this, window, cx| {
                         if let Some(&layer) = this.state.selected_layers.first() {
                             super::export::quick_export_layer(this, layer, false, window, cx);
@@ -202,7 +218,7 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
                         }
                     }))
                 })
-                .when(is_captions, |menu| {
+                .when(caption_files, |menu| {
                     menu.item(item("Export Captions as SRT…", layers, true, weak, |this, window, cx| export_subtitles(this, SubtitleFormat::Srt, window, cx)))
                         .item(item("Export Captions as WebVTT…", layers, true, weak, |this, window, cx| export_subtitles(this, SubtitleFormat::WebVtt, window, cx)))
                 })

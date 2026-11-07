@@ -2649,7 +2649,7 @@ fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppCont
     std::fs::write(folder.join("0123456789abcdef.mov"), vec![0u8; 1000]).unwrap();
     std::fs::write(folder.join("notes.txt"), "mine").unwrap();
     // The cache has its own section in the menu on the left.
-    visual.update(|window, cx| window.click(("settings-section", 6_usize), cx));
+    visual.update(|window, cx| window.click(("settings-section", 7_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("cache-clear", cx));
     render(visual);
@@ -3099,7 +3099,7 @@ fn settings_choose_the_project_panels_columns(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-,", cx));
     render(visual);
-    visual.update(|window, cx| window.click(("settings-section", 4_usize), cx));
+    visual.update(|window, cx| window.click(("settings-section", 5_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("column-type", cx));
     visual.update(|window, cx| window.click("column-duration", cx));
@@ -4069,8 +4069,8 @@ fn ai_features_can_be_hidden_and_models_offered_for_download(cx: &mut TestAppCon
     assert!(visual.update(|window, _| window.try_find("section-enhance")).is_some());
     visual.update(|window, cx| window.press("cmd-,", cx));
     render(visual);
-    // AI Models is the eighth page.
-    visual.update(|window, cx| window.click(("settings-section", 7_usize), cx));
+    // AI Models is the ninth page.
+    visual.update(|window, cx| window.click(("settings-section", 8_usize), cx));
     render(visual);
     // The test model folders are empty, so both models offer a download.
     assert!(visual.update(|window, _| window.try_find("model-whisper-download")).is_some());
@@ -5221,8 +5221,8 @@ fn a_shortcut_changes_by_pressing_the_new_key(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-,", cx));
     render(visual);
-    // Keyboard Shortcuts is the ninth page.
-    visual.update(|window, cx| window.click(("settings-section", 8_usize), cx));
+    // Keyboard Shortcuts is the tenth page.
+    visual.update(|window, cx| window.click(("settings-section", 9_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("shortcut-change:toggle-playback", cx));
     render(visual);
@@ -5245,7 +5245,7 @@ fn a_shortcut_changes_by_pressing_the_new_key(cx: &mut TestAppContext) {
     // Premiere Pro's set: the right arrow steps a frame.
     let mut shortcuts = crate::keymap::Shortcuts { preset: crate::keymap::KeyPreset::Premiere, ..Default::default() };
     shortcuts.custom.clear();
-    visual.update(|_, cx| crate::keymap::apply(&shortcuts, cx));
+    visual.update(|_, cx| crate::keymap::apply(&crate::app_settings::AppSettings { shortcuts, ..Default::default() }, cx));
     let before = visual.update(|_, cx| workspace.read(cx).state.current_frame);
     visual.update(|window, cx| window.press("right", cx));
     render(visual);
@@ -6158,4 +6158,108 @@ fn a_text_clips_menu_leaves_out_what_cant_apply_to_it(cx: &mut TestAppContext) {
     render(visual);
     assert!(!shown(visual, "Insert Freeze Frame") && !shown(visual, "Split at Scene Cuts"));
     assert!(shown(visual, "Close Gaps on Track"));
+}
+
+#[gpui_kit::test]
+fn tools_and_features_turned_off_are_hidden_everywhere(cx: &mut TestAppContext) {
+    use crate::features::Feature;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let shown = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.try_find(id).is_some());
+    for id in ["tool-pen", "tool-group-edit", "rail-export", "rail-effects", "viewer-guides"] {
+        assert!(shown(visual, id), "{id} starts out shown");
+    }
+
+    // Settings ▸ Tools & Features (the fifth page): the Pen, Export, the Effects panel, Guides,
+    // Close Gaps and every clip-editing tool go.
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("settings-section", 4_usize), cx));
+    render(visual);
+    let over_page = visual.update(|window, _| window.find("feature-track-select").bounds().center());
+    for feature in ["cut-tool", "ripple-tool", "roll-tool", "rate-stretch-tool", "slip-tool", "slide-tool", "pen-tool", "effects", "close-gaps", "guides", "export"] {
+        click_in_settings(visual, over_page, &format!("feature-{feature}"));
+    }
+    let settings = visual.update(|_, cx| workspace.read(cx).ui.settings.clone());
+    assert!(!settings.feature_on(Feature::PenTool) && !settings.feature_on(Feature::Export) && !settings.feature_on(Feature::Guides));
+    assert!(!crate::app_settings::load().feature_on(Feature::PenTool), "remembered");
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+
+    // Gone from the tool bar (the whole clip-editing group, as none of it is left), the rail
+    // and the viewer.
+    for id in ["tool-pen", "tool-group-edit", "rail-export", "rail-effects", "viewer-guides"] {
+        assert!(!shown(visual, id), "{id} is hidden");
+    }
+    for id in ["tool-group-select", "tool-group-view", "rail-new-comp", "rail-import", "rail-settings", "rail-media"] {
+        assert!(shown(visual, id), "{id} is always there");
+    }
+    // Its key does nothing.
+    visual.update(|window, cx| window.press("g", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.tool), crate::workspace::Tool::Selection);
+    // Gone from the menu bar, leaving no stray separators.
+    let menu_names = |menu: &str| -> Vec<String> {
+        crate::workspace::menus()
+            .into_iter()
+            .find(|candidate| candidate.name == menu)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| match item {
+                gpui_kit::MenuItem::Action { name, .. } => name.to_string(),
+                gpui_kit::MenuItem::Separator => "-".to_owned(),
+                gpui_kit::MenuItem::Submenu(menu) => menu.name.to_string(),
+                _ => "?".to_owned(),
+            })
+            .collect()
+    };
+    let file = menu_names("File");
+    assert!(!file.iter().any(|name| name.starts_with("Export")), "{file:?}");
+    assert!(file.contains(&"Import…".to_owned()) && file.contains(&"Package…".to_owned()));
+    assert!(!menu_names("Edit").contains(&"Close Gaps".to_owned()));
+    assert_eq!(menu_names("View"), ["Zoom In", "Zoom Out"], "the separator before Show Guides goes with it");
+    // And from a clip's right-click menu: no Close Gaps in Time, and a text layer has nothing
+    // else there, so the submenu goes.
+    visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find_by_label("Time")).is_none());
+    assert!(visual.update(|window, _| window.try_find_by_label("Transform")).is_some());
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+
+    // Turn All On brings everything back.
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("settings-section", 4_usize), cx));
+    render(visual);
+    let over_page = visual.update(|window, _| window.find("feature-track-select").bounds().center());
+    click_in_settings(visual, over_page, "features-all-on");
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    for id in ["tool-pen", "tool-group-edit", "rail-export", "rail-effects", "viewer-guides"] {
+        assert!(shown(visual, id), "{id} is back");
+    }
+    visual.update(|window, cx| window.press("g", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.tool), crate::workspace::Tool::Pen);
+}
+
+/// Clicks `id` on the open Settings page, scrolling the page down first until it is in view.
+/// The wheel turns at `over_page`, a point on the page (taken from a control in view when it opened).
+fn click_in_settings(visual: &mut VisualTestContext, over_page: gpui_kit::Point<gpui_kit::Pixels>, id: &str) {
+    let element = || gpui_kit::ElementId::Name(id.to_owned().into());
+    for _ in 0..40 {
+        if visual.update(|window, _| window.try_find(element()).is_some_and(|found| found.visible())) {
+            break;
+        }
+        visual.update(|window, cx| {
+            use gpui_kit::InputEvent as _;
+            let wheel = gpui_kit::ScrollEvent { position: over_page, delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(-80.0))), ..Default::default() };
+            window.dispatch_event(wheel.to_platform_input(), cx);
+        });
+        render(visual);
+    }
+    visual.update(|window, cx| window.click(element(), cx));
+    render(visual);
 }

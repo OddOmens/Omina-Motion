@@ -23,6 +23,7 @@ use gpui_kit::{
 };
 use studio_core::model::ShapeKind;
 
+use crate::features::Feature;
 use crate::theme::{color, hsla, size};
 use crate::workspace::{LeftPanel, NewLayer, Tool, Workspace};
 
@@ -100,22 +101,28 @@ fn tools(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
         }
     };
     let divider = || div().flex_none().w(px(1.0)).h(px(16.0)).mx_1().bg(hsla(color::MUTED).opacity(0.35));
+    let settings = &workspace.ui.settings;
+    let keys = &settings.shortcuts;
+    // Tools turned off in Settings ▸ Features are left out, and so is a group with none left.
+    let making = [
+        settings.tool_on(Tool::Type).then(|| tool_button("tool-type", IconName::Type, crate::keymap::with_key(keys, "Text", "type-tool"), tool == Tool::Type, pick(Tool::Type), cx).into_any_element()),
+        settings.tool_on(Tool::Shape).then(|| shape_button(workspace, cx).into_any_element()),
+        settings.tool_on(Tool::Pen).then(|| tool_button("tool-pen", IconName::PenTool, crate::keymap::with_key(keys, "Pen", "pen-tool"), tool == Tool::Pen, pick(Tool::Pen), cx).into_any_element()),
+        settings.tool_on(Tool::Rotate).then(|| tool_button("tool-rotate", IconName::RotateCw, crate::keymap::with_key(keys, "Rotate", "rotate-tool"), tool == Tool::Rotate, pick(Tool::Rotate), cx).into_any_element()),
+        settings.tool_on(Tool::Eyedropper).then(|| eyedropper_button(workspace, cx).into_any_element()),
+        settings.feature_on(Feature::NewLayer).then(|| new_layer_button(keys, cx).into_any_element()),
+    ];
+    let making: Vec<_> = making.into_iter().flatten().collect();
     div()
         .flex_none()
         .flex()
         .items_center()
         .gap_0p5()
-        .child(group_button(0, workspace, cx))
-        .child(group_button(1, workspace, cx))
+        .children(group_button(0, workspace, cx))
+        .children(group_button(1, workspace, cx))
+        .when(!making.is_empty(), |bar| bar.child(divider()).children(making))
         .child(divider())
-        .child(tool_button("tool-type", IconName::Type, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Text", "type-tool"), tool == Tool::Type, pick(Tool::Type), cx))
-        .child(shape_button(workspace, cx))
-        .child(tool_button("tool-pen", IconName::PenTool, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Pen", "pen-tool"), tool == Tool::Pen, pick(Tool::Pen), cx))
-        .child(tool_button("tool-rotate", IconName::RotateCw, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Rotate", "rotate-tool"), tool == Tool::Rotate, pick(Tool::Rotate), cx))
-        .child(eyedropper_button(workspace, cx))
-        .child(new_layer_button(&workspace.ui.settings.shortcuts, cx))
-        .child(divider())
-        .child(group_button(2, workspace, cx))
+        .children(group_button(2, workspace, cx))
 }
 
 /// The New Layer button: a menu of the layers made from nothing (a solid in the eyedropper's
@@ -190,18 +197,21 @@ pub const TOOL_GROUPS: [ToolGroup; 3] = [
 const GROUP_TITLES: [&str; 3] = ["Selecting", "Editing clips", "Looking around"];
 
 /// A group's button: the current tool if it is one of the group's, else the one last picked.
-fn group_button(index: usize, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let group = &TOOL_GROUPS[index];
+/// Tools turned off in Settings ▸ Features are left out; a group with none left has no button.
+fn group_button(index: usize, workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl IntoElement + use<>> {
+    let tools = tools_on(index, workspace);
     let current = workspace.ui.tool;
-    let shown = group.tools.iter().find(|tool| tool.0 == current).or_else(|| workspace.ui.group_tools.get(&index).and_then(|picked| group.tools.iter().find(|tool| tool.0 == *picked))).unwrap_or(&group.tools[0]);
+    let shown = tools.iter().find(|tool| tool.0 == current).or_else(|| workspace.ui.group_tools.get(&index).and_then(|picked| tools.iter().find(|tool| tool.0 == *picked))).or(tools.first())?;
     let (tool, icon, label, command) = *shown;
-    let active = group.tools.iter().any(|tool| tool.0 == current);
+    let active = tools.iter().any(|tool| tool.0 == current);
     let named = crate::keymap::with_key(&workspace.ui.settings.shortcuts, label, command);
-    let tip = if group.tools.len() > 1 { format!("{named} · hold for more") } else { named };
-    div()
+    let many = tools.len() > 1;
+    let tip = if many { format!("{named} · hold for more") } else { named };
+    let id = TOOL_GROUPS[index].id;
+    Some(div()
         .relative()
         .child(
-            tool_button_look(group.id, icon, tip, active)
+            tool_button_look(id, icon, tip, active)
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                     this.set_tool(tool);
                     this.ui.tool_press = Some(index);
@@ -223,15 +233,21 @@ fn group_button(index: usize, workspace: &Workspace, cx: &mut Context<Workspace>
                     this.ui.tool_menu = Some(index);
                     cx.notify();
                 }))
-                .child(menu_mark())
+                .when(many, |button| button.child(menu_mark()))
                 .test_support(),
         )
-        .when(workspace.ui.tool_menu == Some(index), |button| button.child(group_menu(index, current, &workspace.ui.settings.shortcuts, cx)))
+        .when(workspace.ui.tool_menu == Some(index), |button| button.child(group_menu(index, current, workspace, cx))))
+}
+
+/// A group's tools that are turned on.
+fn tools_on(index: usize, workspace: &Workspace) -> Vec<RailTool> {
+    TOOL_GROUPS[index].tools.iter().copied().filter(|tool| workspace.ui.settings.tool_on(tool.0)).collect()
 }
 
 /// The menu under a group's button: each of its tools, with its key.
-fn group_menu(index: usize, current: Tool, shortcuts: &crate::keymap::Shortcuts, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let rows = TOOL_GROUPS[index].tools.iter().map(|&(tool, icon, label, command)| {
+fn group_menu(index: usize, current: Tool, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let shortcuts = &workspace.ui.settings.shortcuts;
+    let rows = tools_on(index, workspace).into_iter().map(|(tool, icon, label, command)| {
         let key = crate::keymap::key_for(shortcuts, command).unwrap_or_default();
         div()
             .id(gpui_kit::ElementId::Name(format!("tool-{label}").to_lowercase().replace(' ', "-").into()))
@@ -533,6 +549,8 @@ fn shape_menu(current: ShapeKind, cx: &mut Context<Workspace>) -> impl IntoEleme
 pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let side = workspace.ui.left_panel;
     let keys = &workspace.ui.settings.shortcuts;
+    // Panels turned off in Settings ▸ Features are left out (Media is always there).
+    let panel_on = |panel: LeftPanel| workspace.ui.settings.panel_on(panel);
     let show = |panel: LeftPanel| {
         move |this: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
             this.ui.left_panel = panel;
@@ -551,18 +569,18 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .bg(hsla(color::BACKGROUND))
         // At the top: the side panels.
         .child(rail_button("rail-media", IconName::Folder, "Media", side == LeftPanel::Media, show(LeftPanel::Media), cx))
-        .child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx))
-        .child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx))
-        .child(rail_button("rail-elements", IconName::Sticker, "Elements", side == LeftPanel::Elements, show(LeftPanel::Elements), cx))
-        .child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", side == LeftPanel::Templates, show(LeftPanel::Templates), cx))
-        .child(rail_button("rail-mockups", IconName::TabletSmartphone, "Mockups", side == LeftPanel::Mockups, show(LeftPanel::Mockups), cx))
-        .when(workspace.ui.settings.ai.captions, |rail| rail.child(rail_button("rail-captions", IconName::Captions, "Captions", side == LeftPanel::Captions, show(LeftPanel::Captions), cx)))
+        .when(panel_on(LeftPanel::Libraries), |rail| rail.child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx)))
+        .when(panel_on(LeftPanel::Effects), |rail| rail.child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx)))
+        .when(panel_on(LeftPanel::Elements), |rail| rail.child(rail_button("rail-elements", IconName::Sticker, "Elements", side == LeftPanel::Elements, show(LeftPanel::Elements), cx)))
+        .when(panel_on(LeftPanel::Templates), |rail| rail.child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", side == LeftPanel::Templates, show(LeftPanel::Templates), cx)))
+        .when(panel_on(LeftPanel::Mockups), |rail| rail.child(rail_button("rail-mockups", IconName::TabletSmartphone, "Mockups", side == LeftPanel::Mockups, show(LeftPanel::Mockups), cx)))
+        .when(panel_on(LeftPanel::Captions), |rail| rail.child(rail_button("rail-captions", IconName::Captions, "Captions", side == LeftPanel::Captions, show(LeftPanel::Captions), cx)))
         // At the bottom: getting work in and out (new composition ⌘N, import ⌘I, export ⌘M),
         // and Settings last.
         .child(div().flex_1())
         .child(rail_command("rail-new-comp", IconName::Clapperboard, "New Comp", crate::keymap::with_key(keys, "New Composition", "new-composition"), |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
         .child(rail_command("rail-import", IconName::FileInput, "Import", crate::keymap::with_key(keys, "Import Images, Video and Sound", "import"), |this, window, cx| this.import(window, cx), cx))
-        .child(rail_command("rail-export", IconName::Download, "Export", crate::keymap::with_key(keys, "Export", "export"), super::export_dialog::open, cx))
+        .when(workspace.ui.settings.feature_on(Feature::Export), |rail| rail.child(rail_command("rail-export", IconName::Download, "Export", crate::keymap::with_key(keys, "Export", "export"), super::export_dialog::open, cx)))
         .child(separator())
         .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, cx))
 }

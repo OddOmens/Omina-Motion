@@ -454,7 +454,7 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
             this.state.viewer_snapping = !this.state.viewer_snapping;
             cx.notify();
         })))
-        .child(super::guides::guides_menu(workspace, cx))
+        .when(workspace.has(crate::features::Feature::Guides), |bar| bar.child(super::guides::guides_menu(workspace, cx)))
 }
 
 /// Viewer drags: moving the selection, or scaling from a corner handle.
@@ -1325,7 +1325,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 .text_color(hsla(color::TEXT))
                 .child(format!("Preview: {}", lut.name()))
         }))
-        .children(workspace.ui.guides.then(|| super::guides::guides_overlay(workspace)))
+        .children((workspace.ui.guides && workspace.has(crate::features::Feature::Guides)).then(|| super::guides::guides_overlay(workspace)))
         .children(selection_overlay(workspace, cx))
         .children(pen_draft_overlay(workspace))
         .children(cutout_clicks_overlay(workspace))

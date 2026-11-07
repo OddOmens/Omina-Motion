@@ -445,9 +445,11 @@ fn item_menu(item: &ProjectItem, cx: &mut Context<Workspace>) -> impl Fn(PopupMe
                     .ok();
                 }));
             let resize = target.clone();
-            menu = menu
-                .submenu("Duplicate and Resize", window, cx, move |submenu, _, cx| resize_choices(submenu, id, &resize, cx))
-                .separator();
+            let can_resize = target.upgrade().is_some_and(|workspace| workspace.read(cx).has(crate::features::Feature::MagicResize));
+            if can_resize {
+                menu = menu.submenu("Duplicate and Resize", window, cx, move |submenu, _, cx| resize_choices(submenu, id, &resize, cx));
+            }
+            menu = menu.separator();
         }
         let rename = target.clone();
         let name = name.clone();

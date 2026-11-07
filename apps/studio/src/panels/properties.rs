@@ -20,6 +20,7 @@ use studio_core::subtitles::SubtitleFormat;
 use super::chrome::{CardHeading, card, card_list, divider, heading_button, hint, icon_button, info_button, list_row, panel, section};
 use super::color_picker;
 use super::fields::{FieldTarget, property_row, value_field};
+use crate::features::Feature;
 use crate::state::{AudioSetting, ColorTarget, PaintSlot, ShapeSetting, Switch, TextSetting};
 use crate::theme::{color, hsla, size};
 use crate::workspace::{EditTarget, PanelId, Workspace};
@@ -598,14 +599,14 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         .child(labeled_row("Background", div().flex().items_center().gap_2().child(background_on).child(color_picker::swatch("captions-background", ColorTarget::CaptionBackground(id), style.background, cx))))
         .child(labeled_row("Sync", div().flex().items_center().gap_2().child(value_field(FieldTarget::CaptionSync { layer: id }, workspace, cx)).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("+ later, − earlier"))))
         // Saving the captions as a subtitle file, timed as they show in the composition.
-        .child(div().py_1().flex().flex_wrap().gap_2().children(SubtitleFormat::ALL.map(|format| {
+        .when(workspace.has(Feature::CaptionFiles), |rows| rows.child(div().py_1().flex().flex_wrap().gap_2().children(SubtitleFormat::ALL.map(|format| {
             Button::new(gpui_kit::ElementId::Name(format!("captions-export-{}", format.extension()).into()))
                 .outline()
                 .small()
                 .label(format!("Export {}…", format.name()))
                 .tooltip(format!("Save these captions as a .{} subtitle file", format.extension()))
                 .on_click(cx.listener(move |this, _, window, cx| super::subtitles::export(this, id, format, window, cx)))
-        })))
+        }))))
         .child(divider())
         .child(section(format!("Transcript · {} words", words.len()), None))
         .child(transcript)
@@ -1104,9 +1105,9 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(fold("layer", "Layer", None, [None, None], workspace, cx, |cx| layer_section(layer, workspace, cx)))
         .child(transform)
         .children(text)
-        .children((studio_core::speed::has_speed(&layer.content) && layer.time.hold.is_none()).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
-        .children(stabilizable(layer).then(|| fold("stabilize", "Stabilize", Some(STABILIZE_INFO), [None, Some(stabilize_button(layer, workspace, cx))], workspace, cx, |cx| stabilize_section(layer, workspace, cx))))
-        .children(trackable(layer).then(|| fold("track", "Track Motion", Some(TRACK_INFO), [None, Some(track_add(layer, workspace, cx))], workspace, cx, |_| track_section(layer, workspace))))
+        .children((workspace.has(Feature::Speed) && studio_core::speed::has_speed(&layer.content) && layer.time.hold.is_none()).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
+        .children((workspace.has(Feature::Stabilize) && stabilizable(layer)).then(|| fold("stabilize", "Stabilize", Some(STABILIZE_INFO), [None, Some(stabilize_button(layer, workspace, cx))], workspace, cx, |cx| stabilize_section(layer, workspace, cx))))
+        .children((workspace.has(Feature::TrackMotion) && trackable(layer)).then(|| fold("track", "Track Motion", Some(TRACK_INFO), [None, Some(track_add(layer, workspace, cx))], workspace, cx, |_| track_section(layer, workspace))))
         .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", Some(CUTOUT_INFO), [None, Some(cutout_button(layer, workspace, cx))], workspace, cx, |cx| cutout_section(layer, workspace, cx))))
         .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, [None, None], workspace, cx, |cx| audio_section(layer, workspace, cx))))
         .children((workspace.state.can_enhance(layer.id) && workspace.ui.settings.ai.enhance_speech).then(|| fold("enhance", "Enhance Speech", Some(ENHANCE_INFO), [None, Some(enhance_button(layer, cx))], workspace, cx, |cx| enhance_section(layer, workspace, cx))))

@@ -5,6 +5,7 @@ mod app_settings;
 mod assets;
 mod crash_log;
 mod download;
+mod features;
 mod keymap;
 mod library_store;
 mod lut_library;

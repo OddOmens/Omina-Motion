@@ -18,6 +18,7 @@ use studio_core::presets::Phase;
 
 use super::chrome::{card_list, heading_button, hint};
 use super::fields::{FieldTarget, value_field};
+use crate::features::Feature;
 use super::graph_editor::{CurveTarget, curve_editor, phase_key};
 use super::properties::{add_note, choice_menu, fold, labeled_row};
 use crate::theme::{color, hsla};
@@ -43,13 +44,14 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         [layer] => Some(*layer),
         _ => None,
     };
-    let easing = fold("easing", "Keyframe Easing", Some(EASING_INFO), [None, None], workspace, cx, |cx| super::graph_editor::keyframes_section(workspace, cx));
+    let easing = workspace.has(Feature::GraphEditor).then(|| fold("easing", "Keyframe Easing", Some(EASING_INFO), [None, None], workspace, cx, |cx| super::graph_editor::keyframes_section(workspace, cx)));
+    let morph = workspace.has(Feature::Morph);
     card_list("motion-body")
-        .child(easing)
+        .children(easing)
         .children(layer.filter(|layer| layer.transform.is_some()).map(|layer| fold("animate", "Animate", Some(ANIMATE_INFO), animate_buttons(layer, cx), workspace, cx, |cx| animate_section(layer, cx))))
         .children(layer.filter(|layer| matches!(layer.content, LayerContent::Text { .. })).map(|layer| fold("textanim", "Text Animation", Some(TEXT_ANIMATION_INFO), text_animation_buttons(layer, cx), workspace, cx, |cx| text_animation_section(layer, workspace, cx))))
-        .children(layer.filter(|layer| matches!(layer.content, LayerContent::Shape { .. })).map(|layer| fold("morph", "Morph", Some(super::morph::MORPH_INFO), [None, None], workspace, cx, |cx| super::morph::section(layer, workspace, cx))))
-        .children((selected.len() == 2).then(|| fold("morph", "Morph", Some(super::morph::MORPH_INFO), [None, None], workspace, cx, |cx| super::morph::pair_section(workspace, cx))))
+        .children(layer.filter(|layer| morph && matches!(layer.content, LayerContent::Shape { .. })).map(|layer| fold("morph", "Morph", Some(super::morph::MORPH_INFO), [None, None], workspace, cx, |cx| super::morph::section(layer, workspace, cx))))
+        .children((morph && selected.len() == 2).then(|| fold("morph", "Morph", Some(super::morph::MORPH_INFO), [None, None], workspace, cx, |cx| super::morph::pair_section(workspace, cx))))
         .children(layer.is_none().then(|| hint("Select a single layer to give it In, Out and Loop animations.")))
         .test_support()
         .into_any_element()

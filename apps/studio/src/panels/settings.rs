@@ -69,6 +69,7 @@ enum Section {
     Appearance,
     Playback,
     Timeline,
+    Features,
     ProjectPanel,
     Folders,
     MediaCache,
@@ -80,7 +81,7 @@ enum Section {
 impl Section {
     /// The menu, in groups.
     const GROUPS: [(&'static str, &'static [Section]); 4] = [
-        ("Studio", &[Self::General, Self::Appearance, Self::Playback, Self::Timeline]),
+        ("Studio", &[Self::General, Self::Appearance, Self::Playback, Self::Timeline, Self::Features]),
         ("Project", &[Self::ProjectPanel, Self::Folders]),
         ("Storage", &[Self::MediaCache, Self::Models]),
         ("Help", &[Self::Shortcuts, Self::About]),
@@ -92,6 +93,7 @@ impl Section {
             Self::Appearance => "Appearance",
             Self::Playback => "Playback",
             Self::Timeline => "Timeline & Viewer",
+            Self::Features => "Tools & Features",
             Self::ProjectPanel => "Project Panel",
             Self::Folders => "Folders",
             Self::MediaCache => "Media Cache",
@@ -107,6 +109,7 @@ impl Section {
             Self::Appearance => IconName::Palette,
             Self::Playback => IconName::Play,
             Self::Timeline => IconName::Film,
+            Self::Features => IconName::ToggleRight,
             Self::ProjectPanel => IconName::Menu,
             Self::Folders => IconName::Folder,
             Self::MediaCache => IconName::Hourglass,
@@ -123,6 +126,7 @@ impl Section {
             Self::Appearance => "How Studio looks.",
             Self::Playback => "How the viewer plays.",
             Self::Timeline => "What the timeline and viewer show, and what snaps.",
+            Self::Features => "Turn off what you don't use, and it's hidden everywhere: tools, panels, menus and shortcuts.",
             Self::ProjectPanel => "Which columns the Project panel's list shows.",
             Self::Folders => "The folders new projects start with, and where imports go.",
             Self::MediaCache => "Files Studio makes to keep playback smooth, and can always make again.",
@@ -167,20 +171,28 @@ fn folder_size(folder: &Path) -> u64 {
 /// Saves a settings change, shows it, hands it to the workspace (whose panels read it as they
 /// draw), and redraws.
 fn change(shown: &SharedShown, workspace: &WeakEntity<Workspace>, window: &mut Window, cx: &mut App, edit: impl Fn(&mut AppSettings)) {
-    let shortcuts_before = shown.borrow().settings.shortcuts.clone();
+    let before = shown.borrow().settings.clone();
     app_settings::update(&edit);
     edit(&mut shown.borrow_mut().settings);
     let settings = shown.borrow().settings.clone();
-    if settings.shortcuts != shortcuts_before {
-        crate::keymap::apply(&settings.shortcuts, cx);
+    // Shortcuts changed, or a feature whose shortcut and menu items come and go with it.
+    if settings.shortcuts != before.shortcuts || settings.features_off != before.features_off || settings.ai != before.ai {
+        crate::keymap::apply(&settings, cx);
     }
     workspace
         .update(cx, |this, cx| {
             this.ui.project_columns = settings.project_columns;
             this.state.import_folders = settings.import_folders.clone();
-            // Hidden AI features let go of anything of theirs that is open.
-            if !settings.ai.captions && this.ui.left_panel == crate::workspace::LeftPanel::Captions {
+            // Features turned off let go of anything of theirs that is open: their panel, their
+            // tool, their overlay.
+            if !settings.panel_on(this.ui.left_panel) {
                 this.ui.left_panel = crate::workspace::LeftPanel::Media;
+            }
+            if !settings.tool_on(this.ui.tool) {
+                this.set_tool(crate::workspace::Tool::Selection);
+            }
+            if !settings.feature_on(crate::features::Feature::Guides) {
+                this.ui.guides = false;
             }
             if !settings.ai.remove_background {
                 this.ui.cutout_pick = None;
@@ -428,6 +440,48 @@ fn timeline(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit:
             setting("Behind transparency", "What shows where a composition has nothing.", menu("viewer-transparency", backgrounds, now.transparency, shown, workspace, |settings, choice| settings.transparency = choice)),
             setting("Anchor points snap", "Dragged anchor points snap to a layer's corners, edges and middle. Applies from the next start; the magnet under the viewer changes it now.", switch("viewer-anchor-snapping", now.anchor_snapping, shown, workspace, |settings, on| settings.anchor_snapping = on)),
         ]))
+}
+
+/// The Tools & Features page: a switch for every tool and feature that can be turned off, in
+/// groups. New Composition, Import, Settings, Select, Hand and the Media panel are always on, so
+/// they aren't listed.
+fn features(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {
+    use crate::features::{Feature, GROUPS};
+    let now = shown.borrow().settings.clone();
+    let any_off = GROUPS.iter().flat_map(|(_, features)| features.iter()).any(|info| !now.feature_on(info.feature));
+    let switch_for = |feature: Feature| {
+        let (shown, workspace) = (shown.clone(), workspace.clone());
+        Switch::new(gpui_kit::ElementId::Name(format!("feature-{}", feature.id()).into())).checked(now.feature_on(feature)).on_click(move |checked: &bool, window, cx| {
+            let checked = *checked;
+            change(&shown, &workspace, window, cx, |settings| settings.set_feature(feature, checked));
+        })
+    };
+    let mut page_div = div().child(page(Section::Features));
+    for (group, features) in GROUPS {
+        page_div = page_div.child(group_title(group)).child(card(features.iter().map(|info| setting(info.name, info.about, switch_for(info.feature))).collect()));
+    }
+    let (reset_shown, reset_workspace) = (shown.clone(), workspace.clone());
+    page_div
+        .child(
+            div()
+                .pt_2()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                // The note wraps, so the button always stays in view beside it.
+                .child(div().flex_1().min_w_0().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("New Comp, Import, Settings, Select, Hand and Media are always on. Turning something off keeps what it already made."))
+                .child(Button::new("features-all-on").flex_none().outline().small().label("Turn All On").disabled(!any_off).on_click(move |_, window, cx| {
+                    change(&reset_shown, &reset_workspace, window, cx, |settings| {
+                        for (_, features) in GROUPS {
+                            for info in *features {
+                                settings.set_feature(info.feature, true);
+                            }
+                        }
+                    });
+                })),
+        )
+        .children(note(shown))
 }
 
 fn project_panel(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {
@@ -1072,6 +1126,7 @@ fn open_at(section: Section, workspace: &mut Workspace, window: &mut Window, cx:
             Section::Appearance => appearance(&shown, &target),
             Section::Playback => playback(&shown, &target),
             Section::Timeline => timeline(&shown, &target),
+            Section::Features => features(&shown, &target),
             Section::ProjectPanel => project_panel(&shown, &target),
             Section::Folders => folders(&shown, &target, &new_folder_name),
             Section::MediaCache => media_cache(&shown, &target, cx),
@@ -1136,6 +1191,6 @@ mod tests {
     #[test]
     fn the_menu_lists_every_page() {
         let listed: Vec<Section> = Section::GROUPS.iter().flat_map(|(_, sections)| sections.iter().copied()).collect();
-        assert_eq!(listed.len(), 10);
+        assert_eq!(listed.len(), 11);
     }
 }

@@ -325,21 +325,22 @@ struct BaseBindings(Vec<KeyBinding>);
 impl Global for BaseBindings {}
 
 /// Notes the components' bindings, then binds `shortcuts`. Call once, after `gpui_kit::init`.
-pub fn init(shortcuts: &Shortcuts, cx: &mut App) {
+pub fn init(settings: &crate::app_settings::AppSettings, cx: &mut App) {
     let base = cx.key_bindings().borrow().bindings().cloned().collect();
     cx.set_global(BaseBindings(base));
-    apply(shortcuts, cx);
+    apply(settings, cx);
 }
 
-/// Rebuilds the keymap: the components' bindings, then `shortcuts`. Keys that can't be read are
-/// skipped. The menu bar is rebuilt too, as it shows the shortcuts.
-pub fn apply(shortcuts: &Shortcuts, cx: &mut App) {
+/// Rebuilds the keymap: the components' bindings, then the shortcuts in `settings`. Keys that
+/// can't be read are skipped, and so are commands whose feature is turned off (Settings ▸
+/// Features). The menu bar is rebuilt too, as it shows the shortcuts and hides those features.
+pub fn apply(settings: &crate::app_settings::AppSettings, cx: &mut App) {
     let base = cx.try_global::<BaseBindings>().map(|base| base.0.clone()).unwrap_or_default();
     let not_typing = KeyBindingContextPredicate::parse(NOT_TYPING).ok().map(std::rc::Rc::new);
     let editor = KeyBindingContextPredicate::parse(KEY_CONTEXT).ok().map(std::rc::Rc::new);
     let mut bindings = Vec::new();
-    for (id, keys) in keys_in_use(shortcuts) {
-        let Some(command) = command(id) else { continue };
+    for (id, keys) in keys_in_use(&settings.shortcuts) {
+        let Some(command) = command(id).filter(|command| settings.command_on(command.id)) else { continue };
         let context = match command.scope {
             Scope::App => None,
             Scope::Editor => editor.clone(),

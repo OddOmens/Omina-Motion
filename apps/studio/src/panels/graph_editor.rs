@@ -265,6 +265,9 @@ fn shown_easing(workspace: &Workspace) -> Easing {
 
 /// Shows the graph editor: the Motion tab, unfolded, with its Keyframe Easing section open.
 pub fn show(workspace: &mut Workspace) {
+    if !workspace.has(crate::features::Feature::GraphEditor) {
+        return;
+    }
     workspace.ui.tabs.insert(PanelId::Properties, super::motion::TAB);
     workspace.ui.collapsed_panels.remove(&PanelId::Properties);
     workspace.ui.open_section("easing");

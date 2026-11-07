@@ -177,7 +177,9 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                             .absolute()
                             .bottom(px(8.0))
                             .left(px(3.0))
-                            .text_size(px(10.0))
+                            // Sized to sit inside the 12px rendered-ahead band at the top of the ruler.
+                            .text_size(px(9.0))
+                            .line_height(px(12.0))
                             .text_color(hsla(color::TEXT))
                             .opacity(0.7)
                             .whitespace_nowrap()

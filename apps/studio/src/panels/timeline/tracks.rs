@@ -230,7 +230,7 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                 .test_support(),
         )
         .child(div().w(px(1.0)).h(px(16.0)).mr_1().flex_none().bg(hsla(color::HAIRLINE)))
-        .child(crate::panels::graph_editor::button(workspace, cx));
+        .when(workspace.has(crate::features::Feature::GraphEditor), |bar| bar.child(crate::panels::graph_editor::button(workspace, cx)));
     let middle = div()
         .flex_none()
         .flex()
@@ -256,7 +256,7 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             this.state.loop_playback = !this.state.loop_playback;
             cx.notify();
         })))
-        .child(icon_button("tracks-render-play", IconName::Film, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Render & Play: render the work area, then play it smoothly", "render-and-play"), workspace.ui.render_then_play, cx.listener(|this, _, window, cx| this.render_and_play(window, cx))))
+        .when(workspace.has(crate::features::Feature::RenderAndPlay), |bar| bar.child(icon_button("tracks-render-play", IconName::Film, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Render & Play: render the work area, then play it smoothly", "render-and-play"), workspace.ui.render_then_play, cx.listener(|this, _, window, cx| this.render_and_play(window, cx)))))
         .child(div().pl_2().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)))
         .children(render_progress(workspace, cx));
     let right = side()
