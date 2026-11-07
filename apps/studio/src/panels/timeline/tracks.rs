@@ -290,7 +290,7 @@ fn render_progress(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option
             .text_size(px(12.0))
             .text_color(hsla(color::MUTED))
             .child(div().id("render-play-progress").child(format!("Rendering {percent}%")).test_support())
-            .child(icon_button("render-play-cancel", IconName::Close, "Cancel", false, cx.listener(|this, _, _, cx| {
+            .child(icon_button("render-play-cancel", IconName::X, "Cancel", false, cx.listener(|this, _, _, cx| {
                 this.ui.render_then_play = false;
                 cx.notify();
             }))),
