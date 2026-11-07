@@ -1,5 +1,5 @@
-//! The Properties panel (first tab), Effect Controls (second tab) and Color (third tab, in
-//! `color_grade`). Properties shows the selected layer's transform and, for text layers,
+//! The Properties panel (first tab), Effect Controls (second tab), Color (third tab, in
+//! `color_grade`) and Motion (fourth tab, in `motion`). Properties shows the selected layer's transform and, for text layers,
 //! character and paragraph styling. Every value scrubs or can be typed into.
 
 use gpui_kit::assets::IconName;
@@ -52,7 +52,7 @@ fn weight_name(weight: u16) -> &'static str {
 }
 
 /// A dropdown whose choices run `choose` on the workspace.
-fn choice_menu<T: Clone + 'static>(
+pub(super) fn choice_menu<T: Clone + 'static>(
     id: impl Into<ElementId>,
     label: String,
     choices: Vec<(String, bool, T)>,
@@ -76,8 +76,8 @@ fn choice_menu<T: Clone + 'static>(
     })
 }
 
-/// A labeled control in the Layer section.
-fn labeled_row(label: &'static str, control: impl IntoElement) -> Div {
+/// A labeled control in a section: its name on the left, the control filling the rest.
+pub(super) fn labeled_row(label: &'static str, control: impl IntoElement) -> Div {
     div()
         .h(px(30.0))
         .flex()
@@ -234,7 +234,9 @@ fn duck_row(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -
     let id = layer.id;
     let composition = workspace.state.composition();
     let mut choices: Vec<(String, bool, Option<Id>)> = vec![("Nothing".to_owned(), layer.audio.duck_under.is_none(), None)];
-    choices.extend(composition.layers.iter().filter(|other| other.id != id && workspace.state.has_sound(other.id)).map(|other| (other.name.clone(), layer.audio.duck_under == Some(other.id), Some(other.id))));
+    // Only a single clip's sound can be ducked under, not a nested composition's many.
+    let one_clip = |other: &Layer| other.has_audio && matches!(other.content, LayerContent::Footage { .. } | LayerContent::Audio { .. });
+    choices.extend(composition.layers.iter().filter(|other| other.id != id && one_clip(other)).map(|other| (other.name.clone(), layer.audio.duck_under == Some(other.id), Some(other.id))));
     let current = layer.audio.duck_under.and_then(|under| composition.layer(under)).map_or("Nothing".to_owned(), |under| under.name.clone());
     labeled_row("Duck Under", choice_menu("duck-under", current, choices, move |this, under| this.state.set_duck_under(id, under), cx.weak_entity()))
 }
@@ -299,35 +301,6 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
                     reframe_menu(id, cx).into_any_element()
                 }))
         })
-}
-
-/// How long an in or out animation can be chosen to take, in seconds.
-const ANIMATION_LENGTHS: [f32; 5] = [0.3, 0.5, 0.8, 1.2, 2.0];
-
-/// Animate: one-click ways for the layer to come in, go out, and move in between.
-fn animate_section(layer: &Layer, cx: &mut Context<Workspace>) -> Div {
-    use studio_core::presets::{Loop, Motion, Phase};
-    let id = layer.id;
-    let target = cx.weak_entity();
-    let animation = layer.animation;
-    let row = |phase: Phase, current: Option<(Motion, f32)>, key: &'static str, label: &'static str| {
-        let mut choices: Vec<(String, bool, Option<Motion>)> = vec![("None".to_owned(), current.is_none(), None)];
-        choices.extend(Motion::ALL.iter().map(|&motion| (motion.name().to_owned(), current.is_some_and(|(chosen, _)| chosen == motion), Some(motion))));
-        let seconds = current.map_or(0.5, |(_, seconds)| seconds);
-        let name = current.map_or("None".to_owned(), |(motion, _)| motion.name().to_owned());
-        let motion_menu = choice_menu(format!("animate-{key}"), name, choices, move |this, motion| this.state.set_layer_motion(id, phase, motion, seconds), target.clone());
-        let lengths = ANIMATION_LENGTHS.iter().map(|&length| (format!("{length} s"), (length - seconds).abs() < 0.01, length)).collect();
-        let chosen = current.map(|(motion, _)| motion);
-        let length_menu = choice_menu(format!("animate-{key}-length"), format!("{seconds} s"), lengths, move |this, length| this.state.set_layer_motion(id, phase, chosen, length), target.clone());
-        labeled_row(label, div().flex().gap_1().child(div().flex_1().child(motion_menu)).when(current.is_some(), |row| row.child(div().w(px(72.0)).child(length_menu))))
-    };
-    let mut loops: Vec<(String, bool, Option<Loop>)> = vec![("None".to_owned(), animation.looping.is_none(), None)];
-    loops.extend(Loop::ALL.iter().map(|&looping| (looping.name().to_owned(), animation.looping == Some(looping), Some(looping))));
-    let loop_name = animation.looping.map_or("None".to_owned(), |looping| looping.name().to_owned());
-    div()
-        .child(row(Phase::In, animation.enter, "in", "In"))
-        .child(row(Phase::Out, animation.exit, "out", "Out"))
-        .child(labeled_row("Loop", choice_menu("animate-loop", loop_name, loops, move |this, looping| this.state.set_layer_loop(id, looping), target.clone())))
 }
 
 /// Whether a layer can be pinned to moving video: graphics and text, not footage or sound.
@@ -422,6 +395,8 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     let busy = workspace.ui.analysis_job.is_some();
     let normal_speed = layer.time.is_normal();
     let has_markers = !workspace.state.composition().markers.is_empty();
+    // Silences and beats are found in one file's sound, which a nested composition doesn't have.
+    let one_file = !matches!(layer.content, LayerContent::Composition { .. });
     div()
         .child(
             div()
@@ -443,7 +418,7 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
                 .flex()
                 .flex_wrap()
                 .gap_2()
-                .child(
+                .when(one_file, |row| row.child(
                     Button::new("remove-silences")
                         .outline()
                         .small()
@@ -451,8 +426,8 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
                         .tooltip(if normal_speed { "Cut the pauses out and close the gaps (jump cuts)" } else { "Set the clip back to normal speed to remove its silences" })
                         .disabled(busy || !normal_speed)
                         .on_click(cx.listener(move |this, _, window, cx| super::analysis::remove_silences(this, id, window, cx))),
-                )
-                .child(
+                ))
+                .when(one_file, |row| row.child(
                     Button::new("mark-beats")
                         .outline()
                         .small()
@@ -460,7 +435,7 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
                         .tooltip("Put a marker on every beat; cuts and moves snap to them")
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, window, cx| super::analysis::mark_beats(this, id, window, cx))),
-                )
+                ))
                 .when(has_markers, |row| {
                     row.child(Button::new("clear-markers").ghost().small().label("Clear Markers").on_click(cx.listener(|this, _, _, cx| {
                         this.state.clear_markers();
@@ -584,8 +559,6 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
 
 /// What each section is for, shown by the info button on its heading.
 const TRANSFORM_INFO: &str = "Where the layer sits, its size, turn and opacity. Pick a corner, an edge or the center for the anchor point, or drag the anchor in the viewer.";
-const ANIMATE_INFO: &str = "One-click ways for the layer to come in, go out, and move in between.";
-const TEXT_ANIMATION_INFO: &str = "Brings the text in, or takes it out, a character, word or line at a time, as After Effects' text animators do. The duration covers every piece; overlap sets how much each piece's move runs into the next one's.";
 const SPEED_INFO: &str = "A steady speed changes the clip's length; a ramp keeps it. Sound is silent while a clip ramps or plays backwards.";
 const REFRAME_INFO: &str = "Makes a new composition in another shape, moving the clip to keep its subject in frame. Remove Background clicks pick the subject; otherwise it follows the middle.";
 const TRACK_INFO: &str = "Pins this layer to something moving in a video: its position follows the point you click.";
@@ -612,163 +585,6 @@ fn speed_reset(layer: &Layer, cx: &mut Context<Workspace>) -> AnyElement {
     }))
     .disabled(layer.time.is_normal())
     .into_any_element()
-}
-
-/// The Text Animation heading's buttons: Reset removes both animations (greyed out when there
-/// are none), and + adds the In or Out one that is missing, with Rise by character to start.
-fn text_animation_buttons(layer: &Layer, cx: &mut Context<Workspace>) -> [Option<AnyElement>; 2] {
-    use studio_core::presets::Phase;
-    use studio_core::text_animation::TextAnimator;
-    let id = layer.id;
-    let (has_in, has_out) = (layer.animation.text_in.is_some(), layer.animation.text_out.is_some());
-    let reset = heading_button("text-animation-reset", IconName::RotateCcw, "Remove Text Animations", false, cx.listener(move |this, _, _, cx| {
-        this.state.set_text_animator(id, Phase::In, None);
-        this.state.set_text_animator(id, Phase::Out, None);
-        cx.notify();
-    }))
-    .disabled(!has_in && !has_out);
-    let weak = cx.weak_entity();
-    let add = Button::new("text-animation-add").outline().small().icon(Icon::new(IconName::Plus)).tooltip("Add Text Animation").disabled(has_in && has_out).dropdown_menu(move |menu, _, _| {
-        [(Phase::In, "Animate In", has_in), (Phase::Out, "Animate Out", has_out)].into_iter().fold(menu, |menu, (phase, label, present)| {
-            let weak = weak.clone();
-            menu.item(PopupMenuItem::new(label).disabled(present).on_click(move |_, _, cx| {
-                weak.update(cx, |this, cx| {
-                    this.state.set_text_animator(id, phase, Some(TextAnimator::default()));
-                    cx.notify();
-                })
-                .ok();
-            }))
-        })
-    });
-    [Some(reset.into_any_element()), Some(add.into_any_element())]
-}
-
-/// Text Animation: the text's In and Out animators, each with its motion, the pieces it moves
-/// in (character, word or line), their order and easing, how long it takes and how much the
-/// pieces overlap.
-fn text_animation_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
-    use studio_core::presets::Phase;
-    let animators = [(Phase::In, "In", layer.animation.text_in), (Phase::Out, "Out", layer.animation.text_out)];
-    if animators.iter().all(|(_, _, animator)| animator.is_none()) {
-        return div().child(add_note());
-    }
-    let mut body = div().flex().flex_col().gap_2();
-    for (phase, title, animator) in animators {
-        if let Some(animator) = animator {
-            body = body.child(text_animator_block(layer.id, phase, title, animator, workspace, cx));
-        }
-    }
-    body
-}
-
-/// A dropdown setting one choice (`set`) of layer `id`'s text animator for `phase`.
-fn animator_menu<T: Clone + 'static>(
-    menu_id: String,
-    label: &str,
-    choices: Vec<(String, bool, T)>,
-    (id, phase): (Id, studio_core::presets::Phase),
-    set: fn(&mut studio_core::text_animation::TextAnimator, T),
-    target: &WeakEntity<Workspace>,
-) -> impl IntoElement {
-    choice_menu(menu_id, label.to_owned(), choices, move |this: &mut Workspace, value: T| this.state.edit_text_animator(id, phase, |animator| set(animator, value)), target.clone())
-}
-
-/// One text animator's settings, under a small heading with its Remove button.
-fn text_animator_block(id: Id, phase: studio_core::presets::Phase, title: &'static str, animator: studio_core::text_animation::TextAnimator, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
-    use studio_core::text_animation::{TextEase, TextMotion, TextOrder, TextUnit};
-    let key = match phase {
-        studio_core::presets::Phase::In => "in",
-        studio_core::presets::Phase::Out => "out",
-    };
-    let target = cx.weak_entity();
-    let motions = TextMotion::ALL.iter().map(|&motion| (motion.name().to_owned(), motion == animator.motion, motion)).collect();
-    let orders = TextOrder::ALL.iter().map(|&order| (order.name().to_owned(), order == animator.order, order)).collect();
-    let eases = TextEase::ALL.iter().map(|&ease| (ease.name().to_owned(), ease == animator.ease, ease)).collect();
-    let menu_id = |name: &str| format!("text-animation-{key}-{name}");
-    let motion_menu = animator_menu(menu_id("motion"), animator.motion.name(), motions, (id, phase), |animator, motion| animator.motion = motion, &target);
-    let order_menu = animator_menu(menu_id("order"), animator.order.name(), orders, (id, phase), |animator, order| animator.order = order, &target);
-    let ease_menu = animator_menu(menu_id("ease"), animator.ease.name(), eases, (id, phase), |animator, ease| animator.ease = ease, &target);
-    // By: one segmented switch for the three kinds of piece.
-    let units = div().flex().gap_0p5().p_0p5().rounded(px(6.0)).bg(hsla(color::INSET)).children(TextUnit::ALL.map(|unit| {
-        Button::new(ElementId::Name(format!("text-animation-{key}-unit-{}", unit.name()).into()))
-            .xsmall()
-            .label(unit.name())
-            .flex_1()
-            .map(|button| if unit == animator.unit { button.primary() } else { button.ghost() })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.state.edit_text_animator(id, phase, |animator| animator.unit = unit);
-                cx.notify();
-            }))
-    }));
-    let remove = heading_button(ElementId::Name(format!("text-animation-{key}-remove").into()), IconName::Trash, "Remove", false, cx.listener(move |this, _, _, cx| {
-        this.state.set_text_animator(id, phase, None);
-        cx.notify();
-    }));
-    div()
-        .child(div().flex().items_center().h(px(26.0)).child(div().flex_1().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title)).child(remove))
-        .child(labeled_row("Animate", motion_menu))
-        .child(labeled_row("By", units))
-        .child(labeled_row("Order", order_menu))
-        .child(labeled_row("Easing", ease_menu))
-        .child(labeled_row("Duration", value_field(FieldTarget::TextAnimationSeconds { layer: id, phase }, workspace, cx)))
-        .child(labeled_row("Overlap", value_field(FieldTarget::TextAnimationOverlap { layer: id, phase }, workspace, cx)))
-}
-
-/// The Animate heading's buttons: Reset takes every animation off (greyed out when there is
-/// none), and + opens a menu of the In, Out and Loop animations to add.
-fn animate_buttons(layer: &Layer, cx: &mut Context<Workspace>) -> [Option<AnyElement>; 2] {
-    use studio_core::presets::{Loop, Motion, Phase};
-    let id = layer.id;
-    let animation = layer.animation;
-    let animated = animation.enter.is_some() || animation.exit.is_some() || animation.looping.is_some();
-    let reset = heading_button("animate-reset", IconName::RotateCcw, "Remove Animations", false, cx.listener(move |this, _, _, cx| {
-        this.state.set_layer_motion(id, Phase::In, None, 0.5);
-        this.state.set_layer_motion(id, Phase::Out, None, 0.5);
-        this.state.set_layer_loop(id, None);
-        cx.notify();
-    }))
-    .disabled(!animated);
-    let weak = cx.weak_entity();
-    // One submenu each for In, Out and Loop, so the list stays short.
-    let add = Button::new("animate-add").outline().small().icon(Icon::new(IconName::Plus)).tooltip("Add Animation").dropdown_menu(move |menu, window, cx| {
-        let mut menu = menu;
-        for (phase, title, current) in [(Phase::In, "In", animation.enter), (Phase::Out, "Out", animation.exit)] {
-            let weak = weak.clone();
-            menu = menu.submenu(title, window, cx, move |mut submenu, _, _| {
-                // The length already chosen is kept, or half a second.
-                let seconds = current.map_or(0.5, |(_, seconds)| seconds);
-                for motion in Motion::ALL {
-                    let weak = weak.clone();
-                    let chosen = current.is_some_and(|(picked, _)| picked == motion);
-                    submenu = submenu.item(PopupMenuItem::new(motion.name()).checked(chosen).on_click(move |_, _, cx| {
-                        weak.update(cx, |this, cx| {
-                            this.state.set_layer_motion(id, phase, Some(motion), seconds);
-                            cx.notify();
-                        })
-                        .ok();
-                    }));
-                }
-                submenu
-            });
-        }
-        let weak = weak.clone();
-        menu.submenu("Loop", window, cx, move |mut submenu, _, _| {
-            for looping in Loop::ALL {
-                let weak = weak.clone();
-                submenu = submenu.item(PopupMenuItem::new(looping.name()).checked(animation.looping == Some(looping)).on_click(move |_, _, cx| {
-                    weak.update(cx, |this, cx| {
-                        this.state.set_layer_loop(id, Some(looping));
-                        cx.notify();
-                    })
-                    .ok();
-                }));
-            }
-            submenu
-        })
-    });
-    // A menu button handles its own click, so the press is kept from the heading here.
-    let add = div().on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(add);
-    [Some(reset.into_any_element()), Some(add.into_any_element())]
 }
 
 /// The Track Motion heading's + button: starts picking the point to follow (an X cancels).
@@ -1214,8 +1030,6 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(fold("layer", "Layer", None, [None, None], workspace, cx, |cx| layer_section(layer, workspace, cx)))
         .child(transform)
         .children(text)
-        .children(layer.transform.is_some().then(|| fold("animate", "Animate", Some(ANIMATE_INFO), animate_buttons(layer, cx), workspace, cx, |cx| animate_section(layer, cx))))
-        .children(matches!(layer.content, LayerContent::Text { .. }).then(|| fold("textanim", "Text Animation", Some(TEXT_ANIMATION_INFO), text_animation_buttons(layer, cx), workspace, cx, |cx| text_animation_section(layer, workspace, cx))))
         .children(studio_core::speed::has_speed(&layer.content).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
         .children(trackable(layer).then(|| fold("track", "Track Motion", Some(TRACK_INFO), [None, Some(track_add(layer, workspace, cx))], workspace, cx, |_| track_section(layer, workspace))))
         .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", Some(CUTOUT_INFO), [None, Some(cutout_button(layer, workspace, cx))], workspace, cx, |cx| cutout_section(layer, workspace, cx))))
@@ -1229,7 +1043,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
 /// closed. `info` explains the section in its info button's tooltip; `controls` are the
 /// heading's reset button and its add or delete button, each optional, kept in those slots so
 /// they line up from section to section.
-fn fold(
+pub(super) fn fold(
     key: &'static str,
     title: &'static str,
     info: Option<&'static str>,
@@ -1265,6 +1079,8 @@ fn section_icon(key: &str) -> IconName {
         "captions" => IconName::Captions,
         "animate" => IconName::Sparkles,
         "textanim" => IconName::ALargeSmall,
+        "morph" => IconName::Blend,
+        "easing" => IconName::Spline,
         "speed" => IconName::Hourglass,
         "track" => IconName::Crosshair,
         "cutout" => IconName::Eraser,
@@ -1278,7 +1094,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
     let body = match workspace.ui.tab(PanelId::Properties) {
         0 => properties_body(workspace, cx),
         1 => super::effect_controls::body(workspace, cx),
-        _ => super::color_grade::body(workspace, cx),
+        2 => super::color_grade::body(workspace, cx),
+        _ => super::motion::body(workspace, cx),
     };
-    panel(PanelId::Properties, &["Properties", "Effects", "Color"], None, body, workspace, cx)
+    panel(PanelId::Properties, &["Properties", "Effects", "Color", "Motion"], None, body, workspace, cx)
 }

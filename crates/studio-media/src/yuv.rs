@@ -147,15 +147,21 @@ pub fn bgra_to_yuv(
     });
 }
 
-/// The alpha of a BGRA image as a tightly packed 10-bit little-endian plane (full range,
-/// 0–1023) of an `out_width × out_height` frame, edges repeated as in `bgra_to_yuv`.
-pub fn alpha_plane(bgra: &[u8], (source_width, source_height): (usize, usize), (out_width, out_height): (usize, usize)) -> Vec<u8> {
-    let mut plane = Vec::with_capacity(out_width * out_height * 2);
+/// The alpha of a BGRA image as a tightly packed full-range plane of an `out_width ×
+/// `out_height` frame, edges repeated as in `bgra_to_yuv`: 10-bit little-endian (0–1023) for
+/// `layout`s that are ten-bit (ProRes 4444), otherwise one byte a pixel (WebM's VP9).
+pub fn alpha_plane(bgra: &[u8], (source_width, source_height): (usize, usize), (out_width, out_height): (usize, usize), layout: YuvLayout) -> Vec<u8> {
+    let ten_bit = layout.ten_bit();
+    let mut plane = Vec::with_capacity(out_width * out_height * if ten_bit { 2 } else { 1 });
     for y in 0..out_height {
         for x in 0..out_width {
             let a = bgra[(y.min(source_height - 1) * source_width + x.min(source_width - 1)) * 4 + 3];
-            let code = (u32::from(a) * 1023 + 127) / 255;
-            plane.extend_from_slice(&(code as u16).to_le_bytes());
+            if ten_bit {
+                let code = (u32::from(a) * 1023 + 127) / 255;
+                plane.extend_from_slice(&(code as u16).to_le_bytes());
+            } else {
+                plane.push(a);
+            }
         }
     }
     plane
@@ -214,7 +220,7 @@ mod tests {
 
     #[test]
     fn the_alpha_plane_is_ten_bit_full_range() {
-        let alpha = alpha_plane(&[0, 0, 0, 255, 0, 0, 0, 0], (2, 1), (2, 1));
+        let alpha = alpha_plane(&[0, 0, 0, 255, 0, 0, 0, 0], (2, 1), (2, 1), YuvLayout::Yuv444p10);
         assert_eq!(alpha, vec![0xff, 0x03, 0, 0], "1023 and 0");
     }
 

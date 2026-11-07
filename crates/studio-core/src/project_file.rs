@@ -125,6 +125,7 @@ pub fn from_text_with(text: &str) -> Result<(Project, EditorView, EditorSettings
     let FileIn { mut project, mut view, mut settings } = file;
     restore_effect_info(&mut project);
     fill_missing_start_frames(&mut project);
+    switch_on_nested_sound(&mut project);
     fill_missing_tracks(&mut project);
     check(&project)?;
     project.refresh_next_id();
@@ -173,6 +174,7 @@ fn layer_frames(layer: &crate::model::Layer) -> Vec<i64> {
             frames.extend(property.keyframes);
         }
     }
+    frames.extend(layer.morph.iter().flat_map(crate::morph::ShapeMorph::keyframe_frames));
     frames
 }
 
@@ -272,6 +274,14 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             {
                 return damaged(&format!("shape layer \"{}\" has a missing or broken path", layer.name));
             }
+            // A morph is for a pen path, with a drawable outline and a sound style at every keyframe.
+            if let Some(morph) = &layer.morph
+                && (!matches!(&layer.content, crate::model::LayerContent::Shape { path: Some(_), .. })
+                    || !morph.path.is_sound_with(crate::path::ShapePath::is_sound)
+                    || !morph.style.is_sound_with(shape_is_sound))
+            {
+                return damaged(&format!("shape layer \"{}\" has a broken morph", layer.name));
+            }
             // Background removal is for pictures, with a sane number of clicks on the picture.
             if let Some(cutout) = &layer.cutout
                 && (!crate::cutout::can_cut_out(layer)
@@ -334,6 +344,17 @@ fn fill_missing_tracks(project: &mut Project) {
     }
 }
 
+/// Files from before nested compositions played sound saved their layers with the audio
+/// switch off, as it did nothing then; they are switched on, so their sound plays.
+fn switch_on_nested_sound(project: &mut Project) {
+    for layer in project.compositions.iter_mut().flat_map(|comp| &mut comp.layers) {
+        if matches!(layer.content, crate::model::LayerContent::Composition { .. }) && !layer.has_audio {
+            layer.has_audio = true;
+            layer.switches.audio = true;
+        }
+    }
+}
+
 /// Files from before trimming have no start frames: their sources started at the in point.
 fn fill_missing_start_frames(project: &mut Project) {
     for layer in project.compositions.iter_mut().flat_map(|comp| &mut comp.layers) {
@@ -356,21 +377,18 @@ fn restore_effect_info(project: &mut Project) {
     }
 }
 
+/// Points the project's media files at where they are on this machine. Paths saved relative to
+/// the project file (as File ▸ Package writes them) are made absolute against `project_folder`,
+/// so a packaged project opens wherever it is unzipped; absolute paths are kept as they are.
 /// Media files that are missing where the project says they are, but found under the same
 /// name next to the project file, are pointed there. This keeps a project and its media
 /// working after the folder holding both is moved or copied to another machine. Returns the
 /// files that are still missing.
 pub fn relink_missing_media(project: &mut Project, project_folder: &Path, exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     let mut missing = Vec::new();
-    for item in &mut project.items {
-        let Some(path) = item.path.as_mut() else { continue };
-        if exists(path) {
-            continue;
-        }
-        let beside = path.file_name().map(|name| project_folder.join(name));
-        match beside.filter(|candidate| exists(candidate)) {
-            Some(found) => *path = found,
-            None => missing.push(path.clone()),
+    for path in project.items.iter_mut().filter_map(|item| item.path.as_mut()) {
+        if !relink(path, project_folder, &exists) {
+            missing.push(path.clone());
         }
     }
     // LUT files chosen for Apply LUT effects are relinked the same way.
@@ -379,17 +397,30 @@ pub fn relink_missing_media(project: &mut Project, project_folder: &Path, exists
         Some(crate::model::LutSource::File(path)) => Some(path),
         _ => None,
     }) {
-        if exists(path) {
-            continue;
-        }
-        let beside = path.file_name().map(|name| project_folder.join(name));
-        match beside.filter(|candidate| exists(candidate)) {
-            Some(found) => *path = found,
-            None if !missing.contains(path) => missing.push(path.clone()),
-            None => {}
+        if !relink(path, project_folder, &exists) && !missing.contains(path) {
+            missing.push(path.clone());
         }
     }
     missing
+}
+
+/// Makes one linked path absolute (against the project's folder) and, if the file isn't there,
+/// looks for it under the same name next to the project file. Returns whether it was found.
+fn relink(path: &mut PathBuf, project_folder: &Path, exists: &impl Fn(&Path) -> bool) -> bool {
+    if path.is_relative() {
+        *path = project_folder.join(&*path);
+    }
+    if exists(path) {
+        return true;
+    }
+    let beside = path.file_name().map(|name| project_folder.join(name));
+    match beside.filter(|candidate| exists(candidate)) {
+        Some(found) => {
+            *path = found;
+            true
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +572,32 @@ mod tests {
     }
 
     #[test]
+    fn nested_compositions_in_older_files_get_their_sound_switched_on() {
+        let mut project = sample_project();
+        let inner = crate::edit::new_composition(&mut project, &crate::edit::CompositionSettings {
+            name: "Inner".into(),
+            width: 320,
+            height: 180,
+            frame_rate: crate::time::FrameRate::new(30, 1),
+            duration_frames: 60,
+            background: crate::model::Rgba::TRANSPARENT,
+        }).unwrap();
+        let shown = crate::edit::add_layer_from_item(&mut project, crate::sample::ids::MAIN_COMP, inner, 0, 0).unwrap();
+        // Saved as older versions saved it: no sound, switch off.
+        let layer = project.composition_mut(crate::sample::ids::MAIN_COMP).unwrap().layer_mut(shown).unwrap();
+        layer.has_audio = false;
+        layer.switches.audio = false;
+        let (opened, _) = from_text(&to_text(&project, view()).unwrap()).unwrap();
+        let layer = opened.composition(crate::sample::ids::MAIN_COMP).unwrap().layer(shown).unwrap();
+        assert!(layer.has_audio && layer.switches.audio);
+        // Muted on purpose after that, it stays muted.
+        let mut muted = opened.clone();
+        muted.composition_mut(crate::sample::ids::MAIN_COMP).unwrap().layer_mut(shown).unwrap().switches.audio = false;
+        let (reopened, _) = from_text(&to_text(&muted, view()).unwrap()).unwrap();
+        assert!(!reopened.composition(crate::sample::ids::MAIN_COMP).unwrap().layer(shown).unwrap().switches.audio);
+    }
+
+    #[test]
     fn files_from_before_tracks_get_one_track_per_layer() {
         let text = to_text(&sample_project(), view()).unwrap();
         let mut file: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -550,6 +607,107 @@ mod tests {
         let (opened, _) = from_text(&file.to_string()).unwrap();
         let tracks: Vec<i32> = opened.compositions[0].layers.iter().map(|layer| layer.track).collect();
         assert_eq!(tracks, vec![5, 4, 3, 2, 1, 0], "stacking order is kept exactly");
+    }
+
+    /// Builds a project using as much of the editor as possible (every template in every
+    /// format with its placeholders filled, every mockup, element and effect, layer and text
+    /// animations, a shape morph, a transition and sound settings) so that anything the
+    /// project file fails to keep shows up as a difference after reopening.
+    #[test]
+    fn a_project_using_every_feature_reopens_exactly_as_saved() {
+        use crate::animation::Vec2;
+        use crate::model::{LayerContent, ShapeKind, ShapeStyle};
+        use crate::{effects, elements, magic_move, mockups, morph, presets, slots, templates, text_animation, transitions};
+
+        let mut project = sample_project();
+        let picture = edit::import_image(&mut project, "/media/photo.png".into(), Vec2::new(1200.0, 800.0));
+
+        // Every template in every format, with each placeholder filled as a drop would.
+        let mut built = Vec::new();
+        for template in &templates::TEMPLATES {
+            for format in templates::Format::ALL {
+                let comp = templates::build(&mut project, template, format).unwrap();
+                let placeholders: Vec<Id> = project.composition(comp).unwrap().layers.iter().filter(|layer| slots::is_placeholder(layer)).map(|layer| layer.id).collect();
+                for layer in placeholders {
+                    let slot = slots::Slot { comp, layer, kind: slots::SlotKind::Placeholder, root: layer, outline: [Vec2::default(); 4] };
+                    slots::fill(&mut project, &slot, picture).unwrap();
+                }
+                built.push(comp);
+            }
+        }
+
+        // Every mockup device in each of its finishes, holding the picture.
+        for device in mockups::Device::ALL {
+            for (_, finish) in device.finishes() {
+                let request = mockups::MockupRequest { device, orientation: mockups::Orientation::default(), finish, footage: Some(picture), seconds: 5.0 };
+                mockups::add_to(&mut project, ids::MAIN_COMP, &request).unwrap();
+            }
+        }
+
+        // Every element, then every effect on each layer it suits.
+        for index in 0..elements::ELEMENTS.len() {
+            elements::add(&mut project, ids::MAIN_COMP, index, Vec2::new(400.0, 300.0), 0);
+        }
+        let layers: Vec<(Id, LayerContent)> = project.composition(ids::MAIN_COMP).unwrap().layers.iter().map(|layer| (layer.id, layer.content.clone())).collect();
+        for definition in effects::CATEGORIES.iter().flat_map(|category| category.effects) {
+            if let Some((layer, _)) = layers.iter().find(|(_, content)| effects::suits_layer(definition.name, content)) {
+                edit::add_effect(&mut project, ids::MAIN_COMP, *layer, definition.name).unwrap();
+            }
+        }
+
+        // Layer animations, a text animation, a shape morph and a transition.
+        let text = edit::add_text_layer(&mut project, ids::MAIN_COMP, "Saved", Vec2::new(960.0, 540.0), 0).unwrap();
+        presets::set_motion(&mut project, ids::MAIN_COMP, text, presets::Phase::In, Some(presets::Motion::Pop), 0.5);
+        presets::set_motion(&mut project, ids::MAIN_COMP, text, presets::Phase::Out, Some(presets::Motion::Fade), 0.5);
+        presets::set_loop(&mut project, ids::MAIN_COMP, text, Some(presets::Loop::Wiggle));
+        assert!(text_animation::set_animator(&mut project, ids::MAIN_COMP, text, presets::Phase::In, Some(text_animation::TextAnimator::default())));
+        let circle = edit::add_shape_layer(&mut project, ids::MAIN_COMP, ShapeStyle::new(ShapeKind::Ellipse), Vec2::new(200.0, 200.0), Vec2::new(300.0, 300.0), 0).unwrap();
+        let star = edit::add_shape_layer(&mut project, ids::MAIN_COMP, ShapeStyle::new(ShapeKind::Star), Vec2::new(200.0, 200.0), Vec2::new(900.0, 300.0), 0).unwrap();
+        morph::morph_to(project.composition_mut(ids::MAIN_COMP).unwrap(), circle, star, 10, 20, morph::default_easing()).unwrap();
+        // A transition goes on a cut between touching clips, as the timeline offers it: split a
+        // clip and put one on the cut.
+        let composition = project.composition(ids::MAIN_COMP).unwrap();
+        let clip = composition.layers.iter().find(|layer| matches!(layer.content, LayerContent::Footage { .. })).unwrap();
+        let (clip, middle) = (clip.id, (clip.in_frame + clip.out_frame) / 2);
+        crate::cut::split_layers(&mut project, ids::MAIN_COMP, &[clip], middle);
+        let composition = project.composition(ids::MAIN_COMP).unwrap();
+        let after = transitions::touching(composition, composition.layer(clip).unwrap(), false).unwrap();
+        assert!(transitions::apply(&mut project, ids::MAIN_COMP, Some(clip), Some(after), transitions::Transition::Whip, 0.5));
+        if let Some(&to) = magic_move::targets(&project, built[0]).first() {
+            magic_move::magic_move(&mut project, built[0], to, 15, morph::default_easing()).unwrap();
+        }
+
+        // Sound settings on a clip.
+        let layer = project.composition_mut(ids::MAIN_COMP).unwrap().layers.iter_mut().find(|layer| layer.has_audio).unwrap();
+        layer.audio.volume_db = -6.5;
+        layer.audio.noise_gate = 0.3;
+        layer.audio.fade_in = 0.25;
+        layer.switches.audio = false;
+
+        let settings = EditorSettings {
+            view_range: Some(FrameRange::new(10.0, 90.0)),
+            snapping: false,
+            magnetic_main_track: false,
+            loop_playback: false,
+            expanded_rows: vec!["effect-1".into()],
+            open_clips: vec![text],
+        };
+        let saved = to_text_with(&project, view(), &settings).unwrap();
+        let (opened, opened_view, opened_settings) = from_text_with(&saved).unwrap();
+        assert_eq!(opened_view, view());
+        assert_eq!(opened_settings, settings);
+        // Compare composition by composition so a failure names what changed.
+        assert_eq!(opened.items.len(), project.items.len());
+        for (after, before) in opened.items.iter().zip(&project.items) {
+            assert_eq!(after, before, "project item {:?} changed after reopening", before.name);
+        }
+        assert_eq!(opened.compositions.len(), project.compositions.len());
+        for (after, before) in opened.compositions.iter().zip(&project.compositions) {
+            assert_eq!(after, before, "composition {:?} changed after reopening", before.name);
+        }
+        assert_eq!(opened, project);
+        // Saving the reopened project gives the same file, so nothing drifts save after save.
+        assert_eq!(to_text_with(&opened, view(), &settings).unwrap(), saved);
     }
 
     #[test]
@@ -609,6 +767,21 @@ mod tests {
         assert!(relink_missing_media(&mut opened, Path::new("/new/place"), exists).is_empty());
         let luts: Vec<_> = opened.compositions[0].layers.iter().flat_map(|layer| &layer.effects).filter_map(|effect| effect.lut.clone()).collect();
         assert_eq!(luts, vec![LutSource::Look("Noir".into()), LutSource::File("/new/place/Film.cube".into())]);
+    }
+
+    #[test]
+    fn paths_relative_to_the_project_file_open_wherever_it_is() {
+        let mut project = sample_project();
+        edit::import_audio(&mut project, "Media/score.wav".into(), 1.0);
+        edit::import_audio(&mut project, "/absolute/voice.wav".into(), 1.0);
+        let exists = |path: &Path| path == Path::new("/unzipped/Promo/Media/score.wav") || path == Path::new("/absolute/voice.wav");
+        assert!(relink_missing_media(&mut project, Path::new("/unzipped/Promo"), exists).is_empty());
+        let paths: Vec<_> = project.items.iter().filter_map(|item| item.path.clone()).collect();
+        assert_eq!(paths, [PathBuf::from("/unzipped/Promo/Media/score.wav"), PathBuf::from("/absolute/voice.wav")], "absolute paths are kept");
+        // A relative path that isn't there is reported as the full path it was looked for at.
+        let mut project = sample_project();
+        edit::import_audio(&mut project, "Media/gone.wav".into(), 1.0);
+        assert_eq!(relink_missing_media(&mut project, Path::new("/unzipped/Promo"), |_| false), [PathBuf::from("/unzipped/Promo/Media/gone.wav")]);
     }
 
     #[test]

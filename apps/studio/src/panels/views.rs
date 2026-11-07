@@ -32,6 +32,9 @@ pub struct PanelView {
     /// How many times this panel has rendered, so tests can check that caching works.
     #[cfg(test)]
     pub renders: usize,
+    /// How long its renders took in all, for the stress benchmark.
+    #[cfg(test)]
+    pub render_time: std::time::Duration,
 }
 
 impl PanelView {
@@ -43,6 +46,8 @@ impl PanelView {
             kind,
             #[cfg(test)]
             renders: 0,
+            #[cfg(test)]
+            render_time: std::time::Duration::ZERO,
         }
     }
 }
@@ -54,7 +59,9 @@ impl Render for PanelView {
         {
             self.renders += 1;
         }
-        self.workspace
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let element = self.workspace
             .update(cx, |workspace, cx| -> AnyElement {
                 use super::*;
                 match kind {
@@ -72,7 +79,12 @@ impl Render for PanelView {
                     PanelKind::Mockups => mockups::render(workspace, cx).into_any_element(),
                 }
             })
-            .unwrap_or_else(|_| div().into_any_element())
+            .unwrap_or_else(|_| div().into_any_element());
+        #[cfg(test)]
+        {
+            self.render_time += started.elapsed();
+        }
+        element
     }
 }
 

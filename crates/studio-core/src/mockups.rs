@@ -492,7 +492,7 @@ fn fill_screen(project: &mut Project, screen: Id, footage: Option<Id>) {
     if let Some(id) = edit::add_shape_layer(project, screen, style, Vec2::new(width, height), Vec2::new(width * 0.5, height * 0.5), 0)
         && let Some(layer) = project.composition_mut(screen).and_then(|composition| composition.layer_mut(id))
     {
-        layer.name = "Drop your screen recording here".into();
+        layer.name = crate::slots::placeholder_name("screen recording");
     }
 }
 

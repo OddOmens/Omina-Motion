@@ -248,6 +248,9 @@ impl Layer {
                 property.value.shift(delta);
             }
         }
+        if let Some(morph) = self.morph.as_mut() {
+            morph.shift(delta);
+        }
     }
 
     /// Every animatable property of the layer, in display order.

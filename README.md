@@ -36,7 +36,7 @@ crates/studio-enhance Speech cleanup, like Adobe Podcast's Enhance Speech: AI no
                      -16 LUFS loudness (BS.1770) with a peak limiter. Offline, on whole recordings.
                      `ENHANCE_CLEAN=… ENHANCE_NOISY=… ENHANCE_OUT=… cargo test -p studio-enhance --release --test
                      real_speech -- --ignored --nocapture` measures it on a recording.
-crates/studio-export Exports a composition to a movie (H.264, H.265, ProRes), an animated GIF or a PNG
+crates/studio-export Exports a composition to a movie (H.264, H.265, ProRes, WebM), an animated GIF or a PNG
                      sequence, at the composition's frame rate or another: GPU render, audio mix and encode,
                      written under a temporary name and renamed when done. No UI, so it also runs on a
                      headless render machine.
@@ -67,12 +67,19 @@ Inside `apps/studio/src`:
 - The Export dialog (⌘M, `panels/export_dialog.rs`): a preview of the frames being exported, with a scrubber
   across exactly that range and frame-step arrows, over a checkerboard when the format keeps transparency;
   a summary of the file (size, frame rate, length, sound, and its size for a fixed bitrate); and grouped
-  settings: format (H.264, H.265 / HEVC, five ProRes flavors, animated GIF, PNG sequence), quality and speed
-  for H.264 and H.265, size, frame rate (faster rates repeat frames, slower ones skip them; GIFs stop at 50),
-  work area or whole composition, and sound with its AAC bitrate.
+  settings: format (H.264, H.265 / HEVC, five ProRes flavors, WebM with transparency, animated GIF, PNG
+  sequence), quality and speed for H.264, H.265 and WebM, size, frame rate (faster rates repeat frames, slower
+  ones skip them; GIFs stop at 50), work area or whole composition, and sound with its AAC (or, for WebM, Opus)
+  bitrate.
 - Quick Export (a clip's right-click menu, `panels/export.rs`): renders one layer alone (`studio-core/src/bake.rs`)
   to ProRes 4444 with transparency in an Exports folder beside the project; Export and Replace imports it
   into the project's Exports folder and puts it in the layer's place.
+- File ▸ Package… (`panels/package.rs`, `package_writer.rs`, `studio-core/src/package.rs`), like After
+  Effects' Collect Files: the project and every file it links to (footage, images, sound, LUT files) in one
+  zip. Inside a folder named after the package, the media is copied into folders that mirror the Project
+  panel's (media at the top level goes in `Media`, LUTs in `LUTs`, clashing names get " 2", " 3"), and the
+  packaged `.studio` points at the copies by paths relative to itself. Missing files are left out and listed
+  in `Missing files.txt`. It runs in the background with progress and Cancel in the top bar.
 - `panels/color_picker.rs`: the color picker every color chip opens: a saturation/brightness square, hue and
   opacity sliders, hex and opacity fields, the project's colors, the picked and saved colors, paint type for
   shapes, and a Libraries tab.
@@ -83,17 +90,27 @@ Inside `apps/studio/src`:
   adjustment layer (⌥⌘Y) or a null object (⇧⌥⌘Y, a layer that draws nothing, for parenting), and hold Add or
   Remove Marker (M), Sequence Layers and Stagger Layers (`studio-core/src/edit.rs`). The Rate Stretch tool (R,
   with Cut, Ripple and Roll) drags a clip's end to change its speed (`speed::stretch_to`). The viewer's grid
-  button (') shows title and action safe areas, thirds and the center.
+  button opens a guides menu (' shows or hides them): thirds and the center on any frame, title and action
+  safe on 16:9, and the TikTok, Instagram Reels and YouTube Shorts safe zones on 9:16 (`panels/guides.rs`;
+  the social insets are approximate, from the apps' common 1080×1920 templates).
 - Drops: Media items and files from the Finder can be dropped on the Media panel (import only), on a track
   (clips there, one after another) or on the viewer (`EditorState::add_items_at`: from the playhead on a new
   top track, centered where let go; full-frame pictures stay centered).
+- Media slots (`studio-core/src/slots.rs`, `EditorState::drop_items_at`): a photo or video dragged over the viewer
+  outlines the slot under the pointer, looking inside nested compositions. A slot is a "Drop your … here"
+  placeholder (as templates, mockups and elements make; `slots::placeholder_name`) or a nested composition showing
+  one photo or video. Dropping on a placeholder turns it into a composition of its size ("Photo slot") holding the
+  media, scaled to cover and cropped to the placeholder's shape by a hidden mask; the layer keeps its id,
+  animation, effects and timing. Dropping on a filled slot swaps the media inside, scaling every Scale keyframe so
+  a pan or zoom carries on, and every place showing that composition updates. Other files dropped at the same
+  time are added as layers as usual. A video's sound plays through its slot.
 - Typing text in the viewer (`panels/viewer.rs`): the Type tool's click on empty space starts a text layer, and
   on a text layer edits it with the caret there (as does a double-click with the Selection tool). The picture
   shows the text as it will look while typing (`with_typed_text`), with a blinking caret and the selection
   drawn on the real glyphs from the layout (`studio_render::text::TextGeometry`); the field taking the keys is
   hidden. Return starts a new line; ⌘Return, Escape or a click off the text finishes. Click and drag on the
   text to place the caret or select; double-click selects a word.
-- Text animators (`studio-core/src/text_animation.rs`, Properties ▸ Text Animation): an In and an Out
+- Text animators (`studio-core/src/text_animation.rs`, Motion ▸ Text Animation): an In and an Out
   animation per text layer that moves its characters, words or lines one after another (Fade, Rise, Drop,
   Slide, Pop, Zoom, Spin, Typewriter), in order, reverse, from the center or shuffled, with an easing, a
   duration for the whole and how much the pieces overlap. Nothing is keyframed: the renderer works out each
@@ -125,13 +142,30 @@ Inside `apps/studio/src`:
   Mark Beats (`studio-media/src/beats.rs`; markers snap), Track Motion (`studio-media/src/track.rs`) and Auto
   Reframe (follows the subject with the background-removal model). Speed, reverse and ramps are in
   `studio-core/src/speed.rs`; the mixer plays sped-up sound, ducks music under a voice, and gates noise.
-- `panels/templates.rs`: the Templates panel (with a brand menu that applies a Library brand's colors and font) and
-  its View All gallery, which shows every template at once, grouped by category. The 225 templates (45 animated
-  layouts, each in 16:9, 4:5 and 9:16) are in `studio-core/src/templates/`; `catalog.rs` holds their words, colors and
-  fonts, and `social.rs` the intro and social layouts (profile card, Ask Me Anything, name reveal, story, comment
-  reply, greeting, outlined words, vlog title).
+- Sound in nested compositions (`studio-core/src/audio.rs`, `composition_audio`): the sound inside a nested
+  composition plays where its layer starts, heard only while that layer shows, at any depth. The composition
+  layer's audio switch, solo, volume, fades, ducking and noise gate apply to everything inside it (its Audio
+  card and the mute button on its clip; Remove Silences and Mark Beats are for single files, so they're hidden).
+  Each nested clip gets a mixer id made from the chain of layers it plays through, so a composition used twice
+  plays as two clips. Older files saved composition layers with sound switched off; they're switched on when
+  opened (`switch_on_nested_sound`).
+- `panels/templates.rs`: the Templates panel (with a Colors menu that makes a template in any of the template
+  palettes, or in a Library brand's colors and font) and its View All gallery, which shows every template at once,
+  grouped by category. Hovering over a card plays the template on it (15 pictures a second, built once into a
+  scratch project); its + button adds it and posts a notification. The 61 templates (one for each of 61 animated layouts, so no two are the same design in
+  other colors; each in 16:9, 4:5 and 9:16) are in `studio-core/src/templates/`; `catalog.rs` holds their words,
+  colors and fonts and the named palettes (`LOOKS`), `social.rs` the intro and social layouts (profile card, Ask
+  Me Anything, name reveal, story, comment reply, greeting, outlined words, vlog title), `ads.rs` the ad and UGC
+  layouts (captions over a talking head, us versus them, problem and solution, feature callouts, a countdown
+  offer, a star rating), and `editorial.rs` bold editorial ones with flat color and big type (a poster whose
+  lines stretch in, sliding color blocks, a repeated word, stacking photo cards, a full-screen countdown, a title
+  spinning out of a blur, shutters off a photo, gradient bars, words echoing over a photo, a bouncing full stop). Headlines come in word
+  by word with text animators, everything leaves in a staggered exit at the end, and in 9:16 buttons and key words
+  stay clear of the captions and buttons phone apps draw over the bottom of a video.
   `TEMPLATE_SHEET=/path.png cargo test -p studio-render --test render template_sheet -- --ignored` renders
-  them all into one picture to check.
+  them all into one picture to check, and `TEMPLATE_STRIP=/path.png TEMPLATE_PICK=0,5 cargo test -p studio-render
+  --test render template_strip -- --ignored` renders chosen ones across their running time to check how they move
+  (with `TEMPLATE_FILL=/picture.png`, every placeholder is filled with that picture first).
 - `panels/mockups.rs`: the Mockups panel. Device mockups for iPhone, iPhone Duo, iPad, Mac, Apple Watch (with bands) and
   a browser window (1920 × 1080 page, light or dark), drawn as shapes
   (`studio-core/src/mockups.rs`). A card's + opens the finishes that device comes in (`Device::finishes`, a list per
@@ -143,11 +177,37 @@ Inside `apps/studio/src`:
 - `panels/elements.rs`: the Elements panel (shapes, arrows, badges, frames, social buttons and emoji
   stickers, defined in `studio-core/src/elements.rs`). `ELEMENT_SHEET=/path.png cargo test -p studio-render
   --test render element_sheet -- --ignored` renders them all into one picture.
-- Animation presets (In, Out and Loop, in the Properties panel's Animate section) are in
+- The right panel's Motion tab (`panels/motion.rs`) holds everything about movement: the graph editor
+  (`panels/graph_editor.rs`, Keyframe Easing) for the keyframes selected in the timeline, which the
+  timeline's Easings button, a click on the line between two keyframes or a double-click on one opens;
+  and the Animate and Text Animation sections. Each In and Out animation has its own easing (Smooth,
+  Gentle, Snappy, Overshoot, Spring, Bounce, Linear, or its motion's default) and a curve whose handles drag.
+- Shape morphing: `studio-core/src/morph.rs`. A shape layer's `morph` holds outline keyframes (and,
+  after Morph To, fill and stroke keyframes). Between two keyframes the outlines are cut into the same
+  number of points along their length (`resample`, which keeps the exact shape), the second is started
+  and run the way that moves its points least (`matched`), then blended point by point; a closed outline
+  morphing into an open one is opened at its first point. Drawn shapes become equivalent pen paths
+  (`outline`, rounded corners included) before they morph. The Motion tab's Morph card
+  (`panels/morph.rs`) has the Path stopwatch and keyframe buttons, and dragging a morphing path's points
+  in the viewer keyframes the outline at the playhead. Morph To… (a layer's right-click menu, the Layer
+  menu, or the Morph card with two shapes selected) keyframes the first selected shape into the second's
+  outline, colors, position, scale, rotation and opacity over a chosen length, then hides the second.
+  Style edits on a morphing shape apply across the whole morph. `MORPH_SHEET=/path.png cargo test -p
+  studio-render --test render morph_sheet -- --ignored` renders frames across three morphs.
+- Magic Move (Composition ▸ Magic Move…, `panels/magic_move.rs`, `studio-core/src/magic_move.rs`): a new
+  composition that plays the open one, changes it into another of the same size and frame rate, then
+  plays that. During the change, short-lived "bridge" copies of the layers are keyframed from the first's
+  last frame to the second's first: layers with the same name morph (two shapes), move into place (same
+  content) or move while crossfading (different content); the rest fade out or in. Picture tracks start
+  at 1, leaving the magnetic main track empty so nothing slides out of time. `MAGIC_MOVE_SHEET=/path.png
+  cargo test -p studio-render --test render magic_move_sheet -- --ignored` renders frames across one.
+- Animation presets (In, Out and Loop, in the Motion tab's Animate section) are in
   `studio-core/src/presets.rs`; transitions between clips (the Effects panel's Transitions, dragged onto a
   cut) are in `studio-core/src/transitions.rs`.
 - `panels/resize.rs`: Magic Resize (Composition menu): copies of the open composition in other sizes, with
-  the layers rearranged by `studio-core/src/resize.rs`.
+  the layers rearranged by `studio-core/src/resize.rs`. A composition's right-click menu in the Project panel has
+  Duplicate and Resize, which makes one such copy (9:16 to 4:5, 16:9 to 9:16 and so on) beside the original,
+  named for its new shape, and opens it.
 - Importing other apps' projects: `studio-core/src/import/` reads After Effects projects (`aep.rs`, from the
   RIFX chunks; the format isn't published) and Lottie animations (`lottie.rs`) into a `Scene`, which `build`
   turns into Studio folders, compositions and layers after checking it like a project file. Import (⌘I) and
@@ -162,18 +222,38 @@ Inside `apps/studio/src`:
   applied), and each transcript phrase's start and end can be typed or dragged; its words stretch to fit
   without crossing their neighbors (`captions::retime_phrase`).
 - `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.
+- `keymap.rs`: every command that can have a shortcut, the Studio, After Effects and Premiere Pro sets, and
+  the person's own changes (Settings ▸ Keyboard Shortcuts). Tooltips and menu labels read keys from it, so
+  they follow custom shortcuts.
+- `versions.rs`, `panels/versions.rs`: earlier versions of a project, kept on each save and every few minutes
+  of work under Studio's settings folder (`Versions`), listed and restored from File ▸ Browse Versions….
+- `preview_cache.rs`: rendering ahead: a background thread with its own renderer renders the frames after the
+  playhead and keeps them in memory (Settings ▸ Playback), so playback shows them; a green line on the ruler
+  marks them. The renderer also draws runs of simple layers (normal blending, no effects, matte or mask) in
+  one pass. `cargo test -p studio --release stress_500_layers -- --ignored --nocapture` measures a 500-layer
+  project; the timeline only draws the tracks near what can be seen.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout. Cmd+[ / Cmd+] step a frame
   (with Shift, five); Cmd+= / Cmd+- zoom the viewer, and the scroll wheel over it zooms around the pointer
   (`panels/viewer.rs`, `zoom_to`).
 - `sound.rs`: keeps the sound in step with playback (start, stop, mute changes, heard time).
-- `project_files.rs`: Save, Save As, Open, asking about unsaved changes, reopening the last project, and the
-  recovery copy of unsaved work.
-- `app_settings.rs`: what Studio remembers between runs (last project, window placement, recovery copy, theme,
+- `project_files.rs`: Save, Save As, Open, Close Project (Cmd+W), asking about unsaved changes, what shows on
+  launch, and the recovery copy of unsaved work.
+- `panels/start_screen.rs`: the start screen, like After Effects' Home: shown on launch (Settings > General can
+  reopen the last project instead), from File > Start Screen and after Close Project. It lists recent projects
+  (filterable; right-click to show in Finder or remove), and starts a new project, opens one, or starts from a
+  template (the template's composition becomes the new project's only one). File > Open Recent lists the same
+  projects (`workspace::refresh_menus` rebuilds the menu bar when they change).
+- `crash_log.rs`: a crash writes a report (error, place, call chain, version) to `Crash Reports` in the settings
+  folder; the next launch says so once and offers to show it. Nothing is sent.
+- `updates.rs`: Studio > Check for Updates, and a quiet check once a day at launch, read a small JSON feed (see
+  Releasing). A newer version is offered as a download link; nothing installs itself.
+- `app_settings.rs`: what Studio remembers between runs (recent projects, window placement, recovery copy, theme,
   accent color, Project panel columns, default folders and import sorting, cache folder, proxy settings).
   `panels/settings.rs` is the Settings dialog (Cmd+,), with sections in a menu on its left.
 - `panels/project.rs`: the Project panel, with a preview that shows images and plays video and sound;
   `studio-core/src/folders.rs` adds default folders and sorts imports into them. Right-clicking an item opens
-  its menu: Open and Composition Settings (compositions), Rename, Label, Reveal in Finder, Delete. Double-clicking
+  its menu: Open, Composition Settings and Duplicate and Resize (compositions), Rename, Label, Reveal in Finder,
+  Delete. Clicking an item's label swatch picks another label color. Double-clicking
   a name renames it (as on a timeline clip), and Cmd+D there duplicates the selected item
   (`studio-core/src/copy.rs`: a composition's copy gets copies of its layers).
 - Right-clicking a layer, on its clip or in the viewer, opens `panels/layer_menu.rs`: Rename, Duplicate,
@@ -197,8 +277,9 @@ FFmpeg's libraries and `pkg-config` (macOS: `brew install ffmpeg pkg-config`;
 Debian/Ubuntu: `apt install libavcodec-dev libavformat-dev libswscale-dev libswresample-dev libasound2-dev pkg-config clang`).
 H.264 export uses x264, which Homebrew's and most Linux distributions' FFmpeg include; without it, the
 system's hardware H.264 encoder is used. H.265 export likewise uses x265 when FFmpeg has it (Homebrew's
-does) and the hardware encoder otherwise, which is what release builds use. GIF and PNG export need nothing
-extra.
+does) and the hardware encoder otherwise, which is what release builds use. WebM export uses libvpx (VP9,
+with an alpha plane for transparency) and libopus, which Homebrew's FFmpeg includes; an FFmpeg without them
+shows WebM greyed out in the Export dialog. GIF and PNG export need nothing extra.
 
 ## Commands
 
@@ -237,7 +318,8 @@ cargo run -p studio-export --release --example export -- project.studio out.mp4 
   is in progress (a whole drag is one step). Changes the app makes by itself, such as fitting a text box to
   its text, must go through `History::absorb` so they do not become undo steps.
 - Project files are written to a temporary file and then renamed over the old one, so a crash or full disk
-  never leaves a half-written project. Missing media is looked for next to the project file on opening.
+  never leaves a half-written project. Media paths may be absolute or relative to the project file (as
+  packages save them); missing media is looked for next to the project file on opening.
 - Panels are cached views: an edit (`cx.notify()` on the workspace) refreshes every panel, while
   playback refreshes only the Viewer, Timeline and Properties. Keep dense rows free of heavy
   components (use plain elements, as the timeline does) and never query the OS during render.
@@ -262,19 +344,22 @@ cargo run -p studio-export --release --example export -- project.studio out.mp4 
 
 - **Network.** Studio contacts only: Hugging Face, to download the captions (Whisper) and cut-out (MobileSAM)
   models, after asking or from Settings > AI Models (pinned files, each checked against its SHA-256 before use;
-  `https` only). There is no telemetry, analytics or crash reporting.
+  `https` only); and, in builds given one, the update feed, once a day and from Check for Updates (`https`
+  only, a plain request with no information about you). There is no telemetry or analytics, and crash
+  reports stay on the Mac unless you send one.
 - **On disk.** Settings, libraries (and up to 30 backups), downloaded models and the recovery copy of unsaved
   work live in `~/Library/Application Support/Studio`. Proxies, background-removal masks, cleaned speech and
   images from imported animations live in `~/Library/Caches/Studio` (or the folder chosen in Settings >
   Media Cache), and each can be cleared there.
 - **Sharing projects.** A `.studio` file holds the full paths of its media (which include your user name) and
-  of files in Studio's cache; it holds no settings or libraries. Exported movies carry
+  of files in Studio's cache; it holds no settings or libraries. In a package (File ▸ Package…) the copied
+  media's paths are relative, but the cache paths and the paths of missing files stay full. Exported movies carry
   only the encoder's tags: no project name, paths or dates.
 
 ## Releasing
 
 `scripts/release-macos.sh` makes `target/packages/Studio.app`, a disk image and `SOURCES.txt`. It builds
-x264 and FFmpeg from source (pinned) and links them into the app with the `bundled-ffmpeg` feature, so the
+x264, libvpx, Opus and FFmpeg from source (pinned) and links them into the app with the `bundled-ffmpeg` feature, so the
 app needs nothing installed and runs on macOS 13 and later; it stops if the binary still links anything
 outside macOS. Packaging is `cargo-packager` (configured in `apps/studio/Cargo.toml`), which can also make
 Windows and Linux installers later. Everyday builds skip all this and use the system's FFmpeg
@@ -284,6 +369,9 @@ Windows and Linux installers later. Everyday builds skip all this and use the sy
   `cargo install cargo-packager --locked`.
 - **Signing and notarizing:** set `signing-identity` in `apps/studio/Cargo.toml` and, for notarizing,
   `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password) and `APPLE_TEAM_ID`. Unsigned builds work for testing.
+- **Updates:** build with `STUDIO_UPDATE_URL=https://…/latest.json` to turn on Check for Updates. Publish that
+  file with each release: `{"version": "0.2.0", "url": "https://…/Studio-0.2.0.dmg", "notes": "What's new."}`
+  (the link must be `https`). Without the variable the menu item is off.
 - **Icon:** `python3 scripts/make-icon.py` draws `assets/icon`.
 - **Notices:** `python3 scripts/third-party-notices.py` rewrites `THIRD_PARTY_NOTICES.md` (the release
   script does this too); it ships inside the app with `LICENSE`.

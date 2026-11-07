@@ -73,7 +73,7 @@ fn exports_picture_and_sound(format: MovieFormat, name: &str) {
     let path = scratch(name);
     let mut reports = Vec::new();
     let outcome = export(&project, &request(comp, path.clone(), format), &mut |p| reports.push(p), &|| false).unwrap();
-    assert_eq!(outcome, Outcome::Finished);
+    assert_eq!(outcome, Outcome::Finished { left_out: Vec::new() });
     assert_eq!(reports.last(), Some(&Progress { done: 48, total: 48 }));
 
     let info = probe(&path).unwrap();
@@ -98,6 +98,14 @@ fn exports_prores_with_sound() {
 #[test]
 fn exports_h265_with_sound() {
     exports_picture_and_sound(MovieFormat::H265, "comp-hevc.mp4");
+}
+
+#[test]
+fn exports_webm_with_sound_and_transparency() {
+    exports_picture_and_sound(MovieFormat::WebM, "comp.webm");
+    // The video track says it carries an alpha plane: Matroska's AlphaMode element (0x53C0) set to 1.
+    let bytes = std::fs::read(scratch("comp.webm")).unwrap();
+    assert!(bytes.windows(4).any(|window| window == [0x53, 0xC0, 0x81, 0x01]), "the WebM keeps transparency");
 }
 
 #[test]
@@ -212,6 +220,21 @@ fn a_half_size_export_has_half_the_pixels() {
     assert_eq!((half.width, half.height), (request.output_size(full.width, full.height)));
     assert!(half.width < full.width);
     assert_eq!(color_at(&path, 0), "red", "the picture is the same, smaller");
+}
+
+#[test]
+fn sound_inside_a_nested_composition_is_exported_where_it_plays() {
+    let (mut project, comp) = project();
+    // Pre-compose the tone, then start the nested composition half a second later.
+    let tone = project.composition(comp).unwrap().layers.iter().find(|layer| layer.name == "tone.wav").unwrap().id;
+    let nested = edit::precompose(&mut project, comp, &[tone], "Sound", false).unwrap();
+    let layer = project.composition_mut(comp).unwrap().layer_mut(nested).unwrap();
+    layer.shift_in_time(12);
+    let path = scratch("nested-sound.mp4");
+    export(&project, &request(comp, path.clone(), MovieFormat::H264), &mut |_| {}, &|| false).unwrap();
+    assert!(probe(&path).unwrap().has_audio, "the movie has sound");
+    assert!(loudness(&path, 1.1, 1.4) < 0.01, "silent until the tone, now at 1.5 s");
+    assert!(loudness(&path, 1.6, 1.9) > 0.05, "the tone plays from inside the nested composition");
 }
 
 #[test]

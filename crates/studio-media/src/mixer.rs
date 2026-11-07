@@ -165,7 +165,7 @@ impl Mixer {
             gate(samples, clip.noise_gate, sample_rate, &mut voice.gate_level, &mut voice.gate_gain);
         }
         let into = &mut block[(start - from) as usize * CHANNELS..];
-        let fading = clip.fade_in > 0.0 || clip.fade_out > 0.0;
+        let fading = clip.fades();
         let span = (to - from).max(1) as f32;
         let mut energy = 0.0f32;
         for (index, (mixed, sample)) in into.iter_mut().zip(samples.iter()).enumerate() {

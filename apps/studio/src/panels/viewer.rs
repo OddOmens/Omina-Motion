@@ -42,6 +42,8 @@ pub struct ViewerRender {
     showing_proxy: bool,
     /// How long the last viewer frame took to render, shown under the timeline.
     pub last_render_ms: Option<f64>,
+    /// Frames rendered ahead of the playhead in the background (see `preview_cache`).
+    pub preview: crate::preview_cache::PreviewCache,
     /// What the frame on screen was drawn from, so an unchanged frame is not drawn again.
     drawn: Option<DrawnFrame>,
     /// How many viewer frames have been drawn, so tests can check that unchanged ones aren't.
@@ -97,6 +99,7 @@ impl ViewerRender {
             media: FrameServer::new(PREVIEW_DECODE_WIDTH, Some(proxies.clone())),
             proxies,
             image: None,
+            preview: crate::preview_cache::PreviewCache::new(),
             last_error: None,
             showing_proxy: false,
             last_render_ms: None,
@@ -175,19 +178,29 @@ impl ViewerRender {
     }
 
     /// A small picture of a template, for the Templates panel: built into a scratch project and
-    /// rendered `seconds` in, `width` × `height` pixels. Drawn twice, as the app does, so text
-    /// boxes fit their measured words.
+    /// rendered `seconds` in, `width` × `height` pixels.
     pub fn template_picture(&mut self, template: &studio_core::templates::Template, format: studio_core::templates::Format, seconds: f64, width: u32, height: u32) -> Option<Arc<RenderImage>> {
+        let (mut project, comp) = scratch_template(template, format)?;
+        self.template_frame(&mut project, comp, (seconds * 30.0) as i64, width, height)
+    }
+
+    /// Frame `frame` of a template built with `scratch_template`, `width` × `height` pixels over
+    /// a dark gray (so see-through templates still read). Text boxes are fitted to their measured
+    /// words as they come into view, drawing a frame a second time only when one changed.
+    pub fn template_frame(&mut self, project: &mut studio_core::model::Project, comp: studio_core::model::Id, frame: i64, width: u32, height: u32) -> Option<Arc<RenderImage>> {
         let renderer = self.renderer.as_mut().ok()?;
-        let mut project = studio_core::model::Project::new(Vec::new(), Vec::new());
-        let comp = studio_core::templates::build(&mut project, template, format)?;
-        let frame = (seconds * 30.0) as i64;
-        let measured = renderer.render(&project, comp, frame, width, height, &studio_core::media::NoVideo).ok()?;
-        for (layer, size) in measured.text_sizes {
-            studio_core::edit::set_text_box(project.composition_mut(comp)?, layer, size);
+        let mut picture = renderer.render(project, comp, frame, width, height, &studio_core::media::NoVideo).ok()?;
+        let composition = project.composition_mut(comp)?;
+        let mut refitted = false;
+        for (layer, size) in std::mem::take(&mut picture.text_sizes) {
+            if composition.layer(layer).is_some_and(|layer| layer.size != size) {
+                studio_core::edit::set_text_box(composition, layer, size);
+                refitted = true;
+            }
         }
-        let picture = renderer.render(&project, comp, frame, width, height, &studio_core::media::NoVideo).ok()?;
-        // Straight-alpha pixels over a dark gray, so see-through templates still read.
+        if refitted {
+            picture = renderer.render(project, comp, frame, width, height, &studio_core::media::NoVideo).ok()?;
+        }
         let bgra: Vec<u8> = picture
             .bgra
             .chunks(4)
@@ -200,6 +213,14 @@ impl ViewerRender {
         let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, bgra)?;
         Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
     }
+}
+
+/// `template` in `format`, built into a scratch project of its own (not the user's), for
+/// drawing it on a Templates card. Returns the project and the template's composition.
+pub fn scratch_template(template: &studio_core::templates::Template, format: studio_core::templates::Format) -> Option<(studio_core::model::Project, studio_core::model::Id)> {
+    let mut project = studio_core::model::Project::new(Vec::new(), Vec::new());
+    let comp = studio_core::templates::build(&mut project, template, format)?;
+    Some((project, comp))
 }
 
 /// Passes video frames through from the frame server, noting whether any wasn't the exact
@@ -290,6 +311,26 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
     let previewed = with_typed_text(workspace, lut_preview(workspace), cx);
     let state = &workspace.state;
     let shown = previewed.as_ref().unwrap_or(&state.project);
+    // Rendering ahead: while paused, the background renderer is told what is on screen; while
+    // playing, a frame it already made is shown instead of rendering one. (Not while a cut-out
+    // is being made: its masks arrive from disk, which the project doesn't record.)
+    let budget = if workspace.ui.cutout_job.is_none() { u64::from(workspace.ui.settings.render_ahead_mb) << 20 } else { 0 };
+    if state.is_playing() {
+        workspace.render.preview.follow(state.current_frame);
+        if let Some(ahead) = workspace.render.preview.frame_for(shown, state.active_comp, state.current_frame) {
+            // Its texture is let go of as the next frame replaces it, like any other.
+            if let Some(previous) = workspace.render.image.replace(ahead.image.clone()) {
+                cx.drop_image(previous, Some(window));
+            }
+            workspace.render.last_render_ms = Some(0.0);
+            workspace.render.showing_proxy = false;
+            // What is on screen came from the cache; a paused frame is drawn afresh.
+            workspace.render.drawn = None;
+            return;
+        }
+    } else {
+        workspace.render.preview.show(shown, state.active_comp, width, height, state.current_frame, state.work_area, budget);
+    }
     // Cut-outs load their masks from disk as they are made, which the project doesn't record,
     // so frames are always drawn afresh while one is being made.
     let reusable = workspace.ui.cutout_job.is_none() && workspace.render.image.is_some();
@@ -383,37 +424,6 @@ pub fn set_playback_quality(workspace: &mut Workspace, quality: crate::app_setti
     crate::app_settings::update(|settings| settings.playback_quality = quality);
 }
 
-/// The guides over the picture: the action safe (93%) and title safe (90%) boxes broadcast
-/// uses, the rule of thirds, and a small cross at the center. They are only drawn, never
-/// rendered or exported.
-fn guides_overlay() -> impl IntoElement {
-    let line = gpui_kit::rgba(0xffffff66);
-    let faint = gpui_kit::rgba(0xffffff33);
-    // A box `inset` of the frame in from each edge, as a share of its size.
-    let safe = |inset: f32| div().absolute().top(relative(inset)).bottom(relative(inset)).left(relative(inset)).right(relative(inset)).border_1().border_color(line);
-    let across = |at: f32| div().absolute().left_0().right_0().top(relative(at)).h(px(1.0)).bg(faint);
-    let down = |at: f32| div().absolute().top_0().bottom_0().left(relative(at)).w(px(1.0)).bg(faint);
-    let cross = div()
-        .absolute()
-        .left(relative(0.5))
-        .top(relative(0.5))
-        .child(div().absolute().left(px(-8.0)).top(px(-0.5)).w(px(16.0)).h(px(1.0)).bg(line))
-        .child(div().absolute().top(px(-8.0)).left(px(-0.5)).h(px(16.0)).w(px(1.0)).bg(line));
-    div()
-        .id("viewer-guides-overlay")
-        .absolute()
-        .size_full()
-        .overflow_hidden()
-        .child(safe(0.035))
-        .child(safe(0.05))
-        .child(across(1.0 / 3.0))
-        .child(across(2.0 / 3.0))
-        .child(down(1.0 / 3.0))
-        .child(down(2.0 / 3.0))
-        .child(cross)
-        .test_support()
-}
-
 /// The bar under the viewer (the panel's footer), in one row: magnification and frame size on the left, the play
 /// and frame-stepping controls in the middle, and the current timecode on the right.
 fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
@@ -435,10 +445,7 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
             this.state.viewer_snapping = !this.state.viewer_snapping;
             cx.notify();
         })))
-        .child(icon_button("viewer-guides", IconName::Grid3x3, "Safe Areas and Grid (')", workspace.ui.guides, cx.listener(|this, _, _, cx| {
-            this.ui.guides = !this.ui.guides;
-            cx.notify();
-        })));
+        .child(super::guides::guides_menu(workspace, cx));
     let timecode = div().flex_1().flex().justify_end().child(
         div()
             .px_2()
@@ -454,8 +461,8 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         .items_center()
         .gap_1()
         // The same as Home and End: the composition's first and last frames.
-        .child(icon_button("first-frame", IconName::SkipBack, "First Frame (Home)", false, cx.listener(|this, _, _, cx| this.go_to(0, cx))))
-        .child(icon_button("previous-frame", IconName::StepBack, "Previous Frame (Page Up)", false, cx.listener(
+        .child(icon_button("first-frame", IconName::SkipBack, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "First Frame", "first-frame"), false, cx.listener(|this, _, _, cx| this.go_to(0, cx))))
+        .child(icon_button("previous-frame", IconName::StepBack, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Previous Frame", "previous-frame"), false, cx.listener(
             |this, _, _, cx| {
                 let frame = this.state.current_frame - 1;
                 this.go_to(frame, cx);
@@ -464,17 +471,17 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         .child(icon_button(
             "play",
             if playing { IconName::Pause } else { IconName::Play },
-            if playing { "Pause (Space)" } else { "Play (Space)" },
+            crate::keymap::with_key(&workspace.ui.settings.shortcuts, if playing { "Pause" } else { "Play" }, "toggle-playback"),
             playing,
             cx.listener(|this, _, _, cx| this.toggle_playback(cx)),
         ))
-        .child(icon_button("next-frame", IconName::StepForward, "Next Frame (Page Down)", false, cx.listener(
+        .child(icon_button("next-frame", IconName::StepForward, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Next Frame", "next-frame"), false, cx.listener(
             |this, _, _, cx| {
                 let frame = this.state.current_frame + 1;
                 this.go_to(frame, cx);
             },
         )))
-        .child(icon_button("last-frame", IconName::SkipForward, "Last Frame (End)", false, cx.listener(|this, _, _, cx| {
+        .child(icon_button("last-frame", IconName::SkipForward, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Last Frame", "last-frame"), false, cx.listener(|this, _, _, cx| {
             let end = this.state.composition().duration_frames - 1;
             this.go_to(end, cx);
         })))
@@ -985,27 +992,48 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
 /// A bright outline around the layer an effect being dragged over the viewer would go on.
 fn effect_drop_highlight(workspace: &Workspace) -> Option<AnyElement> {
     let layer = workspace.ui.effect_drop_layer?;
+    let corners = layer_corners(workspace.state.composition(), layer, workspace.state.current_frame as f64)?;
+    Some(drop_outline(workspace, corners))
+}
+
+/// A bright outline around the media slot a photo or video being dragged would fill.
+fn slot_drop_highlight(workspace: &Workspace) -> Option<AnyElement> {
+    workspace.ui.slot_drop.map(|corners| drop_outline(workspace, corners))
+}
+
+/// Outlines `corners` (composition pixels) of a drop target, drawn over the picture.
+fn drop_outline(workspace: &Workspace, corners: [Vec2; 4]) -> AnyElement {
     let composition = workspace.state.composition();
-    let corners = layer_corners(composition, layer, workspace.state.current_frame as f64)?;
     let (width, height) = (composition.width as f32, composition.height as f32);
     let outline = corners.map(|v| (v.x / width, v.y / height));
-    Some(
-        canvas(|_, _, _| (), move |bounds, _, window, _| {
-            let at = |(fx, fy): (f32, f32)| point(bounds.origin.x + bounds.size.width * fx, bounds.origin.y + bounds.size.height * fy);
-            let mut path = PathBuilder::stroke(px(3.0));
-            path.move_to(at(outline[0]));
-            for corner in &outline[1..] {
-                path.line_to(at(*corner));
-            }
-            path.line_to(at(outline[0]));
-            if let Ok(path) = path.build() {
-                window.paint_path(path, hsla(color::HIGHLIGHT));
-            }
-        })
-        .absolute()
-        .size_full()
-        .into_any_element(),
-    )
+    canvas(|_, _, _| (), move |bounds, _, window, _| {
+        let at = |(fx, fy): (f32, f32)| point(bounds.origin.x + bounds.size.width * fx, bounds.origin.y + bounds.size.height * fy);
+        let mut path = PathBuilder::stroke(px(3.0));
+        path.move_to(at(outline[0]));
+        for corner in &outline[1..] {
+            path.line_to(at(*corner));
+        }
+        path.line_to(at(outline[0]));
+        if let Ok(path) = path.build() {
+            window.paint_path(path, hsla(color::HIGHLIGHT));
+        }
+    })
+    .absolute()
+    .size_full()
+    .into_any_element()
+}
+
+/// Outlines the media slot under `position` (window coordinates) while something that could
+/// fill it is dragged over the viewer (`over`), and clears the outline otherwise.
+fn show_slot_under(workspace: &mut Workspace, over: bool, position: gpui_kit::Point<gpui_kit::Pixels>, cx: &mut Context<Workspace>) {
+    let outline = over
+        .then(|| workspace.state.slot_at(to_comp(workspace, f32::from(position.x), f32::from(position.y))))
+        .flatten()
+        .map(|slot| slot.outline);
+    if workspace.ui.slot_drop != outline {
+        workspace.ui.slot_drop = outline;
+        cx.notify();
+    }
 }
 
 /// The layer an effect dropped at `position` (window coordinates) would go on: the topmost one
@@ -1327,12 +1355,13 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 .text_color(hsla(color::TEXT))
                 .child(format!("Preview: {}", lut.name()))
         }))
-        .children(workspace.ui.guides.then(guides_overlay))
+        .children(workspace.ui.guides.then(|| super::guides::guides_overlay(workspace)))
         .children(selection_overlay(workspace, cx))
         .children(pen_draft_overlay(workspace))
         .children(cutout_clicks_overlay(workspace))
         .children(typing)
-        .children(effect_drop_highlight(workspace));
+        .children(effect_drop_highlight(workspace))
+        .children(slot_drop_highlight(workspace));
 
     let viewer = div()
         .id("viewer")
@@ -1406,20 +1435,33 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
             }
             cx.notify();
         }))
-        // A Media item dropped on the picture becomes a layer from the playhead, centered where
-        // it was let go (see `EditorState::add_items_at`).
+        // A photo or video dragged over a media slot (a "Drop your … here" placeholder, or a
+        // nested composition showing one photo or video) outlines the slot it would fill.
+        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ProjectItemDrag>, _, cx| {
+            let fills = studio_core::slots::can_fill_with(&this.state.project, event.drag(cx).item);
+            show_slot_under(this, event.bounds.contains(&event.event.position) && fills, event.event.position, cx);
+        }))
+        // Files from the Finder aren't known to be pictures until they're imported, so any file
+        // outlines the slot; a file that isn't a photo or video is added as a layer as usual.
+        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<gpui_kit::ExternalPaths>, _, cx| {
+            show_slot_under(this, event.bounds.contains(&event.event.position), event.event.position, cx);
+        }))
+        // A Media item dropped on the picture fills the slot under it, or else becomes a layer
+        // from the playhead, centered where it was let go (see `EditorState::drop_items_at`).
         .drag_over::<ProjectItemDrag>(|style, _, _, _| style.bg(hsla(color::HOVER)))
         .on_drop(cx.listener(|this, drag: &ProjectItemDrag, window, cx| {
+            this.ui.slot_drop = None;
             let at = drop_point(this, window);
-            this.state.add_items_at(&[drag.item], at);
+            this.state.drop_items_at(&[drag.item], at);
             cx.notify();
         }))
-        // Files from the Finder are imported first, then added the same way, one after another.
+        // Files from the Finder are imported first, then dropped the same way, one after another.
         .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, _| style.bg(hsla(color::HOVER)))
         .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+            this.ui.slot_drop = None;
             let at = drop_point(this, window);
             let place: super::importing::Then = Box::new(move |this, items, _, cx| {
-                this.state.add_items_at(&items, at);
+                this.state.drop_items_at(&items, at);
                 cx.notify();
             });
             this.import_paths(paths.paths().to_vec(), Some(place), window, cx);

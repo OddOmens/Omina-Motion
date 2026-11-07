@@ -1,5 +1,5 @@
-//! Writes movie files: rendered frames and mixed sound in, H.264 or H.265 (.mp4) or ProRes
-//! (.mov) out. Frames must arrive in order; sound may arrive in any block size.
+//! Writes movie files: rendered frames and mixed sound in, H.264 or H.265 (.mp4), ProRes
+//! (.mov) or WebM (.webm) out. Frames must arrive in order; sound may arrive in any block size.
 //!
 //! - **H.264** uses x264 at constant quality (CRF 18, visually lossless for most material)
 //!   with AAC sound at 320 kb/s, and moves the index to the front so files start playing
@@ -9,6 +9,8 @@
 //!   players and the Photos app need to play it.
 //! - **ProRes 422 HQ** is 10-bit and intra-only, for finishing and further editing, with
 //!   uncompressed 24-bit sound.
+//! - **WebM** is VP9 (libvpx) at constant quality with Opus sound, and keeps transparency in an
+//!   alpha plane: small see-through clips for websites and web apps.
 //!
 //! Both are tagged BT.709, matching how frames are converted (see `yuv`).
 
@@ -39,10 +41,12 @@ pub enum MovieFormat {
     /// Apple ProRes 4444: full color detail and an alpha channel, so transparent areas stay
     /// transparent (renders of single layers, graphics for other apps).
     ProRes4444,
+    /// VP9 video and Opus sound in a WebM file, keeping transparency: for the web.
+    WebM,
 }
 
 impl MovieFormat {
-    pub const ALL: [Self; 7] = [Self::H264, Self::H265, Self::ProRes4444, Self::ProRes422Hq, Self::ProRes422, Self::ProResLt, Self::ProResProxy];
+    pub const ALL: [Self; 8] = [Self::H264, Self::H265, Self::WebM, Self::ProRes4444, Self::ProRes422Hq, Self::ProRes422, Self::ProResLt, Self::ProResProxy];
 
     pub const fn label(self) -> &'static str {
         match self {
@@ -53,6 +57,7 @@ impl MovieFormat {
             Self::ProRes422 => "ProRes 422 (MOV)",
             Self::ProRes422Hq => "ProRes 422 HQ (MOV)",
             Self::ProRes4444 => "ProRes 4444 with transparency (MOV)",
+            Self::WebM => "WebM · VP9 with transparency (WEBM)",
         }
     }
 
@@ -60,6 +65,7 @@ impl MovieFormat {
     pub const fn extension(self) -> &'static str {
         match self {
             Self::H264 | Self::H265 => "mp4",
+            Self::WebM => "webm",
             _ => "mov",
         }
     }
@@ -67,7 +73,7 @@ impl MovieFormat {
     /// Whether it is a ProRes flavor (which has no quality or speed setting: each flavor is a
     /// fixed data rate, and its sound is uncompressed).
     pub const fn is_prores(self) -> bool {
-        !matches!(self, Self::H264 | Self::H265)
+        !matches!(self, Self::H264 | Self::H265 | Self::WebM)
     }
 
     /// `prores_ks`'s profile number for a ProRes flavor.
@@ -85,14 +91,29 @@ impl MovieFormat {
         self.extension()
     }
 
+    /// Whether this build's FFmpeg has the encoders the format needs (WebM needs libvpx and
+    /// libopus, which an FFmpeg built without them lacks), so it can be offered.
+    pub fn can_encode(self) -> bool {
+        if init().is_err() {
+            return false;
+        }
+        let has = |name: &str| encoder::find_by_name(name).is_some();
+        match self {
+            Self::H264 => has("libx264") || has("h264_videotoolbox"),
+            Self::H265 => has("libx265") || has("hevc_videotoolbox"),
+            Self::WebM => has("libvpx-vp9") && has("libopus"),
+            _ => has("prores_ks"),
+        }
+    }
+
     /// Whether the movie keeps the picture's transparency.
     pub const fn has_alpha(self) -> bool {
-        matches!(self, Self::ProRes4444)
+        matches!(self, Self::ProRes4444 | Self::WebM)
     }
 
     fn layout(self) -> YuvLayout {
         match self {
-            Self::H264 | Self::H265 => YuvLayout::Yuv420p8,
+            Self::H264 | Self::H265 | Self::WebM => YuvLayout::Yuv420p8,
             Self::ProRes4444 => YuvLayout::Yuv444p10,
             _ => YuvLayout::Yuv422p10,
         }
@@ -101,6 +122,7 @@ impl MovieFormat {
     fn pixel(self) -> Pixel {
         match self {
             Self::H264 | Self::H265 => Pixel::YUV420P,
+            Self::WebM => Pixel::YUVA420P,
             Self::ProRes4444 => Pixel::YUVA444P10LE,
             _ => Pixel::YUV422P10LE,
         }
@@ -158,6 +180,18 @@ impl VideoQuality {
         }
     }
 
+    /// VP9's constant-quality number (0–63, lower is better). VP9 needs higher numbers than x264
+    /// for the same look.
+    fn vp9_crf(self) -> Option<&'static str> {
+        match self {
+            Self::Draft => Some("42"),
+            Self::Good => Some("36"),
+            Self::High => Some("31"),
+            Self::Maximum => Some("24"),
+            Self::Bitrate(_) => None,
+        }
+    }
+
     /// Bits per pixel for encoders without a constant-quality mode (the hardware one).
     fn bits_per_pixel(self) -> f64 {
         match self {
@@ -197,6 +231,15 @@ impl EncodeSpeed {
             Self::Small => "slow",
         }
     }
+
+    /// libvpx's `cpu-used`: how much quality it trades for speed (higher is faster).
+    const fn vp9_cpu_used(self) -> &'static str {
+        match self {
+            Self::Fast => "5",
+            Self::Balanced => "3",
+            Self::Small => "1",
+        }
+    }
 }
 
 /// What a movie holds.
@@ -210,11 +253,12 @@ pub struct MovieSettings {
     pub frame_rate: FrameRate,
     /// The sound's sample rate, or `None` for a movie without sound.
     pub audio_rate: Option<u32>,
-    /// H.264 and H.265 only.
+    /// H.264, H.265 and WebM only.
     pub quality: VideoQuality,
-    /// H.264 and H.265 only.
+    /// H.264, H.265 and WebM only.
     pub speed: EncodeSpeed,
-    /// AAC sound (H.264 and H.265 movies), in kilobits per second. ProRes sound is uncompressed.
+    /// Compressed sound (AAC in H.264 and H.265 movies, Opus in WebM), in kilobits per second.
+    /// ProRes sound is uncompressed.
     pub audio_kbps: u32,
 }
 
@@ -240,6 +284,8 @@ struct Track<E> {
 enum SampleStore {
     /// 32-bit floats, one plane per channel (AAC).
     PlanarFloat,
+    /// 32-bit floats, interleaved (Opus).
+    PackedFloat,
     /// 24-bit samples in 32-bit integers, interleaved (PCM).
     Packed24,
 }
@@ -279,7 +325,7 @@ impl MovieWriter {
         };
 
         let mut options = ffmpeg::Dictionary::new();
-        if !settings.format.is_prores() {
+        if settings.format.extension() == "mp4" {
             // Put the index first, so the file can play while it downloads.
             options.set("movflags", "+faststart");
         }
@@ -318,7 +364,7 @@ impl MovieWriter {
         bgra_to_yuv(bgra, source, out, layout, planes);
         // With transparency, alpha goes in a fourth plane. Colors are stored straight (not
         // multiplied by their alpha), as the renderer hands them over.
-        let alpha = self.format.has_alpha().then(|| crate::yuv::alpha_plane(bgra, source, out));
+        let alpha = self.format.has_alpha().then(|| crate::yuv::alpha_plane(bgra, source, out, layout));
         let mut packed_planes = vec![(&y, luma), (&u, chroma), (&v, chroma)];
         if let Some(alpha) = &alpha {
             packed_planes.push((alpha, luma));
@@ -422,6 +468,22 @@ fn open_video(
                 }
             }
         }
+        MovieFormat::WebM => {
+            let codec = encoder::find_by_name("libvpx-vp9").ok_or_else(|| MediaError("this FFmpeg has no VP9 encoder (it needs libvpx)".into()))?;
+            let mut options = ffmpeg::Dictionary::new();
+            // Constant quality needs the target bitrate at zero; a fixed bitrate is set below.
+            if let Some(crf) = settings.quality.vp9_crf() {
+                options.set("crf", crf);
+                options.set("b", "0");
+            }
+            options.set("deadline", "good");
+            options.set("cpu-used", settings.speed.vp9_cpu_used());
+            // Rows of each frame encode in parallel.
+            options.set("row-mt", "1");
+            // libvpx can't look ahead with an alternate reference frame while it keeps alpha.
+            options.set("auto-alt-ref", "0");
+            (codec, options)
+        }
         _ => {
             let codec = encoder::find_by_name("prores_ks").ok_or_else(|| MediaError("this FFmpeg has no ProRes encoder".into()))?;
             let mut options = ffmpeg::Dictionary::new();
@@ -483,7 +545,9 @@ fn tag_as_hvc1(stream: &mut ffmpeg::format::stream::StreamMut) {
 }
 
 fn open_audio(output: &mut ffmpeg::format::context::Output, format: MovieFormat, rate: u32, kbps: u32, global_header: bool) -> Result<AudioTrack, MediaError> {
-    let (name, sample, store) = if format.is_prores() {
+    let (name, sample, store) = if format == MovieFormat::WebM {
+        ("libopus", ffmpeg::format::Sample::F32(SampleLayout::Packed), SampleStore::PackedFloat)
+    } else if format.is_prores() {
         ("pcm_s24le", ffmpeg::format::Sample::I32(SampleLayout::Packed), SampleStore::Packed24)
     } else {
         ("aac", ffmpeg::format::Sample::F32(SampleLayout::Planar), SampleStore::PlanarFloat)
@@ -498,8 +562,11 @@ fn open_audio(output: &mut ffmpeg::format::context::Output, format: MovieFormat,
     audio.set_channels(CHANNELS as i32);
     audio.set_format(sample);
     audio.set_time_base(time_base);
-    if matches!(store, SampleStore::PlanarFloat) {
-        audio.set_bit_rate(kbps.clamp(64, 512) as usize * 1000);
+    match store {
+        SampleStore::PlanarFloat => audio.set_bit_rate(kbps.clamp(64, 512) as usize * 1000),
+        // Opus tops out at 256 kb/s for stereo, and sounds transparent well below that.
+        SampleStore::PackedFloat => audio.set_bit_rate(kbps.clamp(64, 256) as usize * 1000),
+        SampleStore::Packed24 => {}
     }
     if global_header {
         audio.set_flags(codec::Flags::GLOBAL_HEADER);
@@ -507,7 +574,7 @@ fn open_audio(output: &mut ffmpeg::format::context::Output, format: MovieFormat,
     let encoder = audio.open_as(codec)?;
     stream.set_parameters(&encoder);
     stream.set_time_base(time_base);
-    // PCM takes any block size; AAC needs exactly its frame size.
+    // PCM takes any block size; AAC and Opus need exactly their frame size.
     let frame_size = match encoder.frame_size() {
         0 => 1024,
         size => size as usize,
@@ -533,6 +600,12 @@ fn encode_audio(audio: &mut AudioTrack, samples: &[f32], output: &mut ffmpeg::fo
                 for (index, sample) in samples.iter().skip(channel).step_by(CHANNELS).enumerate() {
                     plane[index * 4..index * 4 + 4].copy_from_slice(&sample.clamp(-1.0, 1.0).to_ne_bytes());
                 }
+            }
+        }
+        SampleStore::PackedFloat => {
+            let plane = block.data_mut(0);
+            for (index, sample) in samples.iter().enumerate() {
+                plane[index * 4..index * 4 + 4].copy_from_slice(&sample.clamp(-1.0, 1.0).to_ne_bytes());
             }
         }
         SampleStore::Packed24 => {

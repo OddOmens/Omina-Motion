@@ -1,6 +1,6 @@
 //! A layer's right-click menu, the same in the timeline (on a clip) and in the viewer (on the
-//! picture): rename, duplicate, pre-compose or ungroup, flip, reset the transform, split,
-//! delete and export. It acts on the layer right-clicked, or on the whole selection when that
+//! picture): rename, duplicate, pre-compose or ungroup, morph one shape into another or turn
+//! it into a path, flip, reset the transform, split, delete and export. It acts on the layer right-clicked, or on the whole selection when that
 //! layer is part of it, as in After Effects. The menu reads the editor when it opens, so what
 //! it offers matches the layers it will act on.
 
@@ -52,6 +52,11 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         let busy = workspace.ui.export_job.is_some();
         let depended_on = single.is_some_and(|layer| studio_core::bake::is_depended_on(&workspace.state.project, workspace.state.active_comp, layer));
         let some = !layers.is_empty();
+        // Morph To works on two shapes, the first morphing into the second (see `panels::morph`).
+        let can_morph = layers.len() == 2 && studio_core::morph::can_morph(workspace.state.composition(), layers[0], layers[1]).is_ok();
+        let is_box_shape = single.and_then(|layer| workspace.state.composition().layer(layer)).is_some_and(|layer| {
+            matches!(&layer.content, studio_core::model::LayerContent::Shape { style, .. } if style.kind != studio_core::model::ShapeKind::Path)
+        });
 
         let mut menu = menu.item(item("Rename…", &layers, single.is_some(), &weak, |this, window, cx| {
             let Some(&layer) = this.state.selected_layers.first() else { return };
@@ -64,7 +69,14 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
             }))
             .separator()
             .item(item("Pre-compose…", &layers, some, &weak, super::precompose::open))
-            .item(item("Ungroup Composition", &layers, nested.is_some(), &weak, |this, window, cx| this.ungroup_selected(window, cx)));
+            .item(item("Ungroup Composition", &layers, nested.is_some(), &weak, |this, window, cx| this.ungroup_selected(window, cx)))
+            .separator()
+            .item(item("Morph To…", &layers, can_morph, &weak, super::morph::open))
+            .item(item("Convert to Path", &layers, is_box_shape, &weak, |this, _, _| {
+                if let Some(&layer) = this.state.selected_layers.first() {
+                    this.state.convert_to_path(layer);
+                }
+            }));
         if let Some(inner) = nested {
             let weak = weak.clone();
             menu = menu.item(PopupMenuItem::new("Open Composition").on_click(move |_, _, cx| {

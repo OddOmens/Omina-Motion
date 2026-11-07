@@ -1,5 +1,5 @@
-//! Aligning layers, as in the Align panel. Bounds use each layer's anchor point,
-//! position and scale; rotation is not yet taken into account.
+//! Aligning and distributing layers, as in the Align panel. Each layer is measured by the
+//! upright box around it as it appears, so rotation, scale and parenting all count.
 
 use crate::animation::Vec2;
 use crate::model::{Composition, Id};
@@ -181,6 +181,21 @@ mod tests {
 
         align_layers(&mut comp, &[logo], Alignment::Bottom, AlignTarget::Composition, 100);
         assert_eq!(layer_bounds(&comp, logo, 100).unwrap().max.y, 1080.0);
+    }
+
+    #[test]
+    fn a_rotated_layer_aligns_by_the_box_around_it() {
+        let mut comp = comp();
+        let logo = comp.layers[2].id;
+        comp.layer_mut(logo).unwrap().transform.as_mut().unwrap().rotation = crate::animation::Animated::constant(45.0);
+        let upright = layer_bounds(&comp, logo, 100).unwrap();
+        // A 600 × 200 box turned 45° spans (600 + 200) / √2 ≈ 565.7 pixels each way.
+        assert!((upright.max.x - upright.min.x - 565.69).abs() < 0.1, "{upright:?}");
+        assert!((upright.max.y - upright.min.y - 565.69).abs() < 0.1, "{upright:?}");
+        align_layers(&mut comp, &[logo], Alignment::Left, AlignTarget::Composition, 100);
+        align_layers(&mut comp, &[logo], Alignment::Top, AlignTarget::Composition, 100);
+        let moved = layer_bounds(&comp, logo, 100).unwrap();
+        assert!(moved.min.x.abs() < 0.01 && moved.min.y.abs() < 0.01, "its turned corners touch the edges: {moved:?}");
     }
 
     #[test]

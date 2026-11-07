@@ -132,7 +132,7 @@ impl EditorState {
     /// The keyframes whose outgoing segment an easing change affects, as in Flow: on a property with
     /// several selected keyframes, the segments between consecutive selected keyframes; on a
     /// property with one selected keyframe, the segment leaving it.
-    fn eased_segments(&self) -> Vec<KeyframeRef> {
+    pub fn eased_segments(&self) -> Vec<KeyframeRef> {
         let comp = self.composition();
         let mut segments = Vec::new();
         let mut groups: Vec<(Id, PropertyPath)> = self.selected_keyframes.iter().map(|key| (key.layer, key.path)).collect();
@@ -157,9 +157,16 @@ impl EditorState {
         segments
     }
 
-    /// Applies an easing curve to the selected segments (see `eased_segments`).
+    /// Applies an easing curve to the selected segments (see `eased_segments`). The graph
+    /// editor eases only the segment it is focused on (`apply_easing_to`); tests ease them all.
+    #[cfg(test)]
     pub fn apply_easing(&mut self, easing: Easing) {
-        for key in self.eased_segments() {
+        self.apply_easing_to(&self.eased_segments(), easing);
+    }
+
+    /// Applies an easing curve to the segments leaving the keyframes `segments`.
+    pub fn apply_easing_to(&mut self, segments: &[KeyframeRef], easing: Easing) {
+        for &key in segments {
             if let Some(animated) = self.composition_mut().layer_mut(key.layer).and_then(|l| l.animated_mut(key.path)) {
                 animated.set_easing(key.frame, easing);
             }
@@ -205,9 +212,30 @@ impl EditorState {
     }
 
     /// The easing shared by every selected keyframe, if they all agree.
+    #[cfg(test)]
     pub fn selection_easing(&self) -> Option<Easing> {
+        self.segments_easing(&self.eased_segments())
+    }
+
+    /// Where the segment leaving keyframe `key` ends: the property's next keyframe.
+    pub fn segment_end(&self, key: KeyframeRef) -> Option<i64> {
+        let layer = self.composition().layer(key.layer)?;
+        layer.keyframe_easings(key.path).into_iter().map(|(frame, _)| frame).find(|frame| *frame > key.frame)
+    }
+
+    /// Whether the value changes over the segment leaving `key`; easing a segment that holds
+    /// one value (between a fade in and a fade out, say) makes no visible difference.
+    pub fn segment_changes(&self, key: KeyframeRef) -> bool {
+        let Some(end) = self.segment_end(key) else { return false };
+        let Some(layer) = self.composition().layer(key.layer) else { return false };
+        let value = |frame| layer.property(key.path, frame).map(|snapshot| snapshot.value);
+        value(key.frame) != value(end)
+    }
+
+    /// The easing shared by the segments leaving `segments`, if they all agree.
+    pub fn segments_easing(&self, segments: &[KeyframeRef]) -> Option<Easing> {
         let comp = self.composition();
-        let mut easings = self.eased_segments().into_iter().filter_map(|key| {
+        let mut easings = segments.iter().filter_map(|key| {
             let layer = comp.layer(key.layer)?;
             easing_of(layer, key.path, key.frame)
         });

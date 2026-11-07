@@ -42,8 +42,15 @@ const LABEL_WIDTH: f32 = 84.0;
 const SCALES: [(f32, &str); 4] = [(1.0, "Full size"), (0.75, "Three quarters"), (0.5, "Half"), (0.25, "Quarter")];
 /// Fixed bitrates offered for H.264 and H.265, in kilobits per second, with what they suit.
 const BITRATES: [(u32, &str); 4] = [(8_000, "social 1080p"), (16_000, "YouTube 1080p"), (35_000, "YouTube 4K"), (50_000, "broadcast")];
-/// AAC sound bitrates offered, in kilobits per second.
+/// Sound bitrates offered, in kilobits per second.
 const AUDIO_BITRATES: [u32; 4] = [128, 192, 256, 320];
+/// The highest sound bitrate WebM's Opus encoder takes; a higher choice is encoded at this.
+const OPUS_MAX_KBPS: u32 = 256;
+
+/// The sound bitrate the export really uses: the one chosen, or Opus's highest for WebM.
+fn sound_kbps(choice: &ExportChoice) -> u32 {
+    if choice.format == ExportFormat::Movie(MovieFormat::WebM) { choice.audio_kbps.min(OPUS_MAX_KBPS) } else { choice.audio_kbps }
+}
 /// Frame rates offered besides the composition's own.
 const FRAME_RATES: [FrameRate; 10] = [
     FrameRate::new(12, 1),
@@ -382,7 +389,10 @@ fn summary(workspace: &Workspace, range: &Range<i64>) -> impl IntoElement {
         chip(IconName::Timer, format!("{} · {frames} frames", seconds_label(seconds))),
         match (sound, choice.format.has_sound_bitrate()) {
             (false, _) => chip(IconName::VolumeX, "No sound".into()),
-            (true, true) => chip(IconName::Volume2, format!("AAC {} kbps", choice.audio_kbps)),
+            (true, true) => {
+                let codec = if choice.format == ExportFormat::Movie(MovieFormat::WebM) { "Opus" } else { "AAC" };
+                chip(IconName::Volume2, format!("{codec} {} kbps", sound_kbps(&choice)))
+            }
             (true, false) => chip(IconName::Volume2, "Uncompressed sound".into()),
         },
     ];
@@ -390,7 +400,7 @@ fn summary(workspace: &Workspace, range: &Range<i64>) -> impl IntoElement {
         chips.push(chip(IconName::Grid3x3, "Keeps transparency".into()));
     }
     if let (VideoQuality::Bitrate(kbps), true) = (choice.quality, choice.format.has_quality()) {
-        let total_kbps = f64::from(kbps) + if sound { f64::from(choice.audio_kbps) } else { 0.0 };
+        let total_kbps = f64::from(kbps) + if sound { f64::from(sound_kbps(&choice)) } else { 0.0 };
         chips.push(chip(IconName::Download, format!("About {}", megabytes(total_kbps * seconds / 8.0 / 1000.0))));
     }
     div().flex().flex_wrap().gap_1p5().children(chips)
@@ -445,12 +455,16 @@ fn format_note(format: ExportFormat) -> &'static str {
         ExportFormat::Movie(MovieFormat::H264) => "Plays everywhere. The usual choice for sharing and uploading.",
         ExportFormat::Movie(MovieFormat::H265) => "About half the size of H.264 at the same quality. Plays on recent phones and computers.",
         ExportFormat::Movie(MovieFormat::ProRes4444) => "Keeps transparency, for overlays and graphics used in other editing apps.",
+        ExportFormat::Movie(MovieFormat::WebM) => "Small files for websites and web apps, keeping transparency. Plays in every browser; Chrome, Edge and Firefox show the transparency.",
         ExportFormat::Movie(MovieFormat::ProRes422Hq) => "Near-lossless, for finishing and further editing. Large files.",
         ExportFormat::Movie(MovieFormat::ProRes422) => "High quality for editing, a little smaller than HQ.",
         ExportFormat::Movie(MovieFormat::ProResLt) => "Lighter editing copies, about two-thirds the size of ProRes 422.",
         ExportFormat::Movie(MovieFormat::ProResProxy) => "Small, rough editing copies for offline editing.",
         ExportFormat::Gif => "Loops silently in chats and on web pages. 256 colors and large files, so keep it short and small.",
         ExportFormat::PngSequence => "One picture per frame, with transparency, in a new folder.",
+        ExportFormat::Lottie => "Shapes, text and keyframes for Lottie players on the web and in apps. Video, sound and most effects are left out; you’ll see a list after exporting.",
+        ExportFormat::DotLottie => "The Lottie animation zipped into one smaller file, for LottieFiles and dotLottie players.",
+        ExportFormat::AnimatedSvg => "An SVG that animates itself with CSS, for web pages. Video, sound and most effects are left out; you’ll see a list after exporting.",
     }
 }
 
@@ -466,7 +480,14 @@ fn settings(workspace: &Workspace, target: &WeakEntity<Workspace>) -> impl IntoE
     formats.extend([MovieFormat::H264, MovieFormat::H265].map(|format| format_entry(format.into())));
     formats.extend([MenuEntry::Separator, MenuEntry::Heading("Edit and finish")]);
     formats.extend(ExportFormat::ALL.iter().filter(|format| format.movie().is_some_and(MovieFormat::is_prores)).map(|&format| format_entry(format)));
-    formats.extend([MenuEntry::Separator, MenuEntry::Heading("Web and pictures"), format_entry(ExportFormat::Gif), format_entry(ExportFormat::PngSequence)]);
+    // WebM needs encoders an FFmpeg may be built without; then it is shown greyed out, saying so.
+    let webm_format = ExportFormat::from(MovieFormat::WebM);
+    let webm_ok = MovieFormat::WebM.can_encode();
+    let webm_label = if webm_ok { webm_format.label().to_owned() } else { format!("{} — not in this build", webm_format.label()) };
+    let webm = MenuEntry::Choice { label: webm_label, checked: choice.format == webm_format, enabled: webm_ok, value: webm_format };
+    formats.extend([MenuEntry::Separator, MenuEntry::Heading("Web and pictures"), webm, format_entry(ExportFormat::Gif), format_entry(ExportFormat::PngSequence)]);
+    formats.extend([MenuEntry::Separator, MenuEntry::Heading("Vector animation")]);
+    formats.extend(ExportFormat::ALL.iter().filter(|format| format.is_vector()).map(|&format| format_entry(format)));
     let format_menu = choice_menu("export-format", choice.format.label().to_owned(), formats, |c, format| c.format = format, target.clone());
 
     let mut qualities: Vec<MenuEntry<VideoQuality>> = VideoQuality::PRESETS.iter().map(|&quality| MenuEntry::choice(quality.label(), choice.quality == quality, quality)).collect();
@@ -485,6 +506,8 @@ fn settings(workspace: &Workspace, target: &WeakEntity<Workspace>) -> impl IntoE
     let current_size = SCALES.iter().find(|(scale, _)| *scale == choice.scale).map_or("Full size", |(_, name)| name);
     let sizes = SCALES.iter().map(|&(scale, name)| MenuEntry::choice(size_label(scale, name), choice.scale == scale, scale)).collect();
     let size_menu = choice_menu("export-size", size_label(choice.scale, current_size), sizes, |c, scale| c.scale = scale, target.clone());
+    // Vector files draw sharply at any size, so there is no size to choose.
+    let size_control = if choice.format.is_vector() { note("Any size: shapes stay sharp when scaled").into_any_element() } else { size_menu };
     let rate_menu = frame_rate_menu(choice, comp.id, rate, target);
 
     // Frames: the work area or the whole composition.
@@ -516,15 +539,18 @@ fn settings(workspace: &Workspace, target: &WeakEntity<Workspace>) -> impl IntoE
         })
     };
     let sound_note = match (choice.format, audible) {
+        (format, _) if format.is_vector() => Some("Vector animations can't carry sound."),
         (ExportFormat::Gif, _) => Some("GIFs can't carry sound."),
         (ExportFormat::PngSequence, _) => Some("Pictures can't carry sound."),
         (_, false) => Some("This composition has no audible layers."),
         _ if !choice.format.has_sound_bitrate() && choice.include_audio => Some("ProRes keeps the sound uncompressed."),
         _ => None,
     };
-    let audio_rates = AUDIO_BITRATES.iter().map(|&kbps| MenuEntry::choice(format!("{kbps} kbps"), choice.audio_kbps == kbps, kbps)).collect();
+    // Only the bitrates the format's encoder takes, with the one it will really use checked.
+    let used_kbps = sound_kbps(&choice);
+    let audio_rates = AUDIO_BITRATES.iter().filter(|&&kbps| kbps == sound_kbps(&ExportChoice { audio_kbps: kbps, ..choice })).map(|&kbps| MenuEntry::choice(format!("{kbps} kbps"), used_kbps == kbps, kbps)).collect();
     let show_bitrate = can_sound && choice.include_audio && choice.format.has_sound_bitrate();
-    let audio_menu = show_bitrate.then(|| choice_menu("export-audio-bitrate", format!("{} kbps", choice.audio_kbps), audio_rates, |c, kbps| c.audio_kbps = kbps, target.clone()));
+    let audio_menu = show_bitrate.then(|| choice_menu("export-audio-bitrate", format!("{used_kbps} kbps"), audio_rates, |c, kbps| c.audio_kbps = kbps, target.clone()));
 
     div()
         .flex_1()
@@ -538,7 +564,7 @@ fn settings(workspace: &Workspace, target: &WeakEntity<Workspace>) -> impl IntoE
                 .child(note(format_note(choice.format)))
                 .when(choice.format.has_quality(), |group| group.child(row("Quality", quality_menu)).child(row("Speed", speed_menu))),
         )
-        .child(group("Picture").child(row("Size", size_menu)).child(row("Frame rate", rate_menu)))
+        .child(group("Picture").child(row("Size", size_control)).child(row("Frame rate", rate_menu)))
         .child(group("Frames").child(range_switch).child(range_line))
         .child(group("Sound").child(div().flex().items_center().gap_3().child(audio_box).child(div().flex_1()).children(audio_menu)).children(sound_note.map(note)))
 }

@@ -16,6 +16,23 @@ impl EditorState {
         self.clipboard.len()
     }
 
+    /// Cut (Cmd+X): copies the selected layers, then removes them. Returns how many were cut.
+    pub fn cut_selection(&mut self) -> usize {
+        let copied = self.copy_selection();
+        if copied > 0 {
+            // Selected keyframes would be deleted in place of the layers.
+            self.selected_keyframes.clear();
+            self.delete_selection();
+        }
+        copied
+    }
+
+    /// Select All (Cmd+A): selects every layer in the open composition.
+    pub fn select_all_layers(&mut self) {
+        self.selected_layers = self.composition().layers.iter().map(|layer| layer.id).collect();
+        self.selected_keyframes.clear();
+    }
+
     /// Pastes the copied layers at the playhead, each on a new track, and selects them.
     pub fn paste(&mut self) -> Vec<Id> {
         let (comp, frame) = (self.active_comp, self.current_frame);

@@ -23,7 +23,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 
-use crate::app_settings::{self, AppSettings, ImportFolders, PlaybackQuality, ProjectColumns, Transparency};
+use crate::app_settings::{self, AppSettings, ImportFolders, PlaybackQuality, ProjectColumns, StartWith, Transparency};
 use crate::theme::{Accent, ThemeName, color, hsla, size};
 use crate::workspace::Workspace;
 
@@ -144,6 +144,8 @@ struct Shown {
     imported_bytes: u64,
     /// Models being downloaded from the AI Models page, by their row's id.
     downloading: Vec<&'static str>,
+    /// The command waiting for its new shortcut on the Keyboard Shortcuts page.
+    recording: Option<&'static str>,
     note: Option<String>,
 }
 
@@ -165,9 +167,13 @@ fn folder_size(folder: &Path) -> u64 {
 /// Saves a settings change, shows it, hands it to the workspace (whose panels read it as they
 /// draw), and redraws.
 fn change(shown: &SharedShown, workspace: &WeakEntity<Workspace>, window: &mut Window, cx: &mut App, edit: impl Fn(&mut AppSettings)) {
+    let shortcuts_before = shown.borrow().settings.shortcuts.clone();
     app_settings::update(&edit);
     edit(&mut shown.borrow_mut().settings);
     let settings = shown.borrow().settings.clone();
+    if settings.shortcuts != shortcuts_before {
+        crate::keymap::apply(&settings.shortcuts, cx);
+    }
     workspace
         .update(cx, |this, cx| {
             this.ui.project_columns = settings.project_columns;
@@ -276,13 +282,20 @@ fn general(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::
     let sizes = SIZES.iter().map(|&(name, width, height)| (format!("{name} · {width}×{height}"), (width, height))).collect();
     let rates = FRAME_RATES.iter().map(|&fps| (format!("{fps} fps"), fps)).collect();
     let lengths = LENGTHS.iter().map(|&seconds| (if seconds < 60 { format!("{seconds} seconds") } else { format!("{} minutes", seconds / 60) }, seconds)).collect();
+    let start_choices = vec![("Show the start screen".to_owned(), StartWith::StartScreen), ("Reopen the last project".to_owned(), StartWith::LastProject)];
     let recovery = RECOVERY_CHOICES.iter().map(|&seconds| (recovery_label(seconds), seconds)).collect();
     div()
         .child(page(Section::General))
         .child(group_title("Starting up"))
         .child(card(vec![
-            setting("Reopen the last project", "Studio opens the project you were working on when it starts.", switch("general-reopen", now.reopen_last_project, shown, workspace, |settings, on| settings.reopen_last_project = on)),
+            setting("When Studio starts", "Show the start screen, or go straight back to the project you were working on.", menu("general-start", start_choices, now.start_with, shown, workspace, |settings, start| settings.start_with = start)),
             setting("Recovery copy", "How often unsaved work is kept aside, so a crash loses little. Offered back on the next start.", menu("general-recovery", recovery, now.recovery_seconds, shown, workspace, |settings, seconds| settings.recovery_seconds = seconds)),
+        ]))
+        .child(group_title("Versions"))
+        .child(card(vec![
+            setting("Keep earlier versions", "A copy each time you save, and every few minutes while you work, to roll back to with File ▸ Browse Versions….", switch("general-versions", now.versions.keep, shown, workspace, |settings, on| settings.versions.keep = on)),
+            setting("Every", "How often a version is kept while a project changes.", menu("general-versions-every", [5, 10, 15, 30].iter().map(|&minutes| (format!("{minutes} minutes"), minutes)).collect(), now.versions.every_minutes, shown, workspace, |settings, minutes| settings.versions.every_minutes = minutes)),
+            setting("Keep", "How many each project keeps. The oldest go first.", menu("general-versions-count", [10, 30, 100].iter().map(|&count| (format!("{count} versions"), count)).collect(), now.versions.how_many, shown, workspace, |settings, count| settings.versions.how_many = count)),
         ]))
         .child(group_title("New compositions"))
         .child(card(vec![
@@ -389,6 +402,11 @@ fn playback(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit:
         .child(card(vec![
             setting("Quality while playing", "Lower plays heavy compositions more smoothly. Paused frames are always full quality. Auto halves it on Retina screens.", menu("playback-quality", qualities, now.playback_quality, shown, workspace, |settings, quality| settings.playback_quality = quality)),
             setting("Loop playback", "Start over at the end of the work area. Applies from the next start; the loop button changes it now.", switch("playback-loop", now.loop_playback, shown, workspace, |settings, on| settings.loop_playback = on)),
+            setting(
+                "Render ahead",
+                "While you pause, the frames after the playhead are rendered in the background and kept, so heavy compositions play smoothly. A green line on the ruler marks them. More memory keeps more frames.",
+                menu("playback-render-ahead", [(0, "Off"), (1024, "1 GB"), (2048, "2 GB"), (4096, "4 GB"), (8192, "8 GB")].iter().map(|&(mb, name)| (name.to_owned(), mb)).collect(), now.render_ahead_mb, shown, workspace, |settings, mb| settings.render_ahead_mb = mb),
+            ),
         ]))
 }
 
@@ -772,33 +790,116 @@ fn models(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::D
         .children(note(shown))
 }
 
-/// The keys listed on the Keyboard Shortcuts page, by group (they match `workspace::bind_keys`).
-const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
-    ("Playback", &[("Play or pause", "Space"), ("Next frame / previous frame", "Page Down / Page Up"), ("Ten frames on / back", "⇧ Page Down / ⇧ Page Up"), ("First frame / last frame", "Home / End")]),
-    ("Tools", &[("Select", "V"), ("Track Select Forward", "A"), ("Text", "⌘T"), ("Shape", "Q"), ("Pen (Enter ends a path)", "G"), ("Rotate", "W"), ("Hand / Zoom", "H / Z"), ("Cut", "C"), ("Ripple / Roll / Slip / Slide", "B / N / Y / U")]),
-    ("Editing", &[("Undo / redo", "⌘Z / ⇧⌘Z"), ("Copy / paste / duplicate", "⌘C / ⌘V / ⌘D"), ("Split at the playhead", "⇧⌘D"), ("Trim in / out to the playhead", "⌥[ / ⌥]"), ("Delete / ripple delete", "⌫ / ⇧⌫"), ("Pre-compose", "⇧⌘C"), ("Easy ease", "F9"), ("Snapping on or off", "S")]),
-    ("Project", &[("New project / composition", "⌥⌘N / ⌘N"), ("Composition settings", "⌘K"), ("Open / save / save as", "⌘O / ⌘S / ⇧⌘S"), ("Import", "⌘I"), ("Export", "⌘M"), ("Settings", "⌘,")]),
-];
-
-fn shortcuts() -> gpui_kit::Div {
-    let mut page_div = div().child(page(Section::Shortcuts));
-    for (group, keys) in SHORTCUTS {
-        let rows = keys
+/// The Keyboard Shortcuts page: a starting set (Studio's, After Effects' or Premiere Pro's), and
+/// every command with its keys. Change waits for the next key pressed (Esc cancels); a key
+/// another command had moves to this one, and the page says so.
+fn shortcuts(shown: &SharedShown, workspace: &WeakEntity<Workspace>, capture: &gpui_kit::FocusHandle, search: &gpui_kit::Entity<InputState>, cx: &App) -> gpui_kit::Div {
+    use crate::keymap::{self, COMMANDS, KeyPreset};
+    let now = shown.borrow().settings.shortcuts.clone();
+    let recording = shown.borrow().recording;
+    let keys = keymap::keys_in_use(&now);
+    let presets = KeyPreset::ALL.iter().map(|&preset| (preset.name().to_owned(), preset)).collect();
+    let reset = {
+        let (shown, workspace) = (shown.clone(), workspace.clone());
+        Button::new("shortcuts-reset").outline().small().label("Undo My Changes").disabled(now.custom.is_empty()).on_click(move |_, window, cx| {
+            change(&shown, &workspace, window, cx, |settings| settings.shortcuts.custom.clear());
+        })
+    };
+    let mut page_div = div().child(page(Section::Shortcuts)).child(card(vec![
+        setting(
+            "Start from",
+            "Studio's keys, or the ones you know from After Effects or Premiere Pro. Choosing one sets aside your own changes.",
+            menu("shortcuts-preset", presets, now.preset, shown, workspace, |settings, preset| {
+                settings.shortcuts.preset = preset;
+                settings.shortcuts.custom.clear();
+            }),
+        ),
+        setting(format!("{} changed", now.custom.len()), "Commands you gave keys of your own.", reset),
+    ]));
+    // The search narrows the list by command name or key.
+    let wanted = search.read(cx).value().trim().to_lowercase();
+    let matches = |command: &keymap::Command| {
+        wanted.is_empty() || command.name.to_lowercase().contains(&wanted) || keys.get(command.id).is_some_and(|keys| keys.iter().any(|key| keymap::display(key).to_lowercase() == wanted || key == &wanted))
+    };
+    page_div = page_div.child(div().pt_3().child(Input::new(search).small().prefix(Icon::new(IconName::Search).size(px(14.0)))));
+    let mut groups: Vec<&str> = Vec::new();
+    for command in COMMANDS.iter().filter(|command| matches(command)) {
+        if !groups.contains(&command.group) {
+            groups.push(command.group);
+        }
+    }
+    for group in groups {
+        let rows = COMMANDS
             .iter()
-            .map(|(what, key)| {
+            .filter(|command| command.group == group && matches(command))
+            .map(|command| {
+                let id = command.id;
+                let own = keys.get(id).cloned().unwrap_or_default();
+                let waiting = recording == Some(id);
+                let chips = own.iter().map(|key| div().px_2().py_0p5().rounded(px(5.0)).border_1().border_color(hsla(color::HAIRLINE)).bg(hsla(color::INSET)).text_size(px(size::SMALL_TEXT)).text_color(hsla(color::VALUE)).font_family("Menlo").child(keymap::display(key)));
+                let change_button = {
+                    let (shown, capture) = (shown.clone(), capture.clone());
+                    Button::new(gpui_kit::ElementId::Name(format!("shortcut-change:{id}").into()))
+                        .small()
+                        .map(|button| if waiting { button.primary().label("Press a key…") } else { button.ghost().label("Change") })
+                        .on_click(move |_, window, cx| {
+                            let mut now = shown.borrow_mut();
+                            now.recording = if now.recording == Some(id) { None } else { Some(id) };
+                            now.note = None;
+                            drop(now);
+                            window.focus(&capture, cx);
+                            window.refresh();
+                        })
+                };
+                let clear = {
+                    let (shown, workspace) = (shown.clone(), workspace.clone());
+                    Button::new(gpui_kit::ElementId::Name(format!("shortcut-clear:{id}").into())).ghost().small().icon(Icon::new(IconName::X)).tooltip("No shortcut").disabled(own.is_empty()).on_click(move |_, window, cx| {
+                        change(&shown, &workspace, window, cx, move |settings| {
+                            keymap::assign(&mut settings.shortcuts, id, None);
+                        });
+                    })
+                };
                 div()
                     .h(px(38.0))
                     .px_3p5()
                     .flex()
                     .items_center()
-                    .child(div().flex_1().text_color(hsla(color::TEXT)).child(*what))
-                    .child(div().px_2().py_0p5().rounded(px(5.0)).border_1().border_color(hsla(color::HAIRLINE)).bg(hsla(color::INSET)).text_size(px(size::SMALL_TEXT)).text_color(hsla(color::VALUE)).font_family("Menlo").child(*key))
+                    .gap_1p5()
+                    .child(div().flex_1().text_color(hsla(color::TEXT)).child(command.name))
+                    .children(chips)
+                    .when(own.is_empty(), |row| row.child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("None")))
+                    .child(change_button)
+                    .child(clear)
                     .into_any_element()
             })
             .collect();
-        page_div = page_div.child(div().pt_3().pb_1p5().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(group.to_uppercase())).child(card(rows));
+        page_div = page_div.child(group_title(group)).child(card(rows));
     }
-    page_div
+    page_div.children(note(shown))
+}
+
+/// The next key pressed while a command waits for one (Change): it becomes the command's
+/// shortcut. Esc cancels. Keys pressed now don't run their own commands.
+fn capture_key(shown: &SharedShown, workspace: &WeakEntity<Workspace>, event: &gpui_kit::KeyDownEvent, window: &mut Window, cx: &mut App) {
+    let Some(id) = shown.borrow().recording else { return };
+    cx.stop_propagation();
+    let key = event.keystroke.unparse(gpui_kit::OperatingSystem::Mac);
+    shown.borrow_mut().recording = None;
+    if key == "escape" {
+        window.refresh();
+        return;
+    }
+    let taken = crate::keymap::used_by(&shown.borrow().settings.shortcuts, &key, id);
+    let key_for_change = key.clone();
+    change(shown, workspace, window, cx, move |settings| {
+        crate::keymap::assign(&mut settings.shortcuts, id, Some(&key_for_change));
+    });
+    let name = crate::keymap::command(id).map_or("", |command| command.name);
+    shown.borrow_mut().note = Some(match taken {
+        Some(other) => format!("{} is now {name}. It was {}, which has no shortcut now.", crate::keymap::display(&key), other.name),
+        None => format!("{} is now {name}.", crate::keymap::display(&key)),
+    });
+    window.refresh();
 }
 
 /// A document that ships with Studio (`LICENSE`, `THIRD_PARTY_NOTICES.md`): inside the app's
@@ -935,8 +1036,17 @@ fn section_menu(shown: &SharedShown) -> gpui_kit::Div {
 }
 
 pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_at(Section::General, workspace, window, cx);
+}
+
+/// Studio ▸ About Studio: Settings, on its About page.
+pub fn open_about(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_at(Section::About, workspace, window, cx);
+}
+
+fn open_at(section: Section, workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let shown: SharedShown = Rc::new(RefCell::new(Shown {
-        section: Section::General,
+        section,
         settings: app_settings::load(),
         // Measured from the workspace directly: it is being updated, so it can't be read back.
         proxy_bytes: studio_media::cache_size(&workspace.render.proxies.cache_folder()),
@@ -944,8 +1054,14 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         enhanced_bytes: folder_size(&super::enhance::enhanced_folder(workspace)),
         imported_bytes: folder_size(&workspace.imported_folder()),
         downloading: Vec::new(),
+        recording: None,
         note: None,
     }));
+    // Holds the keyboard while a shortcut is being changed, so the key pressed is captured.
+    let capture = cx.focus_handle();
+    let shortcut_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search commands or keys"));
+    let redraw = cx.subscribe_in(&shortcut_search, window, |_, _, _: &gpui_kit::component::input::InputEvent, window, _| window.refresh());
+    workspace.ui.dialog_subscriptions.push(redraw);
     let target = cx.weak_entity();
     let new_folder_name = cx.new(|cx| InputState::new(window, cx).placeholder("New folder name"));
 
@@ -960,7 +1076,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
             Section::Folders => folders(&shown, &target, &new_folder_name),
             Section::MediaCache => media_cache(&shown, &target, cx),
             Section::Models => models(&shown, &target),
-            Section::Shortcuts => shortcuts(),
+            Section::Shortcuts => shortcuts(&shown, &target, &capture, &shortcut_search, cx),
             Section::About => about(&shown, &target),
         };
         dialog
@@ -974,7 +1090,19 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                     .gap_5()
                     .text_size(px(size::TEXT))
                     .child(section_menu(&shown))
-                    .child(div().id("settings-content").flex_1().min_w_0().overflow_y_scroll().pr_2().pb_2().child(content)),
+                    .child({
+                        let (shown, target) = (shown.clone(), target.clone());
+                        div()
+                            .id("settings-content")
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_y_scroll()
+                            .pr_2()
+                            .pb_2()
+                            .track_focus(&capture)
+                            .capture_key_down(move |event, window, cx| capture_key(&shown, &target, event, window, cx))
+                            .child(content)
+                    }),
             )
             // A compact Done at the bottom right (the dialog's own close button stretches).
             .footer(div().w_full().flex().justify_end().child(Button::new("settings-done").primary().small().px_4().label("Done").on_click(|_, window, cx| window.close_dialog(cx))))

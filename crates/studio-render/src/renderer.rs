@@ -106,6 +106,13 @@ struct VideoTexture {
 // A shape's style (with its gradients) makes `Shape` much the largest; sources only live for
 // one draw call, so that costs nothing worth a box.
 #[allow(clippy::large_enum_variant)]
+/// One thing to draw: where (source pixels to composition pixels), what, and which rectangle
+/// of source pixels.
+type Drawn<'a> = (Affine, Source<'a>, (Vec2, Vec2));
+
+// Sources live only while a frame is drawn; boxing the large shape variant would just add an
+// allocation per shape drawn.
+#[allow(clippy::large_enum_variant)]
 enum Source<'a> {
     /// A premultiplied linear color.
     Solid([f32; 4]),
@@ -207,6 +214,9 @@ fn shape_code(kind: ShapeKind) -> f32 {
 }
 
 pub struct Renderer {
+    /// Whether simple layers are drawn together (see `render`). Always on, except to check
+    /// that drawing them one at a time gives the same picture.
+    batching: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     layer_pipeline: wgpu::RenderPipeline,
@@ -488,6 +498,7 @@ impl Renderer {
             .create_view(&Default::default());
 
         Ok(Self {
+            batching: true,
             device,
             queue,
             layer_pipeline,
@@ -576,6 +587,11 @@ impl Renderer {
         self.targets.len() - 1
     }
 
+    /// Draws simple layers together (the default) or one at a time; both give the same picture.
+    pub fn set_batching(&mut self, on: bool) {
+        self.batching = on;
+    }
+
     fn uniform(&self, bytes: &[u8]) -> wgpu::Buffer {
         self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uniform"),
@@ -634,7 +650,14 @@ impl Renderer {
     /// Draws several sources into work slot `target` in one pass, each over the ones before
     /// (a caption's text over its background box).
     fn draw_sources(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, target: usize, scale: f32, sources: &[(Affine, &Source, (Vec2, Vec2))]) {
-        let groups: Vec<wgpu::BindGroup> = sources.iter().map(|(world, source, rect)| self.source_bind_group(targets, *world, scale, source, *rect)).collect();
+        let opaque: Vec<(Affine, &Source, (Vec2, Vec2), f32)> = sources.iter().map(|&(world, source, rect)| (world, source, rect, 1.0)).collect();
+        self.draw_faded_sources(encoder, targets, target, scale, &opaque);
+    }
+
+    /// The same, each source faded to its own opacity (0–1): several whole layers drawn in one
+    /// pass (see `render`'s batching).
+    fn draw_faded_sources(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, target: usize, scale: f32, sources: &[(Affine, &Source, (Vec2, Vec2), f32)]) {
+        let groups: Vec<wgpu::BindGroup> = sources.iter().map(|(world, source, rect, opacity)| self.source_bind_group(targets, *world, scale, source, *rect, *opacity)).collect();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("layer"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -653,7 +676,7 @@ impl Renderer {
     }
 
     /// The uniforms and textures for drawing one source with `layer.wgsl`.
-    fn source_bind_group(&self, targets: &Targets, world: Affine, scale: f32, source: &Source, rect: (Vec2, Vec2)) -> wgpu::BindGroup {
+    fn source_bind_group(&self, targets: &Targets, world: Affine, scale: f32, source: &Source, rect: (Vec2, Vec2), opacity: f32) -> wgpu::BindGroup {
         let (width, height) = (targets.width as f32, targets.height as f32);
         let (mode, color, view, cell) = match source {
             Source::Solid(color) => (0.0, *color, &self.blank, 0.0),
@@ -685,7 +708,7 @@ impl Renderer {
             matrix.a, matrix.b, matrix.c, matrix.d, //
             matrix.tx, matrix.ty, size.x, size.y, //
             color[0], color[1], color[2], color[3], //
-            mode, cell, stroke_width, 0.0,
+            mode, cell, stroke_width, opacity.clamp(0.0, 1.0),
         ];
         uniform.extend(shape);
         uniform.extend(shape_box);
@@ -1159,7 +1182,10 @@ impl Renderer {
                 self.prepare_lut(source);
             }
             match &layer.content {
-                LayerContent::Shape { style, path: Some(path) } => {
+                LayerContent::Shape { path: Some(_), .. } => {
+                    // The outline and style at this moment: a morphing shape changes them over time.
+                    let (Some(path), Some(style)) = (layer.shape_path_at(at_time), layer.shape_style_at(at_time)) else { continue };
+                    let (path, style) = (path.as_ref(), &style);
                     let raster_scale = world_transform(composition, layer.id, at_time).map_or(scale, |w| max_scale(w) * scale).max(0.05);
                     let key = path_key(path, style, layer.size, raster_scale);
                     if !self.path_cache.contains_key(&key)
@@ -1197,11 +1223,11 @@ impl Renderer {
                     text_keys.insert(layer.id, prepared);
                     if let Some(on) = layer.text_path
                         && let Some(path_layer) = composition.layer(on.layer)
-                        && let LayerContent::Shape { path: Some(path), .. } = &path_layer.content
+                        && let Some(path) = path_layer.shape_path_at(at_time)
                         && let Some(path_world) = world_transform(composition, on.layer, at_time)
                     {
                         let size = path_layer.size;
-                        if let Some(walk) = studio_core::path::Walk::new(path, |v| path_world.apply(Vec2::new(v.x * size.x, v.y * size.y))) {
+                        if let Some(walk) = studio_core::path::Walk::new(&path, |v| path_world.apply(Vec2::new(v.x * size.x, v.y * size.y))) {
                             let (letters, baseline) = self.text.letters(text, style);
                             // The letters' size: the text layer's own scale.
                             let letter_scale = layer.transform.as_ref().map_or(1.0, |transform| transform.scale.value_at(at_time).x / 100.0);
@@ -1265,6 +1291,21 @@ impl Renderer {
 
         let any_solo = composition.layers.iter().any(|layer| layer.switches.solo);
 
+        // Layers that only need laying over what is below (normal blending, no effects, matte,
+        // mask or cut-out, drawn in one piece) are gathered and drawn together in one pass, then
+        // laid over the picture once: "over" gives the same result whichever way it is grouped,
+        // and big compositions of simple layers skip two full-frame passes per layer.
+        let mut batch: Vec<(Affine, Source<'_>, (Vec2, Vec2), f32)> = Vec::new();
+        let flush = |batch: &mut Vec<(Affine, Source<'_>, (Vec2, Vec2), f32)>, encoder: &mut wgpu::CommandEncoder, accum: &mut usize, spare: &mut usize| {
+            if batch.is_empty() {
+                return;
+            }
+            let drawn: Vec<(Affine, &Source, (Vec2, Vec2), f32)> = batch.iter().map(|(world, source, rect, opacity)| (*world, source, *rect, *opacity)).collect();
+            self.draw_faded_sources(encoder, targets, slot::LAYER_A, scale, &drawn);
+            self.composite(encoder, targets, *accum, slot::LAYER_A, None, [0, 0, 0], 1.0, *spare);
+            std::mem::swap(accum, spare);
+            batch.clear();
+        };
         for (index, layer) in composition.layers.iter().enumerate().rev() {
             let shown = layer.switches.visible && layer.is_active_at(frame) && layer.content.has_picture() && (!any_solo || layer.switches.solo);
             if !shown || matte_sources.contains(&layer.id) || mask_sources.contains(&layer.id) {
@@ -1272,6 +1313,23 @@ impl Renderer {
             }
             let Some(world) = world_transform(composition, layer.id, at) else { continue };
             let opacity = opacity_at(layer, at);
+
+            let has_effects = layer.switches.effects_enabled && layer.effects.iter().any(|effect| effect.enabled);
+            let cut_out = layer.cutout.is_some() && self.cutouts.contains_key(&layer.id);
+            // (Adjustment layers change what is below them, so they are never simple.)
+            let simple = !matches!(layer.content, LayerContent::Adjustment)
+                && layer.blend_mode == studio_core::model::BlendMode::Normal
+                && layer.track_matte == studio_core::model::TrackMatte::None
+                && layer.mask.is_none()
+                && !has_effects
+                && !cut_out;
+            if simple && self.batching && let Some(single) = self.single_source(project, layer, world, &text_keys) {
+                if let Some((world, source, rect)) = single {
+                    batch.push((world, source, rect, opacity));
+                }
+                continue;
+            }
+            flush(&mut batch, &mut encoder, &mut accum, &mut spare);
 
             let shapers = Shapers { project, composition, frame, at, time, scale, text_keys: &text_keys };
             if matches!(layer.content, LayerContent::Adjustment) {
@@ -1311,6 +1369,7 @@ impl Renderer {
             self.composite(&mut encoder, targets, accum, image, matte, [blend, matte_mode, 0], opacity, spare);
             std::mem::swap(&mut accum, &mut spare);
         }
+        flush(&mut batch, &mut encoder, &mut accum, &mut spare);
 
         // Convert to sRGB and copy to the readback buffer.
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1450,10 +1509,13 @@ impl Renderer {
         text_keys: &HashMap<Id, (u64, Vec2, Vec2)>,
         target: usize,
     ) {
-        let placeholder = || Source::Placeholder(linear(layer.label.color()));
-        let full = (Vec2::default(), layer.size);
+        if let Some(single) = self.single_source(project, layer, world, text_keys) {
+            if let Some((world, source, rect)) = single {
+                self.draw_source(encoder, targets, target, world, scale, &source, rect);
+            }
+            return;
+        }
         match &layer.content {
-            LayerContent::Solid { color } => self.draw_source(encoder, targets, target, world, scale, &Source::Solid(linear(*color)), full),
             LayerContent::Captions { .. } => {
                 let (Some((key, measured, pad)), Some(draw)) = (text_keys.get(&layer.id), self.captions.get(&layer.id)) else { return };
                 let texture = &self.text_cache[key];
@@ -1475,61 +1537,59 @@ impl Renderer {
                     None => self.draw_source(encoder, targets, target, world, scale, &text, text_rect),
                 }
             }
-            LayerContent::Shape { path: Some(_), .. } => {
-                if let Some((texture, origin)) = self.paths.get(&layer.id).and_then(|key| self.path_cache.get(key)) {
-                    self.draw_source(encoder, targets, target, world, scale, &Source::Texture(&texture.view), (*origin, texture.size));
-                }
-            }
+            LayerContent::Text { .. } if self.path_text.contains_key(&layer.id) => self.draw_text_on_path(encoder, targets, layer, scale, text_keys, target),
+            LayerContent::Text { .. } if self.text_pieces.contains_key(&layer.id) => self.draw_text_pieces(encoder, targets, layer, world, scale, text_keys, target),
+            _ => {}
+        }
+    }
+
+    /// What a layer drawn in one piece is drawn from: where (its world transform, adjusted to
+    /// the source), the source, and the rectangle of source pixels drawn. `Some(None)` when there
+    /// is nothing to draw (text not measured yet, an adjustment layer); `None` for layers drawn in
+    /// several pieces (captions, text on a path or in animated pieces), which `draw_layer` draws.
+    fn single_source<'a>(&'a self, project: &Project, layer: &Layer, world: Affine, text_keys: &HashMap<Id, (u64, Vec2, Vec2)>) -> Option<Option<Drawn<'a>>> {
+        let placeholder = || Source::Placeholder(linear(layer.label.color()));
+        let full = (Vec2::default(), layer.size);
+        Some(match &layer.content {
+            LayerContent::Solid { color } => Some((world, Source::Solid(linear(*color)), full)),
+            LayerContent::Captions { .. } => return None,
+            LayerContent::Shape { path: Some(_), .. } => self.paths.get(&layer.id).and_then(|key| self.path_cache.get(key)).map(|(texture, origin)| (world, Source::Texture(&texture.view), (*origin, texture.size))),
             LayerContent::Shape { style, path: None } => {
                 // Grow the drawn rectangle by the stroke, which is centered on the edge.
                 let grow = style.stroke.map_or(0.0, |stroke| stroke.width * 0.5 + 1.0);
                 let rect = (Vec2::new(-grow, -grow), Vec2::new(layer.size.x + grow * 2.0, layer.size.y + grow * 2.0));
-                self.draw_source(encoder, targets, target, world, scale, &Source::Shape(*style, Vec2::default(), layer.size), rect);
+                Some((world, Source::Shape(*style, Vec2::default(), layer.size), rect))
             }
-            LayerContent::Text { .. } if self.path_text.contains_key(&layer.id) => self.draw_text_on_path(encoder, targets, layer, scale, text_keys, target),
-            LayerContent::Text { .. } if self.text_pieces.contains_key(&layer.id) => self.draw_text_pieces(encoder, targets, layer, world, scale, text_keys, target),
-            LayerContent::Text { .. } => {
-                if let Some((key, measured, pad)) = text_keys.get(&layer.id) {
-                    let texture = &self.text_cache[key];
-                    // Fit the text box to the layer's box, so the anchor point stays where the user put it.
-                    let fit = Vec2::new(layer.size.x / measured.x.max(1.0), layer.size.y / measured.y.max(1.0));
-                    let world = Affine::scale(fit).then(world);
-                    let rect = (Vec2::new(-pad.x, -pad.y), texture.size);
-                    self.draw_source(encoder, targets, target, world, scale, &Source::Texture(&texture.view), rect);
-                }
-            }
+            LayerContent::Text { .. } if self.path_text.contains_key(&layer.id) || self.text_pieces.contains_key(&layer.id) => return None,
+            LayerContent::Text { .. } => text_keys.get(&layer.id).map(|(key, measured, pad)| {
+                let texture = &self.text_cache[key];
+                // Fit the text box to the layer's box, so the anchor point stays where the user put it.
+                let fit = Vec2::new(layer.size.x / measured.x.max(1.0), layer.size.y / measured.y.max(1.0));
+                (Affine::scale(fit).then(world), Source::Texture(&texture.view), (Vec2::new(-pad.x, -pad.y), texture.size))
+            }),
             LayerContent::Image { item } => {
                 let loaded = project.item(*item).and_then(|item| item.path.as_ref()).and_then(|path| self.images.get(path)).and_then(|(_, texture)| texture.as_ref());
-                match loaded {
-                    Some(image) => {
-                        // Stretch the image to the layer's size (they match unless the file changed).
-                        let fit = Vec2::new(layer.size.x / image.size.x.max(1.0), layer.size.y / image.size.y.max(1.0));
-                        self.draw_source(encoder, targets, target, Affine::scale(fit).then(world), scale, &Source::Texture(&image.view), (Vec2::default(), image.size));
-                    }
-                    None => self.draw_source(encoder, targets, target, world, scale, &placeholder(), full),
-                }
+                Some(match loaded {
+                    // Stretch the image to the layer's size (they match unless the file changed).
+                    Some(image) => (Affine::scale(Vec2::new(layer.size.x / image.size.x.max(1.0), layer.size.y / image.size.y.max(1.0))).then(world), Source::Texture(&image.view), (Vec2::default(), image.size)),
+                    None => (world, placeholder(), full),
+                })
             }
-            LayerContent::Footage { .. } => {
-                let picture = self.videos.get(&layer.id);
-                match picture {
-                    Some(video) => {
-                        // Stretch the decoded picture (which may be scaled down for preview) over the layer.
-                        let fit = Vec2::new(layer.size.x / video.texture.size.x.max(1.0), layer.size.y / video.texture.size.y.max(1.0));
-                        let world = Affine::scale(fit).then(world);
-                        self.draw_source(encoder, targets, target, world, scale, &Source::Texture(&video.texture.view), (Vec2::default(), video.texture.size));
-                    }
-                    // Still decoding (or the file is missing): show the placeholder.
-                    None => self.draw_source(encoder, targets, target, world, scale, &placeholder(), full),
+            LayerContent::Footage { .. } => Some(match self.videos.get(&layer.id) {
+                // Stretch the decoded picture (which may be scaled down for preview) over the layer.
+                Some(video) => {
+                    let fit = Vec2::new(layer.size.x / video.texture.size.x.max(1.0), layer.size.y / video.texture.size.y.max(1.0));
+                    (Affine::scale(fit).then(world), Source::Texture(&video.texture.view), (Vec2::default(), video.texture.size))
                 }
-            }
+                // Still decoding (or the file is missing): show the placeholder.
+                None => (world, placeholder(), full),
+            }),
             // A nested composition, rendered before this one, stretched over the layer's box.
-            LayerContent::Composition { .. } => {
-                if let Some(picture) = self.nested.get(&layer.id) {
-                    let fit = Vec2::new(layer.size.x / picture.size.x.max(1.0), layer.size.y / picture.size.y.max(1.0));
-                    self.draw_source(encoder, targets, target, Affine::scale(fit).then(world), scale, &Source::Texture(&picture.view), (Vec2::default(), picture.size));
-                }
-            }
-            LayerContent::Adjustment | LayerContent::Audio { .. } => {}
-        }
+            LayerContent::Composition { .. } => self.nested.get(&layer.id).map(|picture| {
+                let fit = Vec2::new(layer.size.x / picture.size.x.max(1.0), layer.size.y / picture.size.y.max(1.0));
+                (Affine::scale(fit).then(world), Source::Texture(&picture.view), (Vec2::default(), picture.size))
+            }),
+            LayerContent::Adjustment | LayerContent::Audio { .. } => None,
+        })
     }
 }

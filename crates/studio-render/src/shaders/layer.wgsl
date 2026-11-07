@@ -15,7 +15,8 @@ struct LayerUniform {
     // Premultiplied linear color for solids and the placeholder tint.
     color: vec4<f32>,
     // x: mode (0 solid, 1 texture, 2 placeholder, 3 shape), y: checker cell size in source
-    // pixels, z: shape stroke width in source pixels.
+    // pixels, z: shape stroke width in source pixels, w: opacity (0-1) the whole draw is faded
+    // to (layers drawn together in one pass carry their own).
     params: vec4<f32>,
     // For shapes: x kind (0 rectangle, 1 ellipse, 2 triangle, 3 polygon, 4 star),
     // y corner radius in source pixels, z sides or points, w a star's inner radius (fraction).
@@ -68,6 +69,11 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    // Colors are premultiplied, so fading scales all four channels.
+    return source_color(in) * u.params.w;
+}
+
+fn source_color(in: VertexOut) -> vec4<f32> {
     let mode = u32(u.params.x);
     if (mode == 1u) {
         // Textures hold premultiplied colors, sRGB encoded; the sRGB format linearizes on

@@ -248,7 +248,13 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
                     return false;
                 }
                 match outcome {
-                    Ok(Outcome::Finished) => match after {
+                    // What the format couldn't hold gets a notice of its own, listing it.
+                    Ok(Outcome::Finished { left_out }) if !left_out.is_empty() && after == AfterExport::Nothing => {
+                        let title = format!("Exported “{file_name}”, with changes");
+                        let list = left_out.iter().map(|line| format!("• {line}")).collect::<Vec<_>>().join("\n");
+                        window.open_alert_dialog(cx, move |dialog, _, _| dialog.title(title.clone()).description(list.clone()));
+                    }
+                    Ok(Outcome::Finished { .. }) => match after {
                         AfterExport::Nothing => window.push_notification(format!("Exported “{file_name}”.").as_str(), cx),
                         AfterExport::Announce => {
                             let folder = path.parent().map_or_else(String::new, |folder| folder.display().to_string());

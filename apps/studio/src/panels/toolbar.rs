@@ -1,6 +1,7 @@
 //! The window's chrome around the panels: a slim top bar and a rail down the left side.
 //!
-//! The top bar has the app's name on the left with the editing tools beside it (as in
+//! The top bar has the app's name on the left (a click goes to the start screen, to open or
+//! start another project) with the editing tools beside it (as in
 //! Photoshop's and Premiere's tool bars, one small icon each, named in a tooltip with its
 //! key), and on the right the project and composition open and the progress of background
 //! jobs. The rail, CapCut style, picks the
@@ -59,15 +60,33 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .gap_3()
         .px_3()
         .bg(hsla(color::BACKGROUND))
-        .child(div().flex_none().min_w(px(RAIL_WIDTH - 12.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).text_color(hsla(color::TEXT)).child("Studio"))
+        .child(home_button(cx))
         .child(tools(workspace, cx))
         .child(breadcrumb)
-        // Captions, cut-outs and exports running in the background show their progress here.
+        // Captions, cut-outs, exports and packages running in the background show their progress here.
         .children(super::captions::status(workspace, cx))
         .children(super::cutout::status(workspace, cx))
         .children(super::enhance::status(workspace, cx))
         .children(super::analysis::status(workspace, cx))
         .children(super::export::status(workspace, cx))
+        .children(super::package::status(workspace, cx))
+}
+
+/// Studio's name, which goes to the start screen when clicked (offering to save first).
+fn home_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+    div()
+        .id("studio-home")
+        .flex_none()
+        .min_w(px(RAIL_WIDTH - 12.0))
+        .px_1()
+        .rounded(px(6.0))
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .text_color(hsla(color::TEXT))
+        .hover(|style| style.bg(hsla(color::HOVER)))
+        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Start Screen: new, recent and saved projects").build(window, cx))
+        .on_click(cx.listener(|this, _, window, cx| crate::panels::start_screen::go_to(this, window, cx)))
+        .child("Studio")
+        .test_support()
 }
 
 /// The editing tools, in a row: selecting, editing clips, text, shapes, the pen, rotating,
@@ -89,23 +108,24 @@ fn tools(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
         .child(group_button(0, workspace, cx))
         .child(group_button(1, workspace, cx))
         .child(divider())
-        .child(tool_button("tool-type", IconName::Type, "Text (⌘T)", tool == Tool::Type, pick(Tool::Type), cx))
+        .child(tool_button("tool-type", IconName::Type, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Text", "type-tool"), tool == Tool::Type, pick(Tool::Type), cx))
         .child(shape_button(workspace, cx))
-        .child(tool_button("tool-pen", IconName::PenTool, "Pen (G)", tool == Tool::Pen, pick(Tool::Pen), cx))
-        .child(tool_button("tool-rotate", IconName::RotateCw, "Rotate (W)", tool == Tool::Rotate, pick(Tool::Rotate), cx))
+        .child(tool_button("tool-pen", IconName::PenTool, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Pen", "pen-tool"), tool == Tool::Pen, pick(Tool::Pen), cx))
+        .child(tool_button("tool-rotate", IconName::RotateCw, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Rotate", "rotate-tool"), tool == Tool::Rotate, pick(Tool::Rotate), cx))
         .child(eyedropper_button(workspace, cx))
-        .child(new_layer_button(cx))
+        .child(new_layer_button(&workspace.ui.settings.shortcuts, cx))
         .child(divider())
         .child(group_button(2, workspace, cx))
 }
 
 /// The New Layer button: a menu of the layers made from nothing (a solid in the eyedropper's
 /// current color, an adjustment layer, a null object), each added from the playhead on.
-fn new_layer_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+fn new_layer_button(shortcuts: &crate::keymap::Shortcuts, cx: &mut Context<Workspace>) -> impl IntoElement {
     use gpui_kit::component::button::{Button, ButtonVariants as _};
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     let weak = cx.weak_entity();
-    let item = move |label: &'static str, icon: IconName, kind: NewLayer| {
+    let labels = [("Solid", "new-solid"), ("Adjustment Layer", "new-adjustment-layer"), ("Null Object", "new-null")].map(|(name, id)| crate::keymap::with_key(shortcuts, name, id));
+    let item = move |label: String, icon: IconName, kind: NewLayer| {
         let weak = weak.clone();
         PopupMenuItem::new(label).icon(Icon::new(icon)).on_click(move |_, _, cx| {
             weak.update(cx, |this, cx| this.new_layer(kind, cx)).ok();
@@ -125,9 +145,9 @@ fn new_layer_button(cx: &mut Context<Workspace>) -> impl IntoElement {
         .tooltip("New Layer")
         .dropdown_menu(move |menu, _, _| {
         menu.label("New Layer")
-            .item(item("Solid (⌘Y)", IconName::Square, NewLayer::Solid))
-            .item(item("Adjustment Layer (⌥⌘Y)", IconName::Layers, NewLayer::Adjustment))
-            .item(item("Null Object (⇧⌥⌘Y)", IconName::SquareDashed, NewLayer::Null))
+            .item(item(labels[0].clone(), IconName::Square, NewLayer::Solid))
+            .item(item(labels[1].clone(), IconName::Layers, NewLayer::Adjustment))
+            .item(item(labels[2].clone(), IconName::SquareDashed, NewLayer::Null))
     })
 }
 
@@ -140,7 +160,7 @@ fn separator() -> gpui_kit::Div {
 /// How long the Shape button must be held to open the shape menu.
 pub const HOLD_FOR_MENU: Duration = Duration::from_millis(350);
 
-/// A tool on the rail: the tool, its icon, its name and its key.
+/// A tool on the rail: the tool, its icon, its name and its command (for its current key).
 type RailTool = (Tool, IconName, &'static str, &'static str);
 
 /// Tools that share one rail button. A click picks the tool the button shows (the one last
@@ -151,19 +171,19 @@ pub struct ToolGroup {
 }
 
 pub const TOOL_GROUPS: [ToolGroup; 3] = [
-    ToolGroup { id: "tool-group-select", tools: &[(Tool::Selection, IconName::MousePointer2, "Select", "V"), (Tool::TrackSelect, IconName::ChevronsRight, "Track Select", "A")] },
+    ToolGroup { id: "tool-group-select", tools: &[(Tool::Selection, IconName::MousePointer2, "Select", "selection-tool"), (Tool::TrackSelect, IconName::ChevronsRight, "Track Select", "track-select-tool")] },
     ToolGroup {
         id: "tool-group-edit",
         tools: &[
-            (Tool::Cut, IconName::Scissors, "Cut", "C"),
-            (Tool::Ripple, IconName::ArrowRightToLine, "Ripple", "B"),
-            (Tool::Roll, IconName::Columns2, "Roll", "N"),
-            (Tool::RateStretch, IconName::Gauge, "Rate Stretch", "R"),
-            (Tool::Slip, IconName::ArrowLeftRight, "Slip", "Y"),
-            (Tool::Slide, IconName::MoveHorizontal, "Slide", "U"),
+            (Tool::Cut, IconName::Scissors, "Cut", "cut-tool"),
+            (Tool::Ripple, IconName::ArrowRightToLine, "Ripple", "ripple-tool"),
+            (Tool::Roll, IconName::Columns2, "Roll", "roll-tool"),
+            (Tool::RateStretch, IconName::Gauge, "Rate Stretch", "rate-stretch-tool"),
+            (Tool::Slip, IconName::ArrowLeftRight, "Slip", "slip-tool"),
+            (Tool::Slide, IconName::MoveHorizontal, "Slide", "slide-tool"),
         ],
     },
-    ToolGroup { id: "tool-group-view", tools: &[(Tool::Hand, IconName::Hand, "Hand", "H"), (Tool::Zoom, IconName::ZoomIn, "Zoom", "Z")] },
+    ToolGroup { id: "tool-group-view", tools: &[(Tool::Hand, IconName::Hand, "Hand", "hand-tool"), (Tool::Zoom, IconName::ZoomIn, "Zoom", "zoom-tool")] },
 ];
 
 /// What each group does, for its menu's heading.
@@ -174,9 +194,10 @@ fn group_button(index: usize, workspace: &Workspace, cx: &mut Context<Workspace>
     let group = &TOOL_GROUPS[index];
     let current = workspace.ui.tool;
     let shown = group.tools.iter().find(|tool| tool.0 == current).or_else(|| workspace.ui.group_tools.get(&index).and_then(|picked| group.tools.iter().find(|tool| tool.0 == *picked))).unwrap_or(&group.tools[0]);
-    let (tool, icon, label, key) = *shown;
+    let (tool, icon, label, command) = *shown;
     let active = group.tools.iter().any(|tool| tool.0 == current);
-    let tip = if group.tools.len() > 1 { format!("{label} ({key}) · hold for more") } else { format!("{label} ({key})") };
+    let named = crate::keymap::with_key(&workspace.ui.settings.shortcuts, label, command);
+    let tip = if group.tools.len() > 1 { format!("{named} · hold for more") } else { named };
     div()
         .relative()
         .child(
@@ -205,12 +226,13 @@ fn group_button(index: usize, workspace: &Workspace, cx: &mut Context<Workspace>
                 .child(menu_mark())
                 .test_support(),
         )
-        .when(workspace.ui.tool_menu == Some(index), |button| button.child(group_menu(index, current, cx)))
+        .when(workspace.ui.tool_menu == Some(index), |button| button.child(group_menu(index, current, &workspace.ui.settings.shortcuts, cx)))
 }
 
 /// The menu under a group's button: each of its tools, with its key.
-fn group_menu(index: usize, current: Tool, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let rows = TOOL_GROUPS[index].tools.iter().map(|&(tool, icon, label, key)| {
+fn group_menu(index: usize, current: Tool, shortcuts: &crate::keymap::Shortcuts, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let rows = TOOL_GROUPS[index].tools.iter().map(|&(tool, icon, label, command)| {
+        let key = crate::keymap::key_for(shortcuts, command).unwrap_or_default();
         div()
             .id(gpui_kit::ElementId::Name(format!("tool-{label}").to_lowercase().replace(' ', "-").into()))
             .h(px(30.0))
@@ -289,12 +311,12 @@ fn rail_button(
 fn tool_button(
     id: &'static str,
     icon: IconName,
-    tip: &'static str,
+    tip: String,
     active: bool,
     on_click: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    tool_button_look(id, icon, tip.to_owned(), active).on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))).test_support()
+    tool_button_look(id, icon, tip, active).on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))).test_support()
 }
 
 /// A tool button's appearance, without its behaviour.

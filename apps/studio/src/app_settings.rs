@@ -1,6 +1,6 @@
-//! What Studio remembers between runs, apart from projects themselves: the last project
-//! (reopened on launch), the window's size and position, and a recovery copy of unsaved
-//! work (offered back if Studio closed without saving it).
+//! What Studio remembers between runs, apart from projects themselves: the projects opened
+//! lately (listed on the start screen), the window's size and position, and a recovery copy of
+//! unsaved work (offered back if Studio closed without saving it).
 //!
 //! It lives in the platform's settings folder (macOS: `~/Library/Application Support/Studio`).
 //! Tests use a temporary folder of their own instead, so they never touch real settings.
@@ -42,8 +42,12 @@ pub struct AppSettings {
     pub default_folders: Vec<String>,
     /// Which folder imported files go into, by kind (`None` leaves them at the top).
     pub import_folders: ImportFolders,
-    /// Whether the last project opens again when Studio starts.
-    pub reopen_last_project: bool,
+    /// What Studio shows when it starts: the start screen, or the last project.
+    pub start_with: StartWith,
+    /// The projects opened or saved lately, newest first, for the start screen and Open Recent.
+    pub recent_projects: Vec<RecentProject>,
+    /// When Studio last reached its update feed, in seconds since 1970.
+    pub last_update_check: u64,
     /// How often unsaved work is copied aside for recovery, in seconds (0: never).
     pub recovery_seconds: u32,
     /// What new compositions (and new projects) start as.
@@ -69,11 +73,67 @@ pub struct AppSettings {
     pub cooler_background_removal: bool,
     /// Which AI features are shown (Settings > AI Models).
     pub ai: AiFeatures,
+    /// Keyboard shortcuts: a starting set and the person's own changes.
+    pub shortcuts: crate::keymap::Shortcuts,
+    /// Earlier versions of projects, kept to roll back to (see `versions`).
+    pub versions: VersionSettings,
+    /// Memory set aside for frames rendered ahead of the playhead, in megabytes (0 is off).
+    pub render_ahead_mb: u32,
     /// The movie an export was writing when Studio last ran, until it finished: if Studio quit
     /// or crashed first, its unfinished hidden file is removed on the next launch.
     pub export_in_progress: Option<PathBuf>,
+    /// The same for File ▸ Package…: the zip being written, until it is finished.
+    pub package_in_progress: Option<PathBuf>,
     /// The eyedropper's current color, the colors it picked lately, and the saved swatches.
     pub colors: SavedColors,
+}
+
+/// What Studio shows when it starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StartWith {
+    /// The start screen: recent projects, a new or opened project, or a template.
+    #[default]
+    StartScreen,
+    /// The project that was open last, straight away (the start screen if there is none).
+    LastProject,
+}
+
+/// A project on the recent list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentProject {
+    pub path: PathBuf,
+    /// When it was last opened or saved, in seconds since 1970.
+    pub opened: u64,
+}
+
+/// How many projects the recent list keeps.
+pub const RECENT_LIMIT: usize = 20;
+
+/// Puts `path` at the top of the recent list (moving it if it was already there), stamped `now`
+/// (seconds since 1970), and keeps the list to `RECENT_LIMIT`.
+pub fn add_recent(recent: &mut Vec<RecentProject>, path: &Path, now: u64) {
+    recent.retain(|project| project.path != path);
+    recent.insert(0, RecentProject { path: path.to_path_buf(), opened: now });
+    recent.truncate(RECENT_LIMIT);
+}
+
+/// Seconds since 1970, for stamping recent projects.
+pub fn now_seconds() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs())
+}
+
+/// Notes that the project at `path` was just opened or saved: it is the one to reopen, and goes
+/// to the top of the recent list.
+pub fn note_project_used(path: &Path) {
+    update(|settings| {
+        settings.last_project = Some(path.to_path_buf());
+        add_recent(&mut settings.recent_projects, path, now_seconds());
+    });
+}
+
+/// Takes `path` off the recent list.
+pub fn forget_recent(path: &Path) {
+    update(|settings| settings.recent_projects.retain(|project| project.path != path));
 }
 
 /// Colors kept from one session to the next, like Photoshop's foreground color and swatches.
@@ -117,6 +177,23 @@ impl AiFeatures {
     /// Whether any is shown.
     pub fn any(self) -> bool {
         self.captions || self.remove_background || self.auto_reframe || self.enhance_speech
+    }
+}
+
+/// How earlier versions of projects are kept (File ▸ Browse Versions…).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VersionSettings {
+    pub keep: bool,
+    /// Minutes between versions while a project changes (one is also kept on each save).
+    pub every_minutes: u32,
+    /// How many each project keeps; the oldest go first.
+    pub how_many: u32,
+}
+
+impl Default for VersionSettings {
+    fn default() -> Self {
+        Self { keep: true, every_minutes: 10, how_many: 30 }
     }
 }
 
@@ -207,7 +284,9 @@ impl Default for AppSettings {
             project_columns: ProjectColumns::default(),
             default_folders: ["Footage", "Images", "Music", "Sound Effects", "Voice Over"].map(String::from).to_vec(),
             import_folders: ImportFolders::default(),
-            reopen_last_project: true,
+            start_with: StartWith::default(),
+            recent_projects: Vec::new(),
+            last_update_check: 0,
             recovery_seconds: 30,
             new_composition: NewComposition::default(),
             playback_quality: PlaybackQuality::default(),
@@ -221,7 +300,12 @@ impl Default for AppSettings {
             compact_timeline: false,
             cooler_background_removal: false,
             ai: AiFeatures::default(),
+            shortcuts: crate::keymap::Shortcuts::default(),
+            versions: VersionSettings::default(),
+            // Tests turn it on where they need it, so the viewer stays predictable elsewhere.
+            render_ahead_mb: if cfg!(test) { 0 } else { 2048 },
             export_in_progress: None,
+            package_in_progress: None,
             colors: SavedColors::default(),
         }
     }
@@ -428,6 +512,20 @@ mod tests {
         assert_eq!(load(), AppSettings::default());
         assert_eq!(std::fs::read_to_string(folder().join("settings.damaged.json")).unwrap(), "{ not json");
         std::fs::remove_file(settings_path()).unwrap();
+    }
+
+    #[test]
+    fn the_recent_list_puts_the_latest_first_without_repeats() {
+        let mut recent = Vec::new();
+        add_recent(&mut recent, Path::new("/a.studio"), 1);
+        add_recent(&mut recent, Path::new("/b.studio"), 2);
+        add_recent(&mut recent, Path::new("/a.studio"), 3);
+        assert_eq!(recent, [RecentProject { path: "/a.studio".into(), opened: 3 }, RecentProject { path: "/b.studio".into(), opened: 2 }]);
+        for index in 0..30 {
+            add_recent(&mut recent, Path::new(&format!("/{index}.studio")), 10 + index);
+        }
+        assert_eq!(recent.len(), RECENT_LIMIT);
+        assert_eq!(recent[0].path, Path::new("/29.studio"));
     }
 
     #[test]

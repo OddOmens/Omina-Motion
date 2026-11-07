@@ -1,12 +1,15 @@
-//! Ready-made, animated compositions for social media and marketing: 225 templates, each in
-//! three shapes (16:9, 4:5 and 9:16), about 10 to 15 seconds long.
+//! Ready-made, animated compositions for social media, ads and marketing: 61 templates, each
+//! in three shapes (16:9, 4:5 and 9:16), about 10 to 15 seconds long.
 //!
-//! A template is a layout (one of `Layout`'s 45 animated designs) filled with its own words,
-//! colors and font (see `catalog`). Making one builds an ordinary composition from text, shape
+//! A template is a layout (one of `Layout`'s 61 animated designs, one template each) filled with
+//! its own words, colors and font (see `catalog`). Any template can take another palette from
+//! `LOOKS` (`Template::recolored`) or a brand's colors and font (`Template::branded`). Making one builds an ordinary composition from text, shape
 //! and solid layers with keyframes and effects, so everything in it can be edited afterwards.
 //! Gray boxes named "Drop your … here" mark where footage or images go.
 
+mod ads;
 mod catalog;
+mod editorial;
 mod fun;
 mod layouts;
 mod social;
@@ -14,9 +17,10 @@ mod social;
 use crate::animation::{Animated, CubicBezier, EaseMode, Easing, Keyframe, Vec2};
 use crate::edit::{self, CompositionSettings};
 use crate::model::{Id, Paint, Project, Rgba, ShapeKind, ShapeStyle, Stroke, TextAlign, TextStyle};
+use crate::text_animation::{TextAnimator, TextEase, TextMotion, TextOrder, TextUnit};
 use crate::time::FrameRate;
 
-pub use catalog::TEMPLATES;
+pub use catalog::{LOOKS, TEMPLATES};
 
 /// The shapes every template comes in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,6 +57,7 @@ impl Format {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Category {
     Marketing,
+    Ads,
     Sales,
     Product,
     Ugc,
@@ -68,11 +73,12 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Self; 13] = [Self::Marketing, Self::Sales, Self::Product, Self::Ugc, Self::Social, Self::Intros, Self::Fun, Self::Celebrations, Self::Testimonials, Self::Events, Self::Education, Self::Podcast, Self::Brand];
+    pub const ALL: [Self; 14] = [Self::Marketing, Self::Ads, Self::Sales, Self::Product, Self::Ugc, Self::Social, Self::Intros, Self::Fun, Self::Celebrations, Self::Testimonials, Self::Events, Self::Education, Self::Podcast, Self::Brand];
 
     pub fn name(self) -> &'static str {
         match self {
             Self::Marketing => "Marketing",
+            Self::Ads => "Ads",
             Self::Sales => "Sales & Offers",
             Self::Product => "Product",
             Self::Ugc => "UGC",
@@ -198,6 +204,39 @@ pub enum Layout {
     OutlineStack,
     /// Word, line under it, date: a bouncy outlined title with a date sticker.
     VlogTitle,
+    /// Hook, three captions, button: captions over a creator talking to camera.
+    UgcCaptions,
+    /// Title, our name, their name, three rows, button: an "us versus them" table.
+    VersusTable,
+    /// Problem kicker, problem, solution kicker, solution, button: the problem struck through,
+    /// then the answer on a panel sweeping up.
+    ProblemSolution,
+    /// Title, three features, button: a product photo with its features pointed out.
+    FeatureCallouts,
+    /// Kicker, offer, line under it, button: a limited-time offer with a clock counting down.
+    OfferTimer,
+    /// Headline, score, reviews line, button: a star rating with customer photos.
+    SocialProof,
+    /// Headline (lines), date, place, tag: a poster whose lines stretch up into place.
+    PosterStretch,
+    /// Kicker, title, date: color bands slide across, then away to show the title.
+    SlidingBlocks,
+    /// Word, caption: the word repeated down the frame in outline, rows drifting.
+    TypeRepeater,
+    /// Quote, name, role: photo cards drop onto a stack, then a quote card on top.
+    CardStack,
+    /// Word, caption: 3, 2, 1 filling the screen on changing colors, then the word.
+    BoldCountdown,
+    /// Headline, line: a title spinning in out of a blur, with rings rippling out.
+    BlurSpin,
+    /// Title, kicker: shutters slide off a photo, then a title band.
+    SplitReveal,
+    /// Title, line: gradient bars drifting behind a huge title.
+    GradientTitle,
+    /// Word, word, brand, button: big words over a photo, echoing across it in outline.
+    PhotoTagline,
+    /// Word, line: the word's full stop bounces in, then swells to fill the frame.
+    BouncyPeriod,
 }
 
 /// One template: its layout filled with words, colors and a font.
@@ -214,6 +253,11 @@ pub struct Template {
 }
 
 impl Template {
+    /// The template in another palette, keeping its words and font.
+    pub fn recolored(&self, palette: Palette) -> Template {
+        Template { palette, ..*self }
+    }
+
     /// The template in a brand's look: its first color becomes the accent; a second, the
     /// background; a third, the text. Its first text style sets the font. Colors and text styles
     /// it doesn't have keep the template's own.
@@ -299,10 +343,14 @@ pub fn build(project: &mut Project, template: &Template, format: Format) -> Opti
     Some(comp)
 }
 
-/// Gentle ease-out (most things arriving), and a springy one (things popping in).
+/// Gentle ease-out (most things arriving), ease-in (things leaving), and a springy one (things
+/// popping in): it goes a little past its size and settles back once, rather than wobbling.
 const EASE_OUT: Easing = Easing::Curve(CubicBezier::new(0.16, 1.0, 0.3, 1.0));
+const EASE_IN: Easing = Easing::Curve(CubicBezier::new(0.7, 0.0, 0.84, 0.0));
 const EASE_IN_OUT: Easing = Easing::Curve(CubicBezier::new(0.65, 0.0, 0.35, 1.0));
-const SPRING: Easing = Easing::Elastic(EaseMode::Out);
+const SPRING: Easing = Easing::Curve(CubicBezier::new(0.34, 1.56, 0.64, 1.0));
+/// A real bounce, for the few playful things that should wobble into place.
+const WOBBLE: Easing = Easing::Elastic(EaseMode::Out);
 
 /// Builds a template's layers into its composition. Positions are fractions of the frame, and
 /// sizes are in "units": a pixel of a 1080-pixel short side, so every format looks alike.
@@ -427,11 +475,11 @@ impl Builder<'_> {
     /// A gray box marking where footage or a photo goes.
     fn placeholder(&mut self, size: Vec2, at: Vec2, corner: f32, from: f64, what: &str) -> Id {
         let fill = Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0);
-        self.shape(ShapeKind::Rectangle, size, at, Some(fill), Some((0x71717a, 2.0)), corner, from, &format!("Drop your {what} here"))
+        self.shape(ShapeKind::Rectangle, size, at, Some(fill), Some((0x71717a, 2.0)), corner, from, &crate::slots::placeholder_name(what))
     }
 
     /// The whole-frame background: a gentle gradient between the palette's two background
-    /// colors, slowly drifting larger for life.
+    /// colors, slowly drifting larger, with a soft glow wandering across it for life.
     fn background(&mut self) -> Id {
         let palette = self.palette();
         let paint = Paint::linear(Self::color(palette.background), Self::color(palette.background_2), 120.0);
@@ -440,6 +488,7 @@ impl Builder<'_> {
         let id = self.shape(ShapeKind::Rectangle, size, center, Some(paint), None, 0.0, 0.0, "Background");
         let end = self.end();
         self.scale(id, 0.0, 100.0, end, 108.0, Easing::Linear);
+        self.ambient_glow();
         id
     }
 
@@ -500,8 +549,63 @@ impl Builder<'_> {
 
     /// Pops in from nothing with a spring.
     fn pop_in(&mut self, id: Id, at: f64) {
-        self.scale(id, at, 0.0, at + 0.7, 100.0, SPRING);
+        self.scale(id, at, 0.0, at + 0.55, 100.0, SPRING);
         self.fade_in(id, at, 0.15);
+    }
+
+    /// Brings a text layer's words in one after another, each rising into place: the way
+    /// headlines arrive in most social and ad videos. It is a text animator, so it can be changed
+    /// in Properties afterwards. The layer must start at `at`.
+    fn words_in(&mut self, id: Id, seconds: f32) {
+        let words = self.text_of(id).split_whitespace().count().max(1);
+        // A word or two takes a moment; a long line takes longer, but never drags.
+        let seconds = (seconds * (0.6 + 0.1 * words as f32)).clamp(0.4, seconds * 1.4);
+        let animator = TextAnimator { motion: TextMotion::Rise, unit: TextUnit::Word, order: TextOrder::Forward, ease: TextEase::Smooth, seconds, overlap: 0.55 };
+        self.layer(id).animation.text_in = Some(animator);
+    }
+
+    /// Brings a short word in letter by letter, each popping up from nothing: for big single
+    /// words such as names, numbers and badges.
+    fn letters_in(&mut self, id: Id, seconds: f32) {
+        let animator = TextAnimator { motion: TextMotion::Pop, unit: TextUnit::Character, order: TextOrder::Forward, ease: TextEase::Overshoot, seconds, overlap: 0.7 };
+        self.layer(id).animation.text_in = Some(animator);
+    }
+
+    /// The words of a text layer.
+    fn text_of(&mut self, id: Id) -> String {
+        match &self.layer(id).content {
+            crate::model::LayerContent::Text { text, .. } => text.clone(),
+            _ => String::new(),
+        }
+    }
+
+    /// The height, in pixels, `text` takes at `size` units (all its lines).
+    fn text_height(&self, text: &str, size: f32) -> f32 {
+        text.lines().count().max(1) as f32 * size * 1.15 * self.unit()
+    }
+
+    /// Where to center something `height` units tall so it sits `gap` units below the text
+    /// `text` (at `size` units, centered at `above`), and no higher than `at_least`. Keeps a
+    /// line under a headline clear of it when the headline runs to two or three lines.
+    fn below(&self, above: Vec2, text: &str, size: f32, gap: f32, height: f32, at_least: Vec2) -> Vec2 {
+        let unit = self.unit();
+        let y = above.y + self.text_height(text, size) * 0.5 + (gap + height * 0.5) * unit;
+        Vec2::new(at_least.x, at_least.y.max(y))
+    }
+
+    /// A soft glow in the accent color, drifting slowly behind everything, so a held frame is
+    /// never quite still. Sits just above the background.
+    fn ambient_glow(&mut self) {
+        let p = self.palette();
+        let side = self.width.max(self.height) / self.unit() * 0.9;
+        let paint = Paint::radial(Self::color(p.accent).with_alpha(0.35), Self::color(p.accent).with_alpha(0.0));
+        let start = self.at(0.25, 0.3);
+        let glow = self.shape(ShapeKind::Ellipse, Vec2::new(side, side), start, Some(paint), None, 0.0, 0.0, "Glow");
+        self.transform(glow).opacity.value = 55.0;
+        let end = self.end();
+        let finish = self.at(0.75, 0.7);
+        self.move_to(glow, 0.0, end, finish, EASE_IN_OUT);
+        self.scale(glow, 0.0, 90.0, end, 120.0, EASE_IN_OUT);
     }
 
     /// Grows across from its left edge (a bar filling).
@@ -561,17 +665,35 @@ impl Builder<'_> {
         }
     }
 
-    /// Fades every layer out over the last half second, so the template ends cleanly.
+    /// Sends every layer still showing at the end off in a quick ripple: each fades while
+    /// lifting a little, a beat after the one before, so the template ends with a clean exit
+    /// rather than a flat fade. What fills the frame (the background, color panels, the spot for
+    /// footage) stays, so the last frame isn't empty.
     fn fade_everything_out(&mut self) {
+        const LENGTH: f64 = 0.45;
+        const STAGGER: f64 = 0.03;
         let end = self.end();
-        let ids: Vec<(Id, bool)> = self
+        let (width, height) = (self.width, self.height);
+        let fills_frame = |layer: &crate::model::Layer| matches!(layer.name.as_str(), "Background" | "Glow" | "Panel") || (layer.size.x >= width * 0.99 && layer.size.y >= height * 0.99);
+        let lasting: Vec<Id> = self
             .project
             .composition(self.comp)
-            .map(|composition| composition.layers.iter().map(|layer| (layer.id, layer.out_frame >= self.duration && layer.name != "Background")).collect())
+            .map(|composition| composition.layers.iter().filter(|layer| layer.out_frame >= self.duration && !fills_frame(layer)).map(|layer| layer.id).collect())
             .unwrap_or_default();
-        for (id, lasts) in ids {
-            if lasts {
-                self.fade_out(id, end, 0.5);
+        let count = lasting.len();
+        let unit = self.unit();
+        // `layers` lists the top layer first; the bottom ones (made first) leave first, as they came.
+        for (index, id) in lasting.into_iter().enumerate() {
+            let order = (count - 1 - index) as f64;
+            let finish = end - 0.02 - (0.2 - (order * STAGGER).min(0.2));
+            self.fade_out(id, finish, LENGTH);
+            // Lifts only layers that aren't already moving then (scrolling rows keep scrolling).
+            let start = self.frame(finish - LENGTH);
+            let position = &self.transform(id).position;
+            if position.keyframes().iter().all(|key| key.frame < start) {
+                let from = position.value_at(start as f64);
+                let keys = vec![self.key(finish - LENGTH, from, EASE_IN), self.key(finish, from - Vec2::new(0.0, 40.0 * unit), Easing::Linear)];
+                Self::keys(&mut self.transform(id).position, keys);
             }
         }
     }
@@ -584,7 +706,7 @@ mod tests {
 
     #[test]
     fn every_template_has_words_for_its_layout() {
-        assert_eq!(TEMPLATES.len(), 225);
+        assert_eq!(TEMPLATES.len(), 61);
         let mut names = std::collections::HashSet::new();
         for template in &TEMPLATES {
             assert!(names.insert(template.name), "{} is named twice", template.name);
@@ -592,8 +714,27 @@ mod tests {
             assert!(template.copy.len() >= layouts::words_needed(template.layout), "{} is missing words", template.name);
         }
         for category in Category::ALL {
-            assert!(TEMPLATES.iter().filter(|template| template.category == category).count() >= 5, "{} has few templates", category.name());
+            assert!(TEMPLATES.iter().filter(|template| template.category == category).count() >= 3, "{} has few templates", category.name());
         }
+    }
+
+    #[test]
+    fn no_two_templates_are_the_same_design_in_other_colors() {
+        let mut layouts = std::collections::HashSet::new();
+        for template in &TEMPLATES {
+            assert!(layouts.insert(format!("{:?}", template.layout)), "{} repeats the {:?} layout", template.name, template.layout);
+        }
+        let mut names = std::collections::HashSet::new();
+        assert!(LOOKS.iter().all(|(name, _)| names.insert(*name)), "palette names are unique");
+    }
+
+    #[test]
+    fn recoloring_keeps_the_words_and_font() {
+        let template = TEMPLATES[0];
+        let (_, palette) = LOOKS[LOOKS.len() - 1];
+        let recolored = template.recolored(palette);
+        assert_eq!(recolored.palette, palette);
+        assert_eq!((recolored.copy, recolored.font, recolored.name), (template.copy, template.font, template.name));
     }
 
     #[test]

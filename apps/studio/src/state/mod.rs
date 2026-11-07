@@ -20,6 +20,7 @@ mod history;
 mod keyframes;
 mod layer_time;
 mod library;
+mod morph;
 mod snap;
 mod viewer;
 
@@ -44,6 +45,7 @@ pub use captions::HeardWord;
 pub use cutout::CutoutSource;
 pub use keyframes::KeyframeRef;
 pub use layer_time::LayerTimeEdit;
+pub use morph::MorphPair;
 pub use gradient::GradientEnd;
 pub use viewer::{ANCHOR_POINTS, ScaleHandle};
 
@@ -211,6 +213,17 @@ pub enum Deleted {
 struct PlaybackClock {
     started_at: Instant,
     start_frame: i64,
+}
+
+/// The colors new templates are made in, picked in the Templates panel: each template's own,
+/// one of the template palettes (`studio_core::templates::LOOKS`), or a Library brand's colors
+/// and font.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TemplateLook {
+    #[default]
+    Own,
+    Palette(usize),
+    Brand(studio_core::model::LinkId),
 }
 
 pub struct EditorState {
@@ -657,15 +670,21 @@ impl EditorState {
         self.selected_item = Some(studio_core::folders::add_folder(&mut self.project, &format!("Folder {}", count + 1), None));
     }
 
+    /// Template `index` in `look`: its own colors, another palette, or a brand's colors and font.
+    pub fn styled_template(&self, index: usize, look: TemplateLook) -> Option<studio_core::templates::Template> {
+        let template = studio_core::templates::TEMPLATES.get(index)?;
+        Some(match look {
+            TemplateLook::Own => *template,
+            TemplateLook::Palette(palette) => studio_core::templates::LOOKS.get(palette).map_or(*template, |(_, palette)| template.recolored(*palette)),
+            TemplateLook::Brand(brand) => self.libraries.brand(brand).map_or(*template, |brand| template.branded(brand)),
+        })
+    }
+
     /// Adds template `index` (of `studio_core::templates::TEMPLATES`) in `format` as a new
     /// composition, opens it and selects it in the Project panel.
     /// With `brand`, the template takes the brand's colors and font (see `Template::branded`).
-    pub fn add_template(&mut self, index: usize, format: studio_core::templates::Format, brand: Option<studio_core::model::LinkId>) -> Option<Id> {
-        let template = studio_core::templates::TEMPLATES.get(index)?;
-        let template = match brand.and_then(|brand| self.libraries.brand(brand)) {
-            Some(brand) => template.branded(brand),
-            None => *template,
-        };
+    pub fn add_template(&mut self, index: usize, format: studio_core::templates::Format, look: TemplateLook) -> Option<Id> {
+        let template = self.styled_template(index, look)?;
         let comp = studio_core::templates::build(&mut self.project, &template, format)?;
         self.open_composition(comp);
         self.selected_item = Some(comp);
@@ -710,6 +729,25 @@ impl EditorState {
         self.set_view_range(FrameRange::new(0.0, duration));
         self.history = history::History::new(&self.project);
         self.file = None;
+    }
+
+    /// Starts a new project made from template `index`: the template's composition is its only
+    /// one (in place of the empty Main Comp), open, with nothing to undo yet.
+    pub fn new_project_from_template(
+        &mut self,
+        folders: &[String],
+        size: crate::app_settings::NewComposition,
+        index: usize,
+        format: studio_core::templates::Format,
+        look: TemplateLook,
+    ) -> Option<Id> {
+        self.new_project(folders, size);
+        let empty = self.active_comp;
+        let comp = self.add_template(index, format, look)?;
+        let plan = edit::plan_item_deletion(&self.project, &[empty], comp);
+        edit::delete_items(&mut self.project, &plan);
+        self.history = history::History::new(&self.project);
+        Some(comp)
     }
 
     // Text -------------------------------------------------------------------
@@ -873,7 +911,7 @@ impl EditorState {
 
     /// Whether a layer has sound to adjust: audio layers, and footage with a sound track.
     pub fn has_sound(&self, layer: Id) -> bool {
-        self.composition().layer(layer).is_some_and(|layer| layer.has_audio && matches!(layer.content, LayerContent::Footage { .. } | LayerContent::Audio { .. }))
+        self.composition().layer(layer).is_some_and(|layer| studio_core::audio::layer_has_sound(&self.project, layer))
     }
 
     pub fn audio_setting(&self, layer: Id, setting: AudioSetting) -> Option<f32> {
@@ -903,7 +941,14 @@ impl EditorState {
         studio_core::presets::set_motion(&mut self.project, comp, layer, phase, motion, seconds);
     }
 
-    /// A text layer's In or Out text animator, if it has one.
+    /// Picks the easing of a layer's In or Out animation (`None`: the motion's own) and
+    /// rewrites its keyframes with it.
+    pub fn set_motion_easing(&mut self, layer: Id, phase: studio_core::presets::Phase, easing: Option<studio_core::animation::Easing>) {
+        let comp = self.active_comp;
+        studio_core::presets::set_motion_easing(&mut self.project, comp, layer, phase, easing);
+    }
+
+        /// A text layer's In or Out text animator, if it has one.
     pub fn text_animator(&self, layer: Id, phase: studio_core::presets::Phase) -> Option<studio_core::text_animation::TextAnimator> {
         let animation = self.composition().layer(layer)?.animation;
         match phase {
@@ -1056,6 +1101,23 @@ impl EditorState {
             self.selected_item = Some(last);
         }
         made
+    }
+
+    /// Copies composition `comp` at `width` × `height`, rearranged to suit the new shape as
+    /// Magic Resize does, and opens it. The copy goes in the same Project panel folder, named
+    /// for its size: "Promo 9:16" copied to 4:5 becomes "Promo 4:5" rather than "Promo 9:16 4:5".
+    pub fn duplicate_resized(&mut self, comp: Id, width: u32, height: u32, label: &str) -> Option<Id> {
+        let name = self.project.composition(comp)?.name.clone();
+        let labels: Vec<&str> = studio_core::resize::SIZES.iter().map(|size| crate::panels::resize::short_label(size.0)).collect();
+        let base = labels.iter().find_map(|old| name.strip_suffix(old).map(str::trim_end)).filter(|base| !base.is_empty()).unwrap_or(&name);
+        let made = studio_core::resize::resize_composition(&mut self.project, comp, width, height, &format!("{base} {label}"))?;
+        let folder = self.project.item(comp).and_then(|item| item.parent);
+        if folder.is_some() {
+            self.move_item(made, folder);
+        }
+        self.open_composition(made);
+        self.selected_item = Some(made);
+        Some(made)
     }
 
     /// Removes every marker from the open composition.

@@ -10,7 +10,7 @@ use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, DragMoveEvent, Entity, FocusHandle, InteractiveElement, IntoElement,
-    KeyBinding, ParentElement, Render, StyleRefinement, Styled, Subscription, Window, actions, div,
+    ParentElement, Render, StyleRefinement, Styled, Subscription, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
 use studio_core::animation::CubicBezier;
@@ -66,11 +66,13 @@ actions!(studio, [
     OpenSettings,
     Precompose,
     UngroupComposition,
+    MorphTo,
     FlipHorizontal,
     FlipVertical,
     ResetTransform,
     CompositionSettings,
     MagicResize,
+    MagicMove,
     NewComposition,
     NewProject,
     Import,
@@ -80,129 +82,119 @@ actions!(studio, [
     SaveAs,
     Open,
     Export,
+    Package,
     TrimInToPlayhead,
     TrimOutToPlayhead,
     SplitLayer,
     RippleDelete,
     ToggleSnapping,
     Dismiss,
-    Quit
+    Quit,
+    Cut,
+    SelectAll,
+    CloseProject,
+    ShowStartScreen,
+    BrowseVersions,
+    ClearRecentProjects,
+    HideStudio,
+    HideOtherApps,
+    ShowAllApps,
+    MinimizeWindow,
+    ZoomWindow,
+    ToggleFullScreen,
+    AboutStudio,
+    CheckForUpdates
 ]);
 
+/// File ▸ Open Recent: opens the project at `path`.
+#[derive(Clone, PartialEq, gpui_kit::Action)]
+#[action(namespace = studio, no_json)]
+pub struct OpenRecent {
+    pub path: std::path::PathBuf,
+}
+
 /// Key context the editor's shortcuts are bound in.
-const KEY_CONTEXT: &str = "Studio";
+pub(crate) const KEY_CONTEXT: &str = "Studio";
 /// Where shortcuts that are plain keys (Space, letters, Delete, Alt+key) apply: anywhere in the
 /// editor except while a text field has focus. On macOS a key binding wins over typing, so
 /// without this, typing "s" or a space into a field would toggle snapping or start playback.
-const NOT_TYPING: &str = "Studio && !Input";
+pub(crate) const NOT_TYPING: &str = "Studio && !Input";
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("space", TogglePlayback, Some(NOT_TYPING)),
-        KeyBinding::new("pagedown", NextFrame, Some(NOT_TYPING)),
-        KeyBinding::new("pageup", PreviousFrame, Some(NOT_TYPING)),
-        KeyBinding::new("shift-pagedown", NextTenFrames, Some(NOT_TYPING)),
-        KeyBinding::new("shift-pageup", PreviousTenFrames, Some(NOT_TYPING)),
-        // Cmd+[ and Cmd+] step a frame; with Shift, five. (Shift+[ types "{", so both spellings.)
-        KeyBinding::new("cmd-[", PreviousFrame, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-]", NextFrame, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-shift-[", PreviousFiveFrames, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-shift-]", NextFiveFrames, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-{", PreviousFiveFrames, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-}", NextFiveFrames, Some(NOT_TYPING)),
-        // Cmd+= (or Cmd++) and Cmd+- zoom the composition viewer.
-        KeyBinding::new("cmd-=", ZoomViewerIn, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-+", ZoomViewerIn, Some(NOT_TYPING)),
-        KeyBinding::new("cmd--", ZoomViewerOut, Some(NOT_TYPING)),
-        KeyBinding::new("escape", Dismiss, Some(NOT_TYPING)),
-        KeyBinding::new("home", FirstFrame, Some(NOT_TYPING)),
-        KeyBinding::new("end", LastFrame, Some(NOT_TYPING)),
-        KeyBinding::new("delete", Delete, Some(NOT_TYPING)),
-        KeyBinding::new("backspace", Delete, Some(NOT_TYPING)),
-        KeyBinding::new("f9", EasyEase, Some(NOT_TYPING)),
-        KeyBinding::new("v", SelectionTool, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-t", TypeTool, Some(KEY_CONTEXT)),
-        KeyBinding::new("q", ShapeTool, Some(NOT_TYPING)),
-        KeyBinding::new("c", CutTool, Some(NOT_TYPING)),
-        KeyBinding::new("g", PenTool, Some(NOT_TYPING)),
-        // The rest of the tools, on After Effects' and Premiere's keys.
-        KeyBinding::new("h", HandTool, Some(NOT_TYPING)),
-        KeyBinding::new("z", ZoomTool, Some(NOT_TYPING)),
-        KeyBinding::new("w", RotateTool, Some(NOT_TYPING)),
-        KeyBinding::new("b", RippleTool, Some(NOT_TYPING)),
-        KeyBinding::new("n", RollTool, Some(NOT_TYPING)),
-        KeyBinding::new("y", SlipTool, Some(NOT_TYPING)),
-        KeyBinding::new("u", SlideTool, Some(NOT_TYPING)),
-        KeyBinding::new("a", TrackSelectTool, Some(NOT_TYPING)),
-        // Photoshop's eyedropper key.
-        KeyBinding::new("i", EyedropperTool, Some(NOT_TYPING)),
-        // Premiere's Rate Stretch and marker keys.
-        KeyBinding::new("r", RateStretchTool, Some(NOT_TYPING)),
-        KeyBinding::new("m", ToggleMarker, Some(NOT_TYPING)),
-        // After Effects' New Solid, Adjustment Layer and Null Object.
-        KeyBinding::new("cmd-y", NewSolid, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-alt-y", NewAdjustmentLayer, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-alt-shift-y", NewNull, Some(KEY_CONTEXT)),
-        // After Effects' title/action safe toggle.
-        KeyBinding::new("'", ToggleGuides, Some(NOT_TYPING)),
-        KeyBinding::new("enter", FinishPath, Some(NOT_TYPING)),
-        // Outside text fields, so copying and pasting text in a field still works.
-        KeyBinding::new("cmd-c", Copy, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-v", Paste, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-d", Duplicate, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-shift-c", Precompose, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-k", CompositionSettings, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-,", OpenSettings, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-n", NewComposition, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-alt-n", NewProject, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-i", Import, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-z", Undo, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-z", Redo, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-s", Save, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-s", SaveAs, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-o", Open, Some(KEY_CONTEXT)),
-        // ⌘M, as After Effects' Add to Render Queue.
-        KeyBinding::new("cmd-m", Export, Some(KEY_CONTEXT)),
-        // As in After Effects: trim the selected layers' in or out point to the playhead.
-        KeyBinding::new("alt-[", TrimInToPlayhead, Some(NOT_TYPING)),
-        KeyBinding::new("alt-]", TrimOutToPlayhead, Some(NOT_TYPING)),
-        // After Effects' Split Layer.
-        KeyBinding::new("cmd-shift-d", SplitLayer, Some(KEY_CONTEXT)),
-        // Premiere's Ripple Delete.
-        KeyBinding::new("shift-delete", RippleDelete, Some(NOT_TYPING)),
-        KeyBinding::new("shift-backspace", RippleDelete, Some(NOT_TYPING)),
-        // Premiere's snapping toggle.
-        KeyBinding::new("s", ToggleSnapping, Some(NOT_TYPING)),
-        KeyBinding::new("cmd-q", Quit, None),
-    ]);
+    // The shortcuts in use (Settings ▸ Keyboard Shortcuts), on top of the components' own.
+    crate::keymap::init(&crate::app_settings::load().shortcuts, cx);
     // The editor window handles Quit itself, to offer saving first. This only runs when no
     // window does (none is open).
     cx.on_action(|_: &Quit, cx| cx.quit());
+    // Hiding is the app's, not the window's, so it works whatever has focus.
+    cx.on_action(|_: &HideStudio, cx| cx.hide());
+    cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
+}
+
+/// Rebuilds the menu bar, so File ▸ Open Recent lists the projects used lately.
+pub fn refresh_menus(cx: &mut App) {
+    cx.set_menus(menus());
 }
 
 /// The menu bar. Shortcuts shown in it come from the key bindings above.
 pub fn menus() -> Vec<gpui_kit::Menu> {
-    use gpui_kit::{Menu, MenuItem};
+    use gpui_kit::{Menu, MenuItem, OsAction, SystemMenuType};
+    // The projects used lately that are still on disk, newest first.
+    let recent: Vec<MenuItem> = crate::app_settings::load()
+        .recent_projects
+        .into_iter()
+        .filter(|project| project.path.exists())
+        .take(10)
+        .map(|project| {
+            let name = project.path.file_stem().map_or_else(|| project.path.display().to_string(), |name| name.to_string_lossy().into_owned());
+            MenuItem::action(name, OpenRecent { path: project.path })
+        })
+        .collect();
+    let mut open_recent = Menu::new("Open Recent").items(recent);
+    open_recent.items.extend([MenuItem::separator(), MenuItem::action("Clear Menu", ClearRecentProjects)]);
     vec![
-        Menu::new("Studio").items([MenuItem::action("Settings…", OpenSettings), MenuItem::separator(), MenuItem::action("Quit Studio", Quit)]),
+        Menu::new("Studio").items([
+            MenuItem::action("About Studio", AboutStudio),
+            // Off in builds made without an update address (see `updates`).
+            MenuItem::action("Check for Updates…", CheckForUpdates).disabled(crate::updates::FEED.is_none()),
+            MenuItem::separator(),
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Hide Studio", HideStudio),
+            MenuItem::action("Hide Others", HideOtherApps),
+            MenuItem::action("Show All", ShowAllApps),
+            MenuItem::separator(),
+            MenuItem::action("Quit Studio", Quit),
+        ]),
         Menu::new("File").items([
             MenuItem::action("New Project", NewProject),
             MenuItem::action("Open…", Open),
+            MenuItem::submenu(open_recent),
+            MenuItem::action("Close Project", CloseProject),
+            MenuItem::action("Start Screen", ShowStartScreen),
+            MenuItem::separator(),
             MenuItem::action("Save", Save),
             MenuItem::action("Save As…", SaveAs),
+            MenuItem::action("Browse Versions…", BrowseVersions),
             MenuItem::separator(),
             MenuItem::action("Export…", Export),
+            MenuItem::action("Package…", Package),
             MenuItem::separator(),
             MenuItem::action("Import…", Import),
             MenuItem::action("New Composition…", NewComposition),
         ]),
         Menu::new("Edit").items([
-            MenuItem::action("Undo", Undo),
-            MenuItem::action("Redo", Redo),
+            MenuItem::os_action("Undo", Undo, OsAction::Undo),
+            MenuItem::os_action("Redo", Redo, OsAction::Redo),
             MenuItem::separator(),
-            MenuItem::action("Copy", Copy),
-            MenuItem::action("Paste", Paste),
+            MenuItem::os_action("Cut", Cut, OsAction::Cut),
+            MenuItem::os_action("Copy", Copy, OsAction::Copy),
+            MenuItem::os_action("Paste", Paste, OsAction::Paste),
             MenuItem::action("Duplicate", Duplicate),
+            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
             MenuItem::action("Pre-compose…", Precompose),
             MenuItem::separator(),
             MenuItem::action("Trim In Point to Playhead", TrimInToPlayhead),
@@ -212,7 +204,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::separator(),
             MenuItem::action("Snapping", ToggleSnapping),
         ]),
-        Menu::new("Composition").items([MenuItem::action("Composition Settings…", CompositionSettings), MenuItem::action("Magic Resize…", MagicResize)]),
+        Menu::new("Composition").items([MenuItem::action("Composition Settings…", CompositionSettings), MenuItem::action("Magic Resize…", MagicResize), MenuItem::action("Magic Move…", MagicMove)]),
         Menu::new("Layer").items([
             MenuItem::action("New Solid", NewSolid),
             MenuItem::action("New Adjustment Layer", NewAdjustmentLayer),
@@ -220,6 +212,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::separator(),
             MenuItem::action("Pre-compose…", Precompose),
             MenuItem::action("Ungroup Composition", UngroupComposition),
+            MenuItem::action("Morph To…", MorphTo),
             MenuItem::action("Flip Horizontal", FlipHorizontal),
             MenuItem::action("Flip Vertical", FlipVertical),
             MenuItem::action("Reset Transform", ResetTransform),
@@ -233,7 +226,13 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Zoom In", ZoomViewerIn),
             MenuItem::action("Zoom Out", ZoomViewerOut),
             MenuItem::separator(),
-            MenuItem::action("Safe Areas and Grid", ToggleGuides),
+            MenuItem::action("Show Guides", ToggleGuides),
+        ]),
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", MinimizeWindow),
+            MenuItem::action("Zoom", ZoomWindow),
+            MenuItem::separator(),
+            MenuItem::action("Enter Full Screen", ToggleFullScreen),
         ]),
     ]
 }
@@ -512,20 +511,29 @@ pub struct UiState {
     pub editing: Option<EditingField>,
     /// The last curve used in the graph editor, shown when the selection has none of its own.
     pub flow_curve: CubicBezier,
-    /// Where the graph editor popover is open (below the Easings button), if it is.
-    pub graph_editor: Option<gpui_kit::Point<gpui_kit::Pixels>>,
+    /// The segment (or All) picked in the graph editor, with the keyframe selection it was
+    /// picked for; it no longer applies once the selection changes.
+    pub segment_focus: Option<(Vec<crate::state::KeyframeRef>, crate::panels::graph_editor::SegmentFocus)>,
     /// Font families offered in the Text section, looked up once at startup.
     pub font_families: Vec<&'static str>,
     /// The Templates panel's chosen shape and category, and the pictures made of templates.
     pub template_format: studio_core::templates::Format,
     pub template_category: Option<studio_core::templates::Category>,
-    /// The brand whose colors and font templates take, if one is chosen.
-    pub template_brand: Option<studio_core::model::LinkId>,
+    /// The colors templates are made in: their own, another palette, or a brand's look.
+    pub template_look: crate::state::TemplateLook,
     pub template_pictures: HashMap<(usize, studio_core::templates::Format), Arc<gpui_kit::RenderImage>>,
+    /// The template playing on its card while the pointer is over it.
+    pub template_preview: Option<panels::templates::TemplatePreview>,
     /// Whether the View All gallery of every template is open.
     pub template_gallery: bool,
+    /// Whether an update check is running, so a second one waits for it.
+    pub checking_for_updates: bool,
+    /// The start screen, while it shows over the editor.
+    pub start_screen: Option<panels::start_screen::StartScreen>,
     /// Whether the last recovery copy failed (said once, until it works again).
     pub recovery_failing: bool,
+    /// When the last version of the project was kept (see `versions`).
+    pub last_version_at: Option<std::time::Instant>,
     /// A library save that failed, to try again (with whether to back up first).
     pub library_save_failed: Option<bool>,
     /// The Mockups panel's choices and its device pictures.
@@ -546,10 +554,15 @@ pub struct UiState {
     /// The Export dialog's choices, and the export running now, if any.
     pub export_choice: panels::export::ExportChoice,
     pub export_job: Option<panels::export::ExportJob>,
+    /// The package File ▸ Package… is making now, if any.
+    pub package_job: Option<panels::package::PackageJob>,
     /// The Export dialog's preview: the frame picked and the picture drawn for it.
     pub export_preview: panels::export_dialog::ExportPreview,
     /// While an effect is dragged over the viewer, the layer it would be dropped on.
     pub effect_drop_layer: Option<Id>,
+    /// While a photo or video is dragged over the viewer, the outline (in composition pixels)
+    /// of the media slot it would fill (see `studio_core::slots`).
+    pub slot_drop: Option<[studio_core::animation::Vec2; 4]>,
     /// Captions being made in the background, if any.
     pub caption_job: Option<panels::captions::CaptionJob>,
     /// Silence removal, beat finding, tracking or reframing running in the background, if any.
@@ -571,8 +584,10 @@ pub struct UiState {
     /// Whether the eyedropper's color menu (current color, recent picks, swatches) is open, and
     /// whether its rail button is held down (a long press opens the menu).
     pub color_well: bool,
-    /// Whether the viewer shows the title and action safe areas, thirds and center (').
+    /// Whether the viewer shows its guides (') and which ones: the grid, title safe, or the
+    /// social apps' safe zones.
     pub guides: bool,
+    pub guide_choice: panels::guides::GuideChoice,
     pub eyedropper_press: bool,
     /// The Basic Correction (layer, effect) waiting for a click on something gray in the viewer
     /// to set its white balance.
@@ -644,6 +659,13 @@ impl UiState {
             self.toggled_sections.insert(key);
         }
     }
+
+    /// Unfolds the section named `key`, if it is folded.
+    pub fn open_section(&mut self, key: &'static str) {
+        if !self.section_open(key) {
+            self.toggle_section(key);
+        }
+    }
 }
 
 pub struct Workspace {
@@ -694,9 +716,22 @@ impl Panels {
 impl Workspace {
     /// How many times each panel has rendered, in `PanelKind` order: toolbar, project, viewer,
     /// timeline, properties, effects, libraries, align.
+    /// How long each panel has spent rendering, in the same order.
+    pub fn panel_render_times(&self, cx: &App) -> [std::time::Duration; 12] {
+        let p = &self.panels;
+        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions, &p.elements, &p.mockups].map(|view| view.read(cx).render_time)
+    }
+
     pub fn panel_render_counts(&self, cx: &App) -> [usize; 12] {
         let p = &self.panels;
         [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions, &p.elements, &p.mockups].map(|view| view.read(cx).renders)
+    }
+}
+
+impl Workspace {
+    /// Redraws just the timeline (scrolling it, say), not every panel.
+    pub fn notify_timeline(&self, cx: &mut App) {
+        cx.notify(self.panels.timeline.entity_id());
     }
 }
 
@@ -766,6 +801,24 @@ impl Workspace {
             })
             .detach();
         }
+        // Frames rendered ahead redraw the timeline's green line as they arrive. (Headless tests
+        // leave this out: their scheduler refuses wake-ups from other threads.)
+        #[cfg(not(test))]
+        {
+            let (ahead_ready, ahead_arrived) = async_channel::bounded::<()>(1);
+            render.preview.set_on_change(move || {
+                let _ = ahead_ready.try_send(());
+            });
+            let timeline = panels.timeline.entity_id();
+            cx.spawn(async move |_, cx| {
+                while ahead_arrived.recv().await.is_ok() {
+                    // At most a few redraws a second: the line needn't follow every frame.
+                    cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                    cx.update(|cx| cx.notify(timeline));
+                }
+            })
+            .detach();
+        }
         // Thumbnails and waveforms decoded in the background redraw the timeline as they arrive.
         // (Headless tests leave this out: their scheduler refuses wake-ups from other threads.)
         #[cfg(not(test))]
@@ -804,6 +857,10 @@ impl Workspace {
                 }
             });
             cx.defer_in(window, |this, window, cx| this.restore_session(window, cx));
+            // A crash last time is mentioned once, with its report.
+            cx.defer_in(window, |_, window, cx| crate::crash_log::mention_last_crash(window, cx));
+            // The daily update check, quietly.
+            cx.defer_in(window, |this, window, cx| crate::updates::check(this, false, window, cx));
             cx.spawn_in(window, async move |this, cx| {
                 loop {
                     // As often as Settings says; checked again each time, so a change applies.
@@ -868,17 +925,21 @@ impl Workspace {
                 field_anchor: None,
                 editing: None,
                 flow_curve: studio_core::animation::EASING_PRESETS[0].1,
-                graph_editor: None,
+                segment_focus: None,
                 font_families: panels::properties::installed_font_families(cx),
                 project_columns: crate::app_settings::load().project_columns,
                 settings: crate::app_settings::load(),
                 preview: Default::default(),
                 template_format: studio_core::templates::Format::Vertical,
                 template_category: None,
-                template_brand: None,
+                template_look: crate::state::TemplateLook::Own,
                 template_pictures: HashMap::new(),
+                template_preview: None,
                 template_gallery: false,
+                checking_for_updates: false,
+                start_screen: None,
                 recovery_failing: false,
+                last_version_at: None,
                 library_save_failed: None,
                 mockups: Default::default(),
                 element_pictures: HashMap::new(),
@@ -887,6 +948,7 @@ impl Workspace {
                 window_title: String::new(),
                 export_choice: Default::default(),
                 export_job: None,
+                package_job: None,
                 export_preview: Default::default(),
                 dialog_subscriptions: Vec::new(),
                 color_picker: None,
@@ -899,8 +961,10 @@ impl Workspace {
                 track_pick: None,
                 cutout_pick: None,
                 effect_drop_layer: None,
+                slot_drop: None,
                 color_well: false,
                 guides: false,
+                guide_choice: panels::guides::GuideChoice::default(),
                 eyedropper_press: false,
                 white_balance_pick: None,
                 wheel_bounds: Default::default(),
@@ -1333,8 +1397,14 @@ impl Render for Workspace {
             self.ui.preview.item = self.state.selected_item;
             self.ui.preview.seconds = 0.0;
         }
+        // A file dragged back out of the window ends its drag without a drop or a mouse release,
+        // so a drop outline left from it is cleared here.
+        if self.ui.slot_drop.is_some() && !cx.has_active_drag() {
+            self.ui.slot_drop = None;
+        }
         // The Templates panel's pictures are made here, a few per frame, as it needs them.
-        if self.ui.left_panel == LeftPanel::Templates || self.ui.template_gallery {
+        let start_templates = self.ui.start_screen.as_ref().is_some_and(|screen| screen.tab == panels::start_screen::StartTab::Templates);
+        if self.ui.left_panel == LeftPanel::Templates || self.ui.template_gallery || start_templates {
             panels::templates::make_pictures(self, window, cx);
         }
         if self.ui.left_panel == LeftPanel::Mockups {
@@ -1417,23 +1487,13 @@ impl Render for Workspace {
             .text_size(px(crate::theme::size::TEXT))
             .track_focus(&self.focus)
             .key_context(KEY_CONTEXT)
-            .on_action(cx.listener(|this, _: &TogglePlayback, _, cx| this.toggle_playback(cx)))
-            .on_action(cx.listener(|this, _: &NextFrame, _, cx| this.step(1, cx)))
-            .on_action(cx.listener(|this, _: &PreviousFrame, _, cx| this.step(-1, cx)))
-            .on_action(cx.listener(|this, _: &NextTenFrames, _, cx| this.step(10, cx)))
-            .on_action(cx.listener(|this, _: &PreviousTenFrames, _, cx| this.step(-10, cx)))
-            .on_action(cx.listener(|this, _: &NextFiveFrames, _, cx| this.step(5, cx)))
-            .on_action(cx.listener(|this, _: &PreviousFiveFrames, _, cx| this.step(-5, cx)))
-            .on_action(cx.listener(|this, _: &ZoomViewerIn, _, cx| {
-                panels::viewer::zoom_step(this, true);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ZoomViewerOut, _, cx| {
-                panels::viewer::zoom_step(this, false);
-                cx.notify();
-            }))
-            // Escape closes the template gallery.
+            // Escape closes the start screen or the template gallery.
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+                if this.ui.start_screen.is_some() {
+                    panels::start_screen::hide(this);
+                    cx.notify();
+                    return;
+                }
                 if this.ui.template_gallery {
                     this.ui.template_gallery = false;
                     cx.notify();
@@ -1445,171 +1505,219 @@ impl Render for Workspace {
                     cx.notify();
                 }
             }))
-            .on_action(cx.listener(|this, _: &FirstFrame, _, cx| this.go_to(0, cx)))
-            .on_action(cx.listener(|this, _: &LastFrame, _, cx| {
-                let last = this.state.composition().duration_frames - 1;
-                this.go_to(last, cx);
-            }))
-            .on_action(cx.listener(|this, _: &Delete, window, cx| this.delete(window, cx)))
-            .on_action(cx.listener(|this, _: &EasyEase, _, cx| {
-                this.state.easy_ease_selected();
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &SelectionTool, _, cx| {
-                this.set_tool(Tool::Selection);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &TypeTool, _, cx| {
-                this.set_tool(Tool::Type);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ShapeTool, _, cx| {
-                this.set_tool(Tool::Shape);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &CutTool, _, cx| {
-                this.set_tool(Tool::Cut);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &PenTool, _, cx| {
-                this.set_tool(Tool::Pen);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &HandTool, _, cx| {
-                this.set_tool(Tool::Hand);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ZoomTool, _, cx| {
-                this.set_tool(Tool::Zoom);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &RotateTool, _, cx| {
-                this.set_tool(Tool::Rotate);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &RippleTool, _, cx| {
-                this.set_tool(Tool::Ripple);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &RollTool, _, cx| {
-                this.set_tool(Tool::Roll);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &SlipTool, _, cx| {
-                this.set_tool(Tool::Slip);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &SlideTool, _, cx| {
-                this.set_tool(Tool::Slide);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &TrackSelectTool, _, cx| {
-                this.set_tool(Tool::TrackSelect);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &EyedropperTool, _, cx| {
-                this.set_tool(Tool::Eyedropper);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &RateStretchTool, _, cx| {
-                this.set_tool(Tool::RateStretch);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleMarker, _, cx| {
-                this.state.toggle_marker_at_playhead();
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &NewSolid, _, cx| this.new_layer(NewLayer::Solid, cx)))
-            .on_action(cx.listener(|this, _: &NewAdjustmentLayer, _, cx| this.new_layer(NewLayer::Adjustment, cx)))
-            .on_action(cx.listener(|this, _: &NewNull, _, cx| this.new_layer(NewLayer::Null, cx)))
-            .on_action(cx.listener(|this, _: &SequenceLayers, window, cx| this.stagger(None, window, cx)))
-            .on_action(cx.listener(|this, _: &StaggerLayers, window, cx| this.stagger(Some(STAGGER_FRAMES), window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleGuides, _, cx| {
-                this.ui.guides = !this.ui.guides;
-                cx.notify();
-            }))
-            // Enter ends a pen path as an open line (a path closes by clicking its first point).
-            .on_action(cx.listener(|this, _: &FinishPath, _, cx| {
-                if this.state.finish_pen(false).is_some() {
-                    this.ui.tabs.insert(PanelId::Properties, 0);
-                }
-                cx.notify();
-            }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| panels::settings::open(this, window, cx)))
-            .on_action(cx.listener(|this, _: &Precompose, window, cx| panels::precompose::open(this, window, cx)))
-            .on_action(cx.listener(|this, _: &UngroupComposition, window, cx| this.ungroup_selected(window, cx)))
-            .on_action(cx.listener(|this, _: &FlipHorizontal, _, cx| {
-                if this.state.flip_selection(true) {
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &FlipVertical, _, cx| {
-                if this.state.flip_selection(false) {
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &ResetTransform, _, cx| {
-                this.state.reset_selection_transform();
+            .on_action(cx.listener(|this, _: &CloseProject, window, cx| this.close_project(window, cx)))
+            .on_action(cx.listener(|this, _: &ShowStartScreen, window, cx| panels::start_screen::go_to(this, window, cx)))
+            .on_action(cx.listener(|this, _: &BrowseVersions, window, cx| panels::versions::open(this, window, cx)))
+            .on_action(cx.listener(|this, action: &OpenRecent, window, cx| panels::start_screen::open_recent(this, action.path.clone(), window, cx)))
+            .on_action(cx.listener(|_, _: &ClearRecentProjects, _, cx| {
+                crate::app_settings::update(|settings| settings.recent_projects.clear());
+                refresh_menus(cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Copy, _, cx| {
-                this.state.copy_selection();
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &Paste, _, cx| {
-                if !this.state.paste().is_empty() {
-                    cx.notify();
-                }
-            }))
-            // In the Project panel, Duplicate copies the selected item; elsewhere, the selected layers.
-            .on_action(cx.listener(|this, _: &Duplicate, window, cx| {
-                if this.ui.active_panel == PanelId::Project {
-                    let Some(item) = this.state.selected_item else { return };
-                    if this.state.duplicate_item(item).is_none() {
-                        window.push_notification("Folders can't be duplicated. Select a composition or media item.", cx);
-                    }
-                    cx.notify();
-                } else if !this.state.duplicate_selection().is_empty() {
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &CompositionSettings, window, cx| {
-                panels::composition_settings::open(this, false, window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &MagicResize, window, cx| panels::resize::open(this, window, cx)))
-            .on_action(cx.listener(|this, _: &Import, window, cx| this.import(window, cx)))
-            // Offered only when there is something to undo or redo, so the Edit menu greys them out otherwise.
-            .when(self.state.can_undo(), |root| root.on_action(cx.listener(|this, _: &Undo, _, cx| this.undo_or_redo(false, cx))))
-            .when(self.state.can_redo(), |root| root.on_action(cx.listener(|this, _: &Redo, _, cx| this.undo_or_redo(true, cx))))
-            .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
-            .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_as(window, cx)))
+            .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
+            .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
+            .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| window.toggle_fullscreen()))
+            .on_action(cx.listener(|this, _: &AboutStudio, window, cx| panels::settings::open_about(this, window, cx)))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| crate::updates::check(this, true, window, cx)))
             .on_action(cx.listener(|this, _: &Open, window, cx| this.open(window, cx)))
-            .on_action(cx.listener(|this, _: &Export, window, cx| panels::export_dialog::open(this, window, cx)))
-            .on_action(cx.listener(|this, _: &SplitLayer, window, cx| this.split_layer(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleSnapping, _, cx| {
-                this.state.snapping = !this.state.snapping;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &RippleDelete, _, cx| {
-                if this.state.ripple_delete_selection() > 0 {
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &TrimInToPlayhead, _, cx| {
-                if this.state.trim_selected_in_to_playhead() {
-                    cx.notify();
-                }
-            }))
-            .on_action(cx.listener(|this, _: &TrimOutToPlayhead, _, cx| {
-                if this.state.trim_selected_out_to_playhead() {
-                    cx.notify();
-                }
-            }))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.quit(window, cx)))
             .on_action(cx.listener(|this, _: &NewProject, window, cx| this.new_project(window, cx)))
-            .on_action(cx.listener(|this, _: &NewComposition, window, cx| {
-                panels::composition_settings::open(this, true, window, cx);
-            }))
+            // The editor's own commands are only there while the editor shows. Behind the start
+            // screen, shortcuts and menu commands would otherwise change a project nobody can see;
+            // without a handler, their menu items are greyed out too.
+            .when(self.ui.start_screen.is_none(), |root| {
+                root
+                .on_action(cx.listener(|this, _: &TogglePlayback, _, cx| this.toggle_playback(cx)))
+                .on_action(cx.listener(|this, _: &NextFrame, _, cx| this.step(1, cx)))
+                .on_action(cx.listener(|this, _: &PreviousFrame, _, cx| this.step(-1, cx)))
+                .on_action(cx.listener(|this, _: &NextTenFrames, _, cx| this.step(10, cx)))
+                .on_action(cx.listener(|this, _: &PreviousTenFrames, _, cx| this.step(-10, cx)))
+                .on_action(cx.listener(|this, _: &NextFiveFrames, _, cx| this.step(5, cx)))
+                .on_action(cx.listener(|this, _: &PreviousFiveFrames, _, cx| this.step(-5, cx)))
+                .on_action(cx.listener(|this, _: &ZoomViewerIn, _, cx| {
+                    panels::viewer::zoom_step(this, true);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ZoomViewerOut, _, cx| {
+                    panels::viewer::zoom_step(this, false);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &FirstFrame, _, cx| this.go_to(0, cx)))
+                .on_action(cx.listener(|this, _: &LastFrame, _, cx| {
+                    let last = this.state.composition().duration_frames - 1;
+                    this.go_to(last, cx);
+                }))
+                .on_action(cx.listener(|this, _: &Delete, window, cx| this.delete(window, cx)))
+                .on_action(cx.listener(|this, _: &EasyEase, _, cx| {
+                    this.state.easy_ease_selected();
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &SelectionTool, _, cx| {
+                    this.set_tool(Tool::Selection);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &TypeTool, _, cx| {
+                    this.set_tool(Tool::Type);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ShapeTool, _, cx| {
+                    this.set_tool(Tool::Shape);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &CutTool, _, cx| {
+                    this.set_tool(Tool::Cut);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &PenTool, _, cx| {
+                    this.set_tool(Tool::Pen);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &HandTool, _, cx| {
+                    this.set_tool(Tool::Hand);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ZoomTool, _, cx| {
+                    this.set_tool(Tool::Zoom);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &RotateTool, _, cx| {
+                    this.set_tool(Tool::Rotate);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &RippleTool, _, cx| {
+                    this.set_tool(Tool::Ripple);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &RollTool, _, cx| {
+                    this.set_tool(Tool::Roll);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &SlipTool, _, cx| {
+                    this.set_tool(Tool::Slip);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &SlideTool, _, cx| {
+                    this.set_tool(Tool::Slide);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &TrackSelectTool, _, cx| {
+                    this.set_tool(Tool::TrackSelect);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &EyedropperTool, _, cx| {
+                    this.set_tool(Tool::Eyedropper);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &RateStretchTool, _, cx| {
+                    this.set_tool(Tool::RateStretch);
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &ToggleMarker, _, cx| {
+                    this.state.toggle_marker_at_playhead();
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &NewSolid, _, cx| this.new_layer(NewLayer::Solid, cx)))
+                .on_action(cx.listener(|this, _: &NewAdjustmentLayer, _, cx| this.new_layer(NewLayer::Adjustment, cx)))
+                .on_action(cx.listener(|this, _: &NewNull, _, cx| this.new_layer(NewLayer::Null, cx)))
+                .on_action(cx.listener(|this, _: &SequenceLayers, window, cx| this.stagger(None, window, cx)))
+                .on_action(cx.listener(|this, _: &StaggerLayers, window, cx| this.stagger(Some(STAGGER_FRAMES), window, cx)))
+                .on_action(cx.listener(|this, _: &ToggleGuides, _, cx| {
+                    this.ui.guides = !this.ui.guides;
+                    cx.notify();
+                }))
+                // Enter ends a pen path as an open line (a path closes by clicking its first point).
+                .on_action(cx.listener(|this, _: &FinishPath, _, cx| {
+                    if this.state.finish_pen(false).is_some() {
+                        this.ui.tabs.insert(PanelId::Properties, 0);
+                    }
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &Precompose, window, cx| panels::precompose::open(this, window, cx)))
+                .on_action(cx.listener(|this, _: &UngroupComposition, window, cx| this.ungroup_selected(window, cx)))
+                .on_action(cx.listener(|this, _: &MorphTo, window, cx| panels::morph::open(this, window, cx)))
+                .on_action(cx.listener(|this, _: &FlipHorizontal, _, cx| {
+                    if this.state.flip_selection(true) {
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &FlipVertical, _, cx| {
+                    if this.state.flip_selection(false) {
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &ResetTransform, _, cx| {
+                    this.state.reset_selection_transform();
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &Cut, _, cx| {
+                    if this.state.cut_selection() > 0 {
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
+                    this.state.select_all_layers();
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &Copy, _, cx| {
+                    this.state.copy_selection();
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &Paste, _, cx| {
+                    if !this.state.paste().is_empty() {
+                        cx.notify();
+                    }
+                }))
+                // In the Project panel, Duplicate copies the selected item; elsewhere, the selected layers.
+                .on_action(cx.listener(|this, _: &Duplicate, window, cx| {
+                    if this.ui.active_panel == PanelId::Project {
+                        let Some(item) = this.state.selected_item else { return };
+                        if this.state.duplicate_item(item).is_none() {
+                            window.push_notification("Folders can't be duplicated. Select a composition or media item.", cx);
+                        }
+                        cx.notify();
+                    } else if !this.state.duplicate_selection().is_empty() {
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &CompositionSettings, window, cx| {
+                    panels::composition_settings::open(this, false, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &MagicResize, window, cx| panels::resize::open(this, window, cx)))
+                .on_action(cx.listener(|this, _: &MagicMove, window, cx| panels::magic_move::open(this, window, cx)))
+                .on_action(cx.listener(|this, _: &Import, window, cx| this.import(window, cx)))
+                // Offered only when there is something to undo or redo, so the Edit menu greys them out otherwise.
+                .when(self.state.can_undo(), |root| root.on_action(cx.listener(|this, _: &Undo, _, cx| this.undo_or_redo(false, cx))))
+                .when(self.state.can_redo(), |root| root.on_action(cx.listener(|this, _: &Redo, _, cx| this.undo_or_redo(true, cx))))
+                .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
+                .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_as(window, cx)))
+                .on_action(cx.listener(|this, _: &Export, window, cx| panels::export_dialog::open(this, window, cx)))
+                // Greyed out in the File menu while a package is being made (the top bar shows its progress).
+                .when(self.ui.package_job.is_none(), |root| root.on_action(cx.listener(|this, _: &Package, window, cx| panels::package::open(this, window, cx))))
+                .on_action(cx.listener(|this, _: &SplitLayer, window, cx| this.split_layer(window, cx)))
+                .on_action(cx.listener(|this, _: &ToggleSnapping, _, cx| {
+                    this.state.snapping = !this.state.snapping;
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &RippleDelete, _, cx| {
+                    if this.state.ripple_delete_selection() > 0 {
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &TrimInToPlayhead, _, cx| {
+                    if this.state.trim_selected_in_to_playhead() {
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &TrimOutToPlayhead, _, cx| {
+                    if this.state.trim_selected_out_to_playhead() {
+                        cx.notify();
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &NewComposition, window, cx| {
+                    panels::composition_settings::open(this, true, window, cx);
+                }))
+            })
             // Releasing the mouse anywhere ends whatever drag was in progress.
             .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
                 this.state.end_keyframe_drag();
@@ -1624,6 +1732,7 @@ impl Render for Workspace {
                 this.ui.eyedropper_press = false;
                 this.ui.grade_pressed = false;
                 this.ui.effect_drop_layer = None;
+                this.ui.slot_drop = None;
                 if let Some(picker) = this.ui.color_picker.as_mut() {
                     picker.pressed = false;
                 }
@@ -1652,6 +1761,7 @@ impl Render for Workspace {
             )
             .children(panels::color_picker::popover(self, cx))
             .children(panels::templates::gallery(self, cx))
+            .children(panels::start_screen::render(self, cx))
             .children(panels::importing::popup(self, cx))
     }
 }

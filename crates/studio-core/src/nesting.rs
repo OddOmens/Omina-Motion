@@ -154,6 +154,10 @@ fn dropped_attributes(layer: &Layer) -> Vec<&'static str> {
     if layer.mask.is_some() || layer.track_matte != TrackMatte::None {
         dropped.push("mask");
     }
+    // Its volume, fades, ducking and noise gate applied to the sound inside it.
+    if layer.audio != crate::model::LayerAudio::default() || !layer.switches.audio {
+        dropped.push("sound settings");
+    }
     dropped
 }
 

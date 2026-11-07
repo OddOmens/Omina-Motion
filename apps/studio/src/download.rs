@@ -24,6 +24,21 @@ fn partial_path(destination: &Path) -> PathBuf {
     destination.with_file_name(format!(".{name}.{}-{}.part", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
 }
 
+/// Fetches a small text file (at most `max_bytes`) from `url`, such as the update feed. Gives
+/// up after 15 seconds, so a slow network never leaves a check hanging.
+pub fn fetch_text(url: &str, max_bytes: u64) -> Result<String, String> {
+    let output = std::process::Command::new("curl")
+        .args(["-q", "-sSfL", "--proto", PROTOCOLS, "--proto-redir", PROTOCOLS, "--connect-timeout", "10", "--max-time", "15", "--max-filesize"])
+        .arg(max_bytes.to_string())
+        .arg(url)
+        .output()
+        .map_err(|error| format!("could not start the request: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().trim_start_matches("curl: ").to_owned());
+    }
+    String::from_utf8(output.stdout).map_err(|_| "the reply was not text".to_owned())
+}
+
 /// Downloads `url` to `destination` if its SHA-256 is `sha256` (lowercase hex). `what` names
 /// the file in error messages ("the captions model"). Stops, removing what it fetched, when
 /// `cancelled` says so.

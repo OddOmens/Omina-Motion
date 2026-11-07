@@ -1,12 +1,15 @@
-//! Exports a composition to a movie, an animated GIF or a PNG sequence. Each frame is
-//! rendered on the GPU from full-quality source frames (never proxies), the sound is mixed to
-//! match, and both are encoded together. The output can run at another frame rate than the
+//! Exports a composition to a movie, an animated GIF, a PNG sequence or a vector animation.
+//! For the frame-based formats, each frame is rendered on the GPU from full-quality source
+//! frames (never proxies), the sound is mixed to match, and both are encoded together. The
+//! vector formats (Lottie, dotLottie, animated SVG) are written whole by `studio_vector`; see
+//! `vector`. The output can run at another frame rate than the
 //! composition (see `format::source_frame`). The file is written under a temporary name and
 //! only takes its real name once complete, so a cancelled or failed export never leaves a
 //! broken file behind.
 
 mod format;
 mod sink;
+mod vector;
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -107,8 +110,12 @@ impl ExportRequest {
     }
 
     /// The movie's picture size for a composition of `width` × `height`: scaled, at least 16
-    /// pixels a side, and even (both codecs need even sizes).
+    /// pixels a side, and even (both codecs need even sizes). Vector files keep the
+    /// composition's own size, since they draw at any size.
     pub fn output_size(&self, width: u32, height: u32) -> (u32, u32) {
+        if self.format.is_vector() {
+            return (width, height);
+        }
         let scale = if self.scale.is_finite() { self.scale.clamp(0.05, 1.0) } else { 1.0 };
         let side = |value: u32| (((value as f32 * scale).round() as u32).max(16) + 1) & !1;
         (side(width), side(height))
@@ -122,9 +129,11 @@ pub struct Progress {
     pub total: i64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Finished,
+    /// The file is written. `left_out` has a plain-English line for each kind of thing the
+    /// format couldn't hold (video in a Lottie file, say); it is empty for the frame formats.
+    Finished { left_out: Vec<String> },
     Cancelled,
 }
 
@@ -136,6 +145,9 @@ pub fn export(
     progress: &mut dyn FnMut(Progress),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Outcome, String> {
+    if request.format.is_vector() {
+        return vector::export(project, request, progress, cancelled);
+    }
     let composition = project.composition(request.composition).ok_or("The composition no longer exists.")?;
     if composition.width > MAX_SIZE || composition.height > MAX_SIZE {
         return Err(format!("Compositions larger than {MAX_SIZE} × {MAX_SIZE} pixels can’t be exported yet."));
@@ -198,16 +210,16 @@ pub fn export(
             }
             progress(Progress { done: index + 1, total });
         }
-        Ok(Outcome::Finished)
+        Ok(Outcome::Finished { left_out: Vec::new() })
     })();
 
     match result {
-        Ok(Outcome::Finished) => {
+        Ok(Outcome::Finished { left_out }) => {
             let saved = sink.finish(&temporary, &request.path);
             if saved.is_err() {
                 discard(&temporary);
             }
-            saved.map(|()| Outcome::Finished)
+            saved.map(|()| Outcome::Finished { left_out })
         }
         other => {
             drop(sink);

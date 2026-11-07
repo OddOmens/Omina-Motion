@@ -1,4 +1,4 @@
-//! The first twenty animated designs (see `Layout`; `fun` and `social` have the rest). Each places its layers by fractions of the frame,
+//! The first twenty animated designs (see `Layout`; `fun`, `social` and `ads` have the rest). Each places its layers by fractions of the frame,
 //! choosing a stacked arrangement for the tall formats and a side-by-side one for 16:9 where
 //! that reads better, and times everything in seconds from the start.
 
@@ -21,6 +21,12 @@ pub(super) fn words_needed(layout: Layout) -> usize {
         Layout::ProfileIntro => 6,
         Layout::StoryFrame => 4,
         Layout::AskMeAnything | Layout::NameReveal | Layout::CommentReply | Layout::FloatingHearts | Layout::OutlineStack | Layout::VlogTitle => 3,
+        Layout::UgcCaptions | Layout::ProblemSolution | Layout::FeatureCallouts => 5,
+        Layout::VersusTable => 7,
+        Layout::OfferTimer | Layout::SocialProof => 4,
+        Layout::PosterStretch | Layout::PhotoTagline => 4,
+        Layout::SlidingBlocks | Layout::CardStack => 3,
+        Layout::TypeRepeater | Layout::BoldCountdown | Layout::BlurSpin | Layout::SplitReveal | Layout::GradientTitle | Layout::BouncyPeriod => 2,
     }
 }
 
@@ -71,6 +77,22 @@ pub(super) fn build(b: &mut Builder) {
         Layout::FloatingHearts => super::social::floating_hearts(b),
         Layout::OutlineStack => super::social::outline_stack(b),
         Layout::VlogTitle => super::social::vlog_title(b),
+        Layout::UgcCaptions => super::ads::ugc_captions(b),
+        Layout::VersusTable => super::ads::versus_table(b),
+        Layout::ProblemSolution => super::ads::problem_solution(b),
+        Layout::FeatureCallouts => super::ads::feature_callouts(b),
+        Layout::OfferTimer => super::ads::offer_timer(b),
+        Layout::SocialProof => super::ads::social_proof(b),
+        Layout::PosterStretch => super::editorial::poster_stretch(b),
+        Layout::SlidingBlocks => super::editorial::sliding_blocks(b),
+        Layout::TypeRepeater => super::editorial::type_repeater(b),
+        Layout::CardStack => super::editorial::card_stack(b),
+        Layout::BoldCountdown => super::editorial::bold_countdown(b),
+        Layout::BlurSpin => super::editorial::blur_spin(b),
+        Layout::SplitReveal => super::editorial::split_reveal(b),
+        Layout::GradientTitle => super::editorial::gradient_title(b),
+        Layout::PhotoTagline => super::editorial::photo_tagline(b),
+        Layout::BouncyPeriod => super::editorial::bouncy_period(b),
     }
 }
 
@@ -88,16 +110,21 @@ fn headline(b: &mut Builder) {
     let p = b.palette();
     b.background();
     let (kicker, title, sub, cta) = (b.copy(0), b.copy(1), b.copy(2), b.copy(3));
-    let top = if b.vertical() { 0.36 } else { 0.32 };
+    let top = if b.vertical() { 0.34 } else { 0.3 };
     let kick = b.text(kicker, b.at(0.5, top), 42.0, p.accent, b.heavy(), 0.3);
     b.slide_in(kick, Vec2::new(0.0, 30.0), 0.3, 0.7);
-    let head = b.text(title, b.at(0.5, top + 0.14), 128.0, p.text, b.heavy(), 0.6);
-    b.slide_in(head, Vec2::new(0.0, 80.0), 0.6, 0.9);
-    let bar = b.block(Vec2::new(220.0, 10.0), b.at(0.5, top + 0.26), p.accent, 5.0, 1.0, "Underline");
-    b.scale(bar, 1.0, 0.0, 1.8, 100.0, EASE_OUT);
-    let line = b.text(sub, b.at(0.5, top + 0.33), 48.0, p.muted, b.light(), 1.5);
-    b.fade_in(line, 1.5, 0.8);
-    button(b, cta, b.at(0.5, if b.vertical() { 0.78 } else { 0.82 }), 3.0);
+    let head_at = b.at(0.5, top + 0.13);
+    let head = b.text(title, head_at, 128.0, p.text, b.heavy(), 0.6);
+    b.words_in(head, 0.9);
+    // Under the headline however many lines it runs to.
+    let bar_at = b.below(head_at, title, 128.0, 36.0, 10.0, b.at(0.5, top + 0.26));
+    let bar = b.block(Vec2::new(220.0, 10.0), bar_at, p.accent, 5.0, 1.2, "Underline");
+    b.scale(bar, 1.2, 0.0, 2.0, 100.0, EASE_OUT);
+    let line_at = bar_at + Vec2::new(0.0, 66.0 * b.unit());
+    let line = b.text(sub, line_at, 48.0, p.muted, b.light(), 1.6);
+    b.slide_in(line, Vec2::new(0.0, 24.0), 1.6, 0.8);
+    let button_at = Vec2::new(line_at.x, b.at(0.5, if b.vertical() { 0.76 } else { 0.82 }).y.max(line_at.y + 120.0 * b.unit()));
+    button(b, cta, button_at, 2.6);
     b.fade_everything_out();
 }
 
@@ -107,7 +134,7 @@ fn split_promo(b: &mut Builder) {
     let tall = b.tall();
     // Two panels: side by side in 16:9, one above the other in the tall formats.
     let (first_size, first_at, second_size, second_at) = if tall {
-        (Vec2::new(b.width, b.height * 0.55), b.at(0.5, 0.275), Vec2::new(b.width, b.height * 0.45), b.at(0.5, 0.775))
+        (Vec2::new(b.width, b.height * 0.5), b.at(0.5, 0.25), Vec2::new(b.width, b.height * 0.5), b.at(0.5, 0.75))
     } else {
         (Vec2::new(b.width * 0.55, b.height), b.at(0.275, 0.5), Vec2::new(b.width * 0.45, b.height), b.at(0.775, 0.5))
     };
@@ -119,18 +146,19 @@ fn split_promo(b: &mut Builder) {
     b.slide_in(second, away * -1.0, 0.0, 0.8);
     let text_at = if tall { b.at(0.5, 0.24) } else { b.at(0.275, 0.42) };
     let head = b.text(title, text_at, 112.0, p.text, b.heavy(), 0.7);
-    b.slide_in(head, Vec2::new(0.0, 60.0), 0.7, 0.8);
-    let line_at = text_at + Vec2::new(0.0, 170.0 * unit);
+    b.words_in(head, 0.8);
+    let line_at = b.below(text_at, title, 112.0, 30.0, 46.0, text_at);
     let line = b.text(sub, line_at, 46.0, p.muted, b.light(), 1.2);
-    b.fade_in(line, 1.2, 0.7);
-    let badge_at = if tall { b.at(0.5, 0.72) } else { b.at(0.775, 0.45) };
+    b.slide_in(line, Vec2::new(0.0, 24.0), 1.2, 0.7);
+    let badge_at = if tall { b.at(0.5, if b.vertical() { 0.64 } else { 0.7 }) } else { b.at(0.775, 0.45) };
     let badge = b.shape(ShapeKind::Ellipse, Vec2::new(330.0, 330.0), badge_at, Some(Paint::Solid(Rgba::hex(p.on_accent))), None, 0.0, 1.6, "Price badge");
     b.pop_in(badge, 1.6);
     let amount = b.text(price, badge_at, 96.0, p.accent, b.heavy(), 1.8);
     b.pop_in(amount, 1.8);
     b.pulse(badge, 3.0, 7.0, 2);
     b.effect(badge, "Drop Shadow", &[(0, 40.0), (2, 18.0), (3, 30.0)]);
-    let button_at = if tall { b.at(0.5, 0.9) } else { b.at(0.775, 0.78) };
+    // Clear of the captions and buttons a phone app draws over the bottom of a 9:16 video.
+    let button_at = if tall { b.at(0.5, if b.vertical() { 0.79 } else { 0.9 }) } else { b.at(0.775, 0.78) };
     let p2 = p;
     let width = (cta.chars().count() as f32 * 26.0 + 120.0).max(280.0);
     let pill = b.block(Vec2::new(width, 100.0), button_at, p2.background, 50.0, 3.2, "Button");
@@ -146,7 +174,7 @@ fn list(b: &mut Builder) {
     let title = b.copy(0);
     let top = if b.vertical() { 0.2 } else { 0.16 };
     let head = b.text(title, b.at(0.5, top), 96.0, p.text, b.heavy(), 0.3);
-    b.slide_in(head, Vec2::new(0.0, 50.0), 0.3, 0.8);
+    b.words_in(head, 0.8);
     let gap = if b.vertical() { 0.14 } else if b.tall() { 0.15 } else { 0.18 };
     let left = if b.tall() { 0.14 } else { 0.28 };
     for index in 0..3 {
@@ -166,7 +194,7 @@ fn list(b: &mut Builder) {
         let _ = width;
         b.slide_in(item, Vec2::new(60.0, 0.0), at + 0.15, 0.6);
     }
-    button(b, b.copy(4), b.at(0.5, if b.vertical() { 0.84 } else { 0.86 }), 5.4);
+    button(b, b.copy(4), b.at(0.5, if b.vertical() { 0.8 } else { 0.86 }), 5.0);
     b.fade_everything_out();
 }
 
@@ -180,7 +208,7 @@ fn quote(b: &mut Builder) {
     let mark = b.text("“", b.at(0.5, if b.vertical() { 0.3 } else { 0.24 }), 260.0, p.accent, b.heavy(), 0.2);
     b.pop_in(mark, 0.2);
     let body = b.text(words, b.at(0.5, 0.5), 66.0, p.text, b.heavy(), 0.8);
-    b.slide_in(body, Vec2::new(0.0, 40.0), 0.8, 1.2);
+    b.words_in(body, 1.4);
     let rule = b.block(Vec2::new(120.0, 6.0), b.at(0.5, if b.vertical() { 0.66 } else { 0.7 }), p.accent, 3.0, 2.0, "Rule");
     b.scale(rule, 2.0, 0.0, 2.6, 100.0, EASE_OUT);
     let name = b.text(who, b.at(0.5, if b.vertical() { 0.7 } else { 0.76 }), 46.0, p.text, b.heavy(), 2.3);
@@ -210,9 +238,10 @@ fn countdown(b: &mut Builder) {
         b.until(ring, at + 1.0);
     }
     let big = b.text(reveal, b.at(0.5, 0.46), 140.0, p.accent, b.heavy(), 3.4);
-    b.pop_in(big, 3.4);
+    b.letters_in(big, 0.6);
     b.effect(big, "Glow", &[(0, 40.0), (1, 30.0), (2, 1.2)]);
-    let line = b.text(sub, b.at(0.5, 0.6), 50.0, p.text, b.light(), 4.0);
+    let line_at = b.below(b.at(0.5, 0.46), reveal, 140.0, 40.0, 50.0, b.at(0.5, 0.6));
+    let line = b.text(sub, line_at, 50.0, p.text, b.light(), 4.0);
     b.slide_in(line, Vec2::new(0.0, 40.0), 4.0, 0.7);
     b.fade_everything_out();
 }
@@ -265,7 +294,7 @@ fn review(b: &mut Builder) {
         b.pop_in(star, at);
     }
     let body = b.text(words, b.at(0.5, 0.5), 60.0, p.text, b.heavy(), 1.8);
-    b.slide_in(body, Vec2::new(0.0, 30.0), 1.8, 0.9);
+    b.words_in(body, 1.2);
     let name_y = b.at(0.5, 0.5).y + card_size.y * 0.3 * unit;
     let name = b.text(who, Vec2::new(b.at(0.5, 0.5).x, name_y), 42.0, p.text, b.heavy(), 2.6);
     b.fade_in(name, 2.6, 0.6);
@@ -287,7 +316,7 @@ fn sale_burst(b: &mut Builder) {
     b.pop_in(burst, 0.0);
     b.spin(burst, 0.0, 90.0);
     let big = b.text(number, center + Vec2::new(0.0, -50.0 * b.unit()), 230.0, p.on_accent, b.heavy(), 0.5);
-    b.pop_in(big, 0.5);
+    b.letters_in(big, 0.5);
     b.pulse(big, 1.5, b.end() - 1.0, 4);
     let off = b.text(word, center + Vec2::new(0.0, 120.0 * b.unit()), 80.0, p.on_accent, b.heavy(), 0.8);
     b.pop_in(off, 0.8);
@@ -314,16 +343,16 @@ fn hook(b: &mut Builder) {
     let card = b.block(Vec2::new(width, 90.0 * lines + 70.0), b.at(0.5, y), p.background, 28.0, 0.2, "Hook box");
     b.pop_in(card, 0.2);
     let words = b.text(hook_words, b.at(0.5, y), 70.0, p.text, b.heavy(), 0.35);
-    b.pop_in(words, 0.35);
-    let line = b.text(sub, b.at(0.5, if b.vertical() { 0.8 } else { 0.84 }), 50.0, 0xffffff, b.heavy(), 1.2);
+    b.words_in(words, 0.6);
+    let line = b.text(sub, b.at(0.5, if b.vertical() { 0.72 } else { 0.84 }), 50.0, 0xffffff, b.heavy(), 1.2);
     b.slide_in(line, Vec2::new(0.0, 40.0), 1.2, 0.6);
     b.effect(line, "Drop Shadow", &[(0, 70.0), (2, 4.0), (3, 12.0)]);
-    let arrow = b.shape(ShapeKind::Triangle, Vec2::new(60.0, 44.0), b.at(0.5, if b.vertical() { 0.86 } else { 0.92 }), Some(Paint::Solid(Rgba::hex(p.accent))), None, 6.0, 1.6, "Arrow");
+    let arrow = b.shape(ShapeKind::Triangle, Vec2::new(60.0, 44.0), b.at(0.5, if b.vertical() { 0.77 } else { 0.92 }), Some(Paint::Solid(Rgba::hex(p.accent))), None, 6.0, 1.6, "Arrow");
     b.transform(arrow).rotation = crate::animation::Animated::constant(180.0);
     b.fade_in(arrow, 1.6, 0.4);
     let end = b.end();
-    let down = b.at(0.5, if b.vertical() { 0.87 } else { 0.935 });
-    let up = b.at(0.5, if b.vertical() { 0.86 } else { 0.92 });
+    let down = b.at(0.5, if b.vertical() { 0.78 } else { 0.935 });
+    let up = b.at(0.5, if b.vertical() { 0.77 } else { 0.92 });
     let mut keys = Vec::new();
     let mut t = 1.6;
     let mut low = true;
@@ -343,21 +372,21 @@ fn product_card(b: &mut Builder) {
     let tall = b.tall();
     // 4:5 is short for a stack of photo and words: a smaller photo there.
     let portrait = tall && !b.vertical();
-    let photo_at = if tall { b.at(0.5, if portrait { 0.27 } else { 0.33 }) } else { b.at(0.3, 0.5) };
+    let photo_at = if tall { b.at(0.5, if portrait { 0.27 } else { 0.3 }) } else { b.at(0.3, 0.5) };
     let photo_side = if portrait { 540.0 } else { 720.0 };
     let photo = b.placeholder(Vec2::new(photo_side, photo_side), photo_at, 40.0, 0.0, "product photo");
     b.pop_in(photo, 0.0);
     b.effect(photo, "Drop Shadow", &[(0, 40.0), (2, 20.0), (3, 40.0)]);
     let text_x = if tall { 0.5 } else { 0.7 };
-    let name_y = if tall { if portrait { 0.56 } else { 0.6 } } else { 0.34 };
-    let step = if portrait { 0.08 } else { 0.09 };
+    let name_y = if tall { if portrait { 0.56 } else { 0.55 } } else { 0.34 };
+    let step = if portrait { 0.08 } else if tall { 0.065 } else { 0.09 };
     let title = b.text(name, b.at(text_x, name_y), 92.0, p.text, b.heavy(), 0.7);
-    b.slide_in(title, Vec2::new(0.0, 40.0), 0.7, 0.7);
+    b.words_in(title, 0.6);
     let cost = b.text(price, b.at(text_x, name_y + step), 76.0, p.accent, b.heavy(), 1.1);
     b.pop_in(cost, 1.1);
     let detail = b.text(features, b.at(text_x, name_y + step * 1.85), 40.0, p.muted, b.light(), 1.6);
     b.fade_in(detail, 1.6, 0.8);
-    button(b, cta, b.at(text_x, if tall { 0.88 } else { 0.76 }), 2.6);
+    button(b, cta, b.at(text_x, if b.vertical() { 0.76 } else if tall { 0.88 } else { 0.76 }), 2.6);
     b.fade_everything_out();
 }
 
@@ -375,14 +404,14 @@ fn event(b: &mut Builder) {
     let kick = b.text(kicker, b.at(0.5, 0.26), 44.0, p.accent, b.heavy(), 0.4);
     b.slide_in(kick, Vec2::new(0.0, 30.0), 0.4, 0.6);
     let head = b.text(title, b.at(0.5, 0.4), 112.0, p.text, b.heavy(), 0.8);
-    b.slide_in(head, Vec2::new(0.0, 60.0), 0.8, 0.8);
-    let date_at = b.at(0.5, 0.58);
+    b.words_in(head, 0.8);
+    let date_at = b.below(b.at(0.5, 0.4), title, 112.0, 40.0, 120.0, b.at(0.5, 0.58));
     let width = (date.chars().count() as f32 * 34.0 + 120.0).max(420.0);
     let block = b.block(Vec2::new(width, 120.0), date_at, p.accent, 20.0, 1.5, "Date");
     b.pop_in(block, 1.5);
     let day = b.text(date, date_at, 54.0, p.on_accent, b.heavy(), 1.6);
     b.pop_in(day, 1.6);
-    let at = b.text(place, b.at(0.5, 0.7), 46.0, p.muted, b.light(), 2.2);
+    let at = b.text(place, date_at + Vec2::new(0.0, 130.0 * b.unit()), 46.0, p.muted, b.light(), 2.2);
     b.fade_in(at, 2.2, 0.7);
     b.fade_everything_out();
 }
@@ -402,7 +431,7 @@ fn big_stat(b: &mut Builder) {
     b.anchor_left(fill);
     b.grow_across(fill, 0.8, 2.0);
     let words = b.text(label, b.at(0.5, 0.67), 60.0, p.text, b.heavy(), 1.4);
-    b.slide_in(words, Vec2::new(0.0, 40.0), 1.4, 0.7);
+    b.words_in(words, 0.7);
     let small = b.text(source, b.at(0.5, 0.76), 34.0, p.muted, b.light(), 2.2);
     b.fade_in(small, 2.2, 0.6);
     b.fade_everything_out();
@@ -430,14 +459,24 @@ fn before_after(b: &mut Builder) {
     b.move_to(line, 1.0, 3.0, middle, EASE_IN_OUT);
     let knob = b.shape(ShapeKind::Ellipse, Vec2::new(90.0, 90.0), b.at(1.0, 0.5), Some(Paint::Solid(Rgba::hex(0xffffff))), None, 0.0, 0.0, "Handle");
     b.move_to(knob, 1.0, 3.0, middle, EASE_IN_OUT);
+    // The labels sit on small tags, so they read over any picture.
     let tag_y = if b.vertical() { 0.12 } else { 0.1 };
-    let first = b.text(before, b.at(0.22, tag_y), 46.0, 0xffffff, b.heavy(), 0.3);
-    b.fade_in(first, 0.3, 0.5);
-    let second = b.text(after, b.at(0.78, tag_y), 46.0, p.accent, b.heavy(), 3.0);
-    b.fade_in(second, 3.0, 0.5);
-    let head = b.text(title, b.at(0.5, if b.vertical() { 0.86 } else { 0.88 }), 66.0, 0xffffff, b.heavy(), 3.6);
-    b.slide_in(head, Vec2::new(0.0, 40.0), 3.6, 0.7);
-    b.effect(head, "Drop Shadow", &[(0, 70.0), (2, 4.0), (3, 14.0)]);
+    for (words, x, color, ink, at) in [(before, 0.22, 0x111111, 0xffffff, 0.3), (after, 0.78, p.accent, p.on_accent, 3.0)] {
+        let tag_at = b.at(x, tag_y);
+        let tag = b.block(Vec2::new(words.chars().count() as f32 * 30.0 + 80.0, 76.0), tag_at, color, 38.0, at, "Tag");
+        b.pop_in(tag, at);
+        let label = b.text(words, tag_at, 40.0, ink, b.heavy(), at + 0.05);
+        b.pop_in(label, at + 0.05);
+    }
+    // The headline goes on a card above the divider, higher in 9:16 so phone apps don't cover it.
+    let head_at = b.at(0.5, if b.vertical() { 0.78 } else { 0.86 });
+    let lines = title.lines().count().max(1) as f32;
+    let card_width = (title.lines().map(|line| line.chars().count()).max().unwrap_or(10) as f32 * 36.0 + 120.0).min(b.width / unit - 80.0);
+    let card = b.block(Vec2::new(card_width, 80.0 * lines + 60.0), head_at, 0x111111, 30.0, 3.5, "Headline card");
+    b.slide_in(card, Vec2::new(0.0, 40.0), 3.5, 0.6);
+    b.transform(card).opacity.value = 85.0;
+    let head = b.text(title, head_at, 66.0, 0xffffff, b.heavy(), 3.6);
+    b.words_in(head, 0.7);
     b.fade_everything_out();
 }
 
@@ -446,10 +485,10 @@ fn steps(b: &mut Builder) {
     b.background();
     let title = b.copy(0);
     let head = b.text(title, b.at(0.5, if b.vertical() { 0.16 } else { 0.14 }), 88.0, p.text, b.heavy(), 0.2);
-    b.slide_in(head, Vec2::new(0.0, 40.0), 0.2, 0.7);
+    b.words_in(head, 0.7);
     let tall = b.tall();
     for index in 0..3 {
-        let at = 1.2 + index as f64 * 1.6;
+        let at = 1.0 + index as f64 * 1.1;
         // Down the frame in the tall formats, across it in 16:9.
         let (center, size) = if tall {
             (b.at(0.5, (if b.vertical() { 0.33 } else { 0.36 }) + index as f32 * (if b.vertical() { 0.2 } else { 0.22 })), Vec2::new(880.0, if b.vertical() { 300.0 } else { 250.0 }))
@@ -463,8 +502,8 @@ fn steps(b: &mut Builder) {
         let number = b.text(&format!("0{}", index + 1), number_at, 80.0, p.accent, b.heavy(), at + 0.2);
         b.pop_in(number, at + 0.2);
         let words_at = center + if tall { Vec2::new(size.x * 0.1 * unit, 0.0) } else { Vec2::new(0.0, size.y * 0.08 * unit) };
-        let words = b.text(b.copy(index + 1), words_at, 46.0, p.text, b.light().max(500), at + 0.35);
-        b.fade_in(words, at + 0.35, 0.6);
+        let words = b.text(b.copy(index + 1), words_at, if tall { 54.0 } else { 46.0 }, p.text, b.light().max(500), at + 0.3);
+        b.slide_in(words, Vec2::new(if tall { 40.0 } else { 0.0 }, if tall { 0.0 } else { 30.0 }), at + 0.3, 0.6);
     }
     b.fade_everything_out();
 }
@@ -483,11 +522,15 @@ fn announcement(b: &mut Builder) {
     b.spin(badge, 0.0, 120.0);
     let word = b.text(badge_word, badge_at, 64.0, p.on_accent, b.heavy(), 0.4);
     b.pop_in(word, 0.4);
-    let head = b.text(title, b.at(0.5, 0.52), 120.0, p.text, b.heavy(), 1.0);
-    b.slide_in(head, Vec2::new(0.0, 60.0), 1.0, 0.8);
+    // Clear of the badge above it and the line below, however many lines it runs to.
+    let head_height = b.text_height(title, 120.0) / b.unit();
+    let head_at = Vec2::new(badge_at.x, b.at(0.5, 0.52).y.max(badge_at.y + (150.0 + 36.0 + head_height * 0.5) * b.unit()));
+    let head = b.text(title, head_at, 120.0, p.text, b.heavy(), 1.0);
+    b.words_in(head, 0.8);
     b.effect(head, "Glow", &[(0, 70.0), (1, 24.0), (2, 0.8)]);
-    let line = b.text(sub, b.at(0.5, 0.66), 50.0, p.muted, b.light(), 1.7);
-    b.fade_in(line, 1.7, 0.7);
+    let line_at = b.below(head_at, title, 120.0, 36.0, 50.0, b.at(0.5, 0.66));
+    let line = b.text(sub, line_at, 50.0, p.muted, b.light(), 1.7);
+    b.slide_in(line, Vec2::new(0.0, 24.0), 1.7, 0.7);
     b.fade_everything_out();
 }
 
@@ -504,12 +547,12 @@ fn podcast(b: &mut Builder) {
     let name = b.text(show, b.at(text_x, top), 44.0, p.accent, b.heavy(), 0.5);
     b.fade_in(name, 0.5, 0.6);
     let title = b.text(episode, b.at(text_x, top + 0.1), 76.0, p.text, b.heavy(), 0.8);
-    b.slide_in(title, Vec2::new(0.0, 40.0), 0.8, 0.8);
+    b.words_in(title, 0.8);
     let who = b.text(guest, b.at(text_x, top + 0.2), 42.0, p.muted, b.light(), 1.3);
     b.fade_in(who, 1.3, 0.6);
     // A sound wave: bars rising and falling out of step.
     let unit = b.unit();
-    let wave_y = b.at(text_x, if tall { 0.84 } else { top + 0.36 }).y;
+    let wave_y = b.at(text_x, if b.vertical() { 0.78 } else if tall { 0.84 } else { top + 0.36 }).y;
     let end = b.end();
     for index in 0..16 {
         let x = b.at(text_x, 0.0).x + (index as f32 - 7.5) * 36.0 * unit;
@@ -539,8 +582,8 @@ fn brand_intro(b: &mut Builder) {
         b.scale(line, 0.8, 0.0, 1.6, 100.0, EASE_OUT);
     }
     let name = b.text(brand, b.at(0.5, 0.58), 130.0, p.text, b.heavy(), 1.2);
-    b.scale(name, 1.2, 130.0, 2.2, 100.0, EASE_OUT);
-    b.fade_in(name, 1.2, 0.6);
+    b.letters_in(name, 0.8);
+    b.scale(name, 1.2, 110.0, b.end(), 100.0, EASE_OUT);
     let line = b.text(tagline, b.at(0.5, 0.68), 48.0, p.muted, b.light(), 2.0);
     b.fade_in(line, 2.0, 0.8);
     b.fade_everything_out();
@@ -561,7 +604,7 @@ fn collage(b: &mut Builder) {
     }
     let text_at = if b.tall() { b.at(0.5, if b.vertical() { 0.76 } else { 0.8 }) } else { b.at(0.75, 0.45) };
     let head = b.text(title, text_at, 96.0, p.text, b.heavy(), 1.4);
-    b.slide_in(head, Vec2::new(0.0, 40.0), 1.4, 0.7);
+    b.words_in(head, 0.7);
     // Below the title, however many lines it has.
     let lines = title.lines().count().max(1) as f32;
     let line = b.text(sub, text_at + Vec2::new(0.0, (55.0 * lines + 50.0) * unit), 44.0, p.muted, b.light(), 1.9);
@@ -587,12 +630,12 @@ fn marquee(b: &mut Builder) {
         b.move_to(line, 0.0, end, start + Vec2::new(shift, 0.0), Easing::Linear);
     }
     let unit = b.unit();
-    let card_width = (sub.chars().count() as f32 * 30.0 + 160.0).max(520.0);
-    let card = b.block(Vec2::new(card_width, 150.0), b.at(0.5, 0.5), p.background, 75.0, 0.8, "Card");
+    let card_width = (sub.chars().count() as f32 * 38.0 + 200.0).clamp(600.0, b.width / unit - 80.0);
+    let card = b.block(Vec2::new(card_width, 180.0), b.at(0.5, 0.5), p.background, 90.0, 0.8, "Card");
     b.pop_in(card, 0.8);
-    let _ = unit;
-    let words = b.text(sub, b.at(0.5, 0.5), 54.0, p.text, b.heavy(), 1.0);
-    b.pop_in(words, 1.0);
+    b.effect(card, "Drop Shadow", &[(0, 55.0), (2, 14.0), (3, 40.0)]);
+    let words = b.text(sub, b.at(0.5, 0.5), 66.0, p.text, b.heavy(), 1.0);
+    b.words_in(words, 0.6);
     b.fade_everything_out();
 }
 
@@ -606,8 +649,9 @@ fn end_card(b: &mut Builder) {
     b.pop_in(avatar, 0.2);
     let head_y = if b.vertical() { 0.5 } else { 0.46 };
     let head = b.text(title, b.at(0.5, head_y), 96.0, p.text, b.heavy(), 0.7);
-    b.slide_in(head, Vec2::new(0.0, 40.0), 0.7, 0.7);
-    let name = b.text(handle, b.at(0.5, head_y + if b.vertical() { 0.1 } else { 0.16 }), 52.0, p.accent, b.heavy(), 1.2);
+    b.words_in(head, 0.7);
+    let handle_at = b.below(b.at(0.5, head_y), title, 96.0, 30.0, 52.0, b.at(0.5, head_y));
+    let name = b.text(handle, handle_at, 52.0, p.accent, b.heavy(), 1.2);
     b.fade_in(name, 1.2, 0.6);
     let at = b.at(0.5, if b.vertical() { 0.74 } else { 0.76 });
     button(b, cta, at, 1.8);

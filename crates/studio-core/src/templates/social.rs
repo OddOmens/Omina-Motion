@@ -11,11 +11,11 @@ use crate::model::{Id, Paint, Rgba, ShapeKind, TextAlign};
 /// A round spot for a photo (a profile picture), filled like the other drop spots.
 fn round_photo(b: &mut Builder, diameter: f32, at: Vec2, from: f64, what: &str) -> Id {
     let fill = Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0);
-    b.shape(ShapeKind::Ellipse, Vec2::new(diameter, diameter), at, Some(fill), Some((0x71717a, 2.0)), 0.0, from, &format!("Drop your {what} here"))
+    b.shape(ShapeKind::Ellipse, Vec2::new(diameter, diameter), at, Some(fill), Some((0x71717a, 2.0)), 0.0, from, &crate::slots::placeholder_name(what))
 }
 
 /// A drop spot for footage filling the whole frame.
-fn full_frame_video(b: &mut Builder, what: &str) -> Id {
+pub(super) fn full_frame_video(b: &mut Builder, what: &str) -> Id {
     let size = Vec2::new(b.width, b.height) * (1.0 / b.unit());
     let center = b.at(0.5, 0.5);
     b.placeholder(size, center, 0.0, 0.0, what)
@@ -24,18 +24,18 @@ fn full_frame_video(b: &mut Builder, what: &str) -> Id {
 /// A see-through rectangle: `color` at `alpha` (0–1). The transparency is in the color, so
 /// fades and slides (which animate opacity) keep it.
 #[allow(clippy::too_many_arguments)]
-fn tinted(b: &mut Builder, size: Vec2, at: Vec2, color: u32, alpha: f32, corner: f32, from: f64, name: &str) -> Id {
+pub(super) fn tinted(b: &mut Builder, size: Vec2, at: Vec2, color: u32, alpha: f32, corner: f32, from: f64, name: &str) -> Id {
     b.shape(ShapeKind::Rectangle, size, at, Some(Paint::Solid(Rgba::hex(color).with_alpha(alpha))), None, corner, from, name)
 }
 
 /// Gives a text layer an outline `width` units thick.
-fn outline(b: &mut Builder, id: Id, color: u32, width: f32) {
+pub(super) fn outline(b: &mut Builder, id: Id, color: u32, width: f32) {
     let (comp, unit) = (b.comp, b.unit());
     crate::edit::edit_text(b.project.composition_mut(comp).expect("made"), id, |_, style| style.stroke = Some((Rgba::hex(color), width * unit)));
 }
 
 /// Turns a text layer's fill off (or back on), keeping its outline.
-fn set_fill(b: &mut Builder, id: Id, fill: Option<u32>) {
+pub(super) fn set_fill(b: &mut Builder, id: Id, fill: Option<u32>) {
     let comp = b.comp;
     crate::edit::edit_text(b.project.composition_mut(comp).expect("made"), id, |_, style| style.fill = fill.map(Rgba::hex));
 }
@@ -76,8 +76,7 @@ pub(super) fn profile_intro(b: &mut Builder) {
     let hello = b.text(greeting, b.at(text_x, top), 48.0, p.muted, b.light().max(500), 0.8);
     b.slide_in(hello, Vec2::new(0.0, 30.0), 0.8, 0.6);
     let title = b.text(name, b.at(text_x, top + step * 1.4), 130.0, p.text, b.heavy(), 1.1);
-    b.scale(title, 1.1, 140.0, 1.5, 100.0, EASE_OUT);
-    b.fade_in(title, 1.1, 0.2);
+    b.letters_in(title, 0.6);
     let at_handle = b.text(handle, b.at(text_x, top + step * 2.7), 44.0, p.accent, b.heavy(), 1.6);
     b.fade_in(at_handle, 1.6, 0.5);
     // Three facts, one after another, in pills.
@@ -132,7 +131,7 @@ pub(super) fn ask_me_anything(b: &mut Builder) {
     let caption_box = tinted(b, Vec2::new(box_width, answer_lines * 70.0 + 60.0), answer_at, 0x000000, 0.7, 24.0, 1.8, "Caption box");
     b.slide_in(caption_box, Vec2::new(0.0, 60.0), 1.8, 0.6);
     let reply = b.text(answer, answer_at, 56.0, 0xffffff, b.heavy(), 2.0);
-    b.slide_in(reply, Vec2::new(0.0, 60.0), 2.0, 0.6);
+    b.words_in(reply, 0.8);
     b.fade_everything_out();
 }
 

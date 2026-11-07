@@ -6,7 +6,7 @@ use studio_core::animation::{Animated, Vec2};
 use studio_core::edit;
 use studio_core::transform::{Affine, layer_contains, parent_space, world_transform};
 use studio_core::edit::PathPart;
-use studio_core::model::{Id, LayerContent, ShapeKind, ShapeStyle};
+use studio_core::model::{Id, ShapeKind, ShapeStyle};
 use studio_core::path::{PathPoint, ShapePath};
 use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
 
@@ -241,7 +241,8 @@ impl EditorState {
     pub fn path_points_on_screen(&self, layer: Id) -> Vec<ScreenPathPoint> {
         let comp = self.composition();
         let Some(target) = comp.layer(layer) else { return Vec::new() };
-        let LayerContent::Shape { path: Some(path), .. } = &target.content else { return Vec::new() };
+        // A morphing outline shows (and is edited) as it is at the playhead.
+        let Some(path) = target.shape_path_at(self.current_frame as f64) else { return Vec::new() };
         let Some(world) = world_transform(comp, layer, self.current_frame as f64) else { return Vec::new() };
         let size = target.size;
         let place = |v: Vec2| world.apply(Vec2::new(v.x * size.x, v.y * size.y));
@@ -332,7 +333,12 @@ impl EditorState {
                 let comp = self.composition();
                 let Some(to_local) = world_transform(comp, layer, frame as f64).and_then(|world| world.inverse()) else { return };
                 let target = to_local.apply(start + delta);
-                edit::move_path_point(self.composition_mut(), layer, index, part, target);
+                // A morphing outline gets a keyframe at the playhead instead of a new box.
+                if self.composition().layer(layer).is_some_and(|target| target.is_morphing()) {
+                    studio_core::morph::move_morph_point(self.composition_mut(), layer, frame, index, part, target);
+                } else {
+                    edit::move_path_point(self.composition_mut(), layer, index, part, target);
+                }
             }
             ViewerDrag::GradientPoint { layer, slot, end, start } => self.place_gradient_end(layer, slot, end, start + delta),
             ViewerDrag::DrawShape { layer, start } => {

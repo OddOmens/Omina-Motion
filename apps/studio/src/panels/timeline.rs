@@ -10,7 +10,7 @@ mod tracks;
 
 use gpui_kit::{
     AppContext as _, Context, DragMoveEvent, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, ParentElement,
-    ScrollEvent, StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder as _, px, relative,
+    ScrollEvent, StatefulInteractiveElement, Styled, TestSupportExt as _, Window, div, prelude::FluentBuilder as _, px, relative,
 };
 use studio_core::model::Id;
 use studio_core::time::{FrameRange, ruler_tick_step};
@@ -24,6 +24,9 @@ const CONTROLS_BAND: f32 = 40.0;
 const RULER_BAND: f32 = 28.0;
 /// How close, in screen pixels, a drag has to come to something before it snaps there.
 const SNAP_PIXELS: f64 = 8.0;
+/// Space kept clear at the right of the time column, so handles at the composition's end sit
+/// clear of the panel's resize strip (which would otherwise catch the pointer) and stay easy to grab.
+const RIGHT_GUTTER: f32 = 8.0;
 /// How fast Alt + scroll zooms.
 const WHEEL_ZOOM_SENSITIVITY: f64 = 0.004;
 
@@ -46,6 +49,8 @@ pub struct TimelineUi {
     pub(crate) expanded_clips: std::collections::HashSet<Id>,
     /// Bounds of the rows content (it scrolls, so its top moves with the scroll position).
     rows: MeasuredBounds,
+    /// Bounds of the part of the rows that can be seen: rows far outside it aren't drawn.
+    pub(crate) viewport: MeasuredBounds,
     /// Bounds of the time column (navigator, ruler and tracks share its x range).
     pub(crate) graph: MeasuredBounds,
     drag_anchor: Option<DragAnchor>,
@@ -191,13 +196,16 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
             .absolute()
             .top_0()
             .bottom_0()
-            .w(px(8.0))
+            .w(px(6.0))
+            .rounded(px(2.0))
+            .bg(hsla(color::ACCENT))
             .cursor_ew_resize()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.anchor_drag(event);
             }))
             .on_drag(drag, |_, _, _, cx| cx.new(|_| EmptyDragView))
+            .test_support()
     };
 
     div()
@@ -215,8 +223,9 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                     .left(relative(work_left))
                     .w(relative(work_right - work_left))
                     .bg(hsla(color::WORK_AREA))
-                    .child(edge("work-start", TimelineDrag::WorkStart, cx).left(px(-4.0)))
-                    .child(edge("work-end", TimelineDrag::WorkEnd, cx).right(px(-4.0))),
+                    // Its ends: bright handles that drag where playback starts and stops.
+                    .child(edge("work-start", TimelineDrag::WorkStart, cx).left_0())
+                    .child(edge("work-end", TimelineDrag::WorkEnd, cx).right_0()),
             ),
         )
         // Ticks; pressing or dragging here moves the playhead.
@@ -235,6 +244,8 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                     cx.notify();
                 }))
                 .on_drag(TimelineDrag::Scrub, |_, _, _, cx| cx.new(|_| EmptyDragView))
+                // Frames already rendered ahead, drawn first so the numbers sit on top.
+                .children(rendered_ahead(workspace))
                 .children(ticks)
                 // Markers (beats, say): small accent marks along the top of the ruler.
                 .children(markers)
@@ -305,10 +316,15 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
         .relative()
         .min_h_full()
         .flex()
+        .pr(px(RIGHT_GUTTER))
         .child(ui.rows.probe())
         // Alt + scroll zooms around the pointer.
-        .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
+        .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
             if !event.modifiers.alt {
+                // Plain scrolling: rows coming into view are drawn (only those near the view
+                // are), once now and again when the new position has been measured.
+                this.notify_timeline(cx);
+                cx.on_next_frame(window, |this, _, cx| this.notify_timeline(cx));
                 return;
             }
             let graph = this.ui.timeline.graph.get();
@@ -334,10 +350,10 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
             cx.notify();
         }))
         .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().child(tracks::toolbar(workspace, cx))))
-        .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().child(navigator(workspace, cx))))
-        .child(band(RULER_BAND).child(div().flex_1().min_w_0().child(ruler(workspace, cx))))
-        .child(div().id("timeline-rows").flex_1().min_h_0().overflow_y_scroll().child(rows_content))
-        .children(super::graph_editor::popover(workspace, cx));
+        .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().mr(px(RIGHT_GUTTER)).child(navigator(workspace, cx))))
+        .child(band(RULER_BAND).child(div().flex_1().min_w_0().mr(px(RIGHT_GUTTER)).child(ruler(workspace, cx))))
+        .child(div().relative().flex_1().min_h_0().child(ui.viewport.probe()).child(div().id("timeline-rows").size_full().overflow_y_scroll().child(rows_content)))
+        .children(empty_hint(workspace));
 
     let footer = div()
         .flex()
@@ -353,6 +369,48 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
 
     // The composition's name is in the toolbar row, beside the transport.
     panel(PanelId::Timeline, &[], Some(footer.into_any_element()), body, workspace, cx)
+}
+
+/// Green lines along the ruler, behind its numbers, where frames have been rendered ahead (as
+/// in After Effects). They sit in the ruler rather than the work-area bar so the bar never hides them.
+fn rendered_ahead(workspace: &Workspace) -> Vec<gpui_kit::Div> {
+    let view = workspace.state.view_range;
+    workspace
+        .render
+        .preview
+        .ranges()
+        .into_iter()
+        .map(|(start, end)| (fraction(start as f64, view), fraction(end as f64, view)))
+        .filter(|(left, right)| *right > 0.0 && *left < 1.0)
+        .map(|(left, right)| div().absolute().top(px(4.0)).h(px(2.0)).left(relative(left.max(0.0))).w(relative(right.min(1.0) - left.max(0.0))).bg(gpui_kit::rgb(0x3ccf6e)))
+        .collect()
+}
+
+/// What to do in an empty composition, over its empty tracks (the tracks still take drops).
+fn empty_hint(workspace: &Workspace) -> Option<impl IntoElement + use<>> {
+    if !workspace.state.composition().layers.is_empty() {
+        return None;
+    }
+    let keys = &workspace.ui.settings.shortcuts;
+    let key = |id: &str| crate::keymap::key_for(keys, id).map(|key| format!(" ({key})")).unwrap_or_default();
+    Some(
+        div()
+            .id("timeline-empty-hint")
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .top(px(CONTROLS_BAND * 2.0 + RULER_BAND))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .text_color(hsla(color::MUTED))
+            .child(div().text_color(hsla(color::TEXT)).child("This composition is empty"))
+            .child(format!("Drag footage, pictures or sound here from the Project panel or the Finder, add text{} or a shape{}, or start from a template.", key("type-tool"), key("shape-tool")))
+            .test_support(),
+    )
 }
 
 /// Zooms the visible range by `factor`, centered on the playhead.

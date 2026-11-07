@@ -4,7 +4,9 @@
 //! Each writes ordinary keyframes (and, for blur and typing, an effect), worked out from the
 //! layer's own position, scale, rotation and opacity, so the layer still ends up where it was
 //! put and everything stays editable. Choosing again replaces what the last choice wrote, and
-//! the layer remembers its choices so Properties can show them.
+//! the layer remembers its choices so the Motion panel can show them. The In and Out motions
+//! each have an easing of their own (`default_easing`), which can be swapped for any other
+//! (`set_motion_easing`); the choice is kept when the motion or its length changes.
 
 use crate::animation::{Animated, CubicBezier, EaseMode, Easing, Keyframe, Lerp, Vec2};
 use crate::model::{Id, Project};
@@ -89,6 +91,11 @@ pub struct LayerAnimation {
     pub exit: Option<(Motion, f32)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub looping: Option<Loop>,
+    /// The easing picked for the In or Out motion in place of the motion's own, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enter_easing: Option<Easing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_easing: Option<Easing>,
     /// A text layer's characters, words or lines coming in, and going out (see
     /// `text_animation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +116,31 @@ pub const MAX_SECONDS: f32 = 5.0;
 const EASE_OUT: Easing = Easing::Curve(CubicBezier::new(0.16, 1.0, 0.3, 1.0));
 const EASE_IN: Easing = Easing::Curve(CubicBezier::new(0.7, 0.0, 0.84, 0.0));
 const EASE_IN_OUT: Easing = Easing::Curve(CubicBezier::new(0.65, 0.0, 0.35, 1.0));
+
+/// The easing a motion moves with unless another is picked: a quick start that settles (In) or
+/// a slow start that speeds away (Out), with a spring for Pop, a bounce for Bounce, an even
+/// pace for Typewriter and a gentle both-ends curve for Fade.
+pub fn default_easing(motion: Motion, phase: Phase) -> Easing {
+    let mode = if phase == Phase::In { EaseMode::Out } else { EaseMode::In };
+    match motion {
+        Motion::Fade => EASE_IN_OUT,
+        Motion::Pop => Easing::Elastic(mode),
+        Motion::Bounce => Easing::Bounce(mode),
+        Motion::Typewriter => Easing::Linear,
+        _ if phase == Phase::In => EASE_OUT,
+        _ => EASE_IN,
+    }
+}
+
+/// The easing a layer's In or Out motion moves with: the one picked for it, or the motion's
+/// own. `None` when there is no motion at that end.
+pub fn motion_easing(animation: &LayerAnimation, phase: Phase) -> Option<Easing> {
+    let (motion, picked) = match phase {
+        Phase::In => (animation.enter, animation.enter_easing),
+        Phase::Out => (animation.exit, animation.exit_easing),
+    };
+    motion.map(|(motion, _)| picked.unwrap_or_else(|| default_easing(motion, phase)))
+}
 
 /// Keyframes made from (frame, value) pairs, `easing` on each.
 fn keys<T>(points: Vec<(i64, T)>, easing: Easing) -> Vec<Keyframe<T>> {
@@ -131,10 +163,16 @@ fn beats<T: Copy>((start, end, period): (i64, i64, i64), a: T, b: T) -> Vec<(i64
     (start..=end).step_by(period.max(1) as usize).enumerate().map(|(index, frame)| (frame, if index % 2 == 0 { a } else { b })).collect()
 }
 
-/// Removes the keyframes an animated value has within `window`, keeping its value there.
-fn clear<T: Copy + Lerp>(animated: &mut Animated<T>, window: (i64, i64)) {
+/// Removes the keyframes an animated value has within `window`. If none are left, it keeps
+/// the value it had at frame `home` (the layer's own value, where the removed animation met the
+/// rest of it), rather than whichever keyframe happened to be removed last.
+fn clear<T: Copy + Lerp>(animated: &mut Animated<T>, window: (i64, i64), home: i64) {
+    let kept = animated.value_at(home as f64);
     for frame in animated.keyframe_frames().into_iter().filter(|frame| (window.0..=window.1).contains(frame)) {
         animated.remove_keyframe(frame);
+    }
+    if !animated.is_animated() {
+        *animated = Animated::constant(kept);
     }
 }
 
@@ -161,7 +199,7 @@ pub fn set_motion(project: &mut Project, comp: Id, layer_id: Id, phase: Phase, m
     };
     if let Some((_, old_seconds)) = previous {
         let old = window(layer, phase, old_seconds, fps);
-        remove_motion(project, comp, layer_id, old);
+        remove_motion(project, comp, layer_id, phase, old);
     }
     let Some(layer) = project.composition(comp).and_then(|composition| composition.layer(layer_id)) else { return false };
     let span = window(layer, phase, seconds, fps);
@@ -181,19 +219,26 @@ pub fn set_motion(project: &mut Project, comp: Id, layer_id: Id, phase: Phase, m
         Phase::In => vec![(span.0, away), (span.1, home)],
         Phase::Out => vec![(span.0, home), (span.1, away)],
     };
-    let ease = if phase == Phase::In { EASE_OUT } else { EASE_IN };
     let offset = |by: Vec2| position + by * unit;
 
     let Some(layer) = project.composition_mut(comp).and_then(|composition| composition.layer_mut(layer_id)) else { return false };
-    match phase {
-        Phase::In => layer.animation.enter = motion.map(|motion| (motion, seconds)),
-        Phase::Out => layer.animation.exit = motion.map(|motion| (motion, seconds)),
+    // Taking the motion off also forgets the easing picked for it.
+    let (chosen, picked) = match phase {
+        Phase::In => (&mut layer.animation.enter, &mut layer.animation.enter_easing),
+        Phase::Out => (&mut layer.animation.exit, &mut layer.animation.exit_easing),
+    };
+    *chosen = motion.map(|motion| (motion, seconds));
+    if motion.is_none() {
+        *picked = None;
     }
+    let picked = *picked;
     let Some(motion) = motion else { return true };
+    // Every keyframe this motion writes moves with the same easing.
+    let ease = picked.unwrap_or_else(|| default_easing(motion, phase));
     let transform = layer.transform.as_mut().expect("checked above");
-    let fade = |transform: &mut crate::model::Transform, easing: Easing| replace(&mut transform.opacity, span, keys(between(0.0, opacity), easing));
+    let fade = |transform: &mut crate::model::Transform| replace(&mut transform.opacity, span, keys(between(0.0, opacity), ease));
     match motion {
-        Motion::Fade => fade(transform, EASE_IN_OUT),
+        Motion::Fade => fade(transform),
         Motion::Rise | Motion::Drop | Motion::SlideLeft | Motion::SlideRight => {
             let by = match motion {
                 Motion::Rise => Vec2::new(0.0, 90.0),
@@ -202,26 +247,20 @@ pub fn set_motion(project: &mut Project, comp: Id, layer_id: Id, phase: Phase, m
                 _ => Vec2::new(if phase == Phase::In { -240.0 } else { 240.0 }, 0.0),
             };
             replace(&mut transform.position, span, keys(between_pair(offset(by), position), ease));
-            fade(transform, ease);
+            fade(transform);
         }
-        Motion::Pop => {
-            let spring = if phase == Phase::In { Easing::Elastic(EaseMode::Out) } else { Easing::Elastic(EaseMode::In) };
-            replace(&mut transform.scale, span, keys(between_pair(Vec2::default(), scale), spring));
-        }
+        Motion::Pop => replace(&mut transform.scale, span, keys(between_pair(Vec2::default(), scale), ease)),
         Motion::Zoom => {
             replace(&mut transform.scale, span, keys(between_pair(scale * 1.6, scale), ease));
-            fade(transform, ease);
+            fade(transform);
         }
         Motion::Spin => {
             replace(&mut transform.rotation, span, keys(between(rotation - 180.0, rotation), ease));
             replace(&mut transform.scale, span, keys(between_pair(Vec2::default(), scale), ease));
         }
-        Motion::Bounce => {
-            let bounce = if phase == Phase::In { Easing::Bounce(EaseMode::Out) } else { Easing::Bounce(EaseMode::In) };
-            replace(&mut transform.position, span, keys(between_pair(offset(Vec2::new(0.0, -420.0)), position), bounce));
-        }
+        Motion::Bounce => replace(&mut transform.position, span, keys(between_pair(offset(Vec2::new(0.0, -420.0)), position), ease)),
         Motion::Blur => {
-            fade(transform, ease);
+            fade(transform);
             let blur = effect_on(project, comp, layer_id, "Gaussian Blur");
             if let Some(property) = blur {
                 let layer = project.composition_mut(comp).and_then(|composition| composition.layer_mut(layer_id)).expect("found above");
@@ -240,13 +279,26 @@ pub fn set_motion(project: &mut Project, comp: Id, layer_id: Id, phase: Phase, m
                         angle.value = Animated::constant(270.0);
                     }
                     if let Some(completion) = effect.properties.first_mut() {
-                        replace(&mut completion.value, span, keys(between(100.0, 0.0), Easing::Linear));
+                        replace(&mut completion.value, span, keys(between(100.0, 0.0), ease));
                     }
                 }
             }
         }
     }
     true
+}
+
+/// Picks the easing of a layer's In or Out motion (`None` goes back to the motion's own) and
+/// rewrites the motion's keyframes with it. Returns whether it changed.
+pub fn set_motion_easing(project: &mut Project, comp: Id, layer_id: Id, phase: Phase, easing: Option<Easing>) -> bool {
+    let Some(layer) = project.composition_mut(comp).and_then(|composition| composition.layer_mut(layer_id)).filter(|layer| !layer.switches.locked) else { return false };
+    let (motion, picked) = match phase {
+        Phase::In => (layer.animation.enter, &mut layer.animation.enter_easing),
+        Phase::Out => (layer.animation.exit, &mut layer.animation.exit_easing),
+    };
+    let Some((motion, seconds)) = motion else { return false };
+    *picked = easing;
+    set_motion(project, comp, layer_id, phase, Some(motion), seconds)
 }
 
 /// The id of the layer's effect named `name`, adding it if it has none.
@@ -257,17 +309,42 @@ fn effect_on(project: &mut Project, comp: Id, layer_id: Id, name: &str) -> Optio
 
 /// Takes out what an animation wrote within `window`: its keyframes on the transform and on the
 /// blur and wipe effects it uses.
-fn remove_motion(project: &mut Project, comp: Id, layer_id: Id, window: (i64, i64)) {
-    let Some(layer) = project.composition_mut(comp).and_then(|composition| composition.layer_mut(layer_id)) else { return };
+fn remove_motion(project: &mut Project, comp: Id, layer_id: Id, phase: Phase, window: (i64, i64)) {
+    if let Some(layer) = project.composition_mut(comp).and_then(|composition| composition.layer_mut(layer_id)) {
+        clear_motion_keys(layer, phase, window);
+    }
+}
+
+/// Takes a layer's In or Out motion off it, keyframes included, as choosing no motion does.
+/// For layers not (yet) in a composition; `fps` is the frame rate of the one it belongs to.
+pub fn strip_motion(layer: &mut crate::model::Layer, phase: Phase, fps: f64) {
+    let recorded = match phase {
+        Phase::In => (layer.animation.enter.take(), layer.animation.enter_easing.take()).0,
+        Phase::Out => (layer.animation.exit.take(), layer.animation.exit_easing.take()).0,
+    };
+    if let Some((_, seconds)) = recorded {
+        let span = window(layer, phase, seconds, fps);
+        clear_motion_keys(layer, phase, span);
+    }
+}
+
+/// Removes the keyframes an In or Out motion wrote within `window`: on the transform, and on
+/// the blur and wipe effects that some motions use. The layer keeps its values from the end of
+/// the window that is not off screen: the end of an In motion, the start of an Out one.
+fn clear_motion_keys(layer: &mut crate::model::Layer, phase: Phase, window: (i64, i64)) {
+    let home = match phase {
+        Phase::In => window.1,
+        Phase::Out => window.0,
+    };
     if let Some(transform) = layer.transform.as_mut() {
-        clear(&mut transform.position, window);
-        clear(&mut transform.scale, window);
-        clear(&mut transform.rotation, window);
-        clear(&mut transform.opacity, window);
+        clear(&mut transform.position, window, home);
+        clear(&mut transform.scale, window, home);
+        clear(&mut transform.rotation, window, home);
+        clear(&mut transform.opacity, window, home);
     }
     for effect in layer.effects.iter_mut().filter(|effect| matches!(effect.name.as_str(), "Gaussian Blur" | "Linear Wipe")) {
         for property in &mut effect.properties {
-            clear(&mut property.value, window);
+            clear(&mut property.value, window, home);
         }
     }
 }
@@ -292,10 +369,10 @@ pub fn set_loop(project: &mut Project, comp: Id, layer_id: Id, looping: Option<L
     // Undo the last loop.
     if previous.is_some() {
         if let Some(transform) = layer.transform.as_mut() {
-            clear(&mut transform.position, (start, end));
-            clear(&mut transform.scale, (start, end));
-            clear(&mut transform.rotation, (start, end));
-            clear(&mut transform.opacity, (start, end));
+            clear(&mut transform.position, (start, end), start);
+            clear(&mut transform.scale, (start, end), start);
+            clear(&mut transform.rotation, (start, end), start);
+            clear(&mut transform.opacity, (start, end), start);
         }
         if previous == Some(Loop::Wiggle) {
             layer.effects.retain(|effect| effect.name != "Wiggle");
@@ -336,6 +413,18 @@ mod tests {
     }
 
     #[test]
+    fn taking_a_motion_off_leaves_the_layer_as_it_was() {
+        for phase in [Phase::In, Phase::Out] {
+            let mut project = sample_project();
+            let layer = crate::edit::add_text_layer(&mut project, ids::MAIN_COMP, "Hi", crate::animation::Vec2::new(500.0, 500.0), 0).unwrap();
+            let opacity = |project: &Project| project.composition(ids::MAIN_COMP).unwrap().layer(layer).unwrap().transform.as_ref().unwrap().opacity.clone();
+            assert!(set_motion(&mut project, ids::MAIN_COMP, layer, phase, Some(Motion::Fade), 0.5));
+            assert!(set_motion(&mut project, ids::MAIN_COMP, layer, phase, None, 0.5));
+            assert_eq!(opacity(&project), Animated::constant(100.0), "{phase:?}: fully seen again, not stuck at the faded value");
+        }
+    }
+
+    #[test]
     fn rising_in_starts_lower_and_ends_where_the_layer_was() {
         let mut project = sample_project();
         // Clear the sample's own fades, so only the preset's keyframes are there.
@@ -353,6 +442,42 @@ mod tests {
         assert!(transform(&project).position.value_at(24.0).y <= home.y + 0.5, "no rise any more");
         set_motion(&mut project, ids::MAIN_COMP, TITLE, Phase::In, None, 0.5);
         assert_eq!(transform(&project).opacity.value_at(24.0), 100.0, "and removing takes it all out");
+    }
+
+    #[test]
+    fn a_picked_easing_rewrites_the_motion_and_outlives_changing_it() {
+        let mut project = sample_project();
+        let layer = project.composition_mut(ids::MAIN_COMP).unwrap().layer_mut(TITLE).unwrap();
+        layer.transform.as_mut().unwrap().opacity = Animated::constant(100.0);
+        let animation = |project: &Project| project.composition(ids::MAIN_COMP).unwrap().layer(TITLE).unwrap().animation;
+        let first_position_easing = |project: &Project| transform(project).position.keyframes()[0].easing;
+        // Without a motion there is nothing to ease.
+        assert!(!set_motion_easing(&mut project, ids::MAIN_COMP, TITLE, Phase::In, Some(Easing::Linear)));
+        set_motion(&mut project, ids::MAIN_COMP, TITLE, Phase::In, Some(Motion::Rise), 0.5);
+        assert_eq!(first_position_easing(&project), default_easing(Motion::Rise, Phase::In));
+        // A bounce picked for it lands on its keyframes, and is what the layer reports.
+        let bounce = Easing::Bounce(EaseMode::Out);
+        assert!(set_motion_easing(&mut project, ids::MAIN_COMP, TITLE, Phase::In, Some(bounce)));
+        assert_eq!(first_position_easing(&project), bounce);
+        assert_eq!(motion_easing(&animation(&project), Phase::In), Some(bounce));
+        // A longer slide keeps it.
+        set_motion(&mut project, ids::MAIN_COMP, TITLE, Phase::In, Some(Motion::SlideLeft), 1.2);
+        assert_eq!(first_position_easing(&project), bounce);
+        assert_eq!(transform(&project).position.keyframes().len(), 2, "the old slide's keyframes were replaced");
+        // Going back to the motion's own easing, and taking the motion off forgets the pick.
+        set_motion_easing(&mut project, ids::MAIN_COMP, TITLE, Phase::In, None);
+        assert_eq!(first_position_easing(&project), default_easing(Motion::SlideLeft, Phase::In));
+        set_motion_easing(&mut project, ids::MAIN_COMP, TITLE, Phase::In, Some(bounce));
+        set_motion(&mut project, ids::MAIN_COMP, TITLE, Phase::In, None, 0.5);
+        assert_eq!(animation(&project).enter_easing, None);
+        assert_eq!(motion_easing(&animation(&project), Phase::In), None);
+    }
+
+    #[test]
+    fn layers_saved_before_picked_easings_still_load() {
+        let animation: LayerAnimation = serde_json::from_str(r#"{"enter": ["Rise", 0.5]}"#).unwrap();
+        assert_eq!(animation.enter_easing, None);
+        assert_eq!(motion_easing(&animation, Phase::In), Some(default_easing(Motion::Rise, Phase::In)));
     }
 
     #[test]

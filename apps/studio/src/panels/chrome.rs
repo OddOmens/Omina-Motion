@@ -238,7 +238,7 @@ impl Render for EmptyDragView {
 pub fn icon_button(
     id: impl Into<ElementId>,
     icon: IconName,
-    tooltip: &'static str,
+    tooltip: impl Into<gpui_kit::SharedString>,
     active: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Button {

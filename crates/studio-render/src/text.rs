@@ -2,9 +2,10 @@
 //! tracking and alignment), rasterized on the CPU into a straight-alpha sRGB image.
 //! Stroke is drawn around the glyphs from a distance map, so it is evenly thick.
 
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
+use cosmic_text::{Attrs, Buffer, Command, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
 use studio_core::animation::Vec2;
 use studio_core::model::{Rgba, TextAlign, TextStyle};
+use studio_core::path::{PathPoint, ShapePath};
 
 /// A rasterized text layer, ready to upload as a texture.
 pub struct TextImage {
@@ -63,6 +64,72 @@ impl TextGeometry {
         let line = self.lines.iter().find(|line| y < line.top + line.height).unwrap_or_else(|| self.lines.last().expect("there is always a line"));
         line.stops.iter().min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs())).map_or(0, |&(at, _)| at)
     }
+}
+
+/// A text layer's letters as outlines (see `TextRenderer::outlines`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextOutlines {
+    /// The text box, as `measure` gives it.
+    pub size: Vec2,
+    /// Each line's top and height.
+    pub lines: Vec<(f32, f32)>,
+    pub glyphs: Vec<GlyphPath>,
+}
+
+/// One letter: the byte offset in the text of the character it draws, its line, its left edge
+/// and the width it takes, and its outline as closed contours in the text's pixels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GlyphPath {
+    pub start: usize,
+    pub line: usize,
+    pub left: f32,
+    pub width: f32,
+    pub contours: Vec<ShapePath>,
+}
+
+/// A glyph's outline commands (y up, from its origin) as closed contours in the text's pixels
+/// (y down), placed at `origin`. Quadratic curves become the equivalent cubic ones.
+fn contours(commands: &[Command], origin: Vec2) -> Vec<ShapePath> {
+    let place = |x: f32, y: f32| Vec2::new(origin.x + x, origin.y - y);
+    let mut contours: Vec<ShapePath> = Vec::new();
+    let mut current: Vec<PathPoint> = Vec::new();
+    fn finish(points: &mut Vec<PathPoint>, contours: &mut Vec<ShapePath>) {
+        // A contour that ends back on its first point joins it there.
+        if points.len() > 2 && (points[0].at - points[points.len() - 1].at).length() < 1e-3 {
+            let last = points.pop().expect("more than two points");
+            points[0].handle_in = last.handle_in;
+        }
+        if points.len() > 1 {
+            contours.push(ShapePath { points: std::mem::take(points), closed: true });
+        }
+        points.clear();
+    }
+    for command in commands {
+        match *command {
+            Command::MoveTo(to) => {
+                finish(&mut current, &mut contours);
+                current.push(PathPoint::corner(place(to.x, to.y)));
+            }
+            Command::LineTo(to) => current.push(PathPoint::corner(place(to.x, to.y))),
+            Command::CurveTo(a, b, to) => {
+                let end = place(to.x, to.y);
+                if let Some(last) = current.last_mut() {
+                    last.handle_out = place(a.x, a.y) - last.at;
+                }
+                current.push(PathPoint { at: end, handle_in: place(b.x, b.y) - end, handle_out: Vec2::default() });
+            }
+            Command::QuadTo(control, to) => {
+                let (control, end) = (place(control.x, control.y), place(to.x, to.y));
+                if let Some(last) = current.last_mut() {
+                    last.handle_out = (control - last.at) * (2.0 / 3.0);
+                }
+                current.push(PathPoint { at: end, handle_in: (control - end) * (2.0 / 3.0), handle_out: Vec2::default() });
+            }
+            Command::Close => finish(&mut current, &mut contours),
+        }
+    }
+    finish(&mut current, &mut contours);
+    contours
 }
 
 pub struct TextRenderer {
@@ -131,6 +198,31 @@ impl TextRenderer {
         let (buffer, _) = self.layout(text, style, 1.0);
         let Some(run) = buffer.layout_runs().next() else { return (Vec::new(), 0.0) };
         (run.glyphs.iter().map(|glyph| (glyph.x, glyph.w)).collect(), run.line_y)
+    }
+
+    /// The text's letters as outlines, laid out exactly as `rasterize` draws them, for exporting
+    /// text as vector shapes. Positions are in source pixels in the text's own box.
+    pub fn outlines(&mut self, text: &str, style: &TextStyle) -> TextOutlines {
+        let (buffer, size) = self.layout(text, style, 1.0);
+        // Glyph offsets count from the start of their line (split at line breaks, as the layout does).
+        let mut line_starts = vec![0];
+        line_starts.extend(text.match_indices('\n').map(|(at, _)| at + 1));
+        let mut lines = Vec::new();
+        let mut glyphs = Vec::new();
+        for run in buffer.layout_runs() {
+            let line = lines.len();
+            lines.push((run.line_top, run.line_height));
+            let line_start = line_starts.get(run.line_i).copied().unwrap_or(0);
+            for glyph in run.glyphs {
+                let physical = glyph.physical((0.0, run.line_y), 1.0);
+                // Where the glyph's origin sits on its baseline, as `physical` places it (only the
+                // vertical position is snapped to a whole pixel).
+                let origin = Vec2::new(glyph.x + glyph.font_size * glyph.x_offset, (run.line_y + glyph.y - glyph.font_size * glyph.y_offset).trunc());
+                let contours = self.glyphs.get_outline_commands(&mut self.fonts, physical.cache_key).map(|commands| contours(commands, origin)).unwrap_or_default();
+                glyphs.push(GlyphPath { start: line_start + glyph.start, line, left: glyph.x, width: glyph.w, contours });
+            }
+        }
+        TextOutlines { size, lines, glyphs }
     }
 
     /// Where a caret and selection go in `text` as drawn with `style`, for editing it in place.
@@ -226,7 +318,16 @@ impl TextRenderer {
 
         // A stroke goes around color glyphs too (a sticker outline).
         let shape: Vec<f32> = if colored.is_empty() { coverage.clone() } else { coverage.iter().zip(&colored).map(|(&c, pixel)| c.max(f32::from(pixel[3]) / 255.0)).collect() };
-        let stroke_coverage = stroke.map(|(_, stroke_width)| stroke_mask(&shape, width, height, stroke_width.max(0.0)));
+        let mut stroke_coverage = stroke.map(|(_, stroke_width)| stroke_mask(&shape, width, height, stroke_width.max(0.0)));
+        // Without a fill, the stroke is only the ring around each letter, so outlined words are
+        // hollow; with one, the fill covers the stroke's inside anyway.
+        if style.fill.is_none()
+            && let Some(mask) = stroke_coverage.as_mut()
+        {
+            for (ring, &inside) in mask.iter_mut().zip(&shape) {
+                *ring *= 1.0 - inside;
+            }
+        }
         let lit = highlight.map(|(_, color)| (highlighted.as_slice(), color));
         let mut pixels = paint(&coverage, stroke_coverage.as_deref(), style.fill, stroke.map(|(color, _)| color), lit);
         over(&mut pixels, &colored);
@@ -422,6 +523,16 @@ mod tests {
         assert_eq!(geometry.highlight(1..5).len(), 2, "a selection across the break covers both lines");
         // Empty text still has a place for the caret.
         assert_eq!(text.geometry("", &style()).caret(0).2, style().line_height);
+    }
+
+    #[test]
+    fn outlined_text_without_a_fill_is_hollow() {
+        let mut text = TextRenderer::new();
+        let outlined = text.rasterize("O", &TextStyle { fill: None, stroke: Some((Rgba::hex(0xff0000), 4.0)), ..style() }, 1.0, 8192);
+        let filled = text.rasterize("O", &TextStyle { stroke: Some((Rgba::hex(0xff0000), 4.0)), ..style() }, 1.0, 8192);
+        let ink = |image: &TextImage| image.pixels.chunks(4).filter(|px| px[3] > 128).count();
+        assert!(ink(&outlined) > 100, "the ring is drawn");
+        assert!(ink(&outlined) < ink(&filled) * 3 / 4, "but not the letter inside it: {} vs {}", ink(&outlined), ink(&filled));
     }
 
     #[test]

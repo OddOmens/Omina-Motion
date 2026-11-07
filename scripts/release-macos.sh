@@ -5,7 +5,7 @@
 #
 # Needs, on the machine that builds releases: Xcode's command-line tools, git, pkg-config and
 # cargo-packager (`cargo install cargo-packager --locked`). The first run downloads and compiles
-# x264 and FFmpeg, which takes several minutes; later runs reuse them.
+# x264, libvpx, Opus and FFmpeg, which takes several minutes; later runs reuse them.
 #
 # Signing and notarizing (so the app opens without Gatekeeper warnings) use your Apple Developer ID:
 # put its name in apps/studio/Cargo.toml (`signing-identity` under [package.metadata.packager.macos]),
@@ -37,8 +37,59 @@ if [ ! -f "$deps/lib/libx264.a" ] || [ "$(cat "$deps/x264-commit" 2>/dev/null)" 
     )
     echo "$x264_commit" > "$deps/x264-commit"
 fi
-# FFmpeg's configure finds x264 here first; only the static library is installed, so it is linked in.
+# libvpx (VP9, for WebM), pinned to a release tag. Its configure is a plain shell script, so it
+# needs nothing beyond Xcode's tools on Apple silicon.
+vpx_tag=v1.15.0
+if [ ! -f "$deps/lib/libvpx.a" ] || [ "$(cat "$deps/vpx-tag" 2>/dev/null)" != "$vpx_tag" ]; then
+    echo "Building libvpx (static)…"
+    rm -rf "$deps/src/libvpx"
+    mkdir -p "$deps/src"
+    git clone --quiet --depth 1 --branch "$vpx_tag" https://chromium.googlesource.com/webm/libvpx "$deps/src/libvpx"
+    # libvpx's configure only recognises macOS versions it was released alongside, and on a
+    # newer one falls back to plain C with none of the processor's fast paths, so the target is
+    # named outright (the newest it knows; the code it builds runs on later versions too).
+    case "$(uname -m)" in
+        arm64) vpx_target=arm64-darwin23-gcc ;;
+        *) vpx_target=x86_64-darwin23-gcc ;;
+    esac
+    (
+        cd "$deps/src/libvpx"
+        ./configure --target="$vpx_target" --prefix="$deps" --enable-static --disable-shared --enable-pic --enable-vp9 \
+            --disable-examples --disable-tools --disable-docs --disable-unit-tests \
+            --extra-cflags="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+        make -j"$(sysctl -n hw.ncpu)"
+        make install
+    )
+    echo "$vpx_tag" > "$deps/vpx-tag"
+fi
+# Opus (WebM's sound), from its release tarball, which comes with a ready-made configure. The
+# download is checked against the checksums Xiph.Org publishes for its releases.
+opus_version=1.5.2
+if [ ! -f "$deps/lib/libopus.a" ] || [ "$(cat "$deps/opus-version" 2>/dev/null)" != "$opus_version" ]; then
+    echo "Building Opus (static)…"
+    rm -rf "$deps/src/opus-$opus_version"
+    mkdir -p "$deps/src"
+    (
+        cd "$deps/src"
+        curl -fsSLO "https://downloads.xiph.org/releases/opus/opus-$opus_version.tar.gz"
+        curl -fsSL https://downloads.xiph.org/releases/opus/SHA256SUMS.txt | grep " opus-$opus_version.tar.gz\$" | shasum -a 256 -c -
+        tar xzf "opus-$opus_version.tar.gz"
+        cd "opus-$opus_version"
+        ./configure --prefix="$deps" --enable-static --disable-shared --with-pic --disable-doc --disable-extra-programs \
+            CFLAGS="-O2 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+        make -j"$(sysctl -n hw.ncpu)"
+        make install
+    )
+    echo "$opus_version" > "$deps/opus-version"
+fi
+# FFmpeg's configure finds x264, libvpx and Opus here first; only their static libraries are
+# installed, so they are linked in.
 export PKG_CONFIG_PATH="$deps/lib/pkgconfig"
+
+# Check for Updates reads the feed named here; without it the menu item is turned off.
+if [ -z "${STUDIO_UPDATE_URL:-}" ]; then
+    echo "warning: STUDIO_UPDATE_URL is not set, so this build can't check for updates." >&2
+fi
 
 echo "Building Studio with FFmpeg built in…"
 cargo build --release -p studio --features bundled-ffmpeg
@@ -56,13 +107,15 @@ python3 scripts/third-party-notices.py
 echo "Packaging…"
 cargo packager --release -p studio --formats app,dmg
 
-# The GPL asks that the source of a release be available: record exactly which FFmpeg and x264
-# went into it, beside the release.
+# The GPL asks that the source of a release be available: record exactly which FFmpeg, x264,
+# libvpx and Opus went into it, beside the release.
 ffmpeg_source="$(find target/release/build -maxdepth 3 -type d -path '*ffmpeg-sys-next-*/out/ffmpeg-*' | head -n 1)"
 {
     echo "Studio $(cargo pkgid -p studio | sed 's/.*[#@]//') for macOS"
     echo "Studio source: this repository at commit $(git rev-parse HEAD)"
     echo "FFmpeg: https://github.com/FFmpeg/FFmpeg at commit $(git -C "$ffmpeg_source" rev-parse HEAD)"
     echo "x264: https://code.videolan.org/videolan/x264 at commit $x264_commit"
+    echo "libvpx: https://chromium.googlesource.com/webm/libvpx at tag $vpx_tag"
+    echo "Opus: https://downloads.xiph.org/releases/opus/opus-$opus_version.tar.gz"
 } > target/packages/SOURCES.txt
 echo "Done: target/packages"

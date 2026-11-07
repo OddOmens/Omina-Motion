@@ -49,6 +49,19 @@ pub trait Lerp: Copy {
     fn lerp(self, other: Self, t: f32) -> Self;
 }
 
+/// Values an animated property can hold: anything that blends between two keyframes. Every
+/// `Lerp` value is one; so is a shape's outline (see `morph`), which is too large to copy and
+/// needs its points matched up before it can blend.
+pub trait Blend: Clone {
+    fn blend(&self, other: &Self, t: f32) -> Self;
+}
+
+impl<T: Lerp> Blend for T {
+    fn blend(&self, other: &Self, t: f32) -> Self {
+        self.lerp(*other, t)
+    }
+}
+
 impl Lerp for f32 {
     fn lerp(self, other: Self, t: f32) -> Self {
         self + (other - self) * t
@@ -257,7 +270,7 @@ impl<T> From<AnimatedFile<T>> for Animated<T> {
     }
 }
 
-impl<T: Lerp> Animated<T> {
+impl<T: Blend> Animated<T> {
     pub fn constant(value: T) -> Self {
         Self { value, keyframes: Vec::new() }
     }
@@ -266,7 +279,7 @@ impl<T: Lerp> Animated<T> {
     pub fn keyframed(mut keyframes: Vec<Keyframe<T>>) -> Self {
         keyframes.sort_by_key(|keyframe| keyframe.frame);
         keyframes.dedup_by_key(|keyframe| keyframe.frame);
-        let value = keyframes.first().map(|keyframe| keyframe.value).expect("at least one keyframe");
+        let value = keyframes.first().map(|keyframe| keyframe.value.clone()).expect("at least one keyframe");
         Self { value, keyframes }
     }
 
@@ -294,13 +307,13 @@ impl<T: Lerp> Animated<T> {
     /// The value at `frame`: held before the first and after the last keyframe, eased in between.
     pub fn value_at(&self, frame: f64) -> T {
         let (Some(first), Some(last)) = (self.keyframes.first(), self.keyframes.last()) else {
-            return self.value;
+            return self.value.clone();
         };
         if frame <= first.frame as f64 {
-            return first.value;
+            return first.value.clone();
         }
         if frame >= last.frame as f64 {
-            return last.value;
+            return last.value.clone();
         }
         // Keyframes are sorted, so the segment containing `frame` is the first whose end lies past it.
         let pair = self
@@ -308,10 +321,10 @@ impl<T: Lerp> Animated<T> {
             .windows(2)
             .find(|pair| frame < pair[1].frame as f64)
             .expect("frame lies strictly between the first and last keyframe");
-        let (from, to) = (pair[0], pair[1]);
+        let (from, to) = (&pair[0], &pair[1]);
         // In floating point: subtracting frame numbers as integers could overflow on extreme frames.
         let t = ((frame - from.frame as f64) / (to.frame as f64 - from.frame as f64)) as f32;
-        from.value.lerp(to.value, from.easing.apply(t))
+        from.value.blend(&to.value, from.easing.apply(t))
     }
 
     /// Sets the value at `frame`. Animated properties gain or update a keyframe there
@@ -338,7 +351,7 @@ impl<T: Lerp> Animated<T> {
             self.value = self.value_at(frame as f64);
             self.keyframes.clear();
         } else {
-            self.keyframes.push(Keyframe::linear(frame, self.value));
+            self.keyframes.push(Keyframe::linear(frame, self.value.clone()));
         }
     }
 
@@ -402,9 +415,9 @@ impl<T: Lerp> Animated<T> {
 
     /// Replaces the static value and every keyframe value with `f(value)`.
     pub fn map_values(&mut self, f: impl Fn(T) -> T) {
-        self.value = f(self.value);
+        self.value = f(self.value.clone());
         for keyframe in &mut self.keyframes {
-            keyframe.value = f(keyframe.value);
+            keyframe.value = f(keyframe.value.clone());
         }
     }
 
@@ -413,6 +426,11 @@ impl<T: Lerp> Animated<T> {
         for keyframe in &mut self.keyframes {
             keyframe.frame += delta;
         }
+    }
+
+    /// Whether the static value and every keyframe's value pass `check` (for checking files).
+    pub fn is_sound_with(&self, check: impl Fn(&T) -> bool) -> bool {
+        check(&self.value) && self.keyframes.iter().all(|keyframe| check(&keyframe.value))
     }
 
     /// The nearest keyframe frame before `frame`, if any.

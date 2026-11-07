@@ -1,0 +1,23 @@
+[package]
+name = "studio-vector"
+description = "Writes Studio compositions as vector animations: Lottie (Bodymovin JSON), dotLottie and animated SVG. Pure functions from a project to text or bytes; fonts and image files come in through a small trait, so it runs headless."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+studio-core.workspace = true
+# Lottie files are JSON.
+serde_json = "1"
+# Deflate, for the zip a dotLottie file is (pure Rust).
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+# The tests read the Lottie output back into typed structs that mirror the format's schema.
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

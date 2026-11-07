@@ -1,7 +1,7 @@
 //! Saving and opening project files from the editor window: the file dialogs, writing files
 //! safely, and asking about unsaved changes before they would be lost (opening another
-//! project, quitting, closing the window). Also the session around them: the last project
-//! reopens on launch, the window keeps its place, and unsaved work is kept in a recovery
+//! project, quitting, closing the window). Also the session around them: the start screen (or
+//! the last project) on launch, the recent projects list, the window keeping its place, and unsaved work is kept in a recovery
 //! copy every half minute, offered back if Studio closed without saving it.
 
 use std::path::{Path, PathBuf};
@@ -59,9 +59,10 @@ impl Workspace {
     }
 
     /// On launch: offers back unsaved work if Studio closed without saving it, otherwise
-    /// reopens the project that was open last.
+    /// shows the start screen or reopens the project that was open last, as Settings says.
     pub fn restore_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         crate::panels::export::remove_unfinished_export();
+        crate::panels::package::remove_unfinished_package();
         let settings = app_settings::load();
         let recovery = app_settings::recovery_path();
         if let Ok(text) = std::fs::read_to_string(&recovery) {
@@ -76,9 +77,7 @@ impl Workspace {
                         this.restore_recovery(&text, settings.recovery_of, window, cx);
                     } else {
                         app_settings::clear_recovery();
-                        if let Some(last) = settings.last_project.filter(|path| path.exists() && settings.reopen_last_project) {
-                            this.open_file(last, window, cx);
-                        }
+                        this.start(&settings, window, cx);
                     }
                 })
                 .ok();
@@ -86,8 +85,16 @@ impl Workspace {
             .detach();
             return;
         }
-        if let Some(last) = settings.last_project.filter(|path| path.exists() && settings.reopen_last_project) {
-            self.open_file(last, window, cx);
+        self.start(&settings, window, cx);
+    }
+
+    /// Opens the last project if Settings asks for that and it is still there; otherwise shows
+    /// the start screen.
+    fn start(&mut self, settings: &app_settings::AppSettings, window: &mut Window, cx: &mut Context<Self>) {
+        let last = settings.last_project.clone().filter(|path| path.exists());
+        match last {
+            Some(last) if settings.start_with == app_settings::StartWith::LastProject => self.open_file(last, window, cx),
+            _ => crate::panels::start_screen::show(self, window, cx),
         }
     }
 
@@ -119,9 +126,58 @@ impl Workspace {
         app_settings::write_recovery(&text, self.state.file()).map_err(|error| error.to_string())
     }
 
+    /// Keeps `text` as a version of the project at `file`, if Settings keeps versions.
+    fn keep_version(&mut self, text: &str, file: Option<&Path>) {
+        let settings = self.ui.settings.versions;
+        if !settings.keep {
+            return;
+        }
+        match crate::versions::keep(text, file, settings.how_many as usize) {
+            Ok(_) => self.ui.last_version_at = Some(std::time::Instant::now()),
+            Err(error) => eprintln!("could not keep a version of the project: {error}"),
+        }
+    }
+
+    /// Keeps a version of unsaved work if the last one is older than Settings asks for.
+    pub fn keep_timed_version(&mut self) {
+        let settings = self.ui.settings.versions;
+        let due = self.ui.last_version_at.is_none_or(|at| at.elapsed().as_secs() >= u64::from(settings.every_minutes.max(1)) * 60);
+        if !settings.keep || !due || !self.state.has_unsaved_changes() {
+            return;
+        }
+        if let Ok(text) = self.state.project_text_with(&self.editor_settings()) {
+            let file = self.state.file().map(Path::to_path_buf);
+            self.keep_version(&text, file.as_deref());
+        }
+    }
+
+    /// Restores version `version` of the project as unsaved changes, after keeping the work as
+    /// it is now as a version too (so the restore can be undone by restoring that).
+    pub fn restore_version(&mut self, version: &crate::versions::Version, window: &mut Window, cx: &mut Context<Self>) {
+        let text = match std::fs::read_to_string(&version.path) {
+            Ok(text) => text,
+            Err(error) => return show_error(window, cx, "That version couldn't be read", error.to_string()),
+        };
+        let file = self.state.file().map(Path::to_path_buf);
+        if let Ok(now) = self.state.project_text_with(&self.editor_settings()) {
+            self.keep_version(&now, file.as_deref());
+        }
+        let path = file.clone().unwrap_or_else(app_settings::recovery_path);
+        match self.state.open_project(&text, path) {
+            Ok((_, settings)) => {
+                self.apply_settings(&settings);
+                self.state.mark_restored_unsaved(file);
+                self.request_proxies();
+                cx.notify();
+            }
+            Err(error) => show_error(window, cx, "That version couldn't be restored", error),
+        }
+    }
+
     /// Runs every `RECOVERY_INTERVAL`: keeps the recovery copy, saying once if it can't be kept
     /// (a full or read-only disk), and tries again to save libraries that failed to save.
     pub fn keep_work_safe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.keep_timed_version();
         match self.keep_recovery_copy() {
             Ok(()) => self.ui.recovery_failing = false,
             Err(error) if !self.ui.recovery_failing => {
@@ -214,13 +270,19 @@ impl Workspace {
 
     /// Writes the project to `path`. Shows what went wrong and returns false if it could not.
     fn write_project(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let written = self.state.project_text_with(&self.editor_settings()).and_then(|text| write_atomically(path, &text).map_err(|error| error.to_string()));
+        let text = self.state.project_text_with(&self.editor_settings());
+        let written = text.as_ref().map_err(Clone::clone).and_then(|text| write_atomically(path, text).map_err(|error| error.to_string()));
         match written {
             Ok(()) => {
+                // Each save is also a version to come back to.
+                if let Ok(text) = &text {
+                    self.keep_version(text, Some(path));
+                }
                 self.state.mark_saved(path.to_path_buf(), cx.has_active_drag());
                 // Saved: nothing left to recover, and this is the project to reopen next time.
                 app_settings::clear_recovery();
-                app_settings::update(|settings| settings.last_project = Some(path.to_path_buf()));
+                app_settings::note_project_used(path);
+                crate::workspace::refresh_menus(cx);
                 cx.notify();
                 true
             }
@@ -234,11 +296,30 @@ impl Workspace {
     /// Starts a new, empty project, after offering to save unsaved changes.
     pub fn new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.unless_cancelled(window, cx, Box::new(|this, _, cx| {
-            let settings = app_settings::load();
-            this.state.new_project(&settings.default_folders, settings.new_composition);
-            app_settings::update(|app| app.last_project = None);
+            this.begin_new_project();
             cx.notify();
         }));
+    }
+
+    /// Closes the project (after offering to save unsaved changes) and shows the start screen,
+    /// like After Effects' Close Project. An empty project is left behind it.
+    pub fn close_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.unless_cancelled(window, cx, Box::new(|this, window, cx| {
+            this.begin_new_project();
+            crate::panels::start_screen::show(this, window, cx);
+        }));
+    }
+
+    /// Replaces the project with a new, empty one, without asking (callers ask first).
+    pub fn begin_new_project(&mut self) {
+        self.begin_new_project_sized(None);
+    }
+
+    /// The same, with its first composition at `size` rather than Settings' new-composition size.
+    pub fn begin_new_project_sized(&mut self, size: Option<app_settings::NewComposition>) {
+        let settings = app_settings::load();
+        self.state.new_project(&settings.default_folders, size.unwrap_or(settings.new_composition));
+        app_settings::update(|app| app.last_project = None);
     }
 
     /// Asks for a project file and opens it, after offering to save unsaved changes.
@@ -263,7 +344,9 @@ impl Workspace {
         match read_project(&path).and_then(|text| self.state.open_project(&text, path.clone())) {
             Ok((missing, settings)) => {
                 self.apply_settings(&settings);
-                app_settings::update(|app| app.last_project = Some(path));
+                app_settings::note_project_used(&path);
+                crate::workspace::refresh_menus(cx);
+                crate::panels::start_screen::hide(self);
                 self.request_proxies();
                 if !missing.is_empty() {
                     let names: Vec<String> = missing.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
@@ -276,25 +359,36 @@ impl Workspace {
         }
     }
 
-    /// Quits, after offering to save unsaved changes. A running export is stopped first
-    /// (after asking), so it can remove its partial file.
+    /// Quits, after offering to save unsaved changes. A running export or package is stopped
+    /// first, after asking. An export removes its partial file before the app quits; a
+    /// package's partial file is removed the next time Studio starts.
     pub fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.unless_cancelled(window, cx, Box::new(|this, window, cx| {
             this.remember_session(window);
-            if this.ui.export_job.is_none() {
-                cx.quit();
-                return;
-            }
-            let buttons = [PromptButton::ok("Stop Export and Quit"), PromptButton::cancel("Cancel")];
-            let answer = window.prompt(PromptLevel::Warning, "An export is still running.", Some("Quitting now stops it."), &buttons, cx);
+            let (title, stop) = match (this.ui.export_job.is_some(), this.ui.package_job.is_some()) {
+                (false, false) => {
+                    cx.quit();
+                    return;
+                }
+                (true, false) => ("An export is still running.", "Stop Export and Quit"),
+                (false, true) => ("A package is still being made.", "Stop Packaging and Quit"),
+                (true, true) => ("An export and a package are still running.", "Stop Both and Quit"),
+            };
+            let buttons = [PromptButton::ok(stop), PromptButton::cancel("Cancel")];
+            let answer = window.prompt(PromptLevel::Warning, title, Some("Quitting now stops it."), &buttons, cx);
             cx.spawn_in(window, async move |this, cx| {
                 if answer.await != Ok(0) {
                     return;
                 }
-                // The export's completion quits the app once its partial file is gone.
-                this.update(cx, |this, _| {
-                    this.ui.quit_after_export = true;
-                    crate::panels::export::cancel(this);
+                this.update(cx, |this, cx| {
+                    crate::panels::package::cancel(this);
+                    if this.ui.export_job.is_some() {
+                        // The export's completion quits the app once its partial file is gone.
+                        this.ui.quit_after_export = true;
+                        crate::panels::export::cancel(this);
+                    } else {
+                        cx.quit();
+                    }
                 })
                 .ok();
             })
@@ -303,9 +397,10 @@ impl Workspace {
     }
 
     /// Runs `then` right away if nothing is unsaved. Otherwise asks first: save and continue,
-    /// continue without saving, or cancel (and do nothing).
+    /// continue without saving, or cancel (and do nothing). It doesn't ask again on the start
+    /// screen when the person already chose not to save on the way there.
     pub fn unless_cancelled(&mut self, window: &mut Window, cx: &mut Context<Self>, then: Then) {
-        if !self.state.has_unsaved_changes() {
+        if !self.state.has_unsaved_changes() || crate::panels::start_screen::changes_declined(self) {
             clear_stale_recovery();
             then(self, window, cx);
             return;

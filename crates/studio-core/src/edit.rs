@@ -39,6 +39,8 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
     .clamp(1, crate::model::MAX_FRAME);
     let size = item.size.unwrap_or(composition.size());
     let has_picture = content.has_picture();
+    // A nested composition plays whatever sound is inside it, so its audio switch starts on.
+    let has_audio = item.has_audio || matches!(content, LayerContent::Composition { .. });
 
     Some(Layer {
         id,
@@ -55,13 +57,14 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         cutout: None,
         text_path: None,
         parent: None,
-        switches: LayerSwitches { visible: has_picture, audio: item.has_audio, ..LayerSwitches::default() },
+        switches: LayerSwitches { visible: has_picture, audio: has_audio, ..LayerSwitches::default() },
         transform: has_picture.then(|| Transform::centered(size, composition.size() * 0.5)),
         effects: Vec::new(),
-        has_audio: item.has_audio,
+        has_audio,
         audio: Default::default(),
         time: Default::default(),
         animation: Default::default(),
+        morph: None,
         content,
     })
 }
@@ -696,6 +699,10 @@ pub fn set_path_closed(composition: &mut Composition, layer_id: Id, closed: bool
     let Some(layer) = composition.layer_mut(layer_id) else { return false };
     let LayerContent::Shape { path: Some(path), .. } = &mut layer.content else { return false };
     path.closed = closed;
+    // A morphing outline opens or closes at every keyframe.
+    if let Some(morph) = layer.morph.as_mut() {
+        morph.path.map_values(|path| crate::path::ShapePath { closed, ..path });
+    }
     true
 }
 
@@ -789,6 +796,7 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
             audio: Default::default(),
             time: Default::default(),
             animation: Default::default(),
+            morph: None,
         },
     );
     crate::tracks::normalize(composition);
@@ -822,6 +830,8 @@ pub fn edit_shape(composition: &mut Composition, layer_id: Id, edit: impl FnOnce
             *paint = paint.with_gradient(gradient.sanitized());
         }
     }
+    // A morphing shape's style keyframes follow the edit (see `morph::sync_style_edit`).
+    crate::morph::sync_style_edit(layer);
     true
 }
 

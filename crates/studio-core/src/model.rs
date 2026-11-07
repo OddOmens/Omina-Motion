@@ -744,6 +744,9 @@ pub struct Layer {
     /// `None` for layers without a picture, such as audio.
     pub transform: Option<Transform>,
     pub effects: Vec<Effect>,
+    /// For footage, whether the file has sound. For a nested composition it is always set, so
+    /// its audio switch is the one that counts; whether it actually makes sound depends on
+    /// what is inside (see `audio::layer_has_sound`).
     pub has_audio: bool,
     /// Volume and fades, for layers with sound.
     #[serde(default)]
@@ -754,6 +757,9 @@ pub struct Layer {
     /// The one-click animations chosen for the layer (see `presets`).
     #[serde(default, skip_serializing_if = "crate::presets::LayerAnimation::is_none")]
     pub animation: crate::presets::LayerAnimation,
+    /// For a shape layer: keyframes that morph its outline (and its fill and stroke) over time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub morph: Option<crate::morph::ShapeMorph>,
 }
 
 /// How fast a footage layer's source plays, and whether backwards.

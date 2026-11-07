@@ -4,7 +4,7 @@
 //! each places its layers by fractions of the frame and adapts to the three shapes.
 
 use super::layouts::button;
-use super::{Builder, EASE_IN_OUT, EASE_OUT, SPRING};
+use super::{Builder, EASE_IN_OUT, EASE_OUT, WOBBLE};
 use crate::animation::{Animated, Easing, Vec2};
 use crate::model::{LayerContent, Paint, Rgba, ShapeKind, TextAlign};
 
@@ -87,7 +87,7 @@ pub(super) fn notification(b: &mut Builder) {
     b.slide_in(now, Vec2::new(0.0, -400.0), 0.4, 0.8);
     b.pulse(card, 2.0, 3.0, 1);
     let head = b.text(headline, b.at(0.5, if b.vertical() { 0.6 } else { 0.68 }), 96.0, p.text, b.heavy(), 1.6);
-    b.slide_in(head, Vec2::new(0.0, 50.0), 1.6, 0.8);
+    b.words_in(head, 0.8);
     b.fade_everything_out();
 }
 
@@ -121,7 +121,7 @@ pub(super) fn post_card(b: &mut Builder) {
     b.fade_in(body, 1.0, 0.8);
     let bottom = center.y + (height * 0.5 - 60.0) * unit;
     let heart = b.text("♥", Vec2::new(left + 24.0 * unit, bottom), 52.0, 0xe11d48, 700, 2.4);
-    b.scale(heart, 2.4, 0.0, 3.0, 100.0, SPRING);
+    b.scale(heart, 2.4, 0.0, 3.0, 100.0, WOBBLE);
     b.pulse(heart, 3.2, 4.6, 2);
     let count = b.text_aligned(likes, Vec2::new(left + 70.0 * unit, bottom), 34.0, 0x3f3f46, b.heavy(), 2.6, TextAlign::Left);
     b.anchor_left(count);
@@ -186,9 +186,9 @@ pub(super) fn meme(b: &mut Builder) {
     let first = b.text(top, b.at(0.5, if b.vertical() { 0.14 } else { 0.12 }), 96.0, 0xffffff, b.heavy(), 0.2);
     style(b, first);
     b.pop_in(first, 0.2);
-    let second = b.text(bottom, b.at(0.5, if b.vertical() { 0.86 } else { 0.88 }), 96.0, 0xffffff, b.heavy(), 1.6);
+    let second = b.text(bottom, b.at(0.5, if b.vertical() { 0.78 } else { 0.88 }), 96.0, 0xffffff, b.heavy(), 1.6);
     style(b, second);
-    b.pop_in(second, 1.6);
+    b.words_in(second, 0.5);
     b.effect(second, "Camera Shake", &[(0, 6.0), (1, 10.0), (2, 0.5), (3, 1.0)]);
     b.fade_everything_out();
 }
@@ -239,8 +239,9 @@ pub(super) fn neon(b: &mut Builder) {
     let flicker = [(0.0, 0.0), (0.3, 100.0), (0.38, 15.0), (0.5, 100.0), (0.56, 30.0), (0.7, 100.0), (4.0, 100.0), (4.05, 40.0), (4.12, 100.0)];
     let keys = flicker.iter().map(|&(at, value)| b.key(at, value, Easing::Hold)).collect();
     super::Builder::keys(&mut b.transform(sign).opacity, keys);
-    let line = b.text(sub, b.at(0.5, 0.68), 46.0, p.text, b.light(), 1.2);
-    b.fade_in(line, 1.2, 0.8);
+    let line_at = Vec2::new(b.at(0.5, 0.0).x, b.at(0.5, 0.68).y.max(b.at(0.5, 0.46).y + (180.0 + 56.0) * unit));
+    let line = b.text(sub, line_at, 46.0, p.text, b.light(), 1.2);
+    b.slide_in(line, Vec2::new(0.0, 24.0), 1.2, 0.8);
     b.fade_everything_out();
 }
 
@@ -264,11 +265,13 @@ pub(super) fn confetti(b: &mut Builder) {
         b.move_to(piece, start, (start + fall).min(end), landing, Easing::Linear);
         b.spin(piece, (index * 40) as f32, (index * 40) as f32 + 540.0);
     }
-    let head = b.text(headline, b.at(0.5, 0.45), 130.0, p.text, b.heavy(), 0.4);
+    let head_at = b.at(0.5, if b.tall() { 0.45 } else { 0.42 });
+    let head = b.text(headline, head_at, 130.0, p.text, b.heavy(), 0.4);
     b.pop_in(head, 0.4);
     b.pulse(head, 1.5, end - 1.0, 4);
-    let line = b.text(sub, b.at(0.5, 0.6), 50.0, p.muted, b.light(), 1.0);
-    b.fade_in(line, 1.0, 0.7);
+    let line_at = b.below(head_at, headline, 130.0, 40.0, 50.0, b.at(0.5, 0.6));
+    let line = b.text(sub, line_at, 50.0, p.muted, b.light(), 1.0);
+    b.slide_in(line, Vec2::new(0.0, 24.0), 1.0, 0.7);
     b.fade_everything_out();
 }
 
@@ -287,12 +290,13 @@ pub(super) fn phone_mockup(b: &mut Builder) {
     let unit = b.unit();
     let notch = b.block(Vec2::new(120.0, 30.0), phone_at - Vec2::new(0.0, (phone_size.y * 0.5 - 40.0) * unit), 0x000000, 15.0, 0.0, "Camera");
     b.slide_in(notch, Vec2::new(0.0, 900.0), 0.0, 1.0);
-    let text_at = if tall { b.at(0.5, if b.vertical() { 0.76 } else { 0.83 }) } else { b.at(0.7, 0.4) };
+    let text_at = if tall { b.at(0.5, if b.vertical() { 0.67 } else { 0.83 }) } else { b.at(0.7, 0.4) };
     let head = b.text(headline, text_at, 84.0, p.text, b.heavy(), 0.9);
-    b.slide_in(head, Vec2::new(0.0, 40.0), 0.9, 0.7);
-    let line = b.text(sub, text_at + Vec2::new(0.0, 110.0 * unit), 42.0, p.muted, b.light(), 1.3);
+    b.words_in(head, 0.7);
+    let line_at = b.below(text_at, headline, 84.0, 24.0, 42.0, text_at + Vec2::new(0.0, 110.0 * unit));
+    let line = b.text(sub, line_at, 42.0, p.muted, b.light(), 1.3);
     b.fade_in(line, 1.3, 0.6);
-    let button_at = if tall { text_at + Vec2::new(0.0, 210.0 * unit) } else { b.at(0.7, 0.7) };
+    let button_at = if tall { line_at + Vec2::new(0.0, 100.0 * unit) } else { b.at(0.7, 0.7) };
     if !(tall && !b.vertical()) {
         button(b, cta, button_at, 2.0);
     }
@@ -563,7 +567,8 @@ pub(super) fn glitch_title(b: &mut Builder) {
     b.effect(head, "Glitch", &[(0, 0.0), (1, 30.0), (2, 14.0)]);
     b.animate_effect(head, 0, &[(0.0, 90.0, EASE_OUT), (0.9, 0.0, Easing::Linear), (3.0, 0.0, Easing::Hold), (3.1, 70.0, EASE_OUT), (3.6, 0.0, Easing::Linear), (6.0, 0.0, Easing::Hold), (6.1, 60.0, EASE_OUT), (6.5, 0.0, Easing::Linear)]);
     b.fade_in(head, 0.0, 0.2);
-    let line = b.text(sub, b.at(0.5, 0.62), 50.0, p.accent, b.heavy(), 1.0);
+    let line_at = b.below(b.at(0.5, 0.45), title, 150.0, 40.0, 50.0, b.at(0.5, 0.62));
+    let line = b.text(sub, line_at, 50.0, p.accent, b.heavy(), 1.0);
     b.slide_in(line, Vec2::new(0.0, 30.0), 1.0, 0.6);
     // A screen look over everything.
     let adjust = b.block(Vec2::new(b.width, b.height) * (1.0 / unit), b.at(0.5, 0.5), 0x000000, 0.0, 0.0, "Screen look");

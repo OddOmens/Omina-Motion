@@ -14,8 +14,9 @@ use crate::decode::VideoDecoder;
 /// The largest picture decoded; matches the renderer's largest frame.
 const MAX_WIDTH: u32 = 8192;
 
-#[derive(Default)]
 pub struct ExactFrames {
+    /// The widest picture decoded (narrower ones are scaled down as they are decoded).
+    max_width: u32,
     /// One decoder per file, or why it could not be opened (so it is not retried every frame).
     decoders: Mutex<HashMap<PathBuf, Result<VideoDecoder, String>>>,
     /// The first frame of each file that could not be decoded, and why. An export must not
@@ -23,9 +24,21 @@ pub struct ExactFrames {
     failed_frames: Mutex<HashMap<PathBuf, (i64, String)>>,
 }
 
+impl Default for ExactFrames {
+    fn default() -> Self {
+        Self { max_width: MAX_WIDTH, decoders: Mutex::default(), failed_frames: Mutex::default() }
+    }
+}
+
 impl ExactFrames {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// One that decodes no wider than `max_width` (for previews, which need no more than the
+    /// screen shows).
+    pub fn with_max_width(max_width: u32) -> Self {
+        Self { max_width: max_width.clamp(16, MAX_WIDTH), ..Self::default() }
     }
 
     /// Files that could not be opened, or had a frame that could not be decoded, and why.
@@ -44,7 +57,7 @@ impl VideoSource for ExactFrames {
         let mut decoders = self.decoders.lock().unwrap_or_else(|p| p.into_inner());
         let decoder = decoders
             .entry(path.to_owned())
-            .or_insert_with(|| VideoDecoder::open_fastest(path, MAX_WIDTH).map_err(|error| error.to_string()));
+            .or_insert_with(|| VideoDecoder::open_fastest(path, self.max_width).map_err(|error| error.to_string()));
         match decoder.as_mut().ok()?.frame(index) {
             Ok(frame) => Some(Arc::new(frame)),
             Err(error) => {

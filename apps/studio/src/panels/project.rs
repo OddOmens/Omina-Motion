@@ -224,6 +224,34 @@ fn visible_rows<'a>(items: &'a [ProjectItem], is_open: &dyn Fn(Id) -> bool) -> V
     rows
 }
 
+/// While the project has no footage, pictures or sound: how to bring some in.
+fn no_media_hint(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl IntoElement + use<>> {
+    use gpui_kit::component::button::Button;
+    use gpui_kit::component::Sizable as _;
+    let has_media = workspace.state.project.items.iter().any(|item| matches!(item.kind, ProjectItemKind::Footage | ProjectItemKind::Image | ProjectItemKind::Audio));
+    if has_media {
+        return None;
+    }
+    let import = crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Import", "import");
+    Some(
+        div()
+            .id("project-empty-hint")
+            .mx_2()
+            .my_2()
+            .p_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(hsla(color::HAIRLINE))
+            .text_color(hsla(color::MUTED))
+            .child("No footage, pictures or sound yet. Drag files here from the Finder, or import them. After Effects projects and Lottie files come in as compositions.")
+            .child(Button::new("project-empty-import").outline().small().icon(Icon::new(IconName::FileInput)).label(import).on_click(cx.listener(|this, _, window, cx| this.import(window, cx))))
+            .test_support(),
+    )
+}
+
 /// Where a dragged project item would go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropPlace {
@@ -327,6 +355,67 @@ fn item_name(item: &ProjectItem, workspace: &Workspace, cx: &mut Context<Workspa
         .into_any_element()
 }
 
+/// The sizes a composition can be copied to (Magic Resize's), for the Duplicate and Resize
+/// submenu. Its own size is greyed out; picking another makes the resized copy and opens it.
+fn resize_choices(mut menu: PopupMenu, comp: Id, target: &gpui_kit::WeakEntity<Workspace>, cx: &gpui_kit::App) -> PopupMenu {
+    use studio_core::resize::SIZES;
+    let current = target.upgrade().and_then(|workspace| workspace.read(cx).state.project.composition(comp).map(|comp| (comp.width, comp.height)));
+    for &(name, width, height) in &SIZES {
+        let target = target.clone();
+        let same = current == Some((width, height));
+        let label = if same { format!("{name} (this size)") } else { format!("{name}  {width}×{height}") };
+        menu = menu.item(PopupMenuItem::new(label).disabled(same).on_click(move |_, window, cx| {
+            let made = target
+                .update(cx, |this, cx| {
+                    let made = this.state.duplicate_resized(comp, width, height, super::resize::short_label(name));
+                    cx.notify();
+                    made
+                })
+                .ok()
+                .flatten();
+            if made.is_none() {
+                window.push_notification("The resized copy could not be made.", cx);
+            }
+        }));
+    }
+    menu
+}
+
+/// The label colors as menu items, each with its swatch, the item's own checked; picking one
+/// gives it to item `id`. Used by the label column's swatch and the right-click Label submenu.
+fn label_choices(mut menu: PopupMenu, id: Id, current: LabelColor, target: &gpui_kit::WeakEntity<Workspace>) -> PopupMenu {
+    for color in LabelColor::ALL {
+        let target = target.clone();
+        let swatch = Icon::new(IconName::Circle).text_color(gpui_kit::rgba(color.color().to_rgba_u32()));
+        menu = menu.item(PopupMenuItem::new(color.name()).icon(swatch).checked(color == current).on_click(move |_, _, cx| {
+            target
+                .update(cx, |this, cx| {
+                    this.state.set_item_label(id, color);
+                    cx.notify();
+                })
+                .ok();
+        }));
+    }
+    menu
+}
+
+/// The label column's swatch: clicking it opens the label colors to pick another.
+fn label_button(item: &ProjectItem, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::menu::DropdownMenu as _;
+    use gpui_kit::component::Sizable as _;
+    let (id, current) = (item.id, item.label);
+    let target = cx.weak_entity();
+    let button = Button::new(("project-label", id.0 as usize))
+        .ghost()
+        .xsmall()
+        .tooltip("Label color")
+        .child(label_swatch(current.color().to_rgba_u32()))
+        .dropdown_menu(move |menu, _, _| label_choices(menu, id, current, &target));
+    // The press is kept from the row, so it neither starts a drag nor opens the item.
+    div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(button)
+}
+
 /// An item's right-click menu, as in After Effects' Project panel: open a composition or
 /// change its settings, rename the item, give it a label color, show its file in the Finder,
 /// or delete it.
@@ -354,7 +443,10 @@ fn item_menu(item: &ProjectItem, cx: &mut Context<Workspace>) -> impl Fn(PopupMe
                         super::composition_settings::open(this, false, window, cx);
                     })
                     .ok();
-                }))
+                }));
+            let resize = target.clone();
+            menu = menu
+                .submenu("Duplicate and Resize", window, cx, move |submenu, _, cx| resize_choices(submenu, id, &resize, cx))
                 .separator();
         }
         let rename = target.clone();
@@ -363,21 +455,7 @@ fn item_menu(item: &ProjectItem, cx: &mut Context<Workspace>) -> impl Fn(PopupMe
             rename.update(cx, |this, cx| this.begin_edit(EditTarget::ItemName(id), name.clone(), window, cx)).ok();
         }));
         let labels = target.clone();
-        menu = menu.submenu("Label", window, cx, move |mut submenu, _, _| {
-            for color in LabelColor::ALL {
-                let labels = labels.clone();
-                let swatch = Icon::new(IconName::Circle).text_color(gpui_kit::rgba(color.color().to_rgba_u32()));
-                submenu = submenu.item(PopupMenuItem::new(color.name()).icon(swatch).checked(color == label).on_click(move |_, _, cx| {
-                    labels
-                        .update(cx, |this, cx| {
-                            this.state.set_item_label(id, color);
-                            cx.notify();
-                        })
-                        .ok();
-                }));
-            }
-            submenu
-        });
+        menu = menu.submenu("Label", window, cx, move |submenu, _, _| label_choices(submenu, id, label, &labels));
         // Imported files can be shown where they are on disk.
         if let Some(path) = path.clone() {
             menu = menu.item(PopupMenuItem::new("Reveal in Finder").on_click(move |_, window, cx| {
@@ -401,7 +479,7 @@ fn item_menu(item: &ProjectItem, cx: &mut Context<Workspace>) -> impl Fn(PopupMe
 }
 
 /// Shows a file selected in a Finder window.
-fn reveal_in_finder(path: &std::path::Path) -> Result<(), String> {
+pub(crate) fn reveal_in_finder(path: &std::path::Path) -> Result<(), String> {
     if !path.exists() {
         return Err("it is no longer where it was imported from".to_owned());
     }
@@ -498,7 +576,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                 }
                 cx.notify();
             }))
-            .when(columns.label, |row| row.child(div().w(px(26.0)).flex().justify_center().child(label_swatch(item.label.color().to_rgba_u32()))))
+            .when(columns.label, |row| row.child(div().w(px(26.0)).flex().justify_center().child(label_button(item, cx))))
             .child(
                 div()
                     .flex_1()
@@ -558,18 +636,18 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .items_center()
         .gap_1()
         .w_full()
-        .child(icon_button("import", IconName::FileInput, "Import Images and Video (⌘I)", false, cx.listener(|this, _, window, cx| {
+        .child(icon_button("import", IconName::FileInput, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Import Images and Video", "import"), false, cx.listener(|this, _, window, cx| {
             this.import(window, cx);
         })))
         .child(icon_button("new-folder", IconName::FolderPlus, "New Folder", false, cx.listener(|this, _, _, cx| {
             this.state.new_folder();
             cx.notify();
         })))
-        .child(icon_button("new-comp", IconName::Clapperboard, "New Composition (⌘N)", false, cx.listener(|this, _, window, cx| {
+        .child(icon_button("new-comp", IconName::Clapperboard, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "New Composition", "new-composition"), false, cx.listener(|this, _, window, cx| {
             super::composition_settings::open(this, true, window, cx);
         })))
         .child(div().flex_1())
-        .child(icon_button("delete-item", IconName::Trash, "Delete (⌫)", false, |_, window, cx| {
+        .child(icon_button("delete-item", IconName::Trash, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Delete", "delete"), false, |_, window, cx| {
             window.dispatch_action(Box::new(crate::workspace::Delete), cx);
         }));
 
@@ -589,6 +667,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             }))
             .child(preview)
             .child(column_header)
+            .children(no_media_hint(workspace, cx))
             .child(
                 div()
                     .id("project-items")

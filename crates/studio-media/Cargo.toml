@@ -28,6 +28,8 @@ bundled-ffmpeg = [
     "ffmpeg-next/build-license-gpl",
     "ffmpeg-next/build-license-version3",
     "ffmpeg-next/build-lib-x264",
+    "ffmpeg-next/build-lib-vpx",
+    "ffmpeg-next/build-lib-opus",
     "ffmpeg-next/build-zlib",
     "dep:ffmpeg-sys-next",
     "ffmpeg-sys-next/build-videotoolbox",

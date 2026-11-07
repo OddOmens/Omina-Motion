@@ -6,7 +6,7 @@
 use studio_core::animation::Vec2;
 use studio_core::model::{Composition, Id};
 use studio_core::property::{PropertyPath, PropertyValue, TransformProperty};
-use studio_core::tracks;
+use studio_core::{slots, tracks};
 
 use super::EditorState;
 use super::snap::SnapExclusions;
@@ -105,6 +105,27 @@ impl EditorState {
             added = true;
         }
         added
+    }
+
+    /// The media slot under `at` (pixels of the open composition) at the playhead, if any: a
+    /// placeholder or a nested composition showing one photo or video (see `studio_core::slots`).
+    pub fn slot_at(&self, at: Vec2) -> Option<slots::Slot> {
+        slots::slot_at(&self.project, self.active_comp, at, self.current_frame)
+    }
+
+    /// Project items dropped on the viewer at `at`. When they land on a media slot, the first
+    /// photo or video fills it and the layer it was found under is selected; everything else is
+    /// added as layers, as `add_items_at` does. Returns whether anything changed.
+    pub fn drop_items_at(&mut self, items: &[Id], at: Vec2) -> bool {
+        let filling = self.slot_at(at).zip(items.iter().position(|&item| slots::can_fill_with(&self.project, item)));
+        let Some((slot, index)) = filling else { return self.add_items_at(items, at) };
+        if slots::fill(&mut self.project, &slot, items[index]).is_none() {
+            return self.add_items_at(items, at);
+        }
+        self.select_layer(slot.root, false);
+        let rest: Vec<Id> = items.iter().enumerate().filter(|&(position, _)| position != index).map(|(_, &item)| item).collect();
+        self.add_items_at(&rest, at);
+        true
     }
 
     /// Keeps the main track packed if it is magnetic. Run after edits, outside drags.

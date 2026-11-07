@@ -236,8 +236,8 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
         .flex()
         .items_center()
         .gap_1()
-        .child(icon_button("tracks-start", IconName::SkipBack, "Go to Start (Home)", false, cx.listener(|this, _, _, cx| this.go_to(0, cx))))
-        .child(icon_button("tracks-play", if playing { IconName::Pause } else { IconName::Play }, "Play / Pause (Space)", playing, cx.listener(|this, _, _, cx| this.toggle_playback(cx))))
+        .child(icon_button("tracks-start", IconName::SkipBack, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Go to Start", "first-frame"), false, cx.listener(|this, _, _, cx| this.go_to(0, cx))))
+        .child(icon_button("tracks-play", if playing { IconName::Pause } else { IconName::Play }, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Play / Pause", "toggle-playback"), playing, cx.listener(|this, _, _, cx| this.toggle_playback(cx))))
         .child(icon_button("tracks-loop", IconName::Repeat, "Loop Playback", state.loop_playback, cx.listener(|this, _, _, cx| {
             this.state.loop_playback = !this.state.loop_playback;
             cx.notify();
@@ -284,17 +284,30 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
     let dragging = state.clip_drag_target();
     let hovered = workspace.ui.timeline.track_drop.filter(|_| cx.has_active_drag()).map(|(track, _)| track);
 
+    // Only rows near what can be seen are drawn (a screenful either side, so scrolling never
+    // shows a gap); the rest are left empty at their full height, so nothing moves. Clips wholly
+    // outside the time shown aren't drawn either. Big projects stay quick this way.
+    let viewport = workspace.ui.timeline.viewport.get();
+    let measured = viewport.height > 0.0;
+    let (near_top, near_bottom) = (viewport.top - viewport.height, viewport.top + viewport.height * 2.0);
+    let mut row_top = workspace.ui.timeline.rows.get().top;
+    let view = state.view_range;
     let rows: Vec<AnyElement> = layout(workspace)
         .into_iter()
         .map(|(track, height)| {
+            let top = row_top;
+            row_top += height;
+            let near = !measured || (top + height >= near_top && top <= near_bottom);
             // A clip being dragged is drawn in the row it is headed for.
             let clips: Vec<AnyElement> = composition
                 .layers
                 .iter()
+                .filter(|_| near)
                 .filter(|layer| match dragging {
                     Some((id, target)) if id == layer.id && existing.contains(&target) => target == track,
                     _ => layer.track == track,
                 })
+                .filter(|layer| layer.out_frame as f64 >= view.start && layer.in_frame as f64 <= view.end)
                 .flat_map(|layer| clip(layer, track, workspace, cx))
                 .collect();
             div()
@@ -308,7 +321,6 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
         })
         .collect();
 
-    let view = state.view_range;
     let playhead = fraction(state.current_frame as f64, view);
     let snap = state.snap_line().map(|frame| div().id("snap-line").absolute().top_0().bottom_0().left(relative(fraction(frame as f64, view))).w(px(1.0)).bg(hsla(color::SNAP)).test_support());
     let drop_line = workspace.ui.timeline.track_drop.filter(|_| cx.has_active_drag()).map(|(_, frame)| {
@@ -530,8 +542,9 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     // Sound fades shade the clip's ends, darkest where the sound is quietest.
     let fps = workspace.state.composition().frame_rate.fps();
     let length = (layer.out_frame - layer.in_frame).max(1) as f64;
+    let has_sound = studio_core::audio::layer_has_sound(&workspace.state.project, layer);
     let fade = |seconds: f32, from_left: bool| {
-        (layer.has_audio && seconds > 0.0).then(|| {
+        (has_sound && seconds > 0.0).then(|| {
             let share = (f64::from(seconds) * fps / length).clamp(0.0, 1.0) as f32;
             let (dark, clear) = (gpui_kit::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.55 }, gpui_kit::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 });
             let shade = div().absolute().top_0().bottom_0().w(relative(share)).bg(gpui_kit::linear_gradient(
@@ -577,7 +590,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
         .child(Icon::new(kind_icon(layer, is_mask)).size(px(12.0)).text_color(rgba((ink << 8) | 0xdd)))
         .child(clip_name(layer, workspace, cx))
         .when(!layer.effects.is_empty(), |header| header.child(div().px_1().rounded(px(3.0)).bg(rgba(0x00000026)).child(format!("fx {}", layer.effects.len()))))
-        .when(layer.has_audio, |header| header.child(clip_toggle(id, "clip-mute", switches.audio, (IconName::Volume2, IconName::VolumeX), Switch::Audio, dark_ink, cx)))
+        .when(studio_core::audio::layer_has_sound(&workspace.state.project, layer), |header| header.child(clip_toggle(id, "clip-mute", switches.audio, (IconName::Volume2, IconName::VolumeX), Switch::Audio, dark_ink, cx)))
         .when(layer.content.has_picture(), |header| header.child(clip_toggle(id, "clip-show", switches.visible, (IconName::Eye, IconName::EyeOff), Switch::Visible, dark_ink, cx)))
         .child(clip_toggle(id, "clip-lock", !switches.locked, (IconName::LockOpen, IconName::Lock), Switch::Locked, dark_ink, cx));
 
@@ -702,11 +715,6 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
     elements
 }
 
-/// Opens the graph editor next to `at` (window coordinates), for the keyframes just selected.
-fn open_graph_editor(workspace: &mut Workspace, at: gpui_kit::Point<gpui_kit::Pixels>) {
-    workspace.ui.graph_editor = Some(point(at.x - px(120.0), at.y + px(14.0)));
-}
-
 /// The rows under an expanded clip: one per animated property, with its name above a line
 /// across its keyframes. Pressing a row selects all its keyframes; keyframes select (Shift
 /// adds) and drag in time; clicking the line between two keyframes selects that segment and
@@ -731,6 +739,8 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
                 let segments = frames.windows(2).map(|pair| {
                     let (from, to) = (pair[0], pair[1]);
                     let selected = state.is_keyframe_selected(&KeyframeRef { layer: id, path, frame: from }) && state.is_keyframe_selected(&KeyframeRef { layer: id, path, frame: to });
+                    // The segment the graph editor is easing, when the selection has several.
+                    let focused = crate::panels::graph_editor::is_focused_segment(workspace, KeyframeRef { layer: id, path, frame: from });
                     div()
                         .id(gpui_kit::ElementId::Name(format!("clip-seg:{}:{path:?}:{from}", id.0).into()))
                         .absolute()
@@ -741,11 +751,11 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
                         .flex()
                         .items_center()
                         .cursor_pointer()
-                        .child(div().w_full().h(px(if selected { 2.0 } else { 1.0 })).bg(if selected { hsla(0xffffff) } else { tint(0x99) }))
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        .child(div().w_full().h(px(if selected { 2.0 } else { 1.0 })).bg(if focused { hsla(color::ACCENT) } else if selected { hsla(0xffffff) } else { tint(0x99) }))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
                             this.state.set_keyframe_selection(vec![KeyframeRef { layer: id, path, frame: from }, KeyframeRef { layer: id, path, frame: to }]);
-                            open_graph_editor(this, event.position);
+                            crate::panels::graph_editor::show(this);
                             cx.notify();
                         }))
                         .test_support()
@@ -774,7 +784,7 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
                             }
                             // A double-click opens the graph editor to ease it.
                             if event.click_count >= 2 {
-                                open_graph_editor(this, event.position);
+                                crate::panels::graph_editor::show(this);
                             } else {
                                 this.anchor_drag(event);
                                 this.state.begin_keyframe_drag();

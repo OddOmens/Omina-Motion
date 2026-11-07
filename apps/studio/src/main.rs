@@ -3,14 +3,20 @@
 
 mod app_settings;
 mod assets;
+mod crash_log;
 mod download;
+mod keymap;
 mod library_store;
 mod lut_library;
+mod package_writer;
 mod panels;
+mod preview_cache;
 mod project_files;
 mod sound;
 mod state;
 mod theme;
+mod updates;
+mod versions;
 #[cfg(test)]
 mod ui_tests;
 mod workspace;
@@ -18,6 +24,8 @@ mod workspace;
 use gpui_kit::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size};
 
 fn main() {
+    // First, so a crash anywhere after this leaves a report.
+    crash_log::install();
     gpui_kit::application().with_assets(assets::StudioAssets).run(|cx: &mut App| {
         // Must run before any component is used.
         gpui_kit::init(cx);

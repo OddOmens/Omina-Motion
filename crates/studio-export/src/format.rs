@@ -1,6 +1,7 @@
 //! What an export can be written as: a movie (H.264, H.265 or a ProRes flavor), an animated
-//! GIF, or a numbered sequence of PNG pictures. Also how an export at another frame rate than
-//! its composition's picks which composition frame each output frame shows.
+//! GIF, a numbered sequence of PNG pictures, or a vector animation (Lottie, dotLottie or an
+//! animated SVG). Also how an export at another frame rate than its composition's picks which
+//! composition frame each output frame shows.
 
 use std::ops::Range;
 
@@ -16,6 +17,12 @@ pub enum ExportFormat {
     /// One PNG picture per frame, with transparency, in a folder of their own: for other apps
     /// that build their own animation from frames.
     PngSequence,
+    /// Lottie (Bodymovin JSON): shapes, text and keyframes for web and app animation players.
+    Lottie,
+    /// The same Lottie animation zipped with a manifest, as LottieFiles' players prefer.
+    DotLottie,
+    /// An SVG that animates itself with CSS, for web pages.
+    AnimatedSvg,
 }
 
 /// GIF frame times are counted in hundredths of a second, and browsers slow down frames
@@ -24,9 +31,10 @@ pub const GIF_MAX_RATE: FrameRate = FrameRate::new(50, 1);
 
 impl ExportFormat {
     /// Every format, in the order the Export dialog lists them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 13] = [
         Self::Movie(MovieFormat::H264),
         Self::Movie(MovieFormat::H265),
+        Self::Movie(MovieFormat::WebM),
         Self::Movie(MovieFormat::ProRes4444),
         Self::Movie(MovieFormat::ProRes422Hq),
         Self::Movie(MovieFormat::ProRes422),
@@ -34,6 +42,9 @@ impl ExportFormat {
         Self::Movie(MovieFormat::ProResProxy),
         Self::Gif,
         Self::PngSequence,
+        Self::Lottie,
+        Self::DotLottie,
+        Self::AnimatedSvg,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -41,6 +52,9 @@ impl ExportFormat {
             Self::Movie(format) => format.label(),
             Self::Gif => "Animated GIF",
             Self::PngSequence => "PNG sequence",
+            Self::Lottie => "Lottie (.json)",
+            Self::DotLottie => "dotLottie (.lottie)",
+            Self::AnimatedSvg => "Animated SVG (.svg)",
         }
     }
 
@@ -50,6 +64,9 @@ impl ExportFormat {
             Self::Movie(format) => Some(format.extension()),
             Self::Gif => Some("gif"),
             Self::PngSequence => None,
+            Self::Lottie => Some("json"),
+            Self::DotLottie => Some("lottie"),
+            Self::AnimatedSvg => Some("svg"),
         }
     }
 
@@ -66,8 +83,14 @@ impl ExportFormat {
         match self {
             Self::Movie(format) => format.has_alpha(),
             Self::Gif => false,
-            Self::PngSequence => true,
+            Self::PngSequence | Self::Lottie | Self::DotLottie | Self::AnimatedSvg => true,
         }
+    }
+
+    /// Whether the file holds shapes and keyframes rather than rendered frames. Vector files
+    /// draw at any size, so the size setting doesn't apply, and they hold no video or sound.
+    pub const fn is_vector(self) -> bool {
+        matches!(self, Self::Lottie | Self::DotLottie | Self::AnimatedSvg)
     }
 
     /// Whether the file can carry sound: only movies can.
@@ -75,14 +98,14 @@ impl ExportFormat {
         matches!(self, Self::Movie(_))
     }
 
-    /// Whether the quality and encoding speed settings apply (H.264 and H.265; every other
-    /// format has a fixed quality).
+    /// Whether the quality and encoding speed settings apply (H.264, H.265 and WebM; every
+    /// other format has a fixed quality).
     pub const fn has_quality(self) -> bool {
         matches!(self, Self::Movie(format) if !format.is_prores())
     }
 
-    /// Whether the sound is compressed (AAC), so its bitrate can be chosen. ProRes sound is
-    /// uncompressed.
+    /// Whether the sound is compressed (AAC, or Opus in WebM), so its bitrate can be chosen.
+    /// ProRes sound is uncompressed.
     pub const fn has_sound_bitrate(self) -> bool {
         self.has_quality()
     }
@@ -169,5 +192,16 @@ mod tests {
         assert!(ExportFormat::Gif.allows_rate(FrameRate::new(50, 1)));
         assert!(!ExportFormat::Gif.allows_rate(FrameRate::new(60, 1)));
         assert!(ExportFormat::Movie(MovieFormat::H264).allows_rate(FrameRate::new(120, 1)));
+    }
+
+    #[test]
+    fn vector_formats_keep_transparency_and_carry_no_sound() {
+        for format in [ExportFormat::Lottie, ExportFormat::DotLottie, ExportFormat::AnimatedSvg] {
+            assert!(format.is_vector() && format.has_alpha() && !format.has_sound() && !format.has_quality());
+        }
+        assert_eq!(ExportFormat::Lottie.extension(), Some("json"));
+        assert_eq!(ExportFormat::DotLottie.extension(), Some("lottie"));
+        assert_eq!(ExportFormat::AnimatedSvg.extension(), Some("svg"));
+        assert!(!ExportFormat::Gif.is_vector());
     }
 }

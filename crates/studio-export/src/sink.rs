@@ -66,6 +66,8 @@ impl Sink {
                 let digits = total.max(1).to_string().len().max(5);
                 Ok(Sink::Png(PngSink { folder: temporary.to_path_buf(), stem, digits, written: 0 }))
             }
+            // Vector files are written whole by `vector::export`, never frame by frame.
+            ExportFormat::Lottie | ExportFormat::DotLottie | ExportFormat::AnimatedSvg => Err("Vector animations aren’t written frame by frame.".into()),
         }
     }
 

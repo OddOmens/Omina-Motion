@@ -36,6 +36,7 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         audio: Default::default(),
         time: Default::default(),
         animation: Default::default(),
+        morph: None,
     }
 }
 
@@ -1158,6 +1159,65 @@ fn template_sheet() {
     sheet.save(path).unwrap();
 }
 
+/// Renders chosen templates across their running time, one row of frames each, into
+/// `TEMPLATE_STRIP` (a PNG), to check how they move. `TEMPLATE_PICK` lists template numbers
+/// (such as "0,5,10"), `TEMPLATE_FORMAT` is wide, portrait or vertical, and `TEMPLATE_TIMES`
+/// lists the seconds to show (a negative one counts back from the end).
+/// Run with `TEMPLATE_STRIP=/path/strip.png TEMPLATE_PICK=0,5 cargo test -p studio-render --test render template_strip -- --ignored`.
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn template_strip() {
+    use studio_core::templates::{Format, TEMPLATES, build};
+    let path = std::env::var("TEMPLATE_STRIP").expect("set TEMPLATE_STRIP to the PNG to write");
+    let numbers = |name: &str, fallback: &str| -> Vec<f64> { std::env::var(name).unwrap_or_else(|_| fallback.to_owned()).split(',').filter_map(|part| part.trim().parse().ok()).collect() };
+    let picks: Vec<usize> = numbers("TEMPLATE_PICK", "0").into_iter().map(|number| number as usize).filter(|&index| index < TEMPLATES.len()).collect();
+    let times = numbers("TEMPLATE_TIMES", "0.4,0.9,1.5,2.5,4,-0.3");
+    let format = match std::env::var("TEMPLATE_FORMAT").as_deref() {
+        Ok("portrait") => Format::Portrait,
+        Ok("wide") => Format::Wide,
+        _ => Format::Vertical,
+    };
+    let (cell_w, cell_h) = match format {
+        Format::Wide => (384u32, 216u32),
+        Format::Portrait => (216, 270),
+        Format::Vertical => (216, 384),
+    };
+    let columns = times.len() as u32;
+    let mut sheet = image::RgbaImage::from_pixel(cell_w * columns, cell_h * picks.len() as u32, image::Rgba([40, 40, 40, 255]));
+    let mut renderer = Renderer::new().unwrap();
+    for (row, &index) in picks.iter().enumerate() {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        let comp = build(&mut project, &TEMPLATES[index], format).unwrap();
+        // With TEMPLATE_FILL set to a picture, every placeholder gets it, as a drop would.
+        if let Ok(fill) = std::env::var("TEMPLATE_FILL") {
+            let size = image::image_dimensions(&fill).map(|(w, h)| Vec2::new(w as f32, h as f32)).unwrap();
+            let picture = studio_core::edit::import_image(&mut project, fill.into(), size);
+            let placeholders: Vec<_> = project.composition(comp).unwrap().layers.iter().filter(|layer| studio_core::slots::is_placeholder(layer)).map(|layer| layer.id).collect();
+            for layer in placeholders {
+                let slot = studio_core::slots::Slot { comp, layer, kind: studio_core::slots::SlotKind::Placeholder, root: layer, outline: [Vec2::default(); 4] };
+                studio_core::slots::fill(&mut project, &slot, picture).unwrap();
+            }
+        }
+        let duration = project.composition(comp).unwrap().duration_frames;
+        for (column, &seconds) in times.iter().enumerate() {
+            let frame = if seconds < 0.0 { duration + (seconds * 30.0) as i64 } else { (seconds * 30.0) as i64 }.clamp(0, duration - 1);
+            // Twice: the first render measures the text, as the app does.
+            let first = renderer.render(&project, comp, frame, cell_w * 2, cell_h * 2, &studio_core::media::NoVideo).unwrap();
+            for (layer, size) in first.text_sizes {
+                studio_core::edit::set_text_box(project.composition_mut(comp).unwrap(), layer, size);
+            }
+            let picture = renderer.render(&project, comp, frame, cell_w, cell_h, &studio_core::media::NoVideo).unwrap();
+            let (x0, y0) = (column as u32 * cell_w, row as u32 * cell_h);
+            for (i, pixel) in picture.bgra.chunks(4).enumerate() {
+                let a = f32::from(pixel[3]) / 255.0;
+                let over = |c: u8| (f32::from(c) * a + 60.0 * (1.0 - a)) as u8;
+                sheet.put_pixel(x0 + i as u32 % cell_w, y0 + i as u32 / cell_w, image::Rgba([over(pixel[2]), over(pixel[1]), over(pixel[0]), 255]));
+            }
+        }
+    }
+    sheet.save(path).unwrap();
+}
+
 #[test]
 fn emoji_keep_their_own_colors() {
     let style = TextStyle { font_family: "Apple Color Emoji".into(), font_size: 60.0, line_height: 70.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() };
@@ -1447,4 +1507,206 @@ fn rising_text_starts_below_its_place() {
     let home = light(&render_at(&project(vec![still]), 9), 0..SIZE).1;
     let rising = light(&render_at(&project(vec![animated]), 4), 0..SIZE).1;
     assert!(rising > home + 3.0, "lower on the way in: {rising} vs {home}");
+}
+
+/// A red square morphing into a green circle to its right (Morph To): it starts as the square,
+/// ends as the circle where the circle was (the circle itself hidden), and is a blend of the
+/// two halfway.
+#[test]
+fn a_shape_morphs_into_another() {
+    let square = shape(2, ShapeKind::Rectangle, Paint::Solid(Rgba::hex(0xff0000)), Vec2::new(30.0, 30.0), Vec2::new(25.0, 50.0));
+    let circle = shape(3, ShapeKind::Ellipse, Paint::Solid(Rgba::hex(0x00ff00)), Vec2::new(30.0, 30.0), Vec2::new(75.0, 50.0));
+    let mut scene = project(vec![square, circle]);
+    let end = studio_core::morph::morph_to(&mut scene.compositions[0], Id(2), Id(3), 0, 8, studio_core::animation::Easing::Linear).unwrap();
+    assert_eq!(end, 8);
+    let mut renderer = Renderer::new().expect("a GPU is available");
+    let mut at = |frame| renderer.render(&scene, Id(1), frame, SIZE, SIZE, &studio_core::media::NoVideo).expect("the frame renders");
+    let start = at(0);
+    assert!(close(pixel(&start, 25, 50), [255, 0, 0]), "the square to start with");
+    assert!(close(pixel(&start, 12, 37), [255, 0, 0]), "with its corners");
+    assert!(close(pixel(&start, 75, 50), [0, 0, 0]), "the circle is hidden");
+    let middle = at(4);
+    let [r, g, _] = pixel(&middle, 50, 50);
+    assert!(r > 60 && g > 60, "a blend of red and green halfway, where the two meet: {r} {g}");
+    let finish = at(8);
+    assert!(close(pixel(&finish, 75, 50), [0, 255, 0]), "the circle at the end");
+    assert!(close(pixel(&finish, 62, 37), [0, 0, 0]), "with no square corners left");
+    assert!(close(pixel(&finish, 25, 50), [0, 0, 0]), "and nothing where the square was");
+}
+
+/// Saves frames across three morphs (square into circle, star into a rounded rectangle, and a
+/// triangle into an open wave line) side by side to `MORPH_SHEET` as a PNG for a visual check.
+/// Run with `MORPH_SHEET=/path/morphs.png cargo test -p studio-render --test render morph_sheet -- --ignored`.
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn morph_sheet() {
+    use studio_core::path::{PathPoint, ShapePath};
+    let path = std::env::var("MORPH_SHEET").expect("set MORPH_SHEET to the PNG to write");
+    let (cell, steps) = (200u32, 7i64);
+    let row_center = |row: u32| 100.0 + row as f32 * cell as f32;
+    let mut layers = Vec::new();
+    // Square → circle, also turning from violet to orange.
+    layers.push(shape(10, ShapeKind::Rectangle, Paint::Solid(Rgba::hex(0x8b5cf6)), Vec2::new(120.0, 120.0), Vec2::new(100.0, row_center(0))));
+    layers.push(shape(11, ShapeKind::Ellipse, Paint::Solid(Rgba::hex(0xf97316)), Vec2::new(150.0, 110.0), Vec2::new(100.0, row_center(0))));
+    // Star → rounded rectangle, rotated, with a stroke fading in.
+    layers.push(shape(20, ShapeKind::Star, Paint::linear(Rgba::hex(0xf472b6), Rgba::hex(0x60a5fa), 0.0), Vec2::new(150.0, 150.0), Vec2::new(100.0, row_center(1))));
+    let mut rounded = shape(21, ShapeKind::Rectangle, Paint::Solid(Rgba::hex(0x22c55e)), Vec2::new(140.0, 90.0), Vec2::new(100.0, row_center(1)));
+    if let LayerContent::Shape { style, .. } = &mut rounded.content {
+        style.corner_radius = 30.0;
+        style.stroke = Some(Stroke { paint: Paint::Solid(Rgba::hex(0xffffff)), width: 6.0 });
+    }
+    rounded.transform.as_mut().unwrap().rotation = Animated::constant(20.0);
+    layers.push(rounded);
+    // Triangle → an open wave (closed into open: filled for the first half, a line after).
+    layers.push(shape(30, ShapeKind::Triangle, Paint::Solid(Rgba::hex(0xeab308)), Vec2::new(130.0, 120.0), Vec2::new(100.0, row_center(2))));
+    let wave = ShapePath {
+        points: vec![
+            PathPoint::smooth(Vec2::new(0.0, 0.5), Vec2::new(0.15, -0.6)),
+            PathPoint::smooth(Vec2::new(0.5, 0.5), Vec2::new(0.15, 0.6)),
+            PathPoint::smooth(Vec2::new(1.0, 0.5), Vec2::new(0.15, -0.6)),
+        ],
+        closed: false,
+    };
+    let mut line = solid(31, 0, Vec2::new(160.0, 80.0), Vec2::new(100.0, row_center(2)));
+    line.content = LayerContent::Shape {
+        style: ShapeStyle { fill: None, stroke: Some(Stroke { paint: Paint::Solid(Rgba::hex(0x38bdf8)), width: 8.0 }), ..ShapeStyle::new(ShapeKind::Path) },
+        path: Some(wave),
+    };
+    layers.push(line);
+
+    let mut scene = project(layers);
+    let composition = &mut scene.compositions[0];
+    (composition.width, composition.height, composition.duration_frames) = (cell, cell * 3, steps);
+    for (from, to) in [(10, 11), (20, 21), (30, 31)] {
+        studio_core::morph::morph_to(composition, Id(from), Id(to), 0, steps - 1, studio_core::morph::default_easing()).unwrap();
+    }
+    let (width, height) = (cell * steps as u32, cell * 3);
+    let mut sheet = vec![0u8; (width * height * 4) as usize];
+    let mut renderer = Renderer::new().unwrap();
+    for frame in 0..steps {
+        let picture = renderer.render(&scene, Id(1), frame, cell, cell * 3, &studio_core::media::NoVideo).unwrap();
+        for (index, pixel) in picture.bgra.chunks(4).enumerate() {
+            let (x, y) = (index as u32 % cell + frame as u32 * cell, index as u32 / cell);
+            let at = ((y * width + x) * 4) as usize;
+            sheet[at..at + 4].copy_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+        }
+    }
+    image::save_buffer(path, &sheet, width, height, image::ColorType::Rgba8).unwrap();
+}
+
+/// Saves frames across a Magic Move between two small compositions to `MAGIC_MOVE_SHEET` as a
+/// PNG: a square named "Card" morphs into a star, a triangle named "Badge" (the same in both)
+/// moves and turns, a circle only in the first fades out and a bar only in the second fades in.
+/// Run with `MAGIC_MOVE_SHEET=/path/magic.png cargo test -p studio-render --test render magic_move_sheet -- --ignored`.
+#[test]
+#[ignore = "writes an image for a visual check"]
+fn magic_move_sheet() {
+    use studio_core::edit::{CompositionSettings, add_shape_layer, new_composition};
+    let path = std::env::var("MAGIC_MOVE_SHEET").expect("set MAGIC_MOVE_SHEET to the PNG to write");
+    let (width, height) = (320u32, 180u32);
+    let mut scene = Project::new(Vec::new(), Vec::new());
+    let settings = |name: &str| CompositionSettings { name: name.into(), width, height, frame_rate: FrameRate::new(30, 1), duration_frames: 30, background: Rgba::hex(0x101018) };
+    let intro = new_composition(&mut scene, &settings("Intro")).unwrap();
+    let main = new_composition(&mut scene, &settings("Main")).unwrap();
+    let style = |kind, color| ShapeStyle { fill: Some(Paint::Solid(Rgba::hex(color))), ..ShapeStyle::new(kind) };
+    let shapes = [
+        (intro, "Card", style(ShapeKind::Rectangle, 0x8b5cf6), Vec2::new(70.0, 70.0), Vec2::new(70.0, 90.0), 0.0),
+        (intro, "Spot", style(ShapeKind::Ellipse, 0xf97316), Vec2::new(40.0, 40.0), Vec2::new(270.0, 40.0), 0.0),
+        (intro, "Badge", style(ShapeKind::Triangle, 0xeab308), Vec2::new(40.0, 36.0), Vec2::new(160.0, 140.0), 0.0),
+        (main, "Card", style(ShapeKind::Star, 0xef4444), Vec2::new(110.0, 110.0), Vec2::new(240.0, 80.0), 0.0),
+        (main, "Badge", style(ShapeKind::Triangle, 0xeab308), Vec2::new(40.0, 36.0), Vec2::new(60.0, 40.0), 90.0),
+        (main, "Bar", style(ShapeKind::Rectangle, 0x22c55e), Vec2::new(280.0, 20.0), Vec2::new(160.0, 160.0), 0.0),
+    ];
+    for (comp, name, style, size, center, rotation) in shapes {
+        let id = add_shape_layer(&mut scene, comp, style, size, center, 0).unwrap();
+        let layer = scene.composition_mut(comp).unwrap().layer_mut(id).unwrap();
+        layer.name = name.into();
+        layer.transform.as_mut().unwrap().rotation = Animated::constant(rotation);
+    }
+    let made = studio_core::magic_move::magic_move(&mut scene, intro, main, 20, studio_core::morph::default_easing()).unwrap();
+    let frames = [29i64, 32, 35, 38, 41, 44, 47, 50];
+    let columns = 4u32;
+    let rows = frames.len() as u32 / columns;
+    let mut sheet = vec![0u8; (width * columns * height * rows * 4) as usize];
+    let mut renderer = Renderer::new().unwrap();
+    for (cell, &frame) in frames.iter().enumerate() {
+        let picture = renderer.render(&scene, made.composition, frame, width, height, &studio_core::media::NoVideo).unwrap();
+        let (x0, y0) = (cell as u32 % columns * width, cell as u32 / columns * height);
+        for (index, pixel) in picture.bgra.chunks(4).enumerate() {
+            let (x, y) = (x0 + index as u32 % width, y0 + index as u32 / width);
+            let at = ((y * width * columns + x) * 4) as usize;
+            sheet[at..at + 4].copy_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+        }
+    }
+    image::save_buffer(path, &sheet, width * columns, height * rows, image::ColorType::Rgba8).unwrap();
+}
+
+/// Where a big composition's render time goes: by layer kind and by output size. Run with
+/// `cargo test -p studio-render --release --test render render_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "benchmark; run on demand"]
+fn render_cost() {
+    use studio_core::model::{ShapeKind, ShapeStyle};
+    let build = |kind: &str, count: u32| {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        let settings = studio_core::edit::CompositionSettings { name: "Bench".into(), width: 1920, height: 1080, frame_rate: studio_core::time::FrameRate::new(30, 1), duration_frames: 300, background: Rgba::hex(0x000000) };
+        let comp = studio_core::edit::new_composition(&mut project, &settings).unwrap();
+        for index in 0..count {
+            let at = Vec2::new(100.0 + (index % 20) as f32 * 85.0, 80.0 + (index / 20) as f32 * 38.0);
+            match kind {
+                "text" => studio_core::edit::add_text_layer(&mut project, comp, &format!("Line {index}"), at, 0),
+                "shape" => studio_core::edit::add_shape_layer(&mut project, comp, ShapeStyle::new(ShapeKind::Rectangle), Vec2::new(60.0, 30.0), at, 0),
+                _ => studio_core::edit::add_background(&mut project, comp, Rgba::hex(0x223344)),
+            };
+        }
+        (project, comp)
+    };
+    let mut renderer = Renderer::new().unwrap();
+    for kind in ["text", "shape", "solid"] {
+        for count in [10, 100, 200] {
+            let (project, comp) = build(kind, count);
+            for (width, height) in [(960, 540), (1920, 1080)] {
+                renderer.render(&project, comp, 10, width, height, &studio_core::media::NoVideo).unwrap();
+                let started = std::time::Instant::now();
+                for frame in 0..10 {
+                    renderer.render(&project, comp, 11 + frame, width, height, &studio_core::media::NoVideo).unwrap();
+                }
+                println!("{kind:>6} × {count:>3} at {width}×{height}: {:>7.2} ms", started.elapsed().as_secs_f64() * 100.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn simple_layers_drawn_together_look_the_same_as_one_at_a_time() {
+    use studio_core::animation::Animated;
+    use studio_core::model::{ShapeKind, ShapeStyle};
+    // Overlapping solids and shapes at part opacity, a text layer, and a blend-mode layer in the
+    // middle (which isn't simple, so it splits the run in two).
+    let mut layers = Vec::new();
+    for index in 0..8u64 {
+        let mut layer = solid(10 + index, [0xff3366, 0x33ccff, 0xffcc00, 0x66ff66][index as usize % 4], Vec2::new(40.0, 30.0), Vec2::new(25.0 + index as f32 * 7.0, 30.0 + index as f32 * 5.0));
+        if index % 2 == 1 {
+            layer.content = LayerContent::Shape { style: ShapeStyle::new(if index % 4 == 1 { ShapeKind::Ellipse } else { ShapeKind::Star }), path: None };
+        }
+        if let Some(transform) = layer.transform.as_mut() {
+            transform.opacity = Animated::constant(35.0 + index as f32 * 8.0);
+            transform.rotation = Animated::constant(index as f32 * 11.0);
+        }
+        if index == 4 {
+            layer.blend_mode = studio_core::model::BlendMode::Screen;
+        }
+        layers.push(layer);
+    }
+    let mut text = solid(30, 0xffffff, Vec2::new(60.0, 20.0), Vec2::new(50.0, 70.0));
+    text.content = LayerContent::Text { text: "Hi".into(), style: TextStyle { font_size: 18.0, line_height: 20.0, ..TextStyle::default() } };
+    layers.push(text);
+    let project = project(layers);
+    let mut renderer = Renderer::new().expect("a GPU is available");
+    let together = renderer.render(&project, Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
+    renderer.set_batching(false);
+    let apart = renderer.render(&project, Id(1), 0, SIZE, SIZE, &studio_core::media::NoVideo).unwrap();
+    let largest = together.bgra.iter().zip(&apart.bgra).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(largest <= 1, "they differ by up to {largest} levels");
+    assert!(together.bgra.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]), "something was drawn");
 }

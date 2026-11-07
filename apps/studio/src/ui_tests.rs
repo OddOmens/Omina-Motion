@@ -241,18 +241,64 @@ fn dragging_a_graph_handle_makes_a_custom_curve(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn clicking_away_closes_the_graph_editor(cx: &mut TestAppContext) {
+fn the_easings_button_shows_the_graph_editor_in_the_motion_tab(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
     let (workspace, visual) = open(cx);
+    // Even with the panel folded away and its Keyframe Easing section closed.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        ws.ui.collapsed_panels.insert(PanelId::Properties);
+        if ws.ui.section_open("easing") {
+            ws.ui.toggle_section("easing");
+        }
+        cx.notify();
+    }));
+    render(visual);
     visual.update(|window, cx| window.click("easings", cx));
     render(visual);
-    visual.update(|_, cx| assert!(workspace.read(cx).ui.graph_editor.is_some()));
-    let elsewhere = center_of(visual, "project-items");
-    visual.update(|window, cx| {
-        window.pointer_down(elsewhere, MouseButton::Left, cx);
-        window.pointer_up(elsewhere, MouseButton::Left, cx);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert!(crate::panels::graph_editor::showing(ws));
+        assert_eq!(ws.ui.tab(PanelId::Properties), crate::panels::motion::TAB);
+        assert!(ws.ui.section_open("easing"));
     });
+    assert!(visual.update(|window, _| window.try_find("motion-body")).is_some(), "the Motion tab is drawn");
+}
+
+#[gpui_kit::test]
+fn an_in_animations_easing_is_picked_or_dragged_in_the_motion_tab(cx: &mut TestAppContext) {
+    use studio_core::presets::{Motion, Phase, default_easing, motion_easing};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, crate::panels::motion::TAB);
+        ws.ui.open_section("animate");
+        ws.state.set_layer_motion(TITLE, Phase::In, Some(Motion::Rise), 0.5);
+        cx.notify();
+    }));
     render(visual);
-    visual.update(|_, cx| assert!(workspace.read(cx).ui.graph_editor.is_none()));
+    let animation = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().animation);
+    assert_eq!(motion_easing(&animation(visual), Phase::In), Some(default_easing(Motion::Rise, Phase::In)));
+    // Spring: the rise now springs into place, on its keyframes too.
+    visual.update(|window, cx| window.click(ElementId::Name("motion-in-ease-Spring".into()), cx));
+    render(visual);
+    let spring = Easing::Elastic(studio_core::animation::EaseMode::Out);
+    assert_eq!(animation(visual).enter_easing, Some(spring));
+    let first = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().transform.as_ref().unwrap().position.keyframes()[0].easing);
+    assert_eq!(first, spring);
+    // Snappy is a curve, whose handle drags into a custom one.
+    visual.update(|window, cx| window.click(ElementId::Name("motion-in-ease-Snappy".into()), cx));
+    render(visual);
+    let handle = center_of(visual, ElementId::Name("motion-in-handle-1".into()));
+    visual.update(|window, cx| window.drag(handle, point(handle.x - px(60.0), handle.y), cx));
+    render(visual);
+    let Some(Easing::Curve(curve)) = animation(visual).enter_easing else { panic!("a custom curve") };
+    assert!(curve.x2 < 0.2, "the second handle moved left: {curve:?}");
+    // Default goes back to the motion's own easing.
+    visual.update(|window, cx| window.click(ElementId::Name("motion-in-ease-Default".into()), cx));
+    render(visual);
+    assert_eq!(animation(visual).enter_easing, None);
 }
 
 #[gpui_kit::test]
@@ -865,6 +911,33 @@ fn a_gif_export_runs_at_the_chosen_frame_rate_without_sound(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn a_lottie_export_lists_what_it_left_out(cx: &mut TestAppContext) {
+    let folder = scratch_folder("export-lottie");
+    let (workspace, visual) = open(cx);
+    open_export_dialog(&workspace, visual);
+    visual.update(|window, cx| window.click("export-format", cx));
+    render(visual);
+    click_label(visual, "Lottie (.json)");
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.export_choice.format, studio_export::ExportFormat::Lottie));
+    // Vector files have no size to choose.
+    assert!(visual.update(|window, _| window.try_find("export-size")).is_none());
+    click_label(visual, "Export…");
+    visual.run_until_parked();
+    visual.simulate_new_path_selection(|_| Some(folder.join("Main Comp")));
+    visual.run_until_parked();
+    render(visual);
+    wait_for_export(&workspace, visual);
+    render(visual);
+
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("Main Comp.json")).expect("saved with the .json extension")).unwrap();
+    assert_eq!((json["w"].as_i64(), json["op"].as_f64()), (Some(1920), Some(12.0)), "the work area's twelve frames");
+    // The sample has footage, which Lottie can't hold: the notice says so.
+    visual.update(|window, cx| assert!(window.has_active_dialog(cx), "a notice lists what was left out"));
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
 fn cancelling_an_export_from_the_toolbar_leaves_no_file(cx: &mut TestAppContext) {
     let folder = scratch_folder("export-cancel");
     let (workspace, visual) = open(cx);
@@ -1231,6 +1304,30 @@ fn the_tracks_toolbar_plays_and_zooms(cx: &mut TestAppContext) {
     assert!(zoomed < fit && fit == 240.0, "zoomed {zoomed}, fit {fit}");
 }
 
+#[gpui_kit::test]
+fn the_work_area_handles_set_what_plays(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // At first the work area is the whole 240-frame comp, shown whole, so the handles sit at its ends.
+    let start = center_of(visual, "work-start");
+    let end = center_of(visual, "work-end");
+    let quarter = (end.x - start.x) / 4.0;
+    visual.update(|window, cx| window.drag(start, point(start.x + quarter, start.y), cx));
+    render(visual);
+    let work = visual.update(|_, cx| workspace.read(cx).state.work_area);
+    assert!((work.start - 60.0).abs() <= 3.0 && work.end == 240.0, "{work:?}");
+    let end = center_of(visual, "work-end");
+    visual.update(|window, cx| window.drag(end, point(end.x - quarter, end.y), cx));
+    render(visual);
+    let work = visual.update(|_, cx| workspace.read(cx).state.work_area);
+    assert!((work.end - 180.0).abs() <= 3.0, "{work:?}");
+    // Playback starts inside it.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.current_frame = 0));
+    visual.update(|window, cx| window.click("tracks-play", cx));
+    visual.update(|_, cx| assert!(workspace.read(cx).state.current_frame >= work.start as i64));
+    visual.update(|window, cx| window.click("tracks-play", cx));
+}
+
 // Files dragged in from the Finder ---------------------------------------------------------------
 
 /// Drags `paths` from outside the window and drops them at `at`, as the Finder does.
@@ -1312,6 +1409,72 @@ fn project_items_dropped_on_the_viewer_land_where_they_are_let_go(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+fn a_picture_dropped_on_a_placeholder_fills_it_and_another_swaps_it(cx: &mut TestAppContext) {
+    use studio_core::model::{LayerContent, ShapeKind, ShapeStyle};
+    let (workspace, visual) = open(cx);
+    // A rounded "Drop your photo here" placeholder on top of the open composition.
+    let placeholder = visual.update(|_, cx| {
+        workspace.update(cx, |ws, cx| {
+            let comp = ws.state.active_comp;
+            let style = ShapeStyle { corner_radius: 24.0, ..ShapeStyle::new(ShapeKind::Rectangle) };
+            let id = studio_core::edit::add_shape_layer(&mut ws.state.project, comp, style, Vec2::new(400.0, 300.0), Vec2::new(500.0, 400.0), 0).unwrap();
+            ws.state.project.composition_mut(comp).unwrap().layer_mut(id).unwrap().name = studio_core::slots::placeholder_name("photo");
+            cx.notify();
+            id
+        })
+    });
+    render(visual);
+    let on_it = screen_point(&workspace, visual, Vec2::new(500.0, 400.0));
+    // Held over the placeholder, a file outlines it; dragged back out of the window, the outline goes.
+    visual.update(|window, cx| {
+        use gpui_kit::{ExternalPaths, FileDropEvent, PlatformInput};
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Entered { position: on_it, paths: ExternalPaths(vec![fixture("still.png")].into()) }), cx);
+        window.render_frame(cx);
+        window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Pending { position: point(on_it.x + px(1.0), on_it.y) }), cx);
+        window.render_frame(cx);
+    });
+    let outline = visual.update(|_, cx| workspace.read(cx).ui.slot_drop).expect("the placeholder is outlined");
+    assert!((outline[0].x - 300.0).abs() < 0.5 && (outline[0].y - 250.0).abs() < 0.5, "outline starts at its top-left: {outline:?}");
+    visual.update(|window, cx| {
+        window.dispatch_event(gpui_kit::PlatformInput::FileDrop(gpui_kit::FileDropEvent::Exited), cx);
+        window.render_frame(cx);
+    });
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.slot_drop).is_none(), "nothing outlined off it");
+    drop_files(visual, vec![fixture("still.png")], on_it);
+    let inner = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let layer = state.composition().layer(placeholder).expect("the layer stays");
+        assert_eq!(state.selected_layers, vec![placeholder], "the filled layer is selected");
+        match layer.content {
+            LayerContent::Composition { composition } => composition,
+            ref other => panic!("not filled: {other:?}"),
+        }
+    });
+    let shows = |cx: &mut gpui_kit::VisualTestContext| {
+        cx.update(|_, cx| {
+            let project = &workspace.read(cx).state.project;
+            let composition = project.composition(inner).unwrap();
+            composition.layers.iter().filter(|layer| layer.switches.visible).filter_map(|layer| match layer.content {
+                LayerContent::Image { item } => project.item(item).map(|item| item.name.clone()),
+                _ => None,
+            }).collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(shows(visual), vec!["still.png".to_owned()]);
+    // A second picture, dragged from the Project panel onto the same spot, takes its place.
+    let project_panel = center_of(visual, "project-items");
+    drop_files(visual, vec![fixture("still.jpg")], project_panel);
+    let jpg = visual.update(|_, cx| workspace.read(cx).state.project.items.iter().find(|item| item.name == "still.jpg").map(|item| item.id).unwrap());
+    let item = center_of(visual, ("project-item", jpg.0 as usize));
+    visual.update(|window, cx| window.drag(item, on_it, cx));
+    render(visual);
+    assert_eq!(shows(visual), vec!["still.jpg".to_owned()]);
+    let layers = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    let before = studio_core::sample::sample_project().composition(studio_core::sample::ids::MAIN_COMP).unwrap().layers.len() + 1;
+    assert_eq!(layers, before, "nothing else was added to the composition");
+}
+
+#[gpui_kit::test]
 fn dropping_a_folder_imports_the_media_inside_it(cx: &mut TestAppContext) {
     let folder = scratch_folder("drop-folder");
     std::fs::copy(fixture("tone.wav"), folder.join("a.wav")).unwrap();
@@ -1370,20 +1533,38 @@ fn a_saved_project_reopens_with_the_editor_as_it_was(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn launching_reopens_the_last_project(cx: &mut TestAppContext) {
+fn launching_shows_the_start_screen_or_reopens_the_last_project(cx: &mut TestAppContext) {
+    use crate::app_settings::StartWith;
     let folder = scratch_folder("last-project");
     let (workspace, visual) = open(cx);
     make_an_edit(&workspace, visual);
     let path = save_as(visual, &folder, "Last.studio");
     // A fresh start: the sample project, then the session is restored.
-    visual.update(|window, cx| workspace.update(cx, |ws, cx| {
-        ws.state = crate::state::EditorState::new();
-        ws.restore_session(window, cx);
-    }));
-    render(visual);
+    let relaunch = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+            ws.state = crate::state::EditorState::new();
+            ws.ui.start_screen = None;
+            ws.restore_session(window, cx);
+        }));
+        render(visual);
+    };
+    // By default, the start screen, with the saved project first on its list.
+    relaunch(visual);
+    assert!(start_screen_showing(&workspace, visual));
+    assert_eq!(crate::app_settings::load().recent_projects[0].path, path);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.file().is_none(), "nothing opened by itself"));
+
+    // Set to reopen the last project, it opens straight away.
+    crate::app_settings::update(|settings| settings.start_with = StartWith::LastProject);
+    relaunch(visual);
+    assert!(!start_screen_showing(&workspace, visual));
     visual.update(|_, cx| assert_eq!(workspace.read(cx).state.file(), Some(path.as_path())));
     assert_eq!(title_value(&workspace, visual, ROTATION, 0), PropertyValue::Scalar(33.0), "the saved edit is back");
+
+    // If it has gone, the start screen shows instead.
     std::fs::remove_dir_all(&folder).unwrap();
+    relaunch(visual);
+    assert!(start_screen_showing(&workspace, visual));
 }
 
 #[gpui_kit::test]
@@ -1499,7 +1680,7 @@ fn clicking_the_line_between_keyframes_opens_the_graph_editor_for_that_segment(c
         let mut frames: Vec<i64> = ws.state.selected_keyframes.iter().map(|key| key.frame).collect();
         frames.sort();
         assert_eq!(frames, vec![36, 156], "the segment's two keyframes");
-        assert!(ws.ui.graph_editor.is_some(), "the graph editor opened");
+        assert!(crate::panels::graph_editor::showing(ws), "the graph editor opened");
     });
     // An easing chosen there applies to exactly that segment.
     visual.update(|window, cx| window.click(ElementId::Name("easing:Expo:Both".into()), cx));
@@ -1510,6 +1691,45 @@ fn clicking_the_line_between_keyframes_opens_the_graph_editor_for_that_segment(c
 }
 
 #[gpui_kit::test]
+fn a_fade_in_and_out_are_eased_one_segment_at_a_time(cx: &mut TestAppContext) {
+    use studio_core::animation::EASING_FAMILIES;
+    let (workspace, visual) = open_title_keyframes(cx);
+    let expo = EASING_FAMILIES.iter().find(|(name, _)| *name == "Expo").unwrap().1;
+    let quad = EASING_FAMILIES.iter().find(|(name, _)| *name == "Quad").unwrap().1;
+    let easings = |visual: &mut VisualTestContext| -> Vec<Easing> {
+        visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().keyframe_easings(OPACITY).into_iter().map(|(_, easing)| easing).collect())
+    };
+    let before = easings(visual);
+    // Every opacity keyframe: a fade in (24 → 36), a hold at full (36 → 156) and a fade out.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_property_keyframes(TITLE, OPACITY, false);
+        crate::panels::graph_editor::show(ws);
+        cx.notify();
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find(("easing-segment", 2_usize)).is_some()), "each segment is offered");
+    // To start, only the fade in is eased.
+    visual.update(|window, cx| window.click(ElementId::Name("easing:Expo:Out".into()), cx));
+    render(visual);
+    let after = easings(visual);
+    assert_eq!(after[0], Easing::Curve(expo[1]));
+    assert_eq!(&after[1..3], &before[1..3], "the hold and the fade out are untouched");
+    // Picking the fade out eases just it.
+    visual.update(|window, cx| window.click(("easing-segment", 2_usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("easing:Expo:In".into()), cx));
+    render(visual);
+    let after = easings(visual);
+    assert_eq!((after[0], after[1], after[2]), (Easing::Curve(expo[1]), before[1], Easing::Curve(expo[0])));
+    // All eases every segment at once.
+    visual.update(|window, cx| window.click("easing-segment-all", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("easing:Quad:Both".into()), cx));
+    render(visual);
+    assert!(easings(visual)[..3].iter().all(|easing| *easing == Easing::Curve(quad[2])), "{:?}", easings(visual));
+}
+
+#[gpui_kit::test]
 fn double_clicking_a_keyframe_opens_the_graph_editor(cx: &mut TestAppContext) {
     let (workspace, visual) = open_title_keyframes(cx);
     let key = ElementId::Name(format!("clip-kf:{}:{OPACITY:?}:36", TITLE.0).into());
@@ -1517,7 +1737,7 @@ fn double_clicking_a_keyframe_opens_the_graph_editor(cx: &mut TestAppContext) {
     render(visual);
     visual.update(|_, cx| {
         let ws = workspace.read(cx);
-        assert!(ws.ui.graph_editor.is_some());
+        assert!(crate::panels::graph_editor::showing(ws));
         assert!(ws.state.selected_keyframes.iter().any(|key| key.frame == 36));
     });
 }
@@ -2271,7 +2491,7 @@ fn text_animation_comes_in_by_the_chosen_piece_and_can_be_tuned(cx: &mut TestApp
     tall_window(visual);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.state.select_layer(TITLE, false);
-        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 0);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, crate::panels::motion::TAB);
         cx.notify();
     }));
     render(visual);
@@ -2606,6 +2826,33 @@ fn separate_audio_moves_the_sound_to_its_own_clip(cx: &mut TestAppContext) {
     assert!(!video_plays, "the video went quiet");
     let content = visual.update(|_, cx| workspace.read(cx).state.composition().layer(audio).unwrap().content.clone());
     assert!(matches!(content, LayerContent::Audio { .. }));
+}
+
+#[gpui_kit::test]
+fn a_nested_composition_with_sound_can_be_muted_like_a_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    add_video_with_sound(&workspace, visual);
+    let nested = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let layer = ws.state.precompose_selection("With Sound", false).unwrap();
+        cx.notify();
+        layer
+    }));
+    render(visual);
+    let heard = |visual: &mut VisualTestContext| visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        studio_core::audio::composition_audio(&state.project, state.composition()).len()
+    });
+    assert_eq!(heard(visual), 1, "the video's sound plays from inside the nested composition");
+    // Its clip has a mute button, and its Audio card the switch, volume and fades, but not the
+    // tools that work on one file's sound.
+    assert!(visual.update(|window, _| window.try_find(("clip-mute", nested.0 as usize))).is_some());
+    assert!(visual.update(|window, _| window.try_find("remove-silences")).is_none());
+    visual.update(|window, cx| window.click("layer-play-audio", cx));
+    render(visual);
+    assert_eq!(heard(visual), 0, "muted");
+    visual.update(|window, cx| window.click(("clip-mute", nested.0 as usize), cx));
+    render(visual);
+    assert_eq!(heard(visual), 1, "and back on from its clip");
 }
 
 #[gpui_kit::test]
@@ -2970,7 +3217,7 @@ fn view_all_shows_every_template_and_adds_the_one_clicked(cx: &mut TestAppContex
     render(visual);
     let first_intro = TEMPLATES.iter().position(|template| template.category == studio_core::templates::Category::Intros).unwrap();
     assert!(visual.update(|window, _| window.try_find(("gallery-template", 0_usize)).is_none()), "other categories are hidden");
-    visual.update(|window, cx| window.click(("gallery-template", first_intro), cx));
+    visual.update(|window, cx| window.click(("gallery-template-add", first_intro), cx));
     render(visual);
     assert!(visual.update(|window, _| window.try_find("template-gallery")).is_none(), "adding one closes it");
     visual.update(|_, cx| {
@@ -2981,6 +3228,58 @@ fn view_all_shows_every_template_and_adds_the_one_clicked(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn the_colors_menu_makes_a_template_in_another_palette(cx: &mut TestAppContext) {
+    use crate::state::TemplateLook;
+    use studio_core::model::{LayerContent, Paint};
+    use studio_core::templates::LOOKS;
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("rail-templates", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("template-brand", cx));
+    render(visual);
+    click_label(visual, "Cobalt");
+    render(visual);
+    let cobalt = LOOKS.iter().position(|(name, _)| *name == "Cobalt").unwrap();
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.template_look, TemplateLook::Palette(cobalt)));
+    // The template is made in Cobalt's colors: its background starts from Cobalt's.
+    visual.update(|window, cx| window.click(("template-add", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let composition = workspace.read(cx).state.composition();
+        let background = composition.layers.iter().find(|layer| layer.name == "Background").expect("a background");
+        let LayerContent::Shape { style, .. } = &background.content else { panic!("a shape") };
+        let Some(Paint::Linear(gradient)) = &style.fill else { panic!("a gradient: {:?}", style.fill) };
+        assert_eq!(gradient.stops()[0].color, studio_core::model::Rgba::hex(LOOKS[cobalt].1.background));
+    });
+}
+
+#[gpui_kit::test]
+fn hovering_a_template_plays_it_and_only_its_plus_adds_it(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("rail-templates", cx));
+    render(visual);
+    let compositions = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.project.compositions.len());
+    let before = compositions(visual);
+    // Clicking the card itself adds nothing.
+    visual.update(|window, cx| window.click(("template", 0_usize), cx));
+    render(visual);
+    assert_eq!(compositions(visual), before, "only the + adds a template");
+    // Hovering starts it playing on its card; moving away stops it.
+    visual.update(|window, cx| window.hover(("template", 0_usize), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.template_preview.as_ref().map(|preview| preview.index), Some(0)));
+    visual.update(|window, cx| window.hover("template-brand", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).ui.template_preview.is_none()));
+    // The + adds it and says so.
+    visual.update(|window, cx| window.click(("template-add", 0_usize), cx));
+    render(visual);
+    assert_eq!(compositions(visual), before + 1);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().name.starts_with(studio_core::templates::TEMPLATES[0].name)));
+}
+
+#[gpui_kit::test]
 fn a_template_click_adds_and_opens_it_in_the_chosen_shape(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.click("rail-templates", cx));
@@ -2988,7 +3287,7 @@ fn a_template_click_adds_and_opens_it_in_the_chosen_shape(cx: &mut TestAppContex
     // 4:5, then the first template.
     visual.update(|window, cx| window.click(("template-format", 1_usize), cx));
     render(visual);
-    visual.update(|window, cx| window.click(("template", 0_usize), cx));
+    visual.update(|window, cx| window.click(("template-add", 0_usize), cx));
     render(visual);
     visual.update(|_, cx| {
         let state = &workspace.read(cx).state;
@@ -3162,6 +3461,7 @@ fn animate_and_track_motion_headings_add_and_reset(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.state.select_layer(TITLE, false);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, crate::panels::motion::TAB);
         cx.notify();
     }));
     tall_window(visual);
@@ -3178,7 +3478,12 @@ fn animate_and_track_motion_headings_add_and_reset(cx: &mut TestAppContext) {
     render(visual);
     let cleared = animation(visual);
     assert!(cleared.enter.is_none() && cleared.exit.is_none() && cleared.looping.is_none(), "every animation is off: {cleared:?}");
-    // Track Motion's + starts picking the point to follow.
+    // Track Motion's + (on the Properties tab) starts picking the point to follow.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 0);
+        cx.notify();
+    }));
+    render(visual);
     visual.update(|window, cx| window.click("track-motion-add", cx));
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.track_pick), Some(TITLE));
@@ -3296,6 +3601,7 @@ fn the_animate_section_shows_for_a_layer_and_presets_land_on_it(cx: &mut TestApp
     let (workspace, visual) = open(cx);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.state.select_layer(TITLE, false);
+        ws.ui.tabs.insert(crate::workspace::PanelId::Properties, crate::panels::motion::TAB);
         cx.notify();
     }));
     tall_window(visual);
@@ -3450,6 +3756,43 @@ fn renaming_a_clip_from_its_right_click_menu(cx: &mut TestAppContext) {
     });
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().name.clone()), "Headline");
+}
+
+#[gpui_kit::test]
+fn duplicate_and_resize_copies_a_composition_to_another_shape_beside_it(cx: &mut TestAppContext) {
+    use studio_core::sample::ids;
+    let (workspace, visual) = open(cx);
+    // A 16:9 composition named for its shape, kept in a folder.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.rename_item(ids::MAIN_COMP, "Promo 16:9");
+        ws.state.move_item(ids::MAIN_COMP, Some(ids::SOLIDS_FOLDER));
+        if !ws.ui.folder_open(ids::SOLIDS_FOLDER) {
+            ws.ui.toggle_folder(ids::SOLIDS_FOLDER);
+        }
+        cx.notify();
+    }));
+    render(visual);
+    let source = visual.update(|_, cx| {
+        let comp = workspace.read(cx).state.project.composition(ids::MAIN_COMP).unwrap();
+        (comp.width, comp.height, comp.layers.len())
+    });
+    assert_eq!((source.0, source.1), (1920, 1080), "the sample is 16:9");
+    visual.update(|window, cx| window.right_click(("project-item", ids::MAIN_COMP.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Duplicate and Resize");
+    render(visual);
+    click_label(visual, "Vertical 9:16 · Reels, TikTok, Shorts  1080×1920");
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let copy = state.composition();
+        assert_ne!(copy.id, ids::MAIN_COMP, "the copy is open");
+        assert_eq!((copy.width, copy.height), (1080, 1920));
+        assert_eq!(copy.name, "Promo 9:16", "named for its new shape, not Promo 16:9 9:16");
+        assert_eq!(copy.layers.len(), source.2, "every layer came along");
+        assert_eq!(state.project.item(copy.id).unwrap().parent, Some(ids::SOLIDS_FOLDER), "beside the original");
+        assert_eq!(state.project.composition(ids::MAIN_COMP).unwrap().width, 1920, "the original is unchanged");
+    });
 }
 
 #[gpui_kit::test]
@@ -4169,7 +4512,7 @@ fn new_layers_markers_and_guides_come_from_the_menus(cx: &mut TestAppContext) {
     // The top bar's New Layer button offers the same.
     visual.update(|window, cx| window.click("tool-new-layer", cx));
     render(visual);
-    click_label(visual, "Null Object (⇧⌥⌘Y)");
+    click_label(visual, "Null Object (⌥⇧⌘Y)");
     render(visual);
     assert_eq!(top_name(visual), "Null 1");
     visual.update(|_, cx| {
@@ -4198,9 +4541,87 @@ fn new_layers_markers_and_guides_come_from_the_menus(cx: &mut TestAppContext) {
     visual.update(|window, cx| window.dispatch_action(Box::new(ToggleGuides), cx));
     render(visual);
     assert!(guides(visual));
+    // The viewer's button opens the guides menu, which can hide them again.
     visual.update(|window, cx| window.click("viewer-guides", cx));
     render(visual);
+    click_label(visual, "Show Guides (')");
+    render(visual);
     assert!(!guides(visual));
+}
+
+#[gpui_kit::test]
+fn the_guides_menu_offers_title_safe_on_wide_frames_and_social_zones_on_tall_ones(cx: &mut TestAppContext) {
+    use crate::panels::guides::SocialApp;
+    let (workspace, visual) = open(cx);
+    let has = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.try_find(id).is_some());
+    let has_label = |visual: &mut VisualTestContext, label: &str| visual.update(|window, _| window.try_find_by_label(label).is_some());
+    let open_menu = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| window.click("viewer-guides", cx));
+        render(visual);
+    };
+    let close_menu = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| window.press("escape", cx));
+        render(visual);
+    };
+    let set_size = |visual: &mut VisualTestContext, width: u32, height: u32| {
+        visual.update(|_, cx| workspace.update(cx, |ws, _| {
+            let composition = ws.state.composition_mut_for_test();
+            (composition.width, composition.height) = (width, height);
+        }));
+        render(visual);
+    };
+
+    // 16:9: title safe is offered (and on by default); the social zones are not.
+    set_size(visual, 1920, 1080);
+    open_menu(visual);
+    assert!(has_label(visual, "Title and Action Safe"));
+    assert!(!has_label(visual, "TikTok"));
+    // While hidden, picking a guide shows the guides with it on rather than turning it off.
+    click_label(visual, "Title and Action Safe");
+    render(visual);
+    assert!(has(visual, "viewer-guides-overlay"), "picking a guide shows the guides");
+    assert!(has(visual, "guide-title-safe") && has(visual, "guide-action-safe"));
+    // Once shown, picking it again turns it off.
+    open_menu(visual);
+    click_label(visual, "Title and Action Safe");
+    render(visual);
+    assert!(!has(visual, "guide-title-safe"));
+    open_menu(visual);
+    click_label(visual, "Title and Action Safe");
+    render(visual);
+    assert!(has(visual, "guide-title-safe"));
+
+    // 9:16: the social zones are offered instead, and title safe is neither offered nor drawn.
+    set_size(visual, 1080, 1920);
+    assert!(!has(visual, "guide-title-safe"));
+    open_menu(visual);
+    assert!(!has_label(visual, "Title and Action Safe"));
+    assert!(has_label(visual, "Social Safe Zones"));
+    click_label(visual, "TikTok");
+    render(visual);
+    assert!(has(visual, "guide-zone-tiktok"));
+    open_menu(visual);
+    click_label(visual, "Instagram Reels");
+    render(visual);
+    assert!(has(visual, "guide-zone-tiktok") && has(visual, "guide-zone-instagram-reels"));
+    assert!(!has(visual, "guide-zone-youtube-shorts"));
+    // The Reels box sits 14% in from the top, 35% from the bottom and 6% from each side.
+    let (frame, zone) = visual.update(|window, _| (window.find("viewer-guides-overlay").bounds(), window.find("guide-zone-instagram-reels").bounds()));
+    let near = |actual: gpui_kit::Pixels, expected: gpui_kit::Pixels| (actual - expected).abs() <= px(1.0);
+    assert!(near(zone.top() - frame.top(), frame.size.height * 0.14), "{zone:?} in {frame:?}");
+    assert!(near(frame.bottom() - zone.bottom(), frame.size.height * 0.35), "{zone:?} in {frame:?}");
+    assert!(near(zone.left() - frame.left(), frame.size.width * 0.06), "{zone:?} in {frame:?}");
+    assert!(near(frame.right() - zone.right(), frame.size.width * 0.06), "{zone:?} in {frame:?}");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.guide_choice.social.clone()), [SocialApp::TikTok, SocialApp::InstagramReels]);
+
+    // Square frames only get the grid; the social zones stay chosen for the next tall comp.
+    set_size(visual, 1080, 1080);
+    assert!(!has(visual, "guide-zone-tiktok"));
+    open_menu(visual);
+    assert!(!has_label(visual, "TikTok") && !has_label(visual, "Title and Action Safe"));
+    close_menu(visual);
+    set_size(visual, 1080, 1920);
+    assert!(has(visual, "guide-zone-tiktok"));
 }
 
 #[gpui_kit::test]
@@ -4244,4 +4665,793 @@ fn the_rate_stretch_tool_changes_a_clips_speed(cx: &mut TestAppContext) {
     assert!(out_after > out_before, "the clip got longer: {out_before} → {out_after}");
     let expected = 100.0 * (out_before - in_before) as f32 / (out_after - in_after) as f32;
     assert!(speed < 100.0 && (speed - expected).abs() < 2.0, "slowed to fill it: {speed}% (about {expected}%)");
+}
+
+// Start screen, recent projects and the standard Mac menu commands ------------------------------
+
+fn start_screen_showing(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> bool {
+    let showing = visual.update(|window, _| window.try_find("start-screen").is_some());
+    assert_eq!(showing, visual.update(|_, cx| workspace.read(cx).ui.start_screen.is_some()));
+    showing
+}
+
+#[gpui_kit::test]
+fn the_start_screen_opens_recent_projects_and_starts_new_ones(cx: &mut TestAppContext) {
+    use crate::workspace::ShowStartScreen;
+    let folder = scratch_folder("start-screen");
+    let (workspace, visual) = open(cx);
+    // A saved project, as if opened before: it is listed, newest first.
+    make_an_edit(&workspace, visual);
+    let file = folder.join("Launch Promo.studio");
+    let text = visual.update(|_, cx| workspace.read(cx).state.project_text().unwrap());
+    std::fs::write(&file, text).unwrap();
+    crate::app_settings::note_project_used(&file);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.mark_saved(std::path::PathBuf::from("/elsewhere/Current.studio"), false);
+        cx.notify();
+    }));
+
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowStartScreen), cx));
+    render(visual);
+    assert!(start_screen_showing(&workspace, visual));
+    assert!(visual.update(|window, _| window.try_find(("start-recent-row", 0usize)).is_some()), "the recent project is listed");
+    assert!(visual.update(|window, _| window.try_find(("start-recent-row", 1usize)).is_none()), "and only it");
+    // Escape goes to the editor, and File ▸ Start Screen comes back.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    assert!(!start_screen_showing(&workspace, visual));
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowStartScreen), cx));
+    render(visual);
+
+    // Clicking it opens it and goes to the editor.
+    visual.update(|window, cx| window.click(("start-recent-row", 0usize), cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(!start_screen_showing(&workspace, visual));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.file(), Some(file.as_path())));
+    assert_eq!(title_value(&workspace, visual, ROTATION, 0), PropertyValue::Scalar(33.0));
+
+    // New Project starts an empty one.
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowStartScreen), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("start-new", cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(!start_screen_showing(&workspace, visual));
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert!(state.file().is_none());
+        assert_eq!(state.project.compositions.len(), 1);
+        assert!(state.composition().layers.is_empty(), "a new, empty project");
+    });
+
+    // A project that has gone missing is taken off the list when clicked.
+    std::fs::remove_file(&file).unwrap();
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowStartScreen), cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find(("start-recent-row", 0usize)).is_none()), "missing files aren't listed");
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
+fn shortcuts_leave_the_project_alone_while_the_start_screen_covers_it(cx: &mut TestAppContext) {
+    use crate::workspace::ShowStartScreen;
+    let (workspace, visual) = open(cx);
+    let layers = visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let first = ws.state.composition().layers[0].id;
+        ws.state.selected_layers = vec![first];
+        ws.state.composition().layers.len()
+    }));
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowStartScreen), cx));
+    render(visual);
+    assert!(start_screen_showing(&workspace, visual));
+    // Delete, Space and Duplicate, by key and as menu commands, reach nothing behind it.
+    for key in ["backspace", "space", "cmd-d"] {
+        visual.update(|window, cx| window.press(key, cx));
+        render(visual);
+    }
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Delete), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.composition().layers.len(), layers, "no layer deleted or duplicated");
+        assert!(!state.is_playing(), "playback didn't start");
+        assert!(!state.has_unsaved_changes());
+    });
+    // Back in the editor, Delete works again.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    visual.update(|window, cx| window.press("backspace", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().layers.len(), layers - 1));
+}
+
+#[gpui_kit::test]
+fn notifications_show_over_the_start_screen_and_can_be_clicked(cx: &mut TestAppContext) {
+    use crate::workspace::ShowStartScreen;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use gpui_kit::component::notification::Notification;
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowStartScreen), cx));
+    render(visual);
+    assert!(start_screen_showing(&workspace, visual));
+    // A message with a button, as a finished package or export posts one.
+    let clicked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = clicked.clone();
+    visual.update(|window, cx| {
+        let note = Notification::success("Done").autohide(false).action(move |_, _, _| {
+            let seen = seen.clone();
+            Button::new("note-button").ghost().label("Show").on_click(move |_, _, _| seen.set(true))
+        });
+        window.push_notification(note, cx);
+    });
+    // Let it finish sliding in: the slide (0.4 s) runs on the real clock, not the test's.
+    for _ in 0..12 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        render(visual);
+    }
+    visual.update(|window, cx| window.click("note-button", cx));
+    render(visual);
+    assert!(clicked.get(), "the button above the start screen took the click");
+}
+
+#[gpui_kit::test]
+fn a_template_on_the_start_screen_becomes_a_new_project(cx: &mut TestAppContext) {
+    use crate::workspace::ShowStartScreen;
+    use studio_core::templates::TEMPLATES;
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowStartScreen), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("start-templates", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find(("start-template", 0usize)).is_some()), "every template is offered");
+    // The sample project has unsaved changes: Don't Save goes on.
+    make_an_edit(&workspace, visual);
+    render(visual);
+    visual.update(|window, cx| window.click(("start-template-add", 3usize), cx));
+    visual.run_until_parked();
+    visual.simulate_prompt_answer("Don’t Save");
+    visual.run_until_parked();
+    render(visual);
+    assert!(!start_screen_showing(&workspace, visual));
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.project.compositions.len(), 1, "the template's composition in place of an empty one");
+        assert!(state.composition().name.contains(TEMPLATES[3].name), "{}", state.composition().name);
+        assert!(!state.composition().layers.is_empty());
+        assert!(!state.can_undo(), "the template is where the project starts");
+    });
+}
+
+#[gpui_kit::test]
+fn clicking_studio_offers_to_save_then_shows_the_start_screen(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    render(visual);
+    // Nothing unsaved: straight to the start screen, and Esc goes back to the same project.
+    visual.update(|window, cx| window.click("studio-home", cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(!visual.has_pending_prompt());
+    assert!(start_screen_showing(&workspace, visual));
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    assert!(!start_screen_showing(&workspace, visual));
+
+    // Unsaved changes: Cancel stays in the editor with them.
+    make_an_edit(&workspace, visual);
+    render(visual);
+    visual.update(|window, cx| window.click("studio-home", cx));
+    visual.run_until_parked();
+    assert!(visual.has_pending_prompt(), "asks to save first");
+    visual.simulate_prompt_answer("Cancel");
+    visual.run_until_parked();
+    render(visual);
+    assert!(!start_screen_showing(&workspace, visual));
+    assert!(has_unsaved_changes(&workspace, visual));
+
+    // Don't Save shows the start screen; Esc goes back to the work, still unsaved.
+    let dont_save_to_start_screen = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| window.click("studio-home", cx));
+        visual.run_until_parked();
+        assert!(visual.has_pending_prompt(), "asks every time it goes there");
+        visual.simulate_prompt_answer("Don’t Save");
+        visual.run_until_parked();
+        render(visual);
+    };
+    dont_save_to_start_screen(visual);
+    assert!(start_screen_showing(&workspace, visual));
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    assert!(!start_screen_showing(&workspace, visual));
+    assert!(has_unsaved_changes(&workspace, visual));
+
+    // Starting a project from the start screen doesn't ask a second time.
+    dont_save_to_start_screen(visual);
+    visual.update(|window, cx| window.click("start-new", cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(!visual.has_pending_prompt(), "it was already asked");
+    assert!(!start_screen_showing(&workspace, visual));
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layers.is_empty(), "a new, empty project"));
+    assert!(!has_unsaved_changes(&workspace, visual));
+}
+
+#[gpui_kit::test]
+fn clicking_a_project_items_label_swatch_picks_its_color(cx: &mut TestAppContext) {
+    use studio_core::model::LabelColor;
+    use studio_core::sample::ids::LOGO;
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.project_columns.label = true;
+        cx.notify();
+    }));
+    render(visual);
+    let label = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.project.item(LOGO).unwrap().label);
+    let other = LabelColor::ALL.into_iter().find(|color| *color != label(visual)).unwrap();
+    let selected_before = visual.update(|_, cx| workspace.read(cx).state.selected_item);
+    visual.update(|window, cx| window.click(("project-label", LOGO.0 as usize), cx));
+    render(visual);
+    click_label(visual, other.name());
+    render(visual);
+    assert_eq!(label(visual), other);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.selected_item, selected_before, "the press didn't select the row"));
+}
+
+#[gpui_kit::test]
+fn close_project_goes_back_to_the_start_screen(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("cmd-w", cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(start_screen_showing(&workspace, visual));
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layers.is_empty(), "the project was closed"));
+}
+
+#[gpui_kit::test]
+fn open_recent_lists_projects_and_opens_them(cx: &mut TestAppContext) {
+    use crate::workspace::{ClearRecentProjects, OpenRecent};
+    let folder = scratch_folder("open-recent");
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    let file = folder.join("Teaser.studio");
+    let text = visual.update(|_, cx| workspace.read(cx).state.project_text().unwrap());
+    std::fs::write(&file, text).unwrap();
+    crate::app_settings::note_project_used(&file);
+    let open_recent_names = || {
+        let menus = crate::workspace::menus();
+        let file_menu = menus.into_iter().find(|menu| menu.name == "File").unwrap();
+        file_menu
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                gpui_kit::MenuItem::Submenu(menu) if menu.name == "Open Recent" => Some(menu),
+                _ => None,
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                gpui_kit::MenuItem::Action { name, .. } => Some(name.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(open_recent_names(), ["Teaser", "Clear Menu"]);
+
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.mark_saved(folder.join("Other.studio"), false); cx.notify(); }));
+    visual.update(|window, cx| window.dispatch_action(Box::new(OpenRecent { path: file.clone() }), cx));
+    visual.run_until_parked();
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.file(), Some(file.as_path())));
+
+    visual.update(|window, cx| window.dispatch_action(Box::new(ClearRecentProjects), cx));
+    render(visual);
+    assert_eq!(open_recent_names(), ["Clear Menu"]);
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
+fn select_all_and_cut_work_on_layers(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let layer_count = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    assert!(layer_count > 1);
+    visual.update(|window, cx| window.press("cmd-a", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.selected_layers.len(), layer_count, "every layer is selected"));
+    visual.update(|window, cx| window.press("cmd-x", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layers.is_empty(), "cut removes them"));
+    visual.update(|window, cx| window.press("cmd-v", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().layers.len(), layer_count, "and paste brings them back"));
+}
+// Packaging ------------------------------------------------------------------------------------
+
+/// Waits (up to 60 s) for the background package to finish, letting its events through.
+fn wait_for_package(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) {
+    let started = std::time::Instant::now();
+    while visual.update(|_, cx| workspace.read(cx).ui.package_job.is_some()) {
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "the package was never finished");
+        // Real time for the packaging thread, then the editor's next check on it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        visual.executor().advance_clock(std::time::Duration::from_millis(100));
+        visual.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn packaging_zips_the_project_with_its_media_and_the_copy_reopens(cx: &mut TestAppContext) {
+    use studio_core::model::LutSource;
+    use studio_core::sample::ids;
+    let folder = scratch_folder("package");
+    let (media, out, unzipped) = (folder.join("media"), folder.join("out"), folder.join("unzipped"));
+    for made in [&media, &out, &unzipped] {
+        std::fs::create_dir_all(made).unwrap();
+    }
+    let (workspace, visual) = open(cx);
+    // Media linked to files: two clips named alike (from two cards) in Footage, one in a
+    // "B-Roll" folder inside it, a logo at the top level, music that is missing, and a LUT file
+    // on a color grade layer. They are left off the timeline, so nothing tries to decode them.
+    std::fs::create_dir_all(media.join("card2")).unwrap();
+    for name in ["clip.mov", "card2/clip.mov", "wide.mov", "logo.png", "Film.cube"] {
+        std::fs::write(media.join(name), format!("contents of {name}")).unwrap();
+    }
+    let linked = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        use studio_core::{edit, folders};
+        let project = &mut ws.state.project;
+        let info = edit::FootageInfo { size: Vec2::new(64.0, 36.0), duration_seconds: 2.0, frame_rate: studio_core::time::FrameRate::new(24, 1), has_audio: false };
+        let b_roll = folders::add_folder(project, "B-Roll", Some(ids::FOOTAGE_FOLDER));
+        let clips = [media.join("clip.mov"), media.join("card2/clip.mov"), media.join("wide.mov")].map(|path| edit::import_footage(project, path, &info));
+        folders::move_to(project, clips[0], Some(ids::FOOTAGE_FOLDER));
+        folders::move_to(project, clips[1], Some(ids::FOOTAGE_FOLDER));
+        folders::move_to(project, clips[2], Some(b_roll));
+        let logo = edit::import_image(project, media.join("logo.png"), Vec2::new(64.0, 36.0));
+        let music = edit::import_audio(project, media.join("missing/score.wav"), 3.0);
+        let grade = edit::ensure_color_grade_layer(project, ids::MAIN_COMP).unwrap();
+        edit::add_lut(project, ids::MAIN_COMP, grade, LutSource::File(media.join("Film.cube"))).unwrap();
+        cx.notify();
+        (clips, logo, music)
+    }));
+    let (clips, logo, music) = linked;
+    render(visual);
+
+    // File ▸ Package… opens the dialog; Choose… picks the folder to save in.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Package), cx));
+    render(visual);
+    visual.update(|window, _| assert!(window.try_find("package-ok").is_some(), "the Package dialog is open"));
+    visual.update(|window, cx| window.click("package-choose", cx));
+    visual.run_until_parked();
+    assert!(visual.did_prompt_for_paths());
+    visual.simulate_path_prompt_response(|options| {
+        assert!(options.directories && !options.files, "asks for a folder");
+        Some(vec![out.clone()])
+    });
+    visual.run_until_parked();
+    render(visual);
+    visual.update(|window, cx| window.click("package-ok", cx));
+    render(visual);
+    // While it runs, the top bar shows it and File ▸ Package… is greyed out.
+    visual.update(|window, cx| {
+        assert!(window.try_find("package-cancel").is_some(), "the top bar shows the package with a Cancel button");
+        assert!(!window.is_action_available(&crate::workspace::Package, cx), "Package… is unavailable while a package is made");
+    });
+    wait_for_package(&workspace, visual);
+    render(visual);
+    visual.update(|window, cx| assert!(window.is_action_available(&crate::workspace::Package, cx), "and available again once it is done"));
+
+    // The zip holds a folder named after the project, mirroring the Project panel's folders.
+    let zip = out.join("Untitled.zip");
+    assert!(zip.exists(), "named after the untitled project");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1, "no partial file is left beside it");
+    zip::ZipArchive::new(std::fs::File::open(&zip).unwrap()).unwrap().extract(&unzipped).unwrap();
+    let package = unzipped.join("Untitled");
+    let copies = [("Footage/clip.mov", "clip.mov"), ("Footage/clip 2.mov", "card2/clip.mov"), ("Footage/B-Roll/wide.mov", "wide.mov"), ("Media/logo.png", "logo.png"), ("LUTs/Film.cube", "Film.cube")];
+    for (copy, original) in copies {
+        assert_eq!(std::fs::read_to_string(package.join(copy)).unwrap(), format!("contents of {original}"), "{copy}");
+    }
+    assert!(std::fs::read_to_string(package.join("Missing files.txt")).unwrap().contains("score.wav"));
+
+    // The packaged project opens from where it was unzipped, with its media found there.
+    let file = package.join("Untitled.studio");
+    let missing = visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.open_project(&std::fs::read_to_string(&file).unwrap(), file.clone()).unwrap().0));
+    assert_eq!(missing, [media.join("missing/score.wav")], "only the missing music is reported, at its old path");
+    visual.update(|_, cx| {
+        let project = &workspace.read(cx).state.project;
+        let path = |id| project.item(id).unwrap().path.clone().unwrap();
+        assert_eq!(path(clips[0]), package.join("Footage/clip.mov"));
+        assert_eq!(path(clips[1]), package.join("Footage/clip 2.mov"));
+        assert_eq!(path(clips[2]), package.join("Footage/B-Roll/wide.mov"));
+        assert_eq!(path(logo), package.join("Media/logo.png"));
+        assert_eq!(path(music), media.join("missing/score.wav"));
+        let luts: Vec<_> = project.compositions.iter().flat_map(|comp| &comp.layers).flat_map(|layer| &layer.effects).filter_map(|effect| effect.lut.clone()).collect();
+        assert_eq!(luts, [LutSource::File(package.join("LUTs/Film.cube"))]);
+    });
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+// Morphing --------------------------------------------------------------------------------------
+
+#[gpui_kit::test]
+fn morph_to_turns_one_shape_into_another_from_the_menus(cx: &mut TestAppContext) {
+    use crate::workspace::MorphTo;
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    let square = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    let star = add_shape(&workspace, visual, ShapeKind::Star);
+    let select_both = |visual: &mut VisualTestContext| {
+        visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+            ws.state.select_layer(square, false);
+            ws.state.select_layer(star, true);
+            cx.notify();
+        }));
+        render(visual);
+    };
+    let morphing = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(square).unwrap().is_morphing());
+    select_both(visual);
+
+    // The square's right-click menu: Morph To… opens the dialog, and Morph makes the keyframes.
+    visual.update(|window, cx| window.right_click(("clip-body", square.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Morph To…");
+    render(visual);
+    visual.update(|window, cx| window.click("morph-ok", cx));
+    render(visual);
+    assert!(morphing(visual), "the square morphs");
+    visual.update(|_, cx| {
+        let workspace = workspace.read(cx);
+        let state = &workspace.state;
+        let layer = state.composition().layer(square).unwrap();
+        let fps = state.composition().frame_rate.fps();
+        let frames = layer.morph.as_ref().unwrap().path.keyframe_frames();
+        assert_eq!(frames, vec![state.current_frame, state.current_frame + fps.round() as i64], "one second from the playhead");
+        assert!(!state.composition().layer(star).unwrap().switches.visible, "the star is hidden");
+        assert_eq!(state.selected_layers, vec![square]);
+        assert_eq!(workspace.ui.tab(crate::workspace::PanelId::Properties), crate::panels::motion::TAB, "the Motion tab shows the morph");
+    });
+
+    // The Motion tab's Morph card keyframes the outline at the playhead.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_current_frame(ws.state.current_frame + 5);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("morph-path-keyframe", cx));
+    render(visual);
+    let keyframes = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(square).unwrap().morph.as_ref().map_or(0, |morph| morph.path.keyframe_frames().len()));
+    assert_eq!(keyframes(visual), 3);
+
+    // Undone, then made again from Layer ▸ Morph To… with a length typed in and no easing.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        // Back past the added keyframe and the morph, but no further (the shapes stay).
+        while ws.state.composition().layer(square).is_some_and(|layer| layer.morph.is_some()) && ws.state.undo() {}
+        cx.notify();
+    }));
+    render(visual);
+    assert!(!morphing(visual), "undo takes the morph off");
+    select_both(visual);
+    visual.update(|window, cx| window.dispatch_action(Box::new(MorphTo), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("morph-length", cx));
+    visual.update(|window, cx| {
+        window.press("cmd-a", cx);
+        for key in ["0", ".", "5"] {
+            window.press(key, cx);
+        }
+    });
+    render(visual);
+    visual.update(|window, cx| window.click("morph-ease", cx));
+    visual.update(|window, cx| window.click("morph-ok", cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let layer = state.composition().layer(square).unwrap();
+        let path = &layer.morph.as_ref().unwrap().path;
+        let fps = state.composition().frame_rate.fps();
+        assert_eq!(path.keyframe_frames(), vec![state.current_frame, state.current_frame + (fps * 0.5).round() as i64], "half a second");
+        assert_eq!(path.easing_at(state.current_frame), Some(studio_core::animation::Easing::Linear), "not eased");
+    });
+
+    // With one layer selected, Morph To says what it needs instead of opening.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(square, false);
+        cx.notify();
+    }));
+    visual.update(|window, cx| window.dispatch_action(Box::new(MorphTo), cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("morph-ok").is_none()), "no dialog for one layer");
+}
+
+#[gpui_kit::test]
+fn magic_move_joins_two_compositions_from_the_composition_menu(cx: &mut TestAppContext) {
+    use crate::workspace::MagicMove;
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    // A second composition like the open one, each with a shape named "Card".
+    let (first, second) = visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let open = ws.state.composition().clone();
+        let settings = studio_core::edit::CompositionSettings { name: "Scene 2".into(), width: open.width, height: open.height, frame_rate: open.frame_rate, duration_frames: 90, background: open.background };
+        (open.id, studio_core::edit::new_composition(&mut ws.state.project, &settings).unwrap())
+    }));
+    for (comp, kind) in [(first, ShapeKind::Rectangle), (second, ShapeKind::Star)] {
+        visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.open_composition(comp)));
+        let card = add_shape(&workspace, visual, kind);
+        visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.composition_mut_for_test().layer_mut(card).unwrap().name = "Card".into()));
+    }
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.open_composition(first);
+        cx.notify();
+    }));
+    render(visual);
+
+    visual.update(|window, cx| window.dispatch_action(Box::new(MagicMove), cx));
+    render(visual);
+    // Scene 2 is the only composition that fits, so the dialog offers it first.
+    visual.update(|window, _| assert!(window.find_by_label("Scene 2").bounds().size.width > gpui_kit::px(0.0)));
+    visual.update(|window, cx| window.click("magic-move-ok", cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let joined = state.composition();
+        let (first, second) = (state.project.composition(first).unwrap(), state.project.composition(second).unwrap());
+        assert_eq!(joined.name, format!("{} → Scene 2", first.name), "the joined composition opens");
+        let transition = first.frame_rate.fps().round() as i64;
+        assert_eq!(joined.duration_frames, first.duration_frames + transition + second.duration_frames, "one second between them");
+        let middle = first.duration_frames + transition / 2;
+        let cards: Vec<_> = joined.layers.iter().filter(|layer| layer.name == "Card" && layer.is_active_at(middle)).collect();
+        assert!(matches!(cards[..], [card] if card.is_morphing()), "the card morphs from one into the other");
+    });
+}
+
+#[gpui_kit::test]
+fn a_shortcut_changes_by_pressing_the_new_key(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    // Keyboard Shortcuts is the ninth page.
+    visual.update(|window, cx| window.click(("settings-section", 8_usize), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("shortcut-change:toggle-playback", cx));
+    render(visual);
+    // K is free in Studio's set; pressing it doesn't run anything else, it becomes Play's key.
+    visual.update(|window, cx| window.press("k", cx));
+    render(visual);
+    assert_eq!(crate::app_settings::load().shortcuts.custom.get("toggle-playback"), Some(&vec!["k".to_owned()]), "remembered");
+    assert!(!visual.update(|_, cx| workspace.read(cx).state.is_playing()), "pressing it only set it");
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    visual.update(|window, cx| window.press("space", cx));
+    render(visual);
+    assert!(!visual.update(|_, cx| workspace.read(cx).state.is_playing()), "Space no longer plays");
+    visual.update(|window, cx| window.press("k", cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).state.is_playing()), "K does");
+    visual.update(|window, cx| window.press("k", cx));
+    render(visual);
+
+    // Premiere Pro's set: the right arrow steps a frame.
+    let mut shortcuts = crate::keymap::Shortcuts { preset: crate::keymap::KeyPreset::Premiere, ..Default::default() };
+    shortcuts.custom.clear();
+    visual.update(|_, cx| crate::keymap::apply(&shortcuts, cx));
+    let before = visual.update(|_, cx| workspace.read(cx).state.current_frame);
+    visual.update(|window, cx| window.press("right", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.current_frame), before + 1);
+}
+
+#[gpui_kit::test]
+fn empty_panels_say_what_to_do(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.new_project(&[], crate::app_settings::NewComposition::default());
+        cx.notify();
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("project-empty-hint")).is_some(), "the Project panel says how to import");
+    assert!(visual.update(|window, _| window.try_find("timeline-empty-hint")).is_some(), "the empty timeline says what to add");
+    // A layer and some media: both hints go.
+    let clip = add_tone_clip(&workspace, visual);
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).is_some()));
+    assert!(visual.update(|window, _| window.try_find("project-empty-hint")).is_none());
+    assert!(visual.update(|window, _| window.try_find("timeline-empty-hint")).is_none());
+}
+
+#[gpui_kit::test]
+fn a_start_screen_preset_starts_a_project_at_its_size(cx: &mut TestAppContext) {
+    use crate::workspace::ShowStartScreen;
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowStartScreen), cx));
+    render(visual);
+    // Vertical: 1080 × 1920 at 30 fps.
+    visual.update(|window, cx| window.click(("start-preset", 2usize), cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(!start_screen_showing(&workspace, visual));
+    visual.update(|_, cx| {
+        let comp = workspace.read(cx).state.composition();
+        assert_eq!((comp.width, comp.height, comp.frame_rate), (1080, 1920, studio_core::time::FrameRate::new(30, 1)));
+    });
+}
+
+#[gpui_kit::test]
+fn earlier_versions_are_kept_and_restored(cx: &mut TestAppContext) {
+    use crate::workspace::BrowseVersions;
+    let folder = scratch_folder("versions");
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    visual.update(|window, cx| window.press("cmd-s", cx));
+    visual.run_until_parked();
+    let saved = folder.join("Versions Demo");
+    visual.simulate_new_path_selection(|_| Some(saved.clone()));
+    visual.run_until_parked();
+    render(visual);
+    let file = folder.join("Versions Demo.studio");
+    assert_eq!(crate::versions::list(Some(&file)).len(), 1, "saving keeps a version");
+
+    // Working on: a version is kept while it changes, once the time comes.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_property_component(TITLE, ROTATION, 0, 75.0); cx.notify(); }));
+    visual.update(|_, cx| workspace.update(cx, |ws, _| { ws.ui.last_version_at = None; ws.keep_timed_version(); }));
+    assert_eq!(crate::versions::list(Some(&file)).len(), 2);
+
+    // Restore the saved one (the older): the rotation goes back, as unsaved changes.
+    visual.update(|window, cx| window.dispatch_action(Box::new(BrowseVersions), cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("version-restore", 1usize), cx));
+    visual.run_until_parked();
+    render(visual);
+    assert_eq!(title_value(&workspace, visual, ROTATION, 0), PropertyValue::Scalar(33.0));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.file(), Some(file.as_path()), "still the same project"));
+    assert!(has_unsaved_changes(&workspace, visual));
+    // The work at 75° wasn't lost: it is the newest version.
+    let newest = crate::versions::list(Some(&file)).remove(0);
+    assert!(std::fs::read_to_string(&newest.path).unwrap().contains("75.0"));
+    std::fs::remove_dir_all(crate::versions::folder_for(Some(&file))).ok();
+    std::fs::remove_dir_all(&folder).ok();
+}
+
+#[gpui_kit::test]
+fn frames_rendered_ahead_play_without_rendering(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.settings.render_ahead_mb = 256;
+        ws.state.set_work_area(studio_core::time::FrameRange::new(0.0, 12.0));
+        cx.notify();
+    }));
+    render(visual);
+    // The background renderer fills in the work area from the playhead.
+    let started = std::time::Instant::now();
+    while visual.update(|_, cx| workspace.read(cx).render.preview.ranges()) != vec![(0, 12)] {
+        assert!(started.elapsed().as_secs() < 30, "the frames ahead never came");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    render(visual);
+    // Playing shows them instead of rendering.
+    let drawn = visual.update(|_, cx| workspace.read(cx).render.frames_drawn);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| ws.toggle_playback(cx)));
+    render(visual);
+    for _ in 0..10 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        render(visual);
+    }
+    assert!(visual.update(|_, cx| workspace.read(cx).state.current_frame) > 0, "it played");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).render.frames_drawn), drawn, "no frame was rendered while playing");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| ws.toggle_playback(cx)));
+    // An edit makes them out of date: frames made from the project before it are let go.
+    let (before, comp) = visual.update(|_, cx| (workspace.read(cx).state.project.clone(), workspace.read(cx).state.active_comp));
+    assert!(visual.update(|_, cx| workspace.read(cx).render.preview.frame_for(&before, comp, 3).is_some()));
+    make_an_edit(&workspace, visual);
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).render.preview.frame_for(&before, comp, 3).is_none()), "nothing from before the edit is shown");
+}
+
+/// A big project: 500 layers (text, shapes and solids, each animated) across a minute, to find
+/// what slows down as projects grow. Prints where the time goes. Run with
+/// `cargo test -p studio --release stress_500_layers -- --ignored --nocapture`.
+#[gpui_kit::test]
+#[ignore = "benchmark; run on demand"]
+fn stress_500_layers(cx: &mut TestAppContext) {
+    use studio_core::animation::{Animated, Easing, Keyframe};
+    use studio_core::model::{ShapeKind, ShapeStyle};
+    let (workspace, visual) = open(cx);
+    let time = |label: &str, runs: u32, mut work: Box<dyn FnMut(&mut VisualTestContext) + '_>, visual: &mut VisualTestContext| {
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            work(visual);
+        }
+        let each = started.elapsed().as_secs_f64() * 1000.0 / f64::from(runs);
+        println!("{label:<42} {each:>8.2} ms");
+        each
+    };
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.new_project(&[], crate::app_settings::NewComposition { width: 1920, height: 1080, fps: 30, seconds: 60 });
+        let comp = ws.state.active_comp;
+        let project = &mut ws.state.project;
+        for index in 0..500u32 {
+            let at = Vec2::new(100.0 + (index % 20) as f32 * 85.0, 80.0 + (index / 20) as f32 * 38.0);
+            let start = i64::from(index % 60) * 30;
+            let made = match index % 5 {
+                0 | 1 => studio_core::edit::add_text_layer(project, comp, &format!("Line {index}"), at, start),
+                2 | 3 => studio_core::edit::add_shape_layer(project, comp, ShapeStyle::new(if index % 2 == 0 { ShapeKind::Rectangle } else { ShapeKind::Ellipse }), Vec2::new(60.0, 30.0), at, start),
+                _ => studio_core::edit::add_background(project, comp, studio_core::model::Rgba::hex(0x223344)),
+            }
+            .unwrap();
+            let layer = project.composition_mut(comp).unwrap().layer_mut(made).unwrap();
+            layer.out_frame = (start + 600).min(1800);
+            if let Some(transform) = layer.transform.as_mut() {
+                transform.position = Animated::keyframed(vec![Keyframe { frame: start, value: at, easing: Easing::Linear }, Keyframe { frame: start + 60, value: at + Vec2::new(40.0, 0.0), easing: Easing::Linear }]);
+                transform.opacity = Animated::keyframed(vec![Keyframe::linear(start, 0.0), Keyframe::linear(start + 15, 100.0)]);
+            }
+        }
+        ws.state.current_frame = 900;
+        cx.notify();
+    }));
+    render(visual);
+    println!("layers: {}", visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()));
+
+    time("whole window after an edit", 20, Box::new(|visual| {
+        visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.current_frame = 900; cx.notify(); }));
+        draw_frame(visual);
+    }), visual);
+    time("moving the playhead (scrub)", 30, Box::new(|visual| {
+        visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_current_frame(ws.state.current_frame + 1); cx.notify(); }));
+        draw_frame(visual);
+    }), visual);
+    time("selecting a layer", 20, Box::new(|visual| {
+        visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+            let layer = ws.state.composition().layers[250].id;
+            ws.state.select_layer(layer, false);
+            cx.notify();
+        }));
+        draw_frame(visual);
+    }), visual);
+    // Each panel's share of a whole-window redraw.
+    let before = visual.update(|_, cx| workspace.read(cx).panel_render_times(cx));
+    for _ in 0..10 {
+        visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.current_frame = 900; cx.notify(); }));
+        draw_frame(visual);
+    }
+    let after = visual.update(|_, cx| workspace.read(cx).panel_render_times(cx));
+    let names = ["toolbar", "project", "viewer", "timeline", "properties", "effects", "libraries", "align", "templates", "captions", "elements", "mockups"];
+    for (index, name) in names.iter().enumerate() {
+        let each = (after[index] - before[index]).as_secs_f64() * 100.0;
+        if each > 0.05 {
+            println!("  panel {name:<38} {each:>8.2} ms");
+        }
+    }
+    time("  changing a property", 20, Box::new(|visual| {
+        visual.update(|_, cx| workspace.update(cx, |ws, _| {
+            let layer = ws.state.composition().layers[250].id;
+            ws.state.set_property_component(layer, studio_core::property::PropertyPath::Transform(studio_core::property::TransformProperty::Rotation), 0, 10.0);
+        }));
+    }), visual);
+    time("  recording it for undo", 20, Box::new(|visual| {
+        visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.record_history(false)));
+    }), visual);
+    time("an edit recorded for undo", 20, Box::new(|visual| {
+        visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+            let layer = ws.state.composition().layers[250].id;
+            ws.state.set_property_component(layer, studio_core::property::PropertyPath::Transform(studio_core::property::TransformProperty::Rotation), 0, 10.0);
+            ws.state.record_history(false);
+            cx.notify();
+        }));
+    }), visual);
+    time("comparing the project (viewer cache check)", 50, Box::new(|visual| {
+        visual.update(|_, cx| {
+            let project = &workspace.read(cx).state.project;
+            let copy = project.clone();
+            assert!(copy == *project);
+        });
+    }), visual);
+    time("saving to text", 5, Box::new(|visual| {
+        visual.update(|_, cx| { workspace.read(cx).state.project_text().unwrap(); });
+    }), visual);
+    let text = visual.update(|_, cx| workspace.read(cx).state.project_text().unwrap());
+    println!("file size: {} KB", text.len() / 1024);
+    time("opening from text", 5, Box::new(|_| { studio_core::project_file::from_text(&text).unwrap(); }), visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| ws.toggle_playback(cx)));
+    render(visual);
+    time("a playback frame", 30, Box::new(draw_frame), visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| ws.toggle_playback(cx)));
+    let ms = visual.update(|_, cx| workspace.read(cx).render.last_render_ms);
+    println!("viewer render alone (last frame): {ms:?} ms");
 }
