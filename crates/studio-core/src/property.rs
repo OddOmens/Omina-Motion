@@ -23,6 +23,10 @@ impl TransformProperty {
 pub enum PropertyPath {
     Transform(TransformProperty),
     Effect { effect: Id, parameter: usize },
+    /// A footage clip's speed, as a percentage. Keyframing it remaps time (After Effects' Time
+    /// Remapping, Premiere's speed keyframes): the clip keeps its length and plays its source
+    /// faster or slower through it.
+    Speed,
 }
 
 /// A property's value at one moment. Two-dimensional values edit each component separately.
@@ -77,6 +81,16 @@ impl PropertyInfo {
         Self { name: "", unit: "", step: 0.5, min: -1.0e6, max: 1.0e6, decimals: 2 }
     }
 }
+
+/// How the Speed property is shown and edited: within `LayerTime::SPEED_RANGE`.
+pub const SPEED_INFO: PropertyInfo = PropertyInfo {
+    name: "Speed",
+    unit: "%",
+    step: 0.5,
+    min: crate::model::LayerTime::SPEED_RANGE.0,
+    max: crate::model::LayerTime::SPEED_RANGE.1,
+    decimals: 0,
+};
 
 pub const fn transform_info(property: TransformProperty) -> PropertyInfo {
     let wide = 1.0e6;
@@ -136,6 +150,11 @@ pub struct PropertySnapshot {
 }
 
 impl Layer {
+    /// Whether the clip has a speed to animate: footage that plays (not a freeze frame).
+    fn has_animatable_speed(&self) -> bool {
+        crate::speed::has_speed(&self.content) && self.time.hold.is_none()
+    }
+
     fn effect_parameter(&self, effect: Id, parameter: usize) -> Option<&crate::model::EffectProperty> {
         self.effects.iter().find(|candidate| candidate.id == effect)?.properties.get(parameter)
     }
@@ -171,6 +190,13 @@ impl Layer {
                 let value = PropertyValue::Scalar(property.value.value_at(at));
                 (property.name.clone(), property.info, value, property.value.keyframe_frames())
             }
+            PropertyPath::Speed => {
+                if !self.has_animatable_speed() {
+                    return None;
+                }
+                let speed = &self.time.speed;
+                (SPEED_INFO.name.to_owned(), SPEED_INFO, PropertyValue::Scalar(speed.value_at(at)), speed.keyframe_frames())
+            }
         };
         Some(PropertySnapshot { path, name, info, value, keyframes })
     }
@@ -192,6 +218,7 @@ impl Layer {
                 let effect = self.effects.iter_mut().find(|candidate| candidate.id == effect)?;
                 Some(AnimatedMut::Scalar(&mut effect.properties.get_mut(parameter)?.value))
             }
+            PropertyPath::Speed => self.has_animatable_speed().then_some(AnimatedMut::Scalar(&mut self.time.speed)),
         }
     }
 
@@ -226,6 +253,8 @@ impl Layer {
             PropertyPath::Effect { effect, parameter } => self
                 .effect_parameter(effect, parameter)
                 .map_or_else(Vec::new, |property| property.value.keyframe_easings()),
+            PropertyPath::Speed if self.has_animatable_speed() => self.time.speed.keyframe_easings(),
+            PropertyPath::Speed => Vec::new(),
         }
     }
 
@@ -258,6 +287,9 @@ impl Layer {
         let mut paths = Vec::new();
         if self.transform.is_some() {
             paths.extend(TransformProperty::ALL.map(PropertyPath::Transform));
+        }
+        if self.has_animatable_speed() {
+            paths.push(PropertyPath::Speed);
         }
         for effect in &self.effects {
             paths.extend((0..effect.properties.len()).map(|parameter| PropertyPath::Effect { effect: effect.id, parameter }));

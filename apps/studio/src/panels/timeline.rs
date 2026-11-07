@@ -137,6 +137,12 @@ impl Workspace {
 
 }
 
+/// The names of the keyframe rows an expanded clip shows, for tests.
+#[cfg(test)]
+pub(crate) fn animated_row_names(layer: &studio_core::model::Layer) -> Vec<String> {
+    tracks::animated_properties(layer).into_iter().map(|(_, name, _)| name).collect()
+}
+
 fn tick_label(frame: i64, base: i64) -> String {
     if frame % base == 0 { format!("{:02}s", frame / base) } else { format!("{}f", frame % base) }
 }

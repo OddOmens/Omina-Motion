@@ -1,12 +1,13 @@
 //! Changing how fast footage plays: a constant speed, playing backwards, and speed ramps
-//! (keyframed speed, such as slowing down for a moment and speeding back up).
+//! (keyframed speed, such as slowing down for a moment and speeding back up), and freeze
+//! frames (one moment of a clip held still).
 //!
 //! A constant speed change keeps the clip's in point and the part of the source it shows, so
 //! a slower clip gets longer and a faster one shorter. A ramp keeps the clip's length and
 //! changes what plays within it.
 
 use crate::animation::{Animated, CubicBezier, Easing, Keyframe};
-use crate::model::{Composition, Id, LayerContent, LayerTime};
+use crate::model::{Composition, Id, LayerContent, LayerTime, Project};
 use crate::trim_tools::End;
 
 /// Whether a layer's speed can be changed: footage (stills and graphics have no speed).
@@ -14,10 +15,16 @@ pub fn has_speed(content: &LayerContent) -> bool {
     matches!(content, LayerContent::Footage { .. })
 }
 
+/// Whether `layer`'s speed can be edited now: footage that is playing (a freeze frame shows
+/// one moment, so speed means nothing to it) and not locked.
+fn speed_editable(layer: &&mut crate::model::Layer) -> bool {
+    has_speed(&layer.content) && layer.time.hold.is_none() && !layer.switches.locked
+}
+
 /// Sets a constant speed (a percentage), ending any ramp. The clip keeps its in point and the
 /// part of the source it shows. Returns whether it changed.
 pub fn set_speed(composition: &mut Composition, layer_id: Id, percent: f32) -> bool {
-    let Some(layer) = composition.layer_mut(layer_id).filter(|layer| has_speed(&layer.content) && !layer.switches.locked) else { return false };
+    let Some(layer) = composition.layer_mut(layer_id).filter(speed_editable) else { return false };
     if !percent.is_finite() {
         return false;
     }
@@ -42,7 +49,7 @@ pub fn set_speed(composition: &mut Composition, layer_id: Id, percent: f32) -> b
 /// stays within `LayerTime::SPEED_RANGE`, so the end may stop short of `frame`, and a ramp
 /// becomes a constant speed. Returns whether the clip changed.
 pub fn stretch_to(composition: &mut Composition, layer_id: Id, end: End, frame: i64) -> bool {
-    let Some(layer) = composition.layer(layer_id).filter(|layer| has_speed(&layer.content) && !layer.switches.locked) else { return false };
+    let Some(layer) = composition.layer(layer_id).filter(|layer| has_speed(&layer.content) && layer.time.hold.is_none() && !layer.switches.locked) else { return false };
     let (in_frame, out_frame) = (layer.in_frame, layer.out_frame);
     // How much source the clip shows, in frames at normal speed.
     let played = layer.time.source_seconds_between(in_frame, out_frame, 1.0);
@@ -65,7 +72,7 @@ pub fn stretch_to(composition: &mut Composition, layer_id: Id, end: End, frame: 
 }
 
 pub fn set_reverse(composition: &mut Composition, layer_id: Id, reverse: bool) -> bool {
-    let Some(layer) = composition.layer_mut(layer_id).filter(|layer| has_speed(&layer.content) && !layer.switches.locked) else { return false };
+    let Some(layer) = composition.layer_mut(layer_id).filter(speed_editable) else { return false };
     layer.time.reverse = reverse;
     true
 }
@@ -109,7 +116,7 @@ impl Ramp {
 /// Puts a speed ramp across the clip, keeping its length. The speed the clip had before is
 /// remembered (switching from one ramp to another keeps the original) for `remove_ramp`.
 pub fn apply_ramp(composition: &mut Composition, layer_id: Id, ramp: Ramp) -> bool {
-    let Some(layer) = composition.layer_mut(layer_id).filter(|layer| has_speed(&layer.content) && !layer.switches.locked) else { return false };
+    let Some(layer) = composition.layer_mut(layer_id).filter(speed_editable) else { return false };
     let (start, length) = (layer.in_frame, (layer.out_frame - layer.in_frame) as f64);
     let smooth = Easing::Curve(CubicBezier::new(0.45, 0.0, 0.55, 1.0));
     let keys = ramp.points().iter().map(|&(at, speed)| Keyframe { frame: start + (at * length).round() as i64, value: speed, easing: smooth }).collect();
@@ -124,13 +131,56 @@ pub fn apply_ramp(composition: &mut Composition, layer_id: Id, ramp: Ramp) -> bo
 /// changes the speed (never the clip's start, in or out), so the clip is as it was. Ramps from
 /// projects saved before the speed was remembered go back to 100%. Returns whether it changed.
 pub fn remove_ramp(composition: &mut Composition, layer_id: Id) -> bool {
-    let Some(layer) = composition.layer_mut(layer_id).filter(|layer| has_speed(&layer.content) && !layer.switches.locked) else { return false };
+    let Some(layer) = composition.layer_mut(layer_id).filter(speed_editable) else { return false };
     if layer.time.constant_factor().is_some() {
         return false;
     }
     let percent = layer.time.speed_before_ramp.take().unwrap_or(100.0);
     layer.time.speed = Animated::constant(percent.clamp(LayerTime::SPEED_RANGE.0, LayerTime::SPEED_RANGE.1));
     true
+}
+
+/// Inserts a freeze frame into a footage clip at `frame`, as Premiere's Insert Frame Hold
+/// Segment does: the clip is split there, a still of that moment `length` frames long goes in
+/// between, and everything after it on the same track moves later to make room (so nothing is
+/// covered). The hold is silent. Returns the new hold's id, or `None` if the layer isn't
+/// unlocked footage spanning `frame`. The composition grows if the track now runs past its end.
+pub fn insert_freeze_frame(project: &mut Project, comp_id: Id, layer_id: Id, frame: i64, length: i64) -> Option<Id> {
+    let composition = project.composition(comp_id)?;
+    let layer = composition.layer(layer_id)?;
+    let spans = layer.in_frame <= frame && frame < layer.out_frame;
+    if !has_speed(&layer.content) || layer.switches.locked || !spans || length < 1 {
+        return None;
+    }
+    let held = layer.source_seconds(frame, composition.frame_rate);
+    let (track, original) = (layer.track, layer.clone());
+
+    // Split first (unless the hold goes at the very start), then push the rest of the track on.
+    if frame > original.in_frame {
+        crate::cut::split_layers(project, comp_id, &[layer_id], frame);
+    }
+    let hold_id = project.allocate_id();
+    let composition = project.composition_mut(comp_id)?;
+    for later in composition.layers.iter_mut().filter(|other| other.track == track && other.in_frame >= frame && !other.switches.locked) {
+        later.shift_in_time(length);
+    }
+
+    // The hold is a copy of the clip showing just that moment, with no sound.
+    let mut hold = original;
+    hold.id = hold_id;
+    hold.name = format!("{} Freeze", hold.name);
+    hold.in_frame = frame;
+    hold.out_frame = frame + length;
+    hold.time = LayerTime { hold: Some(held), ..LayerTime::default() };
+    hold.has_audio = false;
+    hold.effects.clear();
+    hold.track = track;
+    let above = composition.layers.iter().position(|other| other.id == layer_id).unwrap_or(0);
+    composition.layers.insert(above, hold);
+    let end = composition.layers.iter().filter(|other| other.track == track).map(|other| other.out_frame).max().unwrap_or(0);
+    composition.duration_frames = composition.duration_frames.max(end);
+    crate::tracks::normalize(composition);
+    Some(hold_id)
 }
 
 #[cfg(test)]
@@ -264,5 +314,42 @@ mod tests {
         let middle = 24 + 48;
         let step = layer.source_seconds(middle + 1, rate) - layer.source_seconds(middle, rate);
         assert!(step < 0.5 / 24.0, "slow in the middle: {step}");
+    }
+
+    #[test]
+    fn a_freeze_frame_holds_one_moment_and_pushes_the_rest_later() {
+        let (mut project, id) = clip();
+        let rate = FrameRate::new(24, 1);
+        // The 96-frame clip runs from frame 24 to 120; hold frame 48 (one second in) for 36 frames.
+        let hold = insert_freeze_frame(&mut project, ids::MAIN_COMP, id, 48, 36).unwrap();
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        let first = comp.layer(id).unwrap();
+        assert_eq!((first.in_frame, first.out_frame), (24, 48));
+        let held = comp.layer(hold).unwrap();
+        assert_eq!((held.in_frame, held.out_frame), (48, 84));
+        assert_eq!(held.track, first.track);
+        assert!(!held.has_audio);
+        for frame in [48, 60, 83] {
+            assert_eq!(held.source_frame(frame, rate, rate), 24, "always the moment it froze on");
+        }
+        // The rest of the clip carries on from that moment, after the hold.
+        let rest = comp.layers.iter().find(|layer| layer.id != id && layer.id != hold && layer.track == first.track && layer.in_frame == 84).expect("second half");
+        assert_eq!(rest.out_frame, 120 + 36);
+        assert_eq!(rest.source_frame(84, rate, rate), 24);
+        assert!(comp.duration_frames >= 156);
+        // A hold has no speed of its own and stretches freely.
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        assert!(!set_speed(comp, hold, 50.0));
+        let comp = project.composition(ids::MAIN_COMP).unwrap();
+        assert_eq!(crate::trim::source_frames(&project, comp, comp.layer(hold).unwrap()), None);
+    }
+
+    #[test]
+    fn a_freeze_frame_needs_footage_under_the_frame() {
+        let (mut project, id) = clip();
+        assert_eq!(insert_freeze_frame(&mut project, ids::MAIN_COMP, id, 500, 24), None, "past the clip");
+        assert_eq!(insert_freeze_frame(&mut project, ids::MAIN_COMP, id, 30, 0), None, "no length");
+        let text = project.composition(ids::MAIN_COMP).unwrap().layers.iter().find(|layer| matches!(layer.content, LayerContent::Text { .. })).unwrap().id;
+        assert_eq!(insert_freeze_frame(&mut project, ids::MAIN_COMP, text, 30, 24), None, "not footage");
     }
 }

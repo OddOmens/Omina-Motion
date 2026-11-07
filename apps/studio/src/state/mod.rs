@@ -472,6 +472,12 @@ impl EditorState {
     }
 
     fn set_component_at(&mut self, layer_id: Id, path: PropertyPath, frame: i64, component: usize, value: f32) {
+        // A steady speed changes the clip's length to fit (see `set_speed`); only keyframed
+        // speed is set like other properties.
+        if path == PropertyPath::Speed && self.speed_of(layer_id).is_some() {
+            self.set_speed(layer_id, value);
+            return;
+        }
         let linked = self.scale_linked && path == PropertyPath::Transform(TransformProperty::Scale);
         let Some(layer) = self.composition_mut().layer_mut(layer_id) else { return };
         if layer.switches.locked {

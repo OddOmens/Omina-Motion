@@ -29,6 +29,7 @@ pub mod mockups;
 pub mod morph;
 pub mod motion;
 pub mod package;
+pub mod paste_attributes;
 pub mod precompose;
 pub mod project;
 pub mod properties;

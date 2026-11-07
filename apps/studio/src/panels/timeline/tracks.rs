@@ -128,7 +128,7 @@ fn base_height(track: i32, compact: bool) -> f32 {
 }
 
 /// The properties shown under an expanded clip: the animated ones, in panel order.
-fn animated_properties(layer: &Layer) -> Vec<(PropertyPath, String, Vec<i64>)> {
+pub(super) fn animated_properties(layer: &Layer) -> Vec<(PropertyPath, String, Vec<i64>)> {
     layer
         .property_paths()
         .into_iter()

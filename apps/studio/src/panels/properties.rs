@@ -241,43 +241,38 @@ fn duck_row(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -
     labeled_row("Duck Under", choice_menu("duck-under", current, choices, move |this, under| this.state.set_duck_under(id, under), cx.weak_entity()))
 }
 
-/// Speed, for footage: a constant speed or a ramp, playing backwards, and making a version in
+/// Speed, for footage: a constant speed, keyframed speed (time remapping) or a ready-made ramp, playing backwards, and making a version in
 /// another shape that follows the subject (Auto Reframe).
 fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
     let id = layer.id;
     let target = cx.weak_entity();
     let ramped = layer.time.constant_factor().is_none();
-    // While ramping, the speed row offers the way back: the clip as it was before the ramp.
-    let speed = if ramped {
+    // Speed is a keyframeable property: its stopwatch remaps time across the clip. While it
+    // changes over time, a button offers the way back to the steady speed it had before.
+    let speed = crate::panels::fields::property_row(id, studio_core::property::PropertyPath::Speed, None, workspace, cx);
+    let unramp = ramped.then(|| {
         let back_to = layer.time.speed_before_ramp.unwrap_or(100.0);
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(div().text_color(hsla(color::VALUE)).child("Ramping"))
-            .child(
-                Button::new("speed-unramp")
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(IconName::RotateCcw))
-                    .label("Remove Ramp")
-                    .tooltip(format!("Back to a steady {back_to:.0}%, as before the ramp"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state.remove_speed_ramp(id);
-                        cx.notify();
-                    })),
-            )
-            .into_any_element()
-    } else {
-        value_field(FieldTarget::Speed { layer: id }, workspace, cx).into_any_element()
-    };
+        div().py_1().child(
+            Button::new("speed-unramp")
+                .ghost()
+                .xsmall()
+                .icon(Icon::new(IconName::RotateCcw))
+                .label("Remove Speed Changes")
+                .tooltip(format!("Back to a steady {back_to:.0}%, as before"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.remove_speed_ramp(id);
+                    cx.notify();
+                })),
+        )
+    });
     // `None` is the menu's way to take a ramp off.
     let mut ramps: Vec<(String, bool, Option<studio_core::speed::Ramp>)> = vec![("No Ramp".to_owned(), !ramped, None)];
     ramps.extend(studio_core::speed::Ramp::ALL.iter().map(|&ramp| (ramp.name().to_owned(), false, Some(ramp))));
     let ramp_label = if ramped { "Ramping" } else { "Choose a ramp…" };
     let busy = workspace.ui.analysis_job.is_some();
     div()
-        .child(labeled_row("Speed", speed))
+        .child(speed)
+        .children(unramp)
         .child(labeled_row(
             "Ramp",
             choice_menu("speed-ramp", ramp_label.to_owned(), ramps, move |this, ramp| match ramp {
@@ -1030,7 +1025,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(fold("layer", "Layer", None, [None, None], workspace, cx, |cx| layer_section(layer, workspace, cx)))
         .child(transform)
         .children(text)
-        .children(studio_core::speed::has_speed(&layer.content).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
+        .children((studio_core::speed::has_speed(&layer.content) && layer.time.hold.is_none()).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
         .children(trackable(layer).then(|| fold("track", "Track Motion", Some(TRACK_INFO), [None, Some(track_add(layer, workspace, cx))], workspace, cx, |_| track_section(layer, workspace))))
         .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", Some(CUTOUT_INFO), [None, Some(cutout_button(layer, workspace, cx))], workspace, cx, |cx| cutout_section(layer, workspace, cx))))
         .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, [None, None], workspace, cx, |cx| audio_section(layer, workspace, cx))))

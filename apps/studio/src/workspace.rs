@@ -62,6 +62,8 @@ actions!(studio, [
     ToggleGuides,
     Copy,
     Paste,
+    PasteAttributes,
+    CloseGaps,
     Duplicate,
     OpenSettings,
     Precompose,
@@ -193,6 +195,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::os_action("Cut", Cut, OsAction::Cut),
             MenuItem::os_action("Copy", Copy, OsAction::Copy),
             MenuItem::os_action("Paste", Paste, OsAction::Paste),
+            MenuItem::action("Paste Attributes…", PasteAttributes),
             MenuItem::action("Duplicate", Duplicate),
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
             MenuItem::action("Pre-compose…", Precompose),
@@ -201,6 +204,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Trim Out Point to Playhead", TrimOutToPlayhead),
             MenuItem::action("Split Layer", SplitLayer),
             MenuItem::action("Ripple Delete", RippleDelete),
+            MenuItem::action("Close Gaps", CloseGaps),
             MenuItem::separator(),
             MenuItem::action("Snapping", ToggleSnapping),
         ]),
@@ -1697,6 +1701,13 @@ impl Render for Workspace {
                 .on_action(cx.listener(|this, _: &SplitLayer, window, cx| this.split_layer(window, cx)))
                 .on_action(cx.listener(|this, _: &ToggleSnapping, _, cx| {
                     this.state.snapping = !this.state.snapping;
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|this, _: &PasteAttributes, window, cx| panels::paste_attributes::open(this, window, cx)))
+                .on_action(cx.listener(|this, _: &CloseGaps, window, cx| {
+                    if this.state.close_gaps() == 0 {
+                        window.push_notification("There are no gaps to close.", cx);
+                    }
                     cx.notify();
                 }))
                 .on_action(cx.listener(|this, _: &RippleDelete, _, cx| {

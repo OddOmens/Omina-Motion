@@ -1,4 +1,5 @@
-//! Copying layers: Duplicate (Cmd+D) and Paste (Cmd+V). Copies get fresh ids for themselves and
+//! Copying layers: Duplicate (Cmd+D), Paste (Cmd+V) and Paste Attributes (Alt+Cmd+V, which
+//! copies chosen settings of one layer onto others without adding layers). Copies get fresh ids for themselves and
 //! their effects, and each goes on a new track of its own, so nothing already in the timeline
 //! moves in time or is covered differently.
 
@@ -152,6 +153,103 @@ fn copy_composition(project: &mut Project, id: Id, copy_id: Id) -> Option<Compos
     Some(composition)
 }
 
+/// Which parts of a layer Paste Attributes copies, as in Premiere Pro.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Attributes {
+    /// Position, scale, rotation and anchor point.
+    pub motion: bool,
+    pub opacity: bool,
+    /// The copied layer's effects, added after the target's own.
+    pub effects: bool,
+    /// Speed, ramps and playing backwards (footage only).
+    pub speed: bool,
+    pub blend_mode: bool,
+    /// Volume and fades (layers with sound only).
+    pub audio: bool,
+}
+
+impl Default for Attributes {
+    fn default() -> Self {
+        Self { motion: true, opacity: true, effects: true, speed: false, blend_mode: false, audio: false }
+    }
+}
+
+/// A copy of `animated` with its keyframes `delta` frames later.
+fn shifted<T: crate::animation::Blend>(delta: i64, animated: &crate::animation::Animated<T>) -> crate::animation::Animated<T> {
+    let mut copy = animated.clone();
+    copy.shift(delta);
+    copy
+}
+
+/// Copies the chosen `attributes` of `source` onto each of `targets`. Keyframes keep their
+/// timing relative to the clip's start, so an animation that begins as `source` appears
+/// begins as each target appears. Locked layers, and `source` itself, are left alone. Returns
+/// how many layers changed.
+pub fn paste_attributes(project: &mut Project, comp_id: Id, source: &Layer, targets: &[Id], attributes: Attributes) -> usize {
+    let mut changed = 0;
+    for &target in targets {
+        if target == source.id {
+            continue;
+        }
+        // Fresh ids for the copied effects, taken before the composition is borrowed.
+        let effect_ids: Vec<Id> = if attributes.effects { source.effects.iter().map(|_| project.allocate_id()).collect() } else { Vec::new() };
+        let Some(composition) = project.composition_mut(comp_id) else { return changed };
+        let Some(layer) = composition.layer_mut(target).filter(|layer| !layer.switches.locked) else { continue };
+        let before = layer.clone();
+        let delta = layer.in_frame - source.in_frame;
+        if let (Some(from), Some(to)) = (source.transform.as_ref(), layer.transform.as_mut()) {
+            if attributes.motion {
+                to.anchor_point = shifted(delta, &from.anchor_point);
+                to.position = shifted(delta, &from.position);
+                to.scale = shifted(delta, &from.scale);
+                to.rotation = shifted(delta, &from.rotation);
+            }
+            if attributes.opacity {
+                to.opacity = shifted(delta, &from.opacity);
+            }
+        }
+        if attributes.effects {
+            for (effect, id) in source.effects.iter().zip(effect_ids) {
+                let mut copy = effect.clone();
+                copy.id = id;
+                for property in &mut copy.properties {
+                    property.value.shift(delta);
+                }
+                layer.effects.push(copy);
+            }
+        }
+        // Speed only means something between two footage clips that play (not freeze frames).
+        let plays = |layer: &Layer| crate::speed::has_speed(&layer.content) && layer.time.hold.is_none();
+        if attributes.speed && plays(source) && plays(layer) {
+            match source.time.constant_factor() {
+                Some(factor) => {
+                    crate::speed::set_speed(composition, target, (factor * 100.0) as f32);
+                }
+                None => {
+                    // A ramp keeps the target's length, so its keyframes are simply carried over.
+                    let layer = composition.layer_mut(target).expect("found above");
+                    layer.time.speed = shifted(delta, &source.time.speed);
+                    layer.time.speed_before_ramp = before.time.constant_factor().map(|factor| (factor * 100.0) as f32);
+                }
+            }
+            crate::speed::set_reverse(composition, target, source.time.reverse);
+        }
+        let layer = composition.layer_mut(target).expect("found above");
+        if attributes.blend_mode {
+            layer.blend_mode = source.blend_mode;
+        }
+        if attributes.audio && source.has_audio && layer.has_audio {
+            layer.audio.volume_db = source.audio.volume_db;
+            layer.audio.fade_in = source.audio.fade_in;
+            layer.audio.fade_out = source.audio.fade_out;
+        }
+        if *layer != before {
+            changed += 1;
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +348,49 @@ mod tests {
         let mut layer = comp(&project).layers[0].clone();
         layer.content = LayerContent::Composition { composition: ids::MAIN_COMP };
         assert!(paste_layers(&mut project, ids::MAIN_COMP, &[layer], 0).is_empty());
+    }
+
+    #[test]
+    fn paste_attributes_copies_motion_and_effects_lined_up_with_each_clip() {
+        use crate::animation::{Animated, Keyframe, Easing, Vec2};
+        let mut project = sample_project();
+        let (source_id, target_id) = (comp(&project).layers[0].id, comp(&project).layers[1].id);
+        // The source fades in over its first 10 frames and has one effect.
+        let blur = project.allocate_id();
+        let composition = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let source = composition.layer_mut(source_id).unwrap();
+        let start = source.in_frame;
+        source.transform.as_mut().unwrap().opacity = Animated::keyframed(vec![
+            Keyframe { frame: start, value: 0.0, easing: Easing::Linear },
+            Keyframe { frame: start + 10, value: 100.0, easing: Easing::Linear },
+        ]);
+        source.transform.as_mut().unwrap().position = Animated::constant(Vec2::new(5.0, 6.0));
+        source.effects = vec![crate::model::Effect { id: blur, name: "Blur".into(), enabled: true, properties: Vec::new(), lut: None }];
+        let source = source.clone();
+        let target = composition.layer_mut(target_id).unwrap();
+        target.in_frame = start + 40;
+        target.out_frame = start + 80;
+        let effects_before = target.effects.len();
+
+        let only_opacity = Attributes { motion: false, opacity: true, effects: true, speed: false, blend_mode: false, audio: false };
+        assert_eq!(paste_attributes(&mut project, ids::MAIN_COMP, &source, &[target_id, source_id], only_opacity), 1, "the source itself is skipped");
+        let target = comp(&project).layer(target_id).unwrap();
+        let opacity = &target.transform.as_ref().unwrap().opacity;
+        assert_eq!(opacity.keyframes().iter().map(|key| key.frame).collect::<Vec<_>>(), vec![start + 40, start + 50], "the fade starts with the target");
+        assert_ne!(target.transform.as_ref().unwrap().position.value, Vec2::new(5.0, 6.0), "motion wasn't chosen");
+        assert_eq!(target.effects.len(), effects_before + 1);
+        assert_ne!(target.effects.last().unwrap().id, blur, "the copied effect has its own id");
+    }
+
+    #[test]
+    fn paste_attributes_leaves_locked_layers_alone() {
+        let mut project = sample_project();
+        let source = comp(&project).layers[0].clone();
+        let target = comp(&project).layers[1].id;
+        project.composition_mut(ids::MAIN_COMP).unwrap().layer_mut(target).unwrap().switches.locked = true;
+        let before = comp(&project).layer(target).unwrap().clone();
+        let everything = Attributes { motion: true, opacity: true, effects: true, speed: true, blend_mode: true, audio: true };
+        assert_eq!(paste_attributes(&mut project, ids::MAIN_COMP, &source, &[target], everything), 0);
+        assert_eq!(comp(&project).layer(target).unwrap(), &before);
     }
 }

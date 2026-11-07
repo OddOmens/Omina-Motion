@@ -1,5 +1,6 @@
 //! Cutting layers in time: splitting at a frame (After Effects' Split Layer, Premiere's
-//! Add Edit) and ripple deleting (removing layers and closing the gap they leave).
+//! Add Edit), ripple deleting (removing layers and closing the gap they leave) and closing
+//! every gap on a track at once.
 
 use std::collections::BTreeSet;
 
@@ -140,6 +141,35 @@ pub fn ripple_delete(project: &mut Project, comp_id: Id, layers: &[Id]) -> usize
     crate::edit::delete_layers(composition, &doomed)
 }
 
+/// Closes the empty space on `tracks` (every track, with none given): each track's clips
+/// slide earlier, keeping their order, so the first starts at frame 0 and each of the others
+/// starts where the one before it ends. Clips that overlap stay overlapped by the same amount.
+/// A locked clip stays where it is, and the clips after it pack up behind it. Returns how
+/// many clips moved.
+pub fn close_gaps(project: &mut Project, comp_id: Id, tracks: &[i32]) -> usize {
+    let Some(composition) = project.composition_mut(comp_id) else { return 0 };
+    let mut on_tracks: BTreeSet<i32> = composition.layers.iter().map(|layer| layer.track).collect();
+    if !tracks.is_empty() {
+        on_tracks.retain(|track| tracks.contains(track));
+    }
+    let mut moved = 0;
+    for track in on_tracks {
+        // The clips on this track in time order, as (in point, stack index).
+        let mut clips: Vec<(i64, usize)> = composition.layers.iter().enumerate().filter(|(_, layer)| layer.track == track).map(|(index, layer)| (layer.in_frame, index)).collect();
+        clips.sort_unstable();
+        let mut end = 0;
+        for (_, index) in clips {
+            let layer = &mut composition.layers[index];
+            if !layer.switches.locked && layer.in_frame > end {
+                layer.shift_in_time(end - layer.in_frame);
+                moved += 1;
+            }
+            end = end.max(layer.out_frame);
+        }
+    }
+    moved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +300,21 @@ mod tests {
         project.composition_mut(ids::MAIN_COMP).unwrap().layers[1].switches.locked = true;
         ripple_delete(&mut project, ids::MAIN_COMP, &[layers[0]]);
         assert_eq!(span(&project, layers[1]), (24, 48), "locked layers do not move");
+    }
+
+    #[test]
+    fn closing_gaps_packs_each_track_from_the_start() {
+        let (mut project, ids) = solids(&[(10, 20), (30, 50), (70, 80)]);
+        let track = comp(&project).layer(ids[0]).unwrap().track;
+        for id in &ids {
+            project.composition_mut(crate::sample::ids::MAIN_COMP).unwrap().layer_mut(*id).unwrap().track = track;
+        }
+        // A locked clip stays put; what comes after packs up behind it.
+        project.composition_mut(crate::sample::ids::MAIN_COMP).unwrap().layer_mut(ids[1]).unwrap().switches.locked = true;
+        assert_eq!(close_gaps(&mut project, crate::sample::ids::MAIN_COMP, &[track]), 2);
+        assert_eq!(span(&project, ids[0]), (0, 10));
+        assert_eq!(span(&project, ids[1]), (30, 50), "locked");
+        assert_eq!(span(&project, ids[2]), (50, 60));
+        assert_eq!(close_gaps(&mut project, crate::sample::ids::MAIN_COMP, &[track]), 0, "nothing left to close");
     }
 }

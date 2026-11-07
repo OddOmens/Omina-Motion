@@ -214,6 +214,24 @@ impl EditorState {
         true
     }
 
+    /// Inserts a two-second freeze frame of `layer` at the playhead, pushing the rest of its
+    /// track later, and selects the hold. Returns whether one was made.
+    pub fn insert_freeze_frame(&mut self, layer: Id) -> bool {
+        let (comp, frame) = (self.active_comp, self.current_frame);
+        let length = (self.composition().frame_rate.fps() * 2.0).round() as i64;
+        let Some(hold) = studio_core::speed::insert_freeze_frame(&mut self.project, comp, layer, frame, length) else { return false };
+        self.selected_layers = vec![hold];
+        self.selected_keyframes.clear();
+        true
+    }
+
+    /// Whether `layer` can get a freeze frame at the playhead: unlocked footage under it.
+    pub fn can_freeze_at_playhead(&self, layer: Id) -> bool {
+        self.composition().layer(layer).is_some_and(|layer| {
+            studio_core::speed::has_speed(&layer.content) && !layer.switches.locked && layer.is_active_at(self.current_frame)
+        })
+    }
+
     /// Deletes the selected layers and closes the gaps they leave. Returns how many were deleted.
     pub fn ripple_delete_selection(&mut self) -> usize {
         let comp = self.active_comp;

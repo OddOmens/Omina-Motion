@@ -25,6 +25,19 @@ impl EditorState {
     /// Turns animation on (keyframe at the playhead) or off (keeping the current value).
     pub fn toggle_stopwatch(&mut self, layer: Id, path: PropertyPath) {
         let frame = self.current_frame;
+        // Speed's stopwatch works like a ramp: turning it on remembers the steady speed, and
+        // turning it off goes back to it, so the clip's length and timing stay consistent.
+        if path == PropertyPath::Speed {
+            let Some(time) = self.composition().layer(layer).map(|layer| layer.time.clone()) else { return };
+            if time.speed.is_animated() {
+                self.remove_speed_ramp(layer);
+                self.selected_keyframes.retain(|key| !(key.layer == layer && key.path == path));
+                return;
+            }
+            if let Some(clip) = self.composition_mut().layer_mut(layer).filter(|clip| !clip.switches.locked) {
+                clip.time.speed_before_ramp = Some(time.speed.value);
+            }
+        }
         if let Some(animated) = self.composition_mut().layer_mut(layer).and_then(|l| l.animated_mut(path)) {
             animated.toggle_stopwatch(frame);
         }

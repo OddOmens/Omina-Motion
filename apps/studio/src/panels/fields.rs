@@ -26,8 +26,6 @@ pub enum FieldTarget {
     Audio { layer: Id, setting: AudioSetting },
     /// How far along its path a text layer set on one starts.
     TextPathStart { layer: Id },
-    /// A footage layer's constant speed, as a percentage.
-    Speed { layer: Id },
     /// One side (0 width, 1 height) of a video or image layer's Size, in pixels.
     MediaSize { layer: Id, side: usize },
     /// Where a gradient stop sits along a shape's gradient, as a percentage.
@@ -101,10 +99,6 @@ impl FieldTarget {
                 };
                 Some((value, FieldFormat { step, decimals, unit, rotation: false }))
             }
-            Self::Speed { layer } => {
-                let speed = state.speed_of(layer)?;
-                Some((speed, FieldFormat { step: 0.5, decimals: 0, unit: "%", rotation: false }))
-            }
             Self::TextPathStart { layer } => {
                 let start = state.composition().layer(layer)?.text_path?.start;
                 Some((start, FieldFormat { step: 1.0, decimals: 0, unit: "px", rotation: false }))
@@ -144,7 +138,6 @@ impl FieldTarget {
             Self::Shape { layer, setting } => state.set_shape_setting(layer, setting, value),
             Self::Audio { layer, setting } => state.set_audio_setting(layer, setting, value),
             Self::TextPathStart { layer } => state.set_text_path_start(layer, value),
-            Self::Speed { layer } => state.set_speed(layer, value),
             Self::MediaSize { layer, side } => state.set_media_size_side(layer, side, value),
             Self::GradientStop { layer, slot, stop } => state.set_gradient_stop_location(layer, slot, stop, value / 100.0),
             Self::TextAnimationSeconds { layer, phase } => state.edit_text_animator(layer, phase, |animator| animator.seconds = value),

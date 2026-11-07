@@ -1,9 +1,10 @@
 //! A layer's right-click menu, the same in the timeline (on a clip) and in the viewer (on the
 //! picture): rename, duplicate, pre-compose or ungroup, morph one shape into another or turn
-//! it into a path, flip, reset the transform, split, delete and export. It acts on the layer right-clicked, or on the whole selection when that
+//! it into a path, flip, reset the transform, paste attributes, split, freeze a frame, delete, close gaps and export. It acts on the layer right-clicked, or on the whole selection when that
 //! layer is part of it, as in After Effects. The menu reads the editor when it opens, so what
 //! it offers matches the layers it will act on.
 
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::{Context, WeakEntity, Window};
 use studio_core::model::Id;
@@ -52,12 +53,14 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         let busy = workspace.ui.export_job.is_some();
         let depended_on = single.is_some_and(|layer| studio_core::bake::is_depended_on(&workspace.state.project, workspace.state.active_comp, layer));
         let some = !layers.is_empty();
+        let can_freeze = single.is_some_and(|layer| workspace.state.can_freeze_at_playhead(layer));
         // Morph To works on two shapes, the first morphing into the second (see `panels::morph`).
         let can_morph = layers.len() == 2 && studio_core::morph::can_morph(workspace.state.composition(), layers[0], layers[1]).is_ok();
         let is_box_shape = single.and_then(|layer| workspace.state.composition().layer(layer)).is_some_and(|layer| {
             matches!(&layer.content, studio_core::model::LayerContent::Shape { style, .. } if style.kind != studio_core::model::ShapeKind::Path)
         });
 
+        let can_paste_attributes = workspace.state.attributes_source().is_some();
         let mut menu = menu.item(item("Rename…", &layers, single.is_some(), &weak, |this, window, cx| {
             let Some(&layer) = this.state.selected_layers.first() else { return };
             let name = this.state.composition().layer(layer).map(|layer| layer.name.clone()).unwrap_or_default();
@@ -67,6 +70,7 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
             .item(item("Duplicate", &layers, some, &weak, |this, _, _| {
                 this.state.duplicate_selection();
             }))
+            .item(item("Paste Attributes…", &layers, can_paste_attributes, &weak, super::paste_attributes::open))
             .separator()
             .item(item("Pre-compose…", &layers, some, &weak, super::precompose::open))
             .item(item("Ungroup Composition", &layers, nested.is_some(), &weak, |this, window, cx| this.ungroup_selected(window, cx)))
@@ -97,8 +101,18 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
             .item(item("Reset Transform", &layers, some, &weak, |this, _, _| this.state.reset_selection_transform()))
             .separator()
             .item(item("Split at Playhead", &layers, some, &weak, |this, window, cx| this.split_layer(window, cx)))
+            .item(item("Insert Freeze Frame", &layers, can_freeze, &weak, |this, _, _| {
+                if let Some(&layer) = this.state.selected_layers.first() {
+                    this.state.insert_freeze_frame(layer);
+                }
+            }))
             .item(item("Delete", &layers, some, &weak, |this, _, _| {
                 this.state.delete_selection();
+            }))
+            .item(item("Close Gaps on Track", &layers, some, &weak, |this, window, cx| {
+                if this.state.close_gaps() == 0 {
+                    window.push_notification("There are no gaps to close.", cx);
+                }
             }))
             .separator()
             .item(item("Quick Export Layer", &layers, single.is_some() && has_picture && !busy, &weak, |this, window, cx| {

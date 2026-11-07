@@ -3387,7 +3387,7 @@ fn speed_and_reverse_change_a_footage_clip(cx: &mut TestAppContext) {
     let length = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).map(|layer| layer.out_frame - layer.in_frame).unwrap());
     let before = length(visual);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
-        let target = crate::panels::fields::FieldTarget::Speed { layer: clip };
+        let target = crate::panels::fields::FieldTarget::Property { layer: clip, path: studio_core::property::PropertyPath::Speed, component: 0 };
         target.write(&mut ws.state, 200.0);
         cx.notify();
     }));
@@ -5454,4 +5454,127 @@ fn stress_500_layers(cx: &mut TestAppContext) {
     visual.update(|_, cx| workspace.update(cx, |ws, cx| ws.toggle_playback(cx)));
     let ms = visual.update(|_, cx| workspace.read(cx).render.last_render_ms);
     println!("viewer render alone (last frame): {ms:?} ms");
+}
+
+#[gpui_kit::test]
+fn a_freeze_frame_goes_in_from_a_clips_right_click_menu(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let clip = first_footage(&workspace, visual);
+    let (_, in_frame, out_frame) = layer_timing(&workspace, visual, clip);
+    let middle = (in_frame + out_frame) / 2;
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.current_frame = middle; cx.notify(); }));
+    render(visual);
+    let count = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    visual.update(|window, cx| window.right_click(("clip-body", clip.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Insert Freeze Frame");
+    render(visual);
+    // The clip is split and a hold goes between the halves: two more layers, the hold selected.
+    let (count_after, hold) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.composition().layers.len(), state.composition().layer(state.selected_layers[0]).unwrap().clone())
+    });
+    assert_eq!(count_after, count + 2);
+    assert!(hold.time.hold.is_some() && hold.in_frame == middle && hold.out_frame == middle + 48, "{:?}", (hold.in_frame, hold.out_frame));
+    assert_eq!(layer_timing(&workspace, visual, clip).2, middle, "the first half ends where the hold starts");
+    // One undo takes it all back.
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), count);
+    assert_eq!(layer_timing(&workspace, visual, clip).2, out_frame);
+}
+
+#[gpui_kit::test]
+fn paste_attributes_puts_the_copied_clips_effects_and_opacity_on_another(cx: &mut TestAppContext) {
+    use studio_core::animation::Animated;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // The title gets 40% opacity and is copied; the main-track clip is selected.
+    let other = main_clip(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let layer = ws.state.composition_mut_for_test().layer_mut(TITLE).unwrap();
+        layer.transform.as_mut().unwrap().opacity = Animated::constant(40.0);
+        ws.state.add_effect(TITLE, "Gaussian Blur");
+        ws.state.selected_layers = vec![TITLE];
+        ws.state.copy_selection();
+        ws.state.selected_layers = vec![other];
+        cx.notify();
+    }));
+    let effects_before = visual.update(|_, cx| workspace.read(cx).state.composition().layer(other).unwrap().effects.len());
+    let title_effects = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.len());
+    assert!(title_effects > 0, "the copied title has effects to paste");
+    visual.update(|window, cx| window.press("cmd-alt-v", cx));
+    render(visual);
+    // Leave motion out, then paste.
+    visual.update(|window, cx| window.click("paste-attr-motion", cx));
+    visual.update(|window, cx| window.click("paste-attributes-ok", cx));
+    render(visual);
+    let layer = visual.update(|_, cx| workspace.read(cx).state.composition().layer(other).unwrap().clone());
+    assert_eq!(layer.transform.as_ref().unwrap().opacity.value, 40.0);
+    assert_eq!(layer.effects.len(), effects_before + title_effects);
+}
+
+#[gpui_kit::test]
+fn close_gaps_packs_a_track_from_the_clips_menu(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // Move the title later, leaving a gap before it on its track.
+    let (track, start) = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let layer = ws.state.composition_mut_for_test().layer_mut(TITLE).unwrap();
+        layer.shift_in_time(50);
+        cx.notify();
+        (layer.track, layer.in_frame)
+    }));
+    render(visual);
+    let first_on_track = visual.update(|_, cx| {
+        let comp = workspace.read(cx).state.composition();
+        comp.layers.iter().filter(|layer| layer.track == track).map(|layer| layer.in_frame).min().unwrap()
+    });
+    assert_eq!(first_on_track, start, "the title is alone on its track");
+    visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Close Gaps on Track");
+    render(visual);
+    assert_eq!(layer_timing(&workspace, visual, TITLE).1, 0, "packed to the start");
+}
+
+#[gpui_kit::test]
+fn keyframing_speed_remaps_time_and_the_stopwatch_puts_it_back(cx: &mut TestAppContext) {
+    use studio_core::property::PropertyPath;
+    let (workspace, visual) = open(cx);
+    let clip = first_footage(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(clip, false);
+        ws.state.set_speed(clip, 50.0);
+        cx.notify();
+    }));
+    tall_window(visual);
+    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().clone());
+    let stopwatch = ElementId::Name(format!("stopwatch:{:?}:{}", PropertyPath::Speed, clip.0).into());
+    // Stopwatch on at the clip's start, then 200% further in: speed now changes over the clip.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.current_frame = before.in_frame; cx.notify(); }));
+    render(visual);
+    visual.update(|window, cx| window.click(stopwatch.clone(), cx));
+    render(visual);
+    let later = before.in_frame + 20;
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.current_frame = later;
+        crate::panels::fields::FieldTarget::Property { layer: clip, path: PropertyPath::Speed, component: 0 }.write(&mut ws.state, 200.0);
+        cx.notify();
+    }));
+    render(visual);
+    let remapped = visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().clone());
+    assert_eq!(remapped.time.speed.keyframe_frames(), vec![before.in_frame, later]);
+    assert_eq!(remapped.out_frame, before.out_frame, "remapping keeps the clip's length");
+    let rate = studio_core::time::FrameRate::new(24, 1);
+    let shown = |layer: &studio_core::model::Layer, frame| layer.source_seconds(frame, rate);
+    assert!(shown(&remapped, later + 5) - shown(&remapped, later) > shown(&before, later + 5) - shown(&before, later), "plays faster after the second keyframe");
+    // The keyframes show under the clip in the timeline like any other property's.
+    let rows = visual.update(|_, cx| crate::panels::timeline::animated_row_names(&workspace.read(cx).state.composition().layer(clip).unwrap().clone()));
+    assert!(rows.contains(&"Speed".to_owned()), "{rows:?}");
+    // Turning the stopwatch off puts the steady 50% back exactly.
+    visual.update(|window, cx| window.click(stopwatch.clone(), cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().clone()), before);
 }

@@ -1,4 +1,5 @@
-//! Copy, paste and duplicate for layers (Cmd+C, Cmd+V, Cmd+D). The clipboard lives in the
+//! Copy, paste, Paste Attributes and duplicate for layers (Cmd+C, Cmd+V, Alt+Cmd+V, Cmd+D),
+//! and Close Gaps. The clipboard lives in the
 //! editor, so copied layers keep every setting, keyframe and effect.
 
 use studio_core::copy;
@@ -39,6 +40,28 @@ impl EditorState {
         let pasted = copy::paste_layers(&mut self.project, comp, &self.clipboard, frame);
         self.select_new_layers(&pasted);
         pasted
+    }
+
+    /// The layer Paste Attributes copies from: the first one copied.
+    pub fn attributes_source(&self) -> Option<&studio_core::model::Layer> {
+        self.clipboard.first()
+    }
+
+    /// Paste Attributes: copies the chosen attributes of the copied layer onto the selected
+    /// layers. Returns how many changed.
+    pub fn paste_attributes(&mut self, attributes: copy::Attributes) -> usize {
+        let Some(source) = self.clipboard.first().cloned() else { return 0 };
+        let (comp, targets) = (self.active_comp, self.selected_layers.clone());
+        copy::paste_attributes(&mut self.project, comp, &source, &targets, attributes)
+    }
+
+    /// Close Gaps: packs the clips on the selected layers' tracks (every track, with nothing
+    /// selected) so no empty space is left. Returns how many clips moved.
+    pub fn close_gaps(&mut self) -> usize {
+        let comp = self.active_comp;
+        let composition = self.composition();
+        let tracks: Vec<i32> = self.selected_layers.iter().filter_map(|id| composition.layer(*id)).map(|layer| layer.track).collect();
+        studio_core::cut::close_gaps(&mut self.project, comp, &tracks)
     }
 
     /// Duplicates the selected layers just above themselves and selects the copies.

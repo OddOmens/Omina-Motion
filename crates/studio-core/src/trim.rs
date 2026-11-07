@@ -18,6 +18,10 @@ pub fn source_frames(project: &Project, composition: &Composition, layer: &Layer
         LayerContent::Composition { composition } => composition,
         _ => return None,
     };
+    // A freeze frame shows one picture, so it stretches as far as wanted, like a still.
+    if layer.time.hold.is_some() {
+        return None;
+    }
     let item = project.item(item)?;
     if !matches!(item.kind, ProjectItemKind::Footage | ProjectItemKind::Audio | ProjectItemKind::Composition) {
         return None;

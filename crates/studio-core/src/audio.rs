@@ -221,6 +221,10 @@ fn own_clip(project: &Project, composition: &Composition, layer: &crate::model::
         LayerContent::Footage { item } | LayerContent::Audio { item } => item,
         _ => return None,
     };
+    // A freeze frame is silent.
+    if layer.time.hold.is_some() {
+        return None;
+    }
     let speed = layer.time.constant_factor().filter(|_| !layer.time.reverse)?;
     // A cleaned copy plays in place of the original, once it is made.
     let cleaned = layer.audio.enhance.as_ref().filter(|enhance| enhance.on).and_then(|enhance| enhance.file.clone());

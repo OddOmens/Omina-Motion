@@ -775,11 +775,15 @@ pub struct LayerTime {
     /// removing the ramp puts the clip back exactly as it was. `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_before_ramp: Option<f32>,
+    /// A freeze frame: the clip shows this one moment of its source (seconds in) for its whole
+    /// length, silently. `None` for a clip that plays normally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<f64>,
 }
 
 impl Default for LayerTime {
     fn default() -> Self {
-        Self { speed: Animated::constant(100.0), reverse: false, speed_before_ramp: None }
+        Self { speed: Animated::constant(100.0), reverse: false, speed_before_ramp: None, hold: None }
     }
 }
 
@@ -1018,6 +1022,9 @@ impl Layer {
     /// speed (and ramps) from where the source starts. Reversed, the layer plays the same part
     /// of the source backwards: its in point shows what its last frame would have.
     pub fn source_seconds(&self, frame: i64, comp_rate: FrameRate) -> f64 {
+        if let Some(held) = self.time.hold {
+            return held;
+        }
         let fps = comp_rate.fps();
         let forward = |frame: i64| self.time.source_seconds_between(self.start_frame, frame, fps);
         if self.time.reverse {
