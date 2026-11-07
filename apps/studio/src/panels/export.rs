@@ -62,7 +62,7 @@ struct Report {
 }
 
 /// Where the save dialog starts: next to the project if it has been saved, else Movies.
-fn starting_folder(project_file: Option<&Path>) -> PathBuf {
+pub(crate) fn starting_folder(project_file: Option<&Path>) -> PathBuf {
     project_file
         .and_then(Path::parent)
         .map(Path::to_path_buf)

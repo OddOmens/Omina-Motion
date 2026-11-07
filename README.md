@@ -151,7 +151,11 @@ Inside `apps/studio/src`:
   They are stored in Studio's settings folder as `libraries.json`, with backups in `Library Backups`.
 - `panels/analysis.rs`: background jobs that study a clip first: Remove Silences (`studio-core/src/silence.rs`),
   Mark Beats (`studio-media/src/beats.rs`; markers snap), Track Motion (`studio-media/src/track.rs`) and Auto
-  Reframe (follows the subject with the background-removal model). Speed, reverse, ramps and freeze frames
+  Reframe (follows the subject with the background-removal model). Split at Scene Cuts and Mark Scene Cuts (a
+  video clip's right-click menu, at normal speed) find the hard cuts in the part of the video the clip shows
+  (`studio-media/src/scenes.rs`: per-quarter color histograms compared frame to frame, a cut being a change
+  several times the usual change around it, so pans, shaky cameras and fades don't count), then split the
+  clip into its shots in one undo step or put a "Scene" marker at each. Speed, reverse, ramps and freeze frames
   (Insert Freeze Frame, a clip's right-click menu) are in `studio-core/src/speed.rs`; Speed is also a
   keyframeable property (`PropertyPath::Speed`), which remaps time; the mixer plays sped-up sound, ducks music
   under a voice, and gates noise.
@@ -233,7 +237,12 @@ Inside `apps/studio/src`:
   background) and caption layers; their timing and animations are in `studio-core/src/captions.rs`. In
   Properties, Sync shows every caption of a layer some frames later or earlier (kept when another look is
   applied), and each transcript phrase's start and end can be typed or dragged; its words stretch to fit
-  without crossing their neighbors (`captions::retime_phrase`).
+  without crossing their neighbors (`captions::retime_phrase`). Subtitle files (`studio-core/src/subtitles.rs`,
+  `panels/subtitles.rs`): File ▸ Import, a drop, or the Captions panel's Import Subtitles… turn an .srt or .vtt
+  file into a caption layer timed as the file says (each cue shows whole and leaves on time: its last word has
+  `ends_cue`); Properties' Export SRT… / Export WebVTT… and the layer's right-click menu save a caption layer as
+  shown. Reading is forgiving (byte order marks, CRLF, UTF-16 or Windows-1252, tags, missing blank lines),
+  leaves out cues with unreadable times, refuses files with no cues and caps sizes (16 MB, 100,000 cues).
 - `state/copy.rs`: copy, paste, Paste Attributes (Alt+Cmd+V, `panels/paste_attributes.rs`) and duplicate
   (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`, and Close Gaps (`studio-core/src/cut.rs`).
 - `keymap.rs`: every command that can have a shortcut, the Studio, After Effects and Premiere Pro sets, and

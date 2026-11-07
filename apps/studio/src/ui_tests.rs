@@ -5793,3 +5793,122 @@ fn motion_blur_is_switched_in_properties_and_off_from_the_clip(cx: &mut TestAppC
     render(visual);
     visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().motion_blur, shutter));
 }
+
+#[gpui_kit::test]
+fn subtitles_import_from_file_import_and_export_from_properties(cx: &mut TestAppContext) {
+    let folder = scratch_folder("subtitles");
+    // A messy but readable file (byte order mark, Windows line endings, italics, no blank line
+    // at the end), and a file that isn't subtitles at all.
+    let srt = folder.join("Interview.srt");
+    std::fs::write(&srt, "\u{FEFF}1\r\n00:00:01,000 --> 00:00:02,000\r\n<i>Hello</i> there\r\n\r\n2\r\n00:00:02,500 --> 00:00:04,000\r\nWelcome to Studio").unwrap();
+    let not_subtitles = folder.join("Notes.vtt");
+    std::fs::write(&not_subtitles, "Just some notes.\n").unwrap();
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let layers_before = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+
+    // File ▸ Import takes subtitle files and makes a caption layer from the readable one.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Import), cx));
+    visual.run_until_parked();
+    assert!(visual.did_prompt_for_paths());
+    visual.simulate_path_prompt_response(|_| Some(vec![srt.clone(), not_subtitles.clone()]));
+    visual.run_until_parked();
+    render(visual);
+    let (captions, cues, fps) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.composition().layers.len(), layers_before + 1, "one caption layer; the notes are refused");
+        let captions = state.selected_layers[0];
+        assert_eq!(state.composition().layer(captions).unwrap().name, "Interview");
+        (captions, state.subtitle_cues(captions), state.composition().frame_rate)
+    });
+    let second = |seconds: f64| fps.seconds_to_frames(seconds);
+    assert_eq!(cues.iter().map(|cue| (cue.text.as_str(), cue.start, cue.end)).collect::<Vec<_>>(), [("Hello there", second(1.0), second(2.0)), ("Welcome to Studio", second(2.5), second(4.0))]);
+
+    // Properties' Export SRT… asks where, then writes the same cues.
+    visual.update(|window, cx| window.click("captions-export-srt", cx));
+    visual.run_until_parked();
+    assert!(visual.did_prompt_for_new_path());
+    let exported = folder.join("Exported");
+    visual.simulate_new_path_selection(|_| Some(exported.clone()));
+    visual.run_until_parked();
+    let written = std::fs::read(folder.join("Exported.srt")).expect("the extension is added");
+    assert_eq!(studio_core::subtitles::read(&written, fps).unwrap().cues, cues);
+    // The WebVTT button writes a WebVTT file.
+    visual.update(|window, cx| window.click("captions-export-vtt", cx));
+    visual.run_until_parked();
+    visual.simulate_new_path_selection(|_| Some(folder.join("Exported.vtt")));
+    visual.run_until_parked();
+    assert!(std::fs::read_to_string(folder.join("Exported.vtt")).unwrap().starts_with("WEBVTT\n"));
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layer(captions).is_some()));
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// Writes a short movie of three shots (red, blue, then a checker pattern) with hard cuts at
+/// source frames 30 and 60, at 24 frames a second.
+fn write_three_shots(path: &std::path::Path) {
+    let (width, height) = (96, 54);
+    let mut writer = studio_media::MovieWriter::create(path, studio_media::MovieSettings::new(studio_media::MovieFormat::H264, width, height, studio_core::time::FrameRate::new(24, 1), None)).unwrap();
+    let flat = |bgra: [u8; 4]| -> Vec<u8> { bgra.iter().copied().cycle().take((width * height * 4) as usize).collect() };
+    let checker: Vec<u8> = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).flat_map(|(x, y)| if (x / 8 + y / 8) % 2 == 0 { [240, 240, 240, 255] } else { [20, 120, 40, 255] }).collect();
+    let (red, blue) = (flat([30, 30, 220, 255]), flat([220, 60, 20, 255]));
+    for index in 0..96 {
+        writer.write_video(if index < 30 { &red } else if index < 60 { &blue } else { &checker }, width, height).unwrap();
+    }
+    writer.finish().unwrap();
+}
+
+#[gpui_kit::test]
+fn split_at_scene_cuts_cuts_a_clip_into_its_shots_in_one_undo(cx: &mut TestAppContext) {
+    let folder = scratch_folder("scene-cuts");
+    let movie = folder.join("shots.mp4");
+    write_three_shots(&movie);
+    let (workspace, visual) = open(cx);
+    let clip = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.import_files(vec![movie.clone()]);
+        let item = ws.state.selected_item.unwrap();
+        ws.state.add_layer_from_item(item, 0, 0);
+        // The playhead past the clip, so the viewer isn't decoding it while the test waits.
+        let last = ws.state.composition().duration_frames - 1;
+        ws.state.set_current_frame(last);
+        cx.notify();
+        ws.state.selected_layers[0]
+    }));
+    tall_window(visual);
+    // Where the cuts fall in the composition: the first frames showing source frames 30 and 60.
+    let (expected, whole) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let composition = state.composition();
+        let layer = composition.layer(clip).unwrap();
+        let rate = studio_core::time::FrameRate::new(24, 1);
+        let first_showing = |source: i64| (layer.in_frame..layer.out_frame).find(|&frame| layer.source_frame(frame, composition.frame_rate, rate) >= source).unwrap();
+        (vec![first_showing(30), first_showing(60)], (layer.in_frame, layer.out_frame))
+    });
+
+    visual.update(|window, cx| window.right_click(("clip-body", clip.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Split at Scene Cuts");
+    wait_for_analysis(&workspace, visual);
+    render(visual);
+    let pieces = |visual: &mut VisualTestContext| visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let mut spans: Vec<(i64, i64)> = state.composition().layers.iter().filter(|layer| matches!(layer.content, LayerContent::Footage { item } if state.project.item(item).and_then(|item| item.path.as_ref()) == Some(&movie))).map(|layer| (layer.in_frame, layer.out_frame)).collect();
+        spans.sort_unstable();
+        spans
+    });
+    assert_eq!(pieces(visual), vec![(whole.0, expected[0]), (expected[0], expected[1]), (expected[1], whole.1)]);
+
+    // One undo puts the clip back whole.
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(pieces(visual), vec![whole]);
+
+    // Mark Scene Cuts drops a marker at each cut instead.
+    visual.update(|window, cx| window.right_click(("clip-body", clip.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Mark Scene Cuts");
+    wait_for_analysis(&workspace, visual);
+    let markers: Vec<i64> = visual.update(|_, cx| workspace.read(cx).state.composition().markers.iter().filter(|marker| marker.label == "Scene").map(|marker| marker.frame).collect());
+    assert_eq!(markers, expected);
+    assert_eq!(pieces(visual), vec![whole], "marking leaves the clip whole");
+    std::fs::remove_dir_all(&folder).ok();
+}

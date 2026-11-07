@@ -15,6 +15,7 @@ use gpui_kit::{
 use studio_core::captions::{CaptionAnimation, CaptionStyle, CaptionWord};
 use studio_core::model::{BlendMode, Id, Layer, LayerContent, LayerMask, MaskMode, TextPath, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
+use studio_core::subtitles::SubtitleFormat;
 
 use super::chrome::{CardHeading, card, card_list, divider, heading_button, hint, icon_button, info_button, list_row, panel, section};
 use super::color_picker;
@@ -556,6 +557,15 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         .child(labeled_row("Spoken word", color_picker::swatch("captions-highlight", ColorTarget::CaptionHighlight(id), Some(style.highlight), cx)))
         .child(labeled_row("Background", div().flex().items_center().gap_2().child(background_on).child(color_picker::swatch("captions-background", ColorTarget::CaptionBackground(id), style.background, cx))))
         .child(labeled_row("Sync", div().flex().items_center().gap_2().child(value_field(FieldTarget::CaptionSync { layer: id }, workspace, cx)).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("+ later, − earlier"))))
+        // Saving the captions as a subtitle file, timed as they show in the composition.
+        .child(div().py_1().flex().flex_wrap().gap_2().children(SubtitleFormat::ALL.map(|format| {
+            Button::new(gpui_kit::ElementId::Name(format!("captions-export-{}", format.extension()).into()))
+                .outline()
+                .small()
+                .label(format!("Export {}…", format.name()))
+                .tooltip(format!("Save these captions as a .{} subtitle file", format.extension()))
+                .on_click(cx.listener(move |this, _, window, cx| super::subtitles::export(this, id, format, window, cx)))
+        })))
         .child(divider())
         .child(section(format!("Transcript · {} words", words.len()), None))
         .child(transcript)

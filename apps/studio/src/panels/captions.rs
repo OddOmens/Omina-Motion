@@ -292,6 +292,18 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .child(heading("Clips with sound"))
         .when(clips.is_empty(), |list| list.child(super::chrome::hint("Add a clip with speech (video or audio) to the timeline to caption it.")))
         .children(rows)
+        // Captions from a subtitle file instead of from speech.
+        .child(heading("Subtitle files"))
+        .child(
+            div().flex().items_center().gap_2().child(
+                Button::new("import-subtitles")
+                    .small()
+                    .outline()
+                    .label("Import Subtitles…")
+                    .tooltip("Add an .srt or .vtt file as a caption layer, timed as the file says")
+                    .on_click(cx.listener(|_, _, window, cx| super::subtitles::choose_and_import(window, cx))),
+            ),
+        )
         .child(heading("Looks"))
         .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(if can_style { "Click a look to apply it to the selected captions." } else { "Select a caption layer, then click a look to restyle it." }))
         .child(div().pt_1().flex().flex_wrap().gap_2().children(looks));

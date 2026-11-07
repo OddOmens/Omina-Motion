@@ -200,6 +200,27 @@ impl EditorState {
         report
     }
 
+    /// Splits `layer` of composition `comp` at every one of `frames` (Split at Scene Cuts), all
+    /// in one edit, and selects the pieces when `comp` is open. Frames outside the layer are
+    /// ignored. Returns how many cuts were made.
+    pub fn split_layer_at_frames(&mut self, comp: Id, layer: Id, frames: &[i64]) -> usize {
+        let mut frames = frames.to_vec();
+        frames.sort_unstable();
+        frames.dedup();
+        let (mut pieces, mut made) = (vec![layer], 0);
+        // From the last cut back, so the original layer is always the piece still to be cut.
+        for &frame in frames.iter().rev() {
+            let created = cut::split_layers(&mut self.project, comp, &[layer], frame).created;
+            made += usize::from(!created.is_empty());
+            pieces.extend(created);
+        }
+        if made > 0 && comp == self.active_comp {
+            self.selected_layers = pieces;
+            self.selected_keyframes.clear();
+        }
+        made
+    }
+
     /// The Cut tool: splits one clip at `frame` (pulled to the playhead when snapping and close
     /// to it), and selects the part after the cut. Returns whether it was split.
     pub fn cut_layer_at(&mut self, layer: Id, frame: i64) -> bool {
@@ -393,5 +414,22 @@ mod tests {
         assert_eq!(logo_in(&state), 158);
         state.end_layer_time_drag();
         assert_eq!(state.composition().layer(title).unwrap().out_frame, 158);
+    }
+
+    #[test]
+    fn a_clip_splits_at_every_scene_cut_into_pieces_in_order() {
+        let mut state = EditorState::new();
+        let comp = state.active_comp;
+        let clip = state.composition().layers.iter().find(|layer| matches!(layer.content, studio_core::model::LayerContent::Footage { .. })).unwrap().clone();
+        let (a, b) = (clip.in_frame + 10, clip.in_frame + 25);
+        // Unsorted, repeated and outside the clip: only the two real cuts count.
+        assert_eq!(state.split_layer_at_frames(comp, clip.id, &[b, a, b, clip.out_frame + 50]), 2);
+        let mut pieces: Vec<(i64, i64, i64)> = state.selected_layers.iter().map(|&id| {
+            let layer = state.composition().layer(id).unwrap();
+            (layer.in_frame, layer.out_frame, layer.start_frame)
+        }).collect();
+        pieces.sort_unstable();
+        assert_eq!(pieces, vec![(clip.in_frame, a, clip.start_frame), (a, b, clip.start_frame), (b, clip.out_frame, clip.start_frame)]);
+        assert_eq!(state.split_layer_at_frames(comp, clip.id, &[]), 0);
     }
 }

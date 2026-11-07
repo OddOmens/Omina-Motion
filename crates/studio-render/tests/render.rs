@@ -923,7 +923,7 @@ fn grade_sheet() {
 #[test]
 fn captions_show_the_phrase_with_the_spoken_word_highlighted_over_their_box() {
     use studio_core::captions::{CaptionStyle, CaptionWord};
-    let words = ["make", "it", "pop"].iter().enumerate().map(|(i, text)| CaptionWord { text: (*text).into(), start: i as i64 * 5, end: i as i64 * 5 + 5 }).collect();
+    let words = ["make", "it", "pop"].iter().enumerate().map(|(i, text)| CaptionWord::new(*text, i as i64 * 5, i as i64 * 5 + 5)).collect();
     let style = CaptionStyle {
         text: TextStyle { font_size: 40.0, line_height: 48.0, font_weight: 800, fill: Some(Rgba::hex(0xffffff)), stroke: None, ..TextStyle::default() },
         highlight: Rgba::hex(0xff0000),

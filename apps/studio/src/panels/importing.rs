@@ -41,6 +41,9 @@ pub fn start(workspace: &mut Workspace, paths: Vec<PathBuf>, then: Option<Then>,
         window.push_notification("An import is already running. Wait for it, or cancel it.", cx);
         return;
     }
+    // Subtitle files become caption layers rather than project items; they are read on their own.
+    let (subtitle_files, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| studio_core::subtitles::SubtitleFormat::from_path(path).is_some());
+    super::subtitles::import(workspace, subtitle_files, window, cx);
     let (projects, media): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| ["aep", "aepx", "json"].iter().any(|extension| crate::state::is_extension(path, extension)));
     // XML projects can't be read; say so straight away rather than after the rest.
     let (xml, projects): (Vec<_>, Vec<_>) = projects.into_iter().partition(|path| crate::state::is_extension(path, "aepx"));

@@ -15,6 +15,18 @@ pub struct CaptionWord {
     pub start: i64,
     /// The frame after it ends.
     pub end: i64,
+    /// Whether this word closes a subtitle cue (from an imported .srt or .vtt file): its phrase
+    /// always breaks after it, and leaves exactly when it ends instead of lingering briefly as
+    /// phrases of speech do. Words heard in speech never set it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ends_cue: bool,
+}
+
+impl CaptionWord {
+    /// A word heard or typed: not the end of an imported subtitle cue.
+    pub fn new(text: impl Into<String>, start: i64, end: i64) -> Self {
+        Self { text: text.into(), start, end, ends_cue: false }
+    }
 }
 
 /// How captions come and go.
@@ -125,16 +137,24 @@ impl CaptionFrame {
 }
 
 /// Groups words into phrases: at most `per_phrase` words, breaking at pauses and after words
-/// that end a sentence. Returns ranges into `words`.
+/// that end a sentence. Captions read from a subtitle file break where its cues end instead,
+/// so each cue shows whole (unless it has more than `per_phrase` words). Returns ranges into
+/// `words`.
 pub fn phrases(words: &[CaptionWord], per_phrase: u32, fps: f64) -> Vec<std::ops::Range<usize>> {
     let per_phrase = per_phrase.clamp(1, MAX_WORDS_PER_PHRASE) as usize;
     let pause = (PHRASE_PAUSE * fps).round() as i64;
+    let from_subtitles = words.iter().any(|word| word.ends_cue);
     let mut ranges = Vec::new();
     let mut start = 0;
     for index in 0..words.len() {
-        let ends_sentence = words[index].text.ends_with(['.', '?', '!']);
-        let gap_after = words.get(index + 1).is_some_and(|next| next.start - words[index].end >= pause);
-        if index + 1 - start >= per_phrase || ends_sentence || gap_after || index + 1 == words.len() {
+        let natural_break = if from_subtitles {
+            words[index].ends_cue
+        } else {
+            let ends_sentence = words[index].text.ends_with(['.', '?', '!']);
+            let gap_after = words.get(index + 1).is_some_and(|next| next.start - words[index].end >= pause);
+            ends_sentence || gap_after
+        };
+        if index + 1 - start >= per_phrase || natural_break || index + 1 == words.len() {
             ranges.push(start..index + 1);
             start = index + 1;
         }
@@ -142,19 +162,45 @@ pub fn phrases(words: &[CaptionWord], per_phrase: u32, fps: f64) -> Vec<std::ops
     ranges
 }
 
+/// One phrase and when it is on screen: from its first word's start until the frame after it
+/// goes, in frames from the layer's start frame (sync not applied).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShownPhrase {
+    pub words: std::ops::Range<usize>,
+    pub start: i64,
+    pub end: i64,
+}
+
+/// How long a phrase stays up after its last word ends: a short pause for speech, so phrases
+/// don't flash off between words, but none for a subtitle cue, whose end time is exact.
+fn linger(last_word: &CaptionWord, fps: f64) -> i64 {
+    if last_word.ends_cue { 0 } else { (PHRASE_PAUSE * fps).round() as i64 }
+}
+
+/// Every phrase a caption layer shows (see `phrases`) and when each is on screen. A phrase
+/// stays up until it has lingered after its last word (see `linger`) or the next one starts;
+/// one that the next replaces at once is never on screen (its `end` is not after its `start`).
+pub fn shown_phrases(words: &[CaptionWord], per_phrase: u32, fps: f64) -> Vec<ShownPhrase> {
+    let groups = phrases(words, per_phrase, fps);
+    groups
+        .iter()
+        .enumerate()
+        .map(|(index, range)| {
+            let last = &words[range.end - 1];
+            let next = groups.get(index + 1).map_or(i64::MAX, |next| words[next.start].start);
+            let start = words[range.start].start;
+            let end = (last.end + linger(last, fps)).min(next);
+            ShownPhrase { words: range.clone(), start, end }
+        })
+        .collect()
+}
+
 /// What a caption layer shows at `frame` (from its start frame), or `None` between phrases.
 pub fn frame_at(words: &[CaptionWord], style: &CaptionStyle, frame: i64, fps: f64) -> Option<CaptionFrame> {
     // Sync: shown `offset` frames after the words' own times.
     let frame = frame - style.offset;
-    let groups = phrases(words, style.words_per_phrase, fps);
-    // A phrase stays up from its first word until the next phrase starts, or a pause after it.
-    let hold = (PHRASE_PAUSE * fps).round() as i64;
-    let (_, range) = groups.iter().enumerate().find(|(index, range)| {
-        let start = words[range.start].start;
-        let next = groups.get(index + 1).map_or(i64::MAX, |next| words[next.start].start);
-        let end = (words[range.end - 1].end + hold).min(next);
-        (start..end).contains(&frame)
-    })?;
+    let on_screen = shown_phrases(words, style.words_per_phrase, fps);
+    let range = on_screen.iter().find(|phrase| (phrase.start..phrase.end).contains(&frame))?.words.clone();
     let spoken = |word: &CaptionWord| (word.start..word.end).contains(&frame);
     let shown = |text: &str| if style.uppercase { text.to_uppercase() } else { text.to_owned() };
     let words_shown: Vec<(String, bool)> = words[range.clone()]
@@ -167,7 +213,7 @@ pub fn frame_at(words: &[CaptionWord], style: &CaptionStyle, frame: i64, fps: f6
     let opacity = match style.animation {
         CaptionAnimation::Fade => {
             let fade_in = seconds(frame - first) / ANIMATION_TIME;
-            let fade_out = seconds(last_end + hold - frame) / ANIMATION_TIME;
+            let fade_out = seconds(last_end + linger(&words[range.end - 1], fps) - frame) / ANIMATION_TIME;
             fade_in.min(fade_out).clamp(0.0, 1.0) as f32
         }
         _ => 1.0,
@@ -216,6 +262,40 @@ pub fn retime_phrase(words: &mut [CaptionWord], range: std::ops::Range<usize>, s
     true
 }
 
+/// Times the words of `text` one after another across `start..end` (frames), each given a
+/// share of the time by its length, so long words last longer. With more words than frames,
+/// neighboring words share a frame (joined by a space), so each piece keeps at least one frame
+/// and the last ends exactly at `end`. An empty text gives no words.
+pub fn spread_words(text: &str, start: i64, end: i64) -> Vec<CaptionWord> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let end = end.max(start + 1);
+    let frames = (end - start) as usize;
+    // More words than frames: share frames out, a few words to each.
+    let pieces: Vec<String> = if parts.len() > frames {
+        (0..frames).map(|index| parts[index * parts.len() / frames..(index + 1) * parts.len() / frames].join(" ")).collect()
+    } else {
+        parts.iter().map(|part| (*part).to_owned()).collect()
+    };
+    let lengths: Vec<usize> = pieces.iter().map(|piece| piece.chars().count().max(1)).collect();
+    let total: usize = lengths.iter().sum();
+    let count = pieces.len() as i64;
+    let mut words = Vec::with_capacity(pieces.len());
+    let (mut at, mut letters_before) = (start, 0usize);
+    for (index, (piece, length)) in pieces.into_iter().zip(lengths).enumerate() {
+        letters_before += length;
+        // Where this piece ends by its share of the letters, leaving a frame for each one after it.
+        let share = start + (frames as f64 * letters_before as f64 / total as f64).round() as i64;
+        let remaining = count - index as i64 - 1;
+        let piece_end = share.clamp(at + 1, end - remaining);
+        words.push(CaptionWord::new(piece, at, piece_end));
+        at = piece_end;
+    }
+    words
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,7 +329,7 @@ mod tests {
     }
 
     fn word(text: &str, start: i64, end: i64) -> CaptionWord {
-        CaptionWord { text: text.into(), start, end }
+        CaptionWord::new(text, start, end)
     }
 
     #[test]
@@ -280,5 +360,19 @@ mod tests {
         let fade = CaptionStyle { animation: CaptionAnimation::Fade, ..CaptionStyle::default() };
         assert!(frame_at(&words, &fade, 1, 24.0).unwrap().opacity < 0.5);
         assert_eq!(frame_at(&words, &fade, 20, 24.0).unwrap().opacity, 1.0);
+    }
+
+    #[test]
+    fn spread_words_fill_their_time_by_length_and_share_frames_when_short() {
+        let words = spread_words("a looooong b", 10, 30);
+        assert_eq!(words.iter().map(|word| word.text.as_str()).collect::<Vec<_>>(), ["a", "looooong", "b"]);
+        assert_eq!((words[0].start, words[2].end), (10, 30));
+        assert!(words[1].end - words[1].start > words[0].end - words[0].start, "the long word lasts longer");
+        assert!(words.windows(2).all(|pair| pair[0].end == pair[1].start && pair[0].start < pair[0].end));
+        // Five words in two frames: two pieces of a frame each, no words lost.
+        let squeezed = spread_words("one two three four five", 0, 2);
+        assert_eq!(squeezed, vec![CaptionWord::new("one two", 0, 1), CaptionWord::new("three four five", 1, 2)]);
+        assert!(spread_words("   ", 0, 10).is_empty());
+        assert_eq!(spread_words("zero", 5, 5), vec![CaptionWord::new("zero", 5, 6)], "at least a frame");
     }
 }
