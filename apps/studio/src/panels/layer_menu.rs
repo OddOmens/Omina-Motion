@@ -88,29 +88,30 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         });
 
         let can_paste_attributes = workspace.state.attributes_source().is_some();
-        let mut menu = menu.item(item("Rename…", &layers, single.is_some(), &weak, |this, window, cx| {
-            let Some(&layer) = this.state.selected_layers.first() else { return };
-            let name = this.state.composition().layer(layer).map(|layer| layer.name.clone()).unwrap_or_default();
-            this.begin_edit(EditTarget::LayerName(layer), name, window, cx);
-        }));
+        let can_export_layer = single.is_some() && has_picture;
+        let (is_video, is_footage) = (video_clip.is_some(), footage.is_some());
+
+        // The main list: naming, copying and structure, then the everyday cuts. Items that can't
+        // apply to this kind of layer are left out; ones waiting on something (a copy to paste,
+        // a job to finish) are shown greyed so they can still be found.
+        let mut menu = menu;
+        if single.is_some() {
+            menu = menu.item(item("Rename…", &layers, true, &weak, |this, window, cx| {
+                let Some(&layer) = this.state.selected_layers.first() else { return };
+                let name = this.state.composition().layer(layer).map(|layer| layer.name.clone()).unwrap_or_default();
+                this.begin_edit(EditTarget::LayerName(layer), name, window, cx);
+            }));
+        }
         menu = menu
             .item(item("Duplicate", &layers, some, &weak, |this, _, _| {
                 this.state.duplicate_selection();
             }))
             .item(item("Paste Attributes…", &layers, can_paste_attributes, &weak, super::paste_attributes::open))
             .separator()
-            .item(item("Pre-compose…", &layers, some, &weak, super::precompose::open))
-            .item(item("Ungroup Composition", &layers, nested.is_some(), &weak, |this, window, cx| this.ungroup_selected(window, cx)))
-            .separator()
-            .item(item("Morph To…", &layers, can_morph, &weak, super::morph::open))
-            .item(item("Convert to Path", &layers, is_box_shape, &weak, |this, _, _| {
-                if let Some(&layer) = this.state.selected_layers.first() {
-                    this.state.convert_to_path(layer);
-                }
-            }));
+            .item(item("Pre-compose…", &layers, some, &weak, super::precompose::open));
         if let Some(inner) = nested {
             let weak = weak.clone();
-            menu = menu.item(PopupMenuItem::new("Open Composition").on_click(move |_, _, cx| {
+            menu = menu.item(item("Ungroup Composition", &layers, true, &weak, |this, window, cx| this.ungroup_selected(window, cx))).item(PopupMenuItem::new("Open Composition").on_click(move |_, _, cx| {
                 weak.update(cx, |this, cx| {
                     this.state.open_composition(inner);
                     cx.notify();
@@ -118,60 +119,95 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
                 .ok();
             }));
         }
-        menu.separator()
-            .item(item("Flip Horizontal", &layers, some, &weak, |this, _, _| {
-                this.state.flip_selection(true);
-            }))
-            .item(item("Flip Vertical", &layers, some, &weak, |this, _, _| {
-                this.state.flip_selection(false);
-            }))
-            .item(item("Reset Transform", &layers, some, &weak, |this, _, _| this.state.reset_selection_transform()))
-            .item(if stabilized {
-                item("Remove Stabilization", &layers, true, &weak, |this, _, _| {
-                    if let Some(&layer) = this.state.selected_layers.first() {
-                        this.state.remove_stabilization(layer);
-                    }
-                })
-            } else {
-                item("Stabilize", &layers, footage.is_some() && !analysing, &weak, |this, window, cx| {
-                    if let Some(&layer) = this.state.selected_layers.first() {
-                        super::analysis::stabilize(this, layer, window, cx);
-                    }
-                })
-            })
+        if can_morph {
+            menu = menu.item(item("Morph To…", &layers, true, &weak, super::morph::open));
+        }
+        if is_box_shape {
+            menu = menu.item(item("Convert to Path", &layers, true, &weak, |this, _, _| {
+                if let Some(&layer) = this.state.selected_layers.first() {
+                    this.state.convert_to_path(layer);
+                }
+            }));
+        }
+        menu = menu
             .separator()
             .item(item("Split at Playhead", &layers, some, &weak, |this, window, cx| this.split_layer(window, cx)))
-            .item(item("Insert Freeze Frame", &layers, can_freeze, &weak, |this, _, _| {
-                if let Some(&layer) = this.state.selected_layers.first() {
-                    this.state.insert_freeze_frame(layer);
-                }
-            }))
-            .when(video_clip.is_some(), |menu| {
-                menu.item(item("Split at Scene Cuts", &layers, can_find_cuts, &weak, |this, window, cx| scene_cuts(this, SceneCutAction::Split, window, cx)))
-                    .item(item("Mark Scene Cuts", &layers, can_find_cuts, &weak, |this, window, cx| scene_cuts(this, SceneCutAction::Mark, window, cx)))
-            })
             .item(item("Delete", &layers, some, &weak, |this, _, _| {
                 this.state.delete_selection();
             }))
-            .item(item("Close Gaps on Track", &layers, some, &weak, |this, window, cx| {
+            .separator();
+
+        // Time: freeze frames, scene cuts and gaps.
+        let (time_layers, time_weak) = (layers.clone(), weak.clone());
+        menu = menu.submenu("Time", window, cx, move |menu, _, _| {
+            let (layers, weak) = (&time_layers, &time_weak);
+            menu.when(is_video, |menu| {
+                menu.item(item("Insert Freeze Frame", layers, can_freeze, weak, |this, _, _| {
+                    if let Some(&layer) = this.state.selected_layers.first() {
+                        this.state.insert_freeze_frame(layer);
+                    }
+                }))
+                .item(item("Split at Scene Cuts", layers, can_find_cuts, weak, |this, window, cx| scene_cuts(this, SceneCutAction::Split, window, cx)))
+                .item(item("Mark Scene Cuts", layers, can_find_cuts, weak, |this, window, cx| scene_cuts(this, SceneCutAction::Mark, window, cx)))
+            })
+            .item(item("Close Gaps on Track", layers, true, weak, |this, window, cx| {
                 if this.state.close_gaps() == 0 {
                     window.push_notification("There are no gaps to close.", cx);
                 }
             }))
-            .separator()
-            .when(is_captions, |menu| {
-                menu.item(item("Export Captions as SRT…", &layers, true, &weak, |this, window, cx| export_subtitles(this, SubtitleFormat::Srt, window, cx)))
-                    .item(item("Export Captions as WebVTT…", &layers, true, &weak, |this, window, cx| export_subtitles(this, SubtitleFormat::WebVtt, window, cx)))
+        });
+
+        // Transform: flips, reset and (for video) stabilizing.
+        let (move_layers, move_weak) = (layers.clone(), weak.clone());
+        menu = menu.submenu("Transform", window, cx, move |menu, _, _| {
+            let (layers, weak) = (&move_layers, &move_weak);
+            menu.item(item("Flip Horizontal", layers, true, weak, |this, _, _| {
+                this.state.flip_selection(true);
+            }))
+            .item(item("Flip Vertical", layers, true, weak, |this, _, _| {
+                this.state.flip_selection(false);
+            }))
+            .item(item("Reset Transform", layers, true, weak, |this, _, _| this.state.reset_selection_transform()))
+            .when(is_footage, |menu| {
+                menu.separator().item(if stabilized {
+                    item("Remove Stabilization", layers, true, weak, |this, _, _| {
+                        if let Some(&layer) = this.state.selected_layers.first() {
+                            this.state.remove_stabilization(layer);
+                        }
+                    })
+                } else {
+                    item("Stabilize", layers, !analysing, weak, |this, window, cx| {
+                        if let Some(&layer) = this.state.selected_layers.first() {
+                            super::analysis::stabilize(this, layer, window, cx);
+                        }
+                    })
+                })
             })
-            .item(item("Quick Export Layer", &layers, single.is_some() && has_picture && !busy, &weak, |this, window, cx| {
-                if let Some(&layer) = this.state.selected_layers.first() {
-                    super::export::quick_export_layer(this, layer, false, window, cx);
-                }
-            }))
-            .item(item("Export and Replace Layer", &layers, single.is_some() && has_picture && !busy && !depended_on, &weak, |this, window, cx| {
-                if let Some(&layer) = this.state.selected_layers.first() {
-                    super::export::quick_export_layer(this, layer, true, window, cx);
-                }
-            }))
+        });
+
+        // Export: the layer alone, and a caption layer as subtitles.
+        if can_export_layer || is_captions {
+            let (export_layers, export_weak) = (layers.clone(), weak.clone());
+            menu = menu.submenu("Export", window, cx, move |menu, _, _| {
+                let (layers, weak) = (&export_layers, &export_weak);
+                menu.when(can_export_layer, |menu| {
+                    menu.item(item("Quick Export Layer", layers, !busy, weak, |this, window, cx| {
+                        if let Some(&layer) = this.state.selected_layers.first() {
+                            super::export::quick_export_layer(this, layer, false, window, cx);
+                        }
+                    }))
+                    .item(item("Export and Replace Layer", layers, !busy && !depended_on, weak, |this, window, cx| {
+                        if let Some(&layer) = this.state.selected_layers.first() {
+                            super::export::quick_export_layer(this, layer, true, window, cx);
+                        }
+                    }))
+                })
+                .when(is_captions, |menu| {
+                    menu.item(item("Export Captions as SRT…", layers, true, weak, |this, window, cx| export_subtitles(this, SubtitleFormat::Srt, window, cx)))
+                        .item(item("Export Captions as WebVTT…", layers, true, weak, |this, window, cx| export_subtitles(this, SubtitleFormat::WebVtt, window, cx)))
+                })
+            });
+        }
+        menu
     }
 }

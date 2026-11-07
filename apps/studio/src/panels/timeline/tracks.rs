@@ -236,8 +236,22 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
         .flex()
         .items_center()
         .gap_1()
+        // The editor's one set of playback controls (the viewer's bar keeps to view settings).
         .child(icon_button("tracks-start", IconName::SkipBack, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Go to Start", "first-frame"), false, cx.listener(|this, _, _, cx| this.go_to(0, cx))))
+        .child(icon_button("previous-frame", IconName::StepBack, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Previous Frame", "previous-frame"), false, cx.listener(|this, _, _, cx| {
+            let frame = this.state.current_frame - 1;
+            this.go_to(frame, cx);
+        })))
         .child(icon_button("tracks-play", if playing { IconName::Pause } else { IconName::Play }, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Play / Pause", "toggle-playback"), playing, cx.listener(|this, _, _, cx| this.toggle_playback(cx))))
+        .child(icon_button("next-frame", IconName::StepForward, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Next Frame", "next-frame"), false, cx.listener(|this, _, _, cx| {
+            let frame = this.state.current_frame + 1;
+            this.go_to(frame, cx);
+        })))
+        .child(icon_button("last-frame", IconName::SkipForward, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Go to End", "last-frame"), false, cx.listener(|this, _, _, cx| {
+            let end = this.state.composition().duration_frames - 1;
+            this.go_to(end, cx);
+        })))
+        .child(div().w(px(6.0)))
         .child(icon_button("tracks-loop", IconName::Repeat, "Loop Playback", state.loop_playback, cx.listener(|this, _, _, cx| {
             this.state.loop_playback = !this.state.loop_playback;
             cx.notify();

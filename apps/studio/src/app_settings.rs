@@ -296,7 +296,7 @@ impl Default for AppSettings {
             transparency: Transparency::default(),
             clip_thumbnails: true,
             clip_waveforms: true,
-            show_render_time: true,
+            show_render_time: false,
             compact_timeline: false,
             cooler_background_removal: false,
             ai: AiFeatures::default(),

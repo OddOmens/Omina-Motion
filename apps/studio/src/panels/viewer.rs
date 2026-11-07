@@ -1,5 +1,5 @@
 //! The Composition panel: the frame rendered by `studio-render` on the GPU, with the
-//! selection outline, handles and anchor point drawn on top, and the transport bar.
+//! selection outline, handles and anchor point drawn on top, and a bar of view settings.
 //! Paused frames render at full display resolution; playback renders at half
 //! resolution on high-density screens to keep up (After Effects' "Auto" resolution).
 
@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use studio_core::animation::Vec2;
 use studio_core::model::Id;
-use studio_core::time::format_timecode;
 use studio_core::transform::layer_corners;
 use studio_media::{FrameServer, ProxyManager};
 use studio_render::Renderer;
@@ -435,18 +434,17 @@ pub fn set_playback_quality(workspace: &mut Workspace, quality: crate::app_setti
     crate::app_settings::update(|settings| settings.playback_quality = quality);
 }
 
-/// The bar under the viewer (the panel's footer), in one row: magnification and frame size on the left, the play
-/// and frame-stepping controls in the middle, and the current timecode on the right.
+/// The bar under the viewer (the panel's footer): playback quality, magnification, frame size,
+/// snapping and guides. Playing and stepping live in the timeline's bar, so there is one set.
 fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
-    let playing = workspace.state.is_playing();
-    let looping = workspace.state.loop_playback;
     let composition = workspace.state.composition();
-    // Equal-width sides keep the controls centred under the picture.
-    let info = div()
-        .flex_1()
+    // Drawn in the panel's footer, so it lines up with the Project panel's footer beside it.
+    div()
+        .size_full()
         .flex()
         .items_center()
         .gap_2()
+        .px_1()
         .text_size(px(size::SMALL_TEXT))
         .text_color(hsla(color::MUTED))
         .child(quality_menu(workspace, cx))
@@ -456,60 +454,7 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
             this.state.viewer_snapping = !this.state.viewer_snapping;
             cx.notify();
         })))
-        .child(super::guides::guides_menu(workspace, cx));
-    let timecode = div().flex_1().flex().justify_end().child(
-        div()
-            .px_2()
-            .rounded(px(2.0))
-            .bg(hsla(color::INSET))
-            .text_size(px(size::SMALL_TEXT))
-            .text_color(hsla(color::VALUE))
-            .font_family("Menlo")
-            .child(format_timecode(workspace.state.current_frame, composition.frame_rate)),
-    );
-    let controls = div()
-        .flex()
-        .items_center()
-        .gap_1()
-        // The same as Home and End: the composition's first and last frames.
-        .child(icon_button("first-frame", IconName::SkipBack, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "First Frame", "first-frame"), false, cx.listener(|this, _, _, cx| this.go_to(0, cx))))
-        .child(icon_button("previous-frame", IconName::StepBack, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Previous Frame", "previous-frame"), false, cx.listener(
-            |this, _, _, cx| {
-                let frame = this.state.current_frame - 1;
-                this.go_to(frame, cx);
-            },
-        )))
-        .child(icon_button(
-            "play",
-            if playing { IconName::Pause } else { IconName::Play },
-            crate::keymap::with_key(&workspace.ui.settings.shortcuts, if playing { "Pause" } else { "Play" }, "toggle-playback"),
-            playing,
-            cx.listener(|this, _, _, cx| this.toggle_playback(cx)),
-        ))
-        .child(icon_button("next-frame", IconName::StepForward, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Next Frame", "next-frame"), false, cx.listener(
-            |this, _, _, cx| {
-                let frame = this.state.current_frame + 1;
-                this.go_to(frame, cx);
-            },
-        )))
-        .child(icon_button("last-frame", IconName::SkipForward, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Last Frame", "last-frame"), false, cx.listener(|this, _, _, cx| {
-            let end = this.state.composition().duration_frames - 1;
-            this.go_to(end, cx);
-        })))
-        .child(div().w(px(8.0)))
-        .child(icon_button("loop", IconName::Repeat, "Loop Playback", looping, cx.listener(|this, _, _, cx| {
-            this.state.loop_playback = !this.state.loop_playback;
-            cx.notify();
-        })));
-    // Drawn in the panel's footer, so it lines up with the Project panel's footer beside it.
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .px_1()
-        .child(info)
-        .child(controls)
-        .child(timecode)
+        .child(super::guides::guides_menu(workspace, cx))
 }
 
 /// Viewer drags: moving the selection, or scaling from a corner handle.
@@ -1340,6 +1285,9 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .top(px(pan_y))
         .w(px(composition.width as f32 * scale))
         .h(px(composition.height as f32 * scale))
+        // A faint line just outside the frame, so its edge shows even when the picture is as
+        // dark as the space around it (an empty or black composition).
+        .child(div().absolute().top(px(-1.0)).left(px(-1.0)).right(px(-1.0)).bottom(px(-1.0)).border_1().border_color(hsla(color::MUTED).opacity(0.35)))
         // Only the grid is clipped to the frame: selection handles may reach past its edges.
         .child(match workspace.ui.settings.transparency {
             crate::app_settings::Transparency::Checkerboard => div().absolute().size_full().overflow_hidden().child(gpui_kit::StyledImage::object_fit(img(transparency_grid()).size_full(), gpui_kit::ObjectFit::Cover)),

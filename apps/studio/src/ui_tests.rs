@@ -152,7 +152,11 @@ fn the_first_and_last_frame_buttons_match_home_and_end(cx: &mut TestAppContext) 
     let last = visual.update(|_, cx| workspace.read(cx).state.composition().duration_frames - 1);
     visual.update(|window, cx| window.click("last-frame", cx));
     assert_eq!(frame(visual), last);
-    visual.update(|window, cx| window.click("first-frame", cx));
+    visual.update(|window, cx| window.click("tracks-start", cx));
+    assert_eq!(frame(visual), 0);
+    visual.update(|window, cx| window.click("next-frame", cx));
+    assert_eq!(frame(visual), 1);
+    visual.update(|window, cx| window.click("previous-frame", cx));
     assert_eq!(frame(visual), 0);
     visual.update(|window, cx| window.press("end", cx));
     assert_eq!(frame(visual), last);
@@ -387,6 +391,13 @@ fn click_label(visual: &mut VisualTestContext, label: &str) {
     });
 }
 
+/// Opens the open menu's submenu `submenu` (Time, Transform, Export…), then clicks `label` in it.
+fn click_in_submenu(visual: &mut VisualTestContext, submenu: &str, label: &str) {
+    click_label(visual, submenu);
+    render(visual);
+    click_label(visual, label);
+}
+
 #[gpui_kit::test]
 fn deleting_a_project_item_asks_first_and_removes_its_layers(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
@@ -501,7 +512,7 @@ fn typing_a_value_on_a_selected_keyframe_edits_all_selected(cx: &mut TestAppCont
 #[gpui_kit::test]
 fn the_new_composition_button_opens_the_dialog(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
-    visual.update(|window, cx| window.click("new-comp", cx));
+    visual.update(|window, cx| window.click("rail-new-comp", cx));
     render(visual);
     visual.update(|window, cx| window.click("comp-preset", cx));
     render(visual);
@@ -1930,8 +1941,10 @@ fn an_expanded_folder_shows_as_open(cx: &mut TestAppContext) {
 fn the_viewer_bar_lines_up_with_the_project_footer(cx: &mut TestAppContext) {
     let (_workspace, visual) = open(cx);
     let bounds = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.find(id).bounds());
-    let (folder, play) = (bounds(visual, "new-folder"), bounds(visual, "play"));
-    assert!((folder.center().y - play.center().y).abs() < px(1.0), "same row: {folder:?} vs {play:?}");
+    let (folder, snapping) = (bounds(visual, "new-folder"), bounds(visual, "viewer-snapping"));
+    assert!((folder.center().y - snapping.center().y).abs() < px(1.0), "same row: {folder:?} vs {snapping:?}");
+    // Playback has one set of controls, in the timeline.
+    visual.update(|window, _| assert!(window.try_find("play").is_none() && window.try_find("tracks-play").is_some()));
     // The timeline has no separate title row: the name shares the row with its transport.
     let (name, start) = (bounds(visual, "timeline-comp-name"), bounds(visual, "tracks-start"));
     assert!((name.center().y - start.center().y).abs() < px(1.0), "name beside the controls: {name:?} vs {start:?}");
@@ -3501,12 +3514,12 @@ fn a_clips_right_click_menu_flips_resets_and_duplicates(cx: &mut TestAppContext)
     let PropertyValue::Pair(before) = scale(visual) else { panic!() };
     visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
     render(visual);
-    click_label(visual, "Flip Horizontal");
+    click_in_submenu(visual, "Transform", "Flip Horizontal");
     render(visual);
     assert_eq!(scale(visual), PropertyValue::Pair(studio_core::animation::Vec2::new(-before.x, before.y)), "mirrored left to right");
     visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
     render(visual);
-    click_label(visual, "Reset Transform");
+    click_in_submenu(visual, "Transform", "Reset Transform");
     render(visual);
     assert_eq!(scale(visual), PropertyValue::Pair(studio_core::animation::Vec2::new(100.0, 100.0)), "back to 100%");
     let count = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
@@ -3587,8 +3600,9 @@ fn settings_switches_change_what_the_panels_show(cx: &mut TestAppContext) {
     render(visual);
     visual.update(|window, cx| window.click("timeline-render-time", cx));
     render(visual);
-    assert!(!visual.update(|_, cx| workspace.read(cx).ui.settings.show_render_time));
-    assert!(!crate::app_settings::load().show_render_time, "remembered");
+    // Off by default; the switch turns it on, and that is remembered.
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.settings.show_render_time));
+    assert!(crate::app_settings::load().show_render_time, "remembered");
     // General: new compositions take the chosen frame rate.
     visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.settings.new_composition.fps = 60));
     let made = crate::state::new_composition_settings(visual.update(|_, cx| workspace.read(cx).ui.settings.new_composition));
@@ -3913,7 +3927,7 @@ fn export_and_replace_puts_a_transparent_render_in_the_layers_place(cx: &mut Tes
     render(visual);
     visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
     render(visual);
-    click_label(visual, "Export and Replace Layer");
+    click_in_submenu(visual, "Export", "Export and Replace Layer");
     visual.run_until_parked();
     wait_for_export(&workspace, visual);
     render(visual);
@@ -5468,7 +5482,7 @@ fn a_freeze_frame_goes_in_from_a_clips_right_click_menu(cx: &mut TestAppContext)
     let count = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
     visual.update(|window, cx| window.right_click(("clip-body", clip.0 as usize), cx));
     render(visual);
-    click_label(visual, "Insert Freeze Frame");
+    click_in_submenu(visual, "Time", "Insert Freeze Frame");
     render(visual);
     // The clip is split and a hold goes between the halves: two more layers, the hold selected.
     let (count_after, hold) = visual.update(|_, cx| {
@@ -5534,7 +5548,7 @@ fn close_gaps_packs_a_track_from_the_clips_menu(cx: &mut TestAppContext) {
     assert_eq!(first_on_track, start, "the title is alone on its track");
     visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
     render(visual);
-    click_label(visual, "Close Gaps on Track");
+    click_in_submenu(visual, "Time", "Close Gaps on Track");
     render(visual);
     assert_eq!(layer_timing(&workspace, visual, TITLE).1, 0, "packed to the start");
 }
@@ -5886,7 +5900,7 @@ fn split_at_scene_cuts_cuts_a_clip_into_its_shots_in_one_undo(cx: &mut TestAppCo
 
     visual.update(|window, cx| window.right_click(("clip-body", clip.0 as usize), cx));
     render(visual);
-    click_label(visual, "Split at Scene Cuts");
+    click_in_submenu(visual, "Time", "Split at Scene Cuts");
     wait_for_analysis(&workspace, visual);
     render(visual);
     let pieces = |visual: &mut VisualTestContext| visual.update(|_, cx| {
@@ -5905,7 +5919,7 @@ fn split_at_scene_cuts_cuts_a_clip_into_its_shots_in_one_undo(cx: &mut TestAppCo
     // Mark Scene Cuts drops a marker at each cut instead.
     visual.update(|window, cx| window.right_click(("clip-body", clip.0 as usize), cx));
     render(visual);
-    click_label(visual, "Mark Scene Cuts");
+    click_in_submenu(visual, "Time", "Mark Scene Cuts");
     wait_for_analysis(&workspace, visual);
     let markers: Vec<i64> = visual.update(|_, cx| workspace.read(cx).state.composition().markers.iter().filter(|marker| marker.label == "Scene").map(|marker| marker.frame).collect());
     assert_eq!(markers, expected);
@@ -6121,5 +6135,27 @@ fn stabilize_is_offered_for_video_only_and_explains_a_missing_file(cx: &mut Test
     // The right-click menu offers it for the clip too.
     visual.update(|window, cx| window.right_click(("clip-body", A_CAM_LAYER.0 as usize), cx));
     render(visual);
+    click_label(visual, "Transform");
+    render(visual);
     assert!(visual.update(|window, _| window.try_find_by_label("Stabilize")).is_some());
+}
+
+#[gpui_kit::test]
+fn a_text_clips_menu_leaves_out_what_cant_apply_to_it(cx: &mut TestAppContext) {
+    let (_workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
+    render(visual);
+    let shown = |visual: &mut VisualTestContext, label: &str| visual.update(|window, _| window.try_find_by_label(label).is_some());
+    for missing in ["Ungroup Composition", "Open Composition", "Morph To…", "Convert to Path"] {
+        assert!(!shown(visual, missing), "{missing} is left out for text");
+    }
+    for present in ["Rename…", "Duplicate", "Split at Playhead", "Delete", "Time", "Transform", "Export"] {
+        assert!(shown(visual, present), "{present} is in the menu");
+    }
+    // Video-only timing items stay out of the Time submenu; Close Gaps is there.
+    click_label(visual, "Time");
+    render(visual);
+    assert!(!shown(visual, "Insert Freeze Frame") && !shown(visual, "Split at Scene Cuts"));
+    assert!(shown(visual, "Close Gaps on Track"));
 }

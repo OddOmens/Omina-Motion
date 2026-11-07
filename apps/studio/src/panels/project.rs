@@ -631,20 +631,16 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
     })
     .collect::<Vec<_>>();
 
+    // Import and New Comp live on the left rail (always in view), so the footer keeps to what
+    // acts on this list: a new folder, and deleting the selection.
     let footer = div()
         .flex()
         .items_center()
         .gap_1()
         .w_full()
-        .child(icon_button("import", IconName::FileInput, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Import Images and Video", "import"), false, cx.listener(|this, _, window, cx| {
-            this.import(window, cx);
-        })))
         .child(icon_button("new-folder", IconName::FolderPlus, "New Folder", false, cx.listener(|this, _, _, cx| {
             this.state.new_folder();
             cx.notify();
-        })))
-        .child(icon_button("new-comp", IconName::Clapperboard, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "New Composition", "new-composition"), false, cx.listener(|this, _, window, cx| {
-            super::composition_settings::open(this, true, window, cx);
         })))
         .child(div().flex_1())
         .child(icon_button("delete-item", IconName::Trash, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Delete", "delete"), false, |_, window, cx| {

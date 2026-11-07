@@ -307,6 +307,23 @@ fn rail_button(
     rail_button_look(id, icon, label, active).on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))).test_support()
 }
 
+/// A rail button for a command with a shortcut: like `rail_button`, with a tooltip naming the
+/// command and its current key (it follows custom shortcuts).
+fn rail_command(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    tooltip: String,
+    on_click: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let tooltip: gpui_kit::SharedString = tooltip.into();
+    rail_button_look(id, icon, label, false)
+        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
+        .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+        .test_support()
+}
+
 /// A tool button in the top bar: its icon, named in a tooltip.
 fn tool_button(
     id: &'static str,
@@ -515,6 +532,7 @@ fn shape_menu(current: ShapeKind, cx: &mut Context<Workspace>) -> impl IntoEleme
 /// getting work in and out.
 pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let side = workspace.ui.left_panel;
+    let keys = &workspace.ui.settings.shortcuts;
     let show = |panel: LeftPanel| {
         move |this: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
             this.ui.left_panel = panel;
@@ -542,9 +560,9 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         // At the bottom: getting work in and out (new composition ⌘N, import ⌘I, export ⌘M),
         // and Settings last.
         .child(div().flex_1())
-        .child(rail_button("rail-new-comp", IconName::Clapperboard, "New Comp", false, |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
-        .child(rail_button("rail-import", IconName::FileInput, "Import", false, |this, window, cx| this.import(window, cx), cx))
-        .child(rail_button("rail-export", IconName::Download, "Export", false, super::export_dialog::open, cx))
+        .child(rail_command("rail-new-comp", IconName::Clapperboard, "New Comp", crate::keymap::with_key(keys, "New Composition", "new-composition"), |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
+        .child(rail_command("rail-import", IconName::FileInput, "Import", crate::keymap::with_key(keys, "Import Images, Video and Sound", "import"), |this, window, cx| this.import(window, cx), cx))
+        .child(rail_command("rail-export", IconName::Download, "Export", crate::keymap::with_key(keys, "Export", "export"), super::export_dialog::open, cx))
         .child(separator())
         .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, cx))
 }

@@ -24,9 +24,10 @@ const CONTROLS_BAND: f32 = 40.0;
 const RULER_BAND: f32 = 28.0;
 /// How close, in screen pixels, a drag has to come to something before it snaps there.
 const SNAP_PIXELS: f64 = 8.0;
-/// Space kept clear at the right of the time column, so handles at the composition's end sit
-/// clear of the panel's resize strip (which would otherwise catch the pointer) and stay easy to grab.
-const RIGHT_GUTTER: f32 = 8.0;
+/// Space kept clear at both ends of the time column, so the handles and the playhead at the
+/// composition's start and end are drawn whole and sit clear of the panel's resize strip (which
+/// would otherwise catch the pointer).
+const EDGE_GUTTER: f32 = 8.0;
 /// How fast Alt + scroll zooms.
 const WHEEL_ZOOM_SENSITIVITY: f64 = 0.004;
 
@@ -177,7 +178,8 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                             .bottom(px(8.0))
                             .left(px(3.0))
                             .text_size(px(10.0))
-                            .text_color(hsla(color::MUTED))
+                            .text_color(hsla(color::TEXT))
+                            .opacity(0.7)
                             .whitespace_nowrap()
                             .child(tick_label(frame, base)),
                     )
@@ -214,14 +216,15 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
             .test_support()
     };
 
+    // Not clipped, so the playhead's handle shows whole at the composition's start and end
+    // (the time column leaves room for it); the ticks and numbers are clipped below.
     div()
         .relative()
         .size_full()
-        .overflow_hidden()
         .child(workspace.ui.timeline.graph.probe())
         // Work area: the frames a preview or render covers.
         .child(
-            div().absolute().top_0().left_0().right_0().h(px(8.0)).bg(hsla(color::INSET)).child(
+            div().absolute().top_0().left_0().right_0().h(px(8.0)).overflow_hidden().bg(hsla(color::INSET)).child(
                 div()
                     .absolute()
                     .top_0()
@@ -250,12 +253,19 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                     cx.notify();
                 }))
                 .on_drag(TimelineDrag::Scrub, |_, _, _, cx| cx.new(|_| EmptyDragView))
-                // Frames already rendered ahead, drawn first so the numbers sit on top.
-                .children(rendered_ahead(workspace))
-                .children(ticks)
-                // Markers (beats, say): small accent marks along the top of the ruler.
-                .children(markers)
                 .child(
+                    div()
+                        .absolute()
+                        .size_full()
+                        .overflow_hidden()
+                        // Frames already rendered ahead, drawn first so the numbers sit on top.
+                        .children(rendered_ahead(workspace))
+                        .children(ticks)
+                        // Markers (beats, say): small accent marks along the top of the ruler.
+                        .children(markers),
+                )
+                // The playhead's handle, while it is in view (the ruler isn't clipped).
+                .when((0.0..=1.0).contains(&playhead), |scrub| scrub.child(
                     div()
                         .absolute()
                         .top_0()
@@ -266,7 +276,7 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                         // A white pill head on a thin white line.
                         .child(div().absolute().top_0().bottom_0().left(px(6.5)).w(px(1.0)).bg(hsla(color::PLAYHEAD)))
                         .child(div().absolute().bottom(px(2.0)).left_0().w(px(14.0)).h(px(18.0)).rounded(px(7.0)).bg(hsla(color::PLAYHEAD))),
-                ),
+                )),
         )
 }
 
@@ -284,7 +294,8 @@ fn navigator(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
             .top_0()
             .bottom_0()
             .w(px(8.0))
-            .bg(hsla(color::ACCENT))
+            // Neutral, unlike the work area's purple, so the two bars aren't mistaken for each other.
+            .bg(hsla(color::MUTED))
             .cursor_ew_resize()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
@@ -294,7 +305,7 @@ fn navigator(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
     };
 
     div().relative().size_full().child(
-        div().absolute().left_0().right_0().top(px(14.0)).h(px(12.0)).rounded(px(2.0)).bg(hsla(color::INSET)).child(
+        div().absolute().left_0().right_0().top(px(16.0)).h(px(8.0)).rounded(px(2.0)).bg(hsla(color::INSET)).child(
             div()
                 .id("navigator-thumb")
                 .absolute()
@@ -322,7 +333,7 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
         .relative()
         .min_h_full()
         .flex()
-        .pr(px(RIGHT_GUTTER))
+        .px(px(EDGE_GUTTER))
         .child(ui.rows.probe())
         // Alt + scroll zooms around the pointer.
         .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
@@ -356,8 +367,8 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
             cx.notify();
         }))
         .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().child(tracks::toolbar(workspace, cx))))
-        .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().mr(px(RIGHT_GUTTER)).child(navigator(workspace, cx))))
-        .child(band(RULER_BAND).child(div().flex_1().min_w_0().mr(px(RIGHT_GUTTER)).child(ruler(workspace, cx))))
+        .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().mx(px(EDGE_GUTTER)).child(navigator(workspace, cx))))
+        .child(band(RULER_BAND).child(div().flex_1().min_w_0().mx(px(EDGE_GUTTER)).child(ruler(workspace, cx))))
         .child(div().relative().flex_1().min_h_0().child(ui.viewport.probe()).child(div().id("timeline-rows").size_full().overflow_y_scroll().child(rows_content)))
         .children(empty_hint(workspace));
 
@@ -377,8 +388,9 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
     panel(PanelId::Timeline, &[], Some(footer.into_any_element()), body, workspace, cx)
 }
 
-/// Green lines along the ruler, behind its numbers, where frames have been rendered ahead (as
-/// in After Effects). They sit in the ruler rather than the work-area bar so the bar never hides them.
+/// A soft green band behind the ruler's numbers where frames have been rendered ahead (as in
+/// After Effects). It is see-through, so the numbers stay readable on it, and it sits in the
+/// ruler rather than the work-area bar so the bar never hides it.
 fn rendered_ahead(workspace: &Workspace) -> Vec<gpui_kit::Div> {
     let view = workspace.state.view_range;
     workspace
@@ -388,7 +400,7 @@ fn rendered_ahead(workspace: &Workspace) -> Vec<gpui_kit::Div> {
         .into_iter()
         .map(|(start, end)| (fraction(start as f64, view), fraction(end as f64, view)))
         .filter(|(left, right)| *right > 0.0 && *left < 1.0)
-        .map(|(left, right)| div().absolute().top(px(4.0)).h(px(2.0)).left(relative(left.max(0.0))).w(relative(right.min(1.0) - left.max(0.0))).bg(gpui_kit::rgb(0x3ccf6e)))
+        .map(|(left, right)| div().absolute().top_0().h(px(12.0)).left(relative(left.max(0.0))).w(relative(right.min(1.0) - left.max(0.0))).bg(gpui_kit::rgba(0x3ccf6e40)))
         .collect()
 }
 
@@ -411,10 +423,23 @@ fn empty_hint(workspace: &Workspace) -> Option<impl IntoElement + use<>> {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_1()
-            .text_color(hsla(color::MUTED))
-            .child(div().text_color(hsla(color::TEXT)).child("This composition is empty"))
-            .child(format!("Drag footage, pictures or sound here from the Project panel or the Finder, add text{} or a shape{}, or start from a template.", key("type-tool"), key("shape-tool")))
+            .child(
+                // A card of its own, so the track rows' lines don't run through the text.
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .px_4()
+                    .py_3()
+                    .rounded(px(6.0))
+                    .bg(hsla(color::PANEL))
+                    .border_1()
+                    .border_color(hsla(color::HAIRLINE))
+                    .text_color(hsla(color::MUTED))
+                    .child(div().text_color(hsla(color::TEXT)).child("This composition is empty"))
+                    .child(format!("Drag footage, pictures or sound here from the Project panel or the Finder, add text{} or a shape{}, or start from a template.", key("type-tool"), key("shape-tool"))),
+            )
             .test_support(),
     )
 }
