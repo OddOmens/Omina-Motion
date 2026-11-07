@@ -94,6 +94,22 @@ impl EditorState {
         self.set_property_component(layer, PropertyPath::Effect { effect, parameter: 1 }, 0, (tint + pinker).clamp(-100.0, 100.0));
     }
 
+    /// Sets a Keyer's key color (its first three parameters, 0–255) to `seen`, a color picked
+    /// from the viewer (straight sRGB). Animated channels get a keyframe at the playhead.
+    pub fn set_key_color(&mut self, layer: Id, effect: Id, seen: Rgba) {
+        for (parameter, channel) in [seen.r, seen.g, seen.b].into_iter().enumerate() {
+            let value = (channel.clamp(0.0, 1.0) * 255.0).round();
+            self.set_property_component(layer, PropertyPath::Effect { effect, parameter }, 0, value);
+        }
+    }
+
+    /// A Keyer's key color at the playhead, as a display color for its swatch.
+    pub fn key_color(&self, layer: Id, effect: Id) -> Option<Rgba> {
+        let layer = self.composition().layer(layer)?;
+        let channel = |parameter| layer.property(PropertyPath::Effect { effect, parameter }, self.current_frame).map(|snapshot| snapshot.value.component(0) / 255.0);
+        Some(Rgba { r: channel(0)?, g: channel(1)?, b: channel(2)?, ..Rgba::hex(0) })
+    }
+
     // The eyedropper's colors -------------------------------------------------
 
     /// Makes `color` the current color and puts it first among the recent picks.

@@ -84,6 +84,7 @@ pub fn passes(effect: &Effect, frame: f64, scale: f32) -> Option<Vec<Pass>> {
         "Linear Color Key" => shader(61, &[v(0), v(1), v(2)]),
         "Spill Suppressor" => shader(62, &[v(0), v(1)]),
         "Key Cleaner" => shader(63, &[px(0)]),
+        "Keyer" => shader(83, &[v(0), v(1), v(2), v(3), v(4), v(5), px(6)]),
         "Median" => shader(64, &[px(0)]),
         "Stroke" => shader(65, &[px(0), v(1)]),
         "Crop" => shader(66, &[v(0), v(1), v(2), v(3), px(4)]),

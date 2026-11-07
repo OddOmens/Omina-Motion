@@ -261,6 +261,17 @@ pub(crate) fn lut_preview(workspace: &Workspace) -> Option<studio_core::model::P
     Some(project)
 }
 
+/// The project as the viewer shows it while a Keyer's key color is being picked: a copy with
+/// that Keyer turned off, so the click lands on the screen's real color rather than on the
+/// already keyed-out picture. `None` when no key color is being picked.
+fn key_pick_preview(workspace: &Workspace) -> Option<studio_core::model::Project> {
+    let (layer, effect) = workspace.ui.key_color_pick?;
+    let mut project = workspace.state.project.clone();
+    let keyer = project.composition_mut(workspace.state.active_comp)?.layer_mut(layer)?.effects.iter_mut().find(|candidate| candidate.id == effect)?;
+    keyer.enabled = false;
+    Some(project)
+}
+
 /// What is shown while text is being typed into a text layer: `base` (the project, or a LUT
 /// preview of it) with that layer's text swapped for what is in the field so far, so the viewer
 /// draws it exactly as it will look, in the layer's own font, style and effects. Nothing is
@@ -308,7 +319,7 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
         .chain(previewed)
         .collect();
     workspace.render.media.release_unused(|path| footage.contains(path));
-    let previewed = with_typed_text(workspace, lut_preview(workspace), cx);
+    let previewed = with_typed_text(workspace, lut_preview(workspace).or_else(|| key_pick_preview(workspace)), cx);
     let state = &workspace.state;
     let shown = previewed.as_ref().unwrap_or(&state.project);
     // Rendering ahead: while paused, the background renderer is told what is on screen; while
@@ -834,6 +845,16 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         cx.notify();
         return;
     }
+    // Picking a Keyer's key color: the color clicked (in the picture before the key) is what
+    // it removes.
+    if let Some((layer, effect)) = workspace.ui.key_color_pick.take() {
+        match color_at(workspace, point).filter(|color| color.a > 0.0) {
+            Some(color) => workspace.state.set_key_color(layer, effect, color),
+            None => window.push_notification("Click on the green or blue screen in the picture.", cx),
+        }
+        cx.notify();
+        return;
+    }
     // The Eyedropper tool takes the color under the pointer as the current color; with Shift
     // it also goes on the selected shapes, text and solids.
     if workspace.ui.tool == Tool::Eyedropper {
@@ -1200,8 +1221,9 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
             .into_any_element(),
         );
 
-        // While its subject is being picked, clicks belong to the picture: no handles to catch them.
-        if picking_layer(workspace) == Some(id) {
+        // While its subject or a key color is being picked, clicks belong to the picture: no
+        // handles to catch them.
+        if picking_layer(workspace) == Some(id) || workspace.ui.key_color_pick.is_some() {
             continue;
         }
         let handles = [ScaleHandle::TopLeft, ScaleHandle::TopRight, ScaleHandle::BottomRight, ScaleHandle::BottomLeft];
@@ -1378,7 +1400,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .when(workspace.ui.tool == Tool::Hand, |viewer| viewer.cursor_grab())
         .when(workspace.ui.track_pick.is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.color_picker.as_ref().is_some_and(|picker| picker.sampling), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
-        .when(workspace.ui.tool == Tool::Eyedropper || workspace.ui.white_balance_pick.is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
+        .when(workspace.ui.tool == Tool::Eyedropper || workspace.ui.white_balance_pick.is_some() || workspace.ui.key_color_pick.is_some(), |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.tool == Tool::Zoom, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .when(workspace.ui.tool == Tool::Rotate, |viewer| viewer.cursor(gpui_kit::CursorStyle::Crosshair))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| press_viewer(this, event, window, cx)))

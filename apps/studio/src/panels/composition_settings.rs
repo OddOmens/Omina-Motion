@@ -1,8 +1,9 @@
 //! The Composition Settings dialog, used both for a new composition (Cmd+N, or
 //! the Project panel's New Composition button) and for changing the open one
 //! (Cmd+K). Laid out like After Effects': name, a preset menu, frame size with an
-//! optional locked aspect ratio, frame rate, duration as timecode, and the background
-//! color. Any frame size up to 30,000 px works.
+//! optional locked aspect ratio, frame rate, duration as timecode, the background
+//! color, and the motion blur shutter (After Effects keeps it under Advanced). Any frame
+//! size up to 30,000 px works.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -17,6 +18,7 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::{AppContext as _, Context, Entity, IntoElement, ParentElement, Styled, Window, div, px, rgba};
 use studio_core::edit::CompositionSettings;
 use studio_core::model::Rgba;
+use studio_core::motion_blur::MotionBlur;
 use studio_core::time::{FrameRate, format_timecode, parse_timecode};
 
 use crate::theme::{color, hsla, size};
@@ -103,6 +105,9 @@ struct Fields {
     height: Entity<InputState>,
     frame_rate: Entity<InputState>,
     duration: Entity<InputState>,
+    /// Motion blur's shutter angle (degrees) and samples, for layers with the switch on.
+    shutter_angle: Entity<InputState>,
+    samples: Entity<InputState>,
     background: Rc<Cell<Rgba>>,
     /// While set, width and height keep this ratio (width / height).
     locked_ratio: Rc<Cell<Option<f64>>>,
@@ -122,6 +127,15 @@ impl Fields {
             .filter(|frames| *frames > 0)
             .ok_or("Enter a duration as timecode (0:00:10:00) or seconds (10).")?;
         let settings = CompositionSettings { name: Self::text(&self.name, cx), width, height, frame_rate, duration_frames, background: self.background.get() };
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    /// Reads and checks the motion blur fields.
+    fn read_motion_blur(&self, cx: &gpui_kit::App) -> Result<MotionBlur, String> {
+        let shutter_angle = Self::text(&self.shutter_angle, cx).trim_end_matches('°').trim().parse::<f32>().map_err(|_| "Enter a shutter angle in degrees, such as 180.")?;
+        let samples = Self::text(&self.samples, cx).parse::<u32>().map_err(|_| "Motion blur samples must be a whole number.")?;
+        let settings = MotionBlur { shutter_angle, samples };
         settings.validate()?;
         Ok(settings)
     }
@@ -192,6 +206,8 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
     } else {
         base
     };
+    // A new composition starts with the default shutter; an open one shows its own.
+    let shutter = if create { MotionBlur::default() } else { workspace.state.composition().motion_blur };
     let make = |value: String, window: &mut Window, cx: &mut Context<Workspace>| cx.new(|cx| InputState::new(window, cx).default_value(value));
     let fields = Fields {
         name: make(base.name.clone(), window, cx),
@@ -199,6 +215,8 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
         height: make(base.height.to_string(), window, cx),
         frame_rate: make(format_frame_rate(base.frame_rate), window, cx),
         duration: make(format_timecode(base.duration_frames, base.frame_rate), window, cx),
+        shutter_angle: make(format!("{}", shutter.shutter_angle), window, cx),
+        samples: make(shutter.samples.to_string(), window, cx),
         background: Rc::new(Cell::new(base.background)),
         locked_ratio: Rc::new(Cell::new(None)),
     };
@@ -323,6 +341,18 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
                             .gap_3()
                             .child(div().w(px(44.0)).h(px(24.0)).rounded(px(4.0)).border_1().border_color(hsla(color::HAIRLINE)).bg(rgba(background.to_rgba_u32())))
                             .child(background_menu),
+                    ))
+                    .child(rule())
+                    .child(row(
+                        "Motion Blur",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(70.0)).child(Input::new(&fields.shutter_angle).small()))
+                            .child(muted("° shutter"))
+                            .child(div().w(px(60.0)).child(Input::new(&fields.samples).small()))
+                            .child(muted("samples")),
                     )),
             )
             // A plain dialog draws no buttons of its own; Cancel closes it and OK runs `on_ok`.
@@ -331,11 +361,13 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
                     .child(DialogClose::new().trigger(|button| button.outline().label("Cancel")))
                     .child(DialogAction::new().child(Button::new("comp-settings-ok").primary().label("OK"))),
             )
-            .on_ok(move |_, window, cx| match ok_fields.read(cx) {
-                Ok(settings) => {
+            .on_ok(move |_, window, cx| match ok_fields.read(cx).and_then(|settings| Ok((settings, ok_fields.read_motion_blur(cx)?))) {
+                Ok((settings, shutter)) => {
                     let result = ok_target
                         .update(cx, |this, cx| {
                             let result = if create { this.state.create_composition(&settings) } else { this.state.update_composition(&settings) };
+                            // Either way the composition just set up is the open one.
+                            let result = result.and_then(|()| this.state.set_motion_blur(shutter));
                             this.ui.dialog_subscriptions.clear();
                             cx.notify();
                             result

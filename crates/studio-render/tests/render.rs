@@ -56,6 +56,7 @@ fn project(layers: Vec<Layer>) -> Project {
         background: Rgba::hex(0x000000),
         layers,
         markers: Vec::new(),
+        motion_blur: Default::default(),
     };
     Project::new(Vec::new(), vec![composition])
 }
@@ -961,6 +962,7 @@ fn clear_comp(id: u64, layers: Vec<Layer>) -> Composition {
         background: Rgba::TRANSPARENT,
         layers,
         markers: Vec::new(),
+        motion_blur: Default::default(),
     }
 }
 
@@ -1709,4 +1711,145 @@ fn simple_layers_drawn_together_look_the_same_as_one_at_a_time() {
     let largest = together.bgra.iter().zip(&apart.bgra).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
     assert!(largest <= 1, "they differ by up to {largest} levels");
     assert!(together.bgra.chunks(4).any(|pixel| pixel[..3] != [0, 0, 0]), "something was drawn");
+}
+
+/// A full-frame solid of `color` with a Keyer whose parameters are set to `values` (by index;
+/// the rest at their defaults), on a transparent composition. Returns the middle pixel's color
+/// and alpha.
+fn keyed(color: u32, values: &[(usize, f32)]) -> ([u8; 3], u8) {
+    let mut layer = full(2, color);
+    let mut keyer = effects::instantiate(effects::find("Keyer").unwrap(), Id(9));
+    for &(index, value) in values {
+        keyer.properties[index].value = Animated::constant(value);
+    }
+    layer.effects.push(keyer);
+    let frame = render(&Project::new(Vec::new(), vec![clear_comp(1, vec![layer])]));
+    (pixel(&frame, 50, 50), frame.bgra[((50 * frame.width + 50) * 4 + 3) as usize])
+}
+
+#[test]
+fn the_keyer_removes_the_screen_color_and_keeps_skin_and_gray() {
+    assert_eq!(keyed(0x00ff00, &[]).1, 0, "pure green is keyed out");
+    // The same screen in shadow and in a hot spot still keys, as the match ignores brightness.
+    assert_eq!(keyed(0x008000, &[]).1, 0, "darker green");
+    assert_eq!(keyed(0x60ff60, &[(3, 50.0)]).1, 0, "a lighter, washed-out green at a wider tolerance");
+    // Skin and gray stay solid and keep their color (no green to take out of them).
+    for color in [0xd9a07a, 0x8d5524, 0x808080, 0xffffff] {
+        let (rgb, alpha) = keyed(color, &[]);
+        assert_eq!(alpha, 255, "{color:06x} stays opaque");
+        let expected = [(color >> 16) as u8, (color >> 8) as u8, color as u8];
+        assert!(close(rgb, expected), "{color:06x} keeps its color: {rgb:?}");
+    }
+    // A blue screen keys with the key color set to blue, and leaves green alone then.
+    let blue = [(0, 0.0), (1, 0.0), (2, 255.0)];
+    assert_eq!(keyed(0x0000ff, &blue).1, 0, "pure blue against a blue key");
+    assert_eq!(keyed(0x00ff00, &blue).1, 255, "green against a blue key");
+}
+
+#[test]
+fn the_keyers_softness_leaves_edge_colors_partly_transparent() {
+    // Half screen green, half gray: the color of a pixel on a subject's edge.
+    let edge = 0x40bf40;
+    assert_eq!(keyed(edge, &[(4, 0.0)]).1, 255, "with no softness the edge is all kept");
+    let (_, soft) = keyed(edge, &[(4, 30.0)]);
+    assert!((20..235).contains(&soft), "softness makes the edge partly see-through: {soft}");
+    let (_, softer) = keyed(edge, &[(4, 60.0)]);
+    assert!(softer < soft, "more softness, more see-through: {softer} vs {soft}");
+}
+
+#[test]
+fn the_keyers_spill_suppression_takes_the_green_cast_off_edges() {
+    // A light gray picking up green light from the screen: kept, but tinted.
+    let tinted = 0x90c090;
+    let (cast, alpha) = keyed(tinted, &[(5, 0.0)]);
+    assert_eq!(alpha, 255);
+    assert!(cast[1] > cast[0] + 40, "without suppression the green stays: {cast:?}");
+    let (cleaned, alpha) = keyed(tinted, &[(5, 100.0)]);
+    assert_eq!(alpha, 255, "suppression changes color, not what is kept");
+    assert!(cleaned[1] <= cleaned[0] + 3, "full suppression brings green down to red and blue: {cleaned:?}");
+    let (half, _) = keyed(tinted, &[(5, 50.0)]);
+    assert!(half[1] < cast[1] && half[1] > cleaned[1], "half suppression is in between: {half:?}");
+}
+
+#[test]
+fn the_keyers_choke_pulls_the_edge_in() {
+    // A gray square on a green screen, keyed by an adjustment layer over both.
+    let render_with_choke = |choke: f32| {
+        let mut keyer_layer = full(2, 0);
+        keyer_layer.content = LayerContent::Adjustment;
+        let mut keyer = effects::instantiate(effects::find("Keyer").unwrap(), Id(9));
+        keyer.properties[6].value = Animated::constant(choke);
+        keyer_layer.effects.push(keyer);
+        let square = solid(3, 0x808080, Vec2::new(40.0, 40.0), Vec2::new(50.0, 50.0));
+        render(&Project::new(Vec::new(), vec![clear_comp(1, vec![keyer_layer, square, full(4, 0x00ff00)])]))
+    };
+    let alpha = |frame: &studio_render::RenderedFrame, x: u32, y: u32| frame.bgra[((y * frame.width + x) * 4 + 3) as usize];
+    let plain = render_with_choke(0.0);
+    assert_eq!((alpha(&plain, 10, 10), alpha(&plain, 32, 50), alpha(&plain, 50, 50)), (0, 255, 255), "the screen goes, the square stays");
+    let choked = render_with_choke(5.0);
+    assert_eq!(alpha(&choked, 32, 50), 0, "2 px inside the edge is pulled in by a 5 px choke");
+    assert_eq!(alpha(&choked, 50, 50), 255, "the middle stays solid");
+}
+
+/// A 10 × 10 white square crossing the frame left to right at 40 px a frame (x = 10 at frame 0,
+/// 50 at frame 1, 90 at frame 2), with its Motion Blur switch set to `blur`.
+fn moving_square(blur: bool) -> Layer {
+    use studio_core::animation::Keyframe;
+    let mut square = solid(2, 0xffffff, Vec2::new(10.0, 10.0), Vec2::new(10.0, 50.0));
+    square.transform.as_mut().unwrap().position = Animated::keyframed(vec![Keyframe::linear(0, Vec2::new(10.0, 50.0)), Keyframe::linear(2, Vec2::new(90.0, 50.0))]);
+    square.switches.motion_blur = blur;
+    square
+}
+
+#[test]
+fn motion_blur_smears_a_moving_layer_along_its_path() {
+    let sharp = render_at(&project(vec![moving_square(false)]), 1);
+    let blurred = render_at(&project(vec![moving_square(true)]), 1);
+    let red = |frame: &studio_render::RenderedFrame, x: u32| pixel(frame, x, 50)[0];
+    // Without blur: solid from x = 45 to 55, nothing else on the row.
+    assert_eq!((red(&sharp, 50), red(&sharp, 40), red(&sharp, 60)), (255, 0, 0));
+    // A 180° shutter is open for half a frame, so the square sweeps 20 px (its center from 40
+    // to 60): from 45 to 55 it is covered half the time, toward the swept ends less, and past
+    // them not at all.
+    assert!((150..230).contains(&red(&blurred, 50)), "half covered in the middle: {}", red(&blurred, 50));
+    assert!(red(&blurred, 45).abs_diff(red(&blurred, 50)) <= 8, "evenly covered across the square's own width");
+    for x in [38, 41, 59, 62] {
+        assert!((20..175).contains(&red(&blurred, x)), "partly covered at {x}: {}", red(&blurred, x));
+    }
+    assert!(red(&blurred, 37) < red(&blurred, 40) && red(&blurred, 40) < red(&blurred, 43), "fading toward the ends of the path");
+    assert_eq!((red(&blurred, 30), red(&blurred, 70)), (0, 0), "nothing beyond the swept path");
+    // Above and below the path stays clear: the smear runs along the motion only.
+    assert_eq!(pixel(&blurred, 50, 40), [0, 0, 0]);
+
+    // A wider shutter smears further.
+    let mut wide = project(vec![moving_square(true)]);
+    wide.compositions[0].motion_blur.shutter_angle = 360.0;
+    assert!(red(&render_at(&wide, 1), 33) > 0, "a 360° shutter sweeps a whole frame's move");
+}
+
+#[test]
+fn motion_blur_changes_nothing_on_still_layers_or_with_the_switch_off() {
+    // Held still (after its last keyframe), the switch on draws exactly what it does off.
+    let still_on = render_at(&project(vec![moving_square(true)]), 5);
+    let still_off = render_at(&project(vec![moving_square(false)]), 5);
+    assert_eq!(still_on.bgra, still_off.bgra);
+    // Moving with the switch off is the plain frame: the same as a still square in that place.
+    let moving_off = render_at(&project(vec![moving_square(false)]), 1);
+    let placed = render_at(&project(vec![solid(2, 0xffffff, Vec2::new(10.0, 10.0), Vec2::new(50.0, 50.0))]), 1);
+    assert_eq!(moving_off.bgra, placed.bgra);
+    // A closed shutter blurs nothing either.
+    let mut closed = project(vec![moving_square(true)]);
+    closed.compositions[0].motion_blur.shutter_angle = 0.0;
+    assert_eq!(render_at(&closed, 1).bgra, moving_off.bgra);
+}
+
+#[test]
+fn a_motion_blurred_layer_composites_like_any_other() {
+    // Over another layer, at half opacity: the blur is drawn first, then faded and laid over.
+    let mut square = moving_square(true);
+    square.transform.as_mut().unwrap().opacity = Animated::constant(50.0);
+    let frame = render_at(&project(vec![square, full(3, 0x0000ff)]), 1);
+    let middle = pixel(&frame, 50, 50);
+    assert!(middle[0] > 60 && middle[0] < 200 && middle[2] > 150, "a faded smear over blue: {middle:?}");
+    assert!(close(pixel(&frame, 20, 50), [0, 0, 255]), "the blue shows outside the path");
 }

@@ -603,6 +603,8 @@ pub struct UiState {
     /// The Basic Correction (layer, effect) waiting for a click on something gray in the viewer
     /// to set its white balance.
     pub white_balance_pick: Option<(Id, Id)>,
+    /// The Keyer (layer, effect) waiting for a click in the viewer to pick its key color.
+    pub key_color_pick: Option<(Id, Id)>,
     /// Where the Color panel's three color wheels and its sliders are on screen, for dragging,
     /// and whether one is pressed (so the press and the drag after it are one undo step).
     pub wheel_bounds: [panels::chrome::MeasuredBounds; 3],
@@ -984,6 +986,7 @@ impl Workspace {
                 guide_choice: panels::guides::GuideChoice::default(),
                 eyedropper_press: false,
                 white_balance_pick: None,
+                key_color_pick: None,
                 wheel_bounds: Default::default(),
                 grade_pressed: false,
                 slider_bounds: Default::default(),
@@ -1560,9 +1563,10 @@ impl Render for Workspace {
                     this.ui.template_gallery = false;
                     cx.notify();
                 }
-                // Escape also gives up picking a white balance and closes the color menu.
-                if this.ui.white_balance_pick.is_some() || this.ui.color_well {
+                // Escape also gives up picking a white balance or key color and closes the color menu.
+                if this.ui.white_balance_pick.is_some() || this.ui.key_color_pick.is_some() || this.ui.color_well {
                     this.ui.white_balance_pick = None;
+                    this.ui.key_color_pick = None;
                     this.ui.color_well = false;
                     cx.notify();
                 }

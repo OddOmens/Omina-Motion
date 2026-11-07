@@ -24,6 +24,7 @@ pub mod magic_move;
 pub mod mockups;
 pub mod model;
 pub mod morph;
+pub mod motion_blur;
 pub mod nesting;
 pub mod package;
 pub mod path;

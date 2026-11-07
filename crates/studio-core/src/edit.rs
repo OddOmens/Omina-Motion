@@ -525,6 +525,7 @@ pub fn new_composition(project: &mut Project, settings: &CompositionSettings) ->
         background: settings.background,
         layers: Vec::new(),
         markers: Vec::new(),
+        motion_blur: Default::default(),
     });
     project.items.push(ProjectItem {
         id,

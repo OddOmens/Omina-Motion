@@ -151,6 +151,7 @@ pub fn sample_project() -> Project {
         background: Rgba::hex(0x000000),
         layers: vec![title, grade, logo, b_roll, a_cam, background],
         markers: Vec::new(),
+        motion_blur: Default::default(),
     };
 
     let footage = Some(ids::FOOTAGE_FOLDER);

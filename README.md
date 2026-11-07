@@ -88,6 +88,15 @@ Inside `apps/studio/src`:
 - The right panel's tabs are Properties, Effects (the selected layer's effects, keyframable, with an Add
   Effect menu and sliders for settings with a modest range) and Color. All three show their groups as the
   same folding cards (`chrome::card`), with the same heading buttons for effects (on/off, reset, remove).
+- Keyer (Effects ▸ Keying): green or blue screen in one effect, like Premiere's Ultra Key. Its card has a key
+  color swatch and eyedropper (the viewer shows the picture without that key while picking); then
+  Tolerance, Softness, Spill Suppression and Choke. Colors are matched in BT.709 YCbCr chroma after
+  evening out brightness, so shadows and hot spots on the screen key alike (`keyer_keep` in `effect.wgsl`).
+- Motion blur (`studio-core/src/motion_blur.rs`): the Properties panel's Motion Blur checkbox (a wind
+  button on the clip while on) draws a layer whose transform or parents' move as the average of several
+  moments across the shutter; the shutter angle and samples are in Composition Settings (180°, 12 by
+  default; saved only when changed). Still layers are drawn once and stay in the renderer's batched fast
+  path; export uses the same renderer.
 - The top bar's New Layer button and the Layer menu add a solid (in the eyedropper's current color, ⌘Y), an
   adjustment layer (⌥⌘Y) or a null object (⇧⌥⌘Y, a layer that draws nothing, for parenting), and hold Add or
   Remove Marker (M), Sequence Layers and Stagger Layers (`studio-core/src/edit.rs`). The Rate Stretch tool (R,

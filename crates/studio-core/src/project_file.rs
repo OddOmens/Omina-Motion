@@ -225,6 +225,7 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             background: comp.background,
         };
         settings.validate().map_err(|error| format!("Composition \"{}\" is damaged: {error}", comp.name))?;
+        comp.motion_blur.validate().map_err(|error| format!("Composition \"{}\" is damaged: {error}", comp.name))?;
         if comp.duration_frames > MAX_FRAME || comp.id.0 > MAX_ID {
             return damaged(&format!("composition \"{}\" is impossibly long", comp.name));
         }
@@ -797,5 +798,32 @@ mod tests {
         let mut project = crate::sample::sample_project();
         project.items.iter_mut().find(|item| item.id == crate::sample::ids::LOGO).unwrap().parent = Some(crate::sample::ids::A_CAM);
         assert!(to_text(&project, view).is_err());
+    }
+
+    #[test]
+    fn motion_blur_settings_round_trip_and_older_files_open_with_the_defaults() {
+        use crate::motion_blur::MotionBlur;
+        // Untouched, nothing about motion blur is written for the composition.
+        let plain = to_text(&sample_project(), view()).unwrap();
+        let file: serde_json::Value = serde_json::from_str(&plain).unwrap();
+        assert!(file["project"]["compositions"][0].get("motion_blur").is_none(), "the default shutter is left out");
+        let (opened, _) = from_text(&plain).unwrap();
+        assert_eq!(opened.compositions[0].motion_blur, MotionBlur::default(), "files without it get the defaults");
+
+        // A changed shutter and a layer's switch are kept exactly.
+        let mut project = sample_project();
+        let shutter = MotionBlur { shutter_angle: 270.0, samples: 24 };
+        crate::motion_blur::set_motion_blur(&mut project, ids::MAIN_COMP, shutter).unwrap();
+        project.composition_mut(ids::MAIN_COMP).unwrap().layers[0].switches.motion_blur = true;
+        let saved = to_text(&project, view()).unwrap();
+        let (opened, _) = from_text(&saved).unwrap();
+        assert_eq!(opened, project);
+        assert_eq!(opened.compositions[0].motion_blur, shutter);
+        assert!(opened.compositions[0].layers[0].switches.motion_blur);
+
+        // Impossible settings are refused when typed and when opened.
+        assert!(crate::motion_blur::set_motion_blur(&mut project, ids::MAIN_COMP, MotionBlur { shutter_angle: -1.0, samples: 8 }).is_err());
+        let damaged = open_damaged(|file| file["project"]["compositions"][0]["motion_blur"] = serde_json::json!({ "shutter_angle": 180.0, "samples": 100_000 }));
+        assert!(damaged.unwrap_err().contains("samples"));
     }
 }

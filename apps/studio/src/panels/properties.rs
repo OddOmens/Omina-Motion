@@ -152,8 +152,17 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             .gap_4()
             .py_1()
             .child(switch("layer-solo", "Solo", layer.switches.solo, Switch::Solo, cx))
-            .when(layer.content.has_picture(), |row| row.child(switch("layer-effects", "Effects", layer.switches.effects_enabled, Switch::EffectsEnabled, cx))),
+            .when(layer.content.has_picture(), |row| row.child(switch("layer-effects", "Effects", layer.switches.effects_enabled, Switch::EffectsEnabled, cx)))
+            // Adjustment layers have nothing of their own to move, so motion blur isn't offered.
+            .when(layer.content.has_picture() && !matches!(layer.content, LayerContent::Adjustment), |row| {
+                row.child(switch("layer-motion-blur", "Motion Blur", layer.switches.motion_blur, Switch::MotionBlur, cx))
+            }),
     )
+    // The shutter is the composition's, so say where it is set.
+    .when(layer.switches.motion_blur && !matches!(layer.content, LayerContent::Adjustment), |rows| {
+        let shutter = composition.motion_blur;
+        rows.child(status_line(format!("{}° shutter, {} samples (set in Composition Settings)", shutter.shutter_angle, shutter.samples)))
+    })
     // Clips with sound can be captioned.
     .when(workspace.state.caption_source(id).is_some() && workspace.ui.settings.ai.captions, |rows| {
         let busy = workspace.ui.caption_job.is_some();
