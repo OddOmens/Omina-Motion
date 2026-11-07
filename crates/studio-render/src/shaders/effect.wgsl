@@ -157,6 +157,35 @@ fn hue_rotate(v: vec3<f32>, degrees: f32) -> vec3<f32> {
     return v * cos(a) + cross(axis, v) * sin(a) + axis * dot(axis, v) * (1.0 - cos(a));
 }
 
+// The color part (Cb, Cr) of a display-value color in BT.709 YCbCr, which separates color from
+// brightness the way the eye does. The Keyer compares colors here.
+fn chroma_709(v: vec3<f32>) -> vec2<f32> {
+    let y = dot(v, LUMA);
+    return vec2((v.b - y) / 1.8556, (v.r - y) / 1.5748);
+}
+
+// The Keyer's matte for one straight display-value color: 0 where it matches the key color
+// (p0.xyz, 0-255), 1 where it is kept. Its color is first brought to the key's brightness, so
+// darker and brighter patches of an unevenly lit screen still match. The distance is measured
+// as a fraction of the key's own colorfulness, so Tolerance (p0.w %) and Softness (p1.x %) act
+// the same for green and blue screens.
+fn keyer_keep(color: vec3<f32>) -> f32 {
+    let v = clamp(color, vec3(0.0), vec3(1.0));
+    let key = clamp(u.p0.xyz / 255.0, vec3(0.0), vec3(1.0));
+    let key_chroma = chroma_709(key);
+    let gain = min(dot(key, LUMA) / max(dot(v, LUMA), 0.001), 4.0);
+    let distance = length(chroma_709(v) * gain - key_chroma) / max(length(key_chroma), 0.02);
+    let tolerance = u.p0.w / 100.0;
+    return smoothstep(tolerance, tolerance + max(u.p1.x / 100.0, 0.001), distance);
+}
+
+// A sample's alpha after the Keyer's matte, for pulling the edge in. Reads past the frame's
+// edge clamp to it, so footage filling the frame isn't eaten from its borders.
+fn keyed_alpha_at(uv: vec2<f32>) -> f32 {
+    let s = textureSampleLevel(src, linear_sampler, clamp(uv, vec2(0.0), vec2(1.0)), 0.0);
+    return s.a * keyer_keep(to_display(straight(s)));
+}
+
 // A sample's display-value color with its alpha applied, so transparent areas read as black.
 // Edge and relief effects use it to see the layer's outline as well as its detail.
 fn display_at(uv: vec2<f32>) -> vec3<f32> {
@@ -764,6 +793,37 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         case 82u: {
             let turn = radians(u.p0.x) * sin(u.info.z * u.p0.y * 2.0 * PI);
             return sample((size * 0.5 + rotate2(pixel - size * 0.5, -turn)) / size);
+        }
+        // Keyer: p0.xyz key color (0-255 display values), p0.w tolerance (%), p1.x softness (%),
+        // p1.y spill suppression (%), p1.z choke (px). Colors near the key turn clear (see
+        // `keyer_keep`); Choke keeps the smallest alpha within its radius, which pulls the edge
+        // in; and spill suppression turns the color so the key's hue sits on green, limits green
+        // to the larger of red and blue (as Spill Suppressor does), and turns it back.
+        case 83u: {
+            let v = to_display(rgb);
+            var alpha = c.a * keyer_keep(v);
+            let choke = u.p1.z;
+            if (choke >= 0.25 && alpha > 0.0) {
+                for (var i = 0; i < 16; i++) {
+                    let angle = f32(i) / 16.0 * 2.0 * PI;
+                    let direction = vec2(cos(angle), sin(angle)) / size;
+                    alpha = min(alpha, min(keyed_alpha_at(uv + direction * choke), keyed_alpha_at(uv + direction * choke * 0.5)));
+                }
+            }
+            var kept = v;
+            let suppression = u.p1.y / 100.0;
+            if (suppression > 0.0) {
+                let key_hue = rgb_to_hsl(clamp(u.p0.xyz / 255.0, vec3(0.0), vec3(1.0))).x * 360.0;
+                var turned = hue_rotate(v, 120.0 - key_hue);
+                turned.g -= max(turned.g - max(turned.r, turned.b), 0.0) * suppression;
+                kept = hue_rotate(turned, key_hue - 120.0);
+            }
+            return with_alpha(to_linear(kept), alpha);
+        }
+        // Motion blur's running average (not a catalog effect): p0.x is the weight of the new
+        // moment in `aux`. Mixing moment k in at 1/k leaves every moment weighted equally.
+        case 84u: {
+            return mix(c, textureSampleLevel(aux, linear_sampler, uv, 0.0), u.p0.x);
         }
         default: { return c; }
     }

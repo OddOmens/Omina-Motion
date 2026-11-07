@@ -27,6 +27,8 @@ const TEXT_CACHE_LIMIT: usize = 64;
 const PATH_CACHE_LIMIT: usize = 32;
 /// The effect shader pass that keeps an image only where (or only outside where) a mask draws.
 const MASK_PASS: u32 = 60;
+/// The effect shader pass that mixes one more moment into a motion-blurred layer's average.
+const MOTION_BLUR_PASS: u32 = 84;
 
 #[derive(Debug)]
 pub struct RenderError(pub String);
@@ -1316,13 +1318,17 @@ impl Renderer {
 
             let has_effects = layer.switches.effects_enabled && layer.effects.iter().any(|effect| effect.enabled);
             let cut_out = layer.cutout.is_some() && self.cutouts.contains_key(&layer.id);
+            // A layer moving while the shutter is open is drawn several times and averaged, so
+            // it can't join a batch; a still one (or one with its switch off) is drawn as usual.
+            let shutter = studio_core::motion_blur::shutter_transforms(composition, layer, at);
             // (Adjustment layers change what is below them, so they are never simple.)
             let simple = !matches!(layer.content, LayerContent::Adjustment)
                 && layer.blend_mode == studio_core::model::BlendMode::Normal
                 && layer.track_matte == studio_core::model::TrackMatte::None
                 && layer.mask.is_none()
                 && !has_effects
-                && !cut_out;
+                && !cut_out
+                && shutter.is_none();
             if simple && self.batching && let Some(single) = self.single_source(project, layer, world, &text_keys) {
                 if let Some((world, source, rect)) = single {
                     batch.push((world, source, rect, opacity));
@@ -1342,7 +1348,10 @@ impl Renderer {
                 continue;
             }
 
-            self.draw_layer(&mut encoder, targets, project, layer, world, scale, &text_keys, slot::LAYER_A);
+            match &shutter {
+                Some(worlds) => self.draw_motion_blurred_layer(&mut encoder, targets, project, layer, worlds, scale, &text_keys, slot::LAYER_A),
+                None => self.draw_layer(&mut encoder, targets, project, layer, world, scale, &text_keys, slot::LAYER_A),
+            }
             // Background removal comes first, so effects (a glow, a shadow) follow the cut-out.
             let (drawn, spare_layer) = match (self.cutouts.get(&layer.id), layer.cutout.as_ref()) {
                 (Some((_, mask)), Some(cutout)) => {
@@ -1540,6 +1549,35 @@ impl Renderer {
             LayerContent::Text { .. } if self.path_text.contains_key(&layer.id) => self.draw_text_on_path(encoder, targets, layer, scale, text_keys, target),
             LayerContent::Text { .. } if self.text_pieces.contains_key(&layer.id) => self.draw_text_pieces(encoder, targets, layer, world, scale, text_keys, target),
             _ => {}
+        }
+    }
+
+    /// Draws a moving layer with motion blur into work slot `target`: once at each of `worlds`
+    /// (its transforms across the shutter), averaged. Each moment is drawn into a spare slot and
+    /// mixed into a running average that ping-pongs between `target` and the other layer slot,
+    /// starting in whichever slot makes the last mix land in `target`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_motion_blurred_layer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        targets: &Targets,
+        project: &Project,
+        layer: &Layer,
+        worlds: &[Affine],
+        scale: f32,
+        text_keys: &HashMap<Id, (u64, Vec2, Vec2)>,
+        target: usize,
+    ) {
+        let Some((first, rest)) = worlds.split_first() else { return };
+        let other = if target == slot::LAYER_A { slot::LAYER_B } else { slot::LAYER_A };
+        let (mut average, mut next) = if rest.len() % 2 == 0 { (target, other) } else { (other, target) };
+        self.draw_layer(encoder, targets, project, layer, *first, scale, text_keys, average);
+        for (index, world) in rest.iter().enumerate() {
+            self.draw_layer(encoder, targets, project, layer, *world, scale, text_keys, slot::AUX_A);
+            // Moment k (counting from 1) joins the average of the k − 1 before it at weight 1/k.
+            let weight = 1.0 / (index + 2) as f32;
+            self.effect_pass(encoder, targets, MOTION_BLUR_PASS, &[weight], 0.0, average, slot::AUX_A, next);
+            std::mem::swap(&mut average, &mut next);
         }
     }
 

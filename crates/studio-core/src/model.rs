@@ -1042,6 +1042,10 @@ pub struct Composition {
     /// Points marked on the timeline (such as the beats of a song), in frame order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// The shutter used by layers with their Motion Blur switch on. Files from before motion
+    /// blur, and compositions still at the defaults, leave it out.
+    #[serde(default, skip_serializing_if = "crate::motion_blur::MotionBlur::is_default")]
+    pub motion_blur: crate::motion_blur::MotionBlur,
 }
 
 /// A point marked on a composition's timeline. Moves and trims snap to markers.

@@ -591,6 +591,9 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
         .child(clip_name(layer, workspace, cx))
         .when(!layer.effects.is_empty(), |header| header.child(div().px_1().rounded(px(3.0)).bg(rgba(0x00000026)).child(format!("fx {}", layer.effects.len()))))
         .when(studio_core::audio::layer_has_sound(&workspace.state.project, layer), |header| header.child(clip_toggle(id, "clip-mute", switches.audio, (IconName::Volume2, IconName::VolumeX), Switch::Audio, dark_ink, cx)))
+        // Shown only while motion blur is on (it is turned on in the Properties panel), so the
+        // clips that blur stand out and can be switched back off here.
+        .when(switches.motion_blur, |header| header.child(clip_toggle(id, "clip-motion-blur", true, (IconName::Wind, IconName::Wind), Switch::MotionBlur, dark_ink, cx)))
         .when(layer.content.has_picture(), |header| header.child(clip_toggle(id, "clip-show", switches.visible, (IconName::Eye, IconName::EyeOff), Switch::Visible, dark_ink, cx)))
         .child(clip_toggle(id, "clip-lock", !switches.locked, (IconName::LockOpen, IconName::Lock), Switch::Locked, dark_ink, cx));
 

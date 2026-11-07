@@ -209,6 +209,22 @@ pub const CATEGORIES: &[EffectCategory] = &[
             EffectDefinition { name: "Key Cleaner", parameters: &[(param("Additional Edge Radius", "px", 0.05, 0.0, 100.0, 1), 1.0)] },
             // Takes the screen's color cast out of edges and reflections.
             EffectDefinition { name: "Spill Suppressor", parameters: &[(param("Key Hue", "°", 0.5, 0.0, 360.0, 0), 120.0), (param("Suppression", "", 0.5, 0.0, 200.0, 0), 100.0)] },
+            // Green or blue screen in one effect, like Premiere's Ultra Key: the key color (as
+            // 0–255 display values, set by the eyedropper in Effect Controls), how close a color
+            // must be to vanish, a soft band beyond that, the screen's cast taken out of what
+            // stays, and the edge pulled in.
+            EffectDefinition {
+                name: "Keyer",
+                parameters: &[
+                    (param("Key Red", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Key Green", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Key Blue", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Tolerance", "%", 0.5, PERCENT.0, PERCENT.1, 0), 30.0),
+                    (param("Softness", "%", 0.5, PERCENT.0, PERCENT.1, 0), 20.0),
+                    (param("Spill Suppression", "%", 0.5, PERCENT.0, PERCENT.1, 0), 50.0),
+                    (param("Choke", "px", 0.05, 0.0, 20.0, 1), 0.0),
+                ],
+            },
         ],
     },
     EffectCategory {

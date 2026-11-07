@@ -5455,3 +5455,114 @@ fn stress_500_layers(cx: &mut TestAppContext) {
     let ms = visual.update(|_, cx| workspace.read(cx).render.last_render_ms);
     println!("viewer render alone (last frame): {ms:?} ms");
 }
+
+// Keyer and motion blur --------------------------------------------------------------------------
+
+#[gpui_kit::test]
+fn the_keyer_is_added_from_effect_controls_and_picks_its_key_color_in_the_viewer(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let a_cam = Id(104);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(a_cam, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("tab:Properties:1".into()), cx));
+    render(visual);
+    // The Add Effect menu lists it under Keying for footage, past the first screenful: scroll
+    // the menu with the wheel until it is in view, then pick it.
+    visual.update(|window, cx| window.click("fx-add", cx));
+    render(visual);
+    let first_item = visual.update(|window, _| window.find_by_label("Crop").bounds().center());
+    for _ in 0..20 {
+        if visual.update(|window, _| window.find_by_label("Keyer").bounds().center().y) < first_item.y {
+            break;
+        }
+        visual.update(|window, cx| {
+            use gpui_kit::InputEvent as _;
+            let wheel = gpui_kit::ScrollEvent { position: first_item, delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(-60.0))), ..Default::default() };
+            window.dispatch_event(wheel.to_platform_input(), cx);
+        });
+        render(visual);
+    }
+    click_label(visual, "Keyer");
+    render(visual);
+    let keyer = visual.update(|_, cx| workspace.read(cx).state.effect_named(a_cam, "Keyer")).expect("the Keyer was added");
+    let key = |visual: &mut VisualTestContext| {
+        visual.update(|_, cx| {
+            let ws = workspace.read(cx);
+            (0..3).map(|parameter| ws.state.composition().layer(a_cam).unwrap().property(PropertyPath::Effect { effect: keyer, parameter }, 0).unwrap().value.component(0)).collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(key(visual), [0.0, 255.0, 0.0], "it starts keying pure green");
+
+    // The eyedropper waits for a click in the viewer; meanwhile the viewer shows the picture
+    // without this key, so the click reads the screen's own color.
+    let pick = ElementId::Name(format!("keyer-pick:{}", keyer.0).into());
+    visual.update(|window, cx| window.click(pick.clone(), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.key_color_pick, Some((a_cam, keyer))));
+    // The middle is where the selected layer's anchor point sits; its handles step aside while
+    // picking, so the click still reaches the picture.
+    let screen = screen_point(&workspace, visual, Vec2::new(960.0, 540.0));
+    click_at(visual, screen);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.key_color_pick, None, "one click picks, then the eyedropper lets go"));
+    let picked = key(visual);
+    assert_ne!(picked, [0.0, 255.0, 0.0], "the key color is now the color clicked");
+    assert!(picked.iter().all(|channel| (0.0..=255.0).contains(channel) && channel.fract() == 0.0), "{picked:?}");
+
+    // Pressing the eyedropper again before clicking gives up, as Escape does.
+    visual.update(|window, cx| window.click(pick.clone(), cx));
+    render(visual);
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.key_color_pick, None));
+
+    // Its other settings are ordinary fields: typing a tolerance sets it.
+    let tolerance = FieldTarget::Property { layer: a_cam, path: PropertyPath::Effect { effect: keyer, parameter: 3 }, component: 0 };
+    visual.update(|window, cx| window.click(field_id(tolerance), cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("42", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    let typed = visual.update(|_, cx| workspace.read(cx).state.composition().layer(a_cam).unwrap().property(PropertyPath::Effect { effect: keyer, parameter: 3 }, 0).unwrap().value);
+    assert_eq!(typed, PropertyValue::Scalar(42.0));
+}
+
+#[gpui_kit::test]
+fn motion_blur_is_switched_in_properties_and_off_from_the_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let blurred = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().switches.motion_blur);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    // The clip shows no motion blur button until it is on.
+    assert!(visual.update(|window, _| window.try_find(("clip-motion-blur", TITLE.0 as usize))).is_none());
+    visual.update(|window, cx| window.click("layer-motion-blur", cx));
+    render(visual);
+    assert!(blurred(visual), "the Properties checkbox turns it on");
+    visual.update(|_, cx| assert!(workspace.read(cx).state.can_undo(), "as an undoable edit"));
+    // Now the clip shows it, and clicking there turns it off again.
+    visual.update(|window, cx| window.click(("clip-motion-blur", TITLE.0 as usize), cx));
+    render(visual);
+    assert!(!blurred(visual));
+    assert!(visual.update(|window, _| window.try_find(("clip-motion-blur", TITLE.0 as usize))).is_none());
+
+    // The shutter lives in Composition Settings: the dialog shows the composition's own and
+    // OK keeps it.
+    let shutter = studio_core::motion_blur::MotionBlur { shutter_angle: 270.0, samples: 24 };
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_motion_blur(shutter).unwrap();
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.press("cmd-k", cx));
+    render(visual);
+    click_label(visual, "OK");
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().motion_blur, shutter));
+}

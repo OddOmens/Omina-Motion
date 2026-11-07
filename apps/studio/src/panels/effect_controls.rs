@@ -6,9 +6,9 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::{AnyElement, Context, ElementId, IntoElement, ParentElement, Styled, div, px};
+use gpui_kit::{AnyElement, Context, ElementId, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder as _, px, rgba};
 use studio_core::model::{Id, Layer};
 use studio_core::property::PropertyPath;
 
@@ -101,6 +101,9 @@ fn effect_body(layer: Id, effect: &studio_core::model::Effect, workspace: &Works
     if effect.name == "Apply LUT" {
         body = body.child(super::color_grade::lut_chooser(layer, effect_id, workspace, cx));
     }
+    if effect.name == "Keyer" {
+        body = body.child(key_color_row(layer, effect_id, workspace, cx));
+    }
     for parameter in 0..effect.properties.len() {
         let path = PropertyPath::Effect { effect: effect_id, parameter };
         body = body.child(property_row(layer, path, None, workspace, cx));
@@ -110,6 +113,38 @@ fn effect_body(layer: Id, effect: &studio_core::model::Effect, workspace: &Works
         }
     }
     body.into_any_element()
+}
+
+/// The Keyer's key color: a swatch of the color it removes and an eyedropper that waits for a
+/// click on the screen in the viewer (which shows the picture without this key meanwhile). The
+/// color's channels are also the effect's first three parameters, typed or keyframed below.
+fn key_color_row(layer: Id, effect: Id, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let picking = workspace.ui.key_color_pick == Some((layer, effect));
+    let swatch = workspace.state.key_color(layer, effect).map_or(0x000000ff, |color| color.to_rgba_u32());
+    let picker = Button::new(ElementId::Name(format!("keyer-pick:{}", effect.0).into()))
+        .xsmall()
+        .icon(Icon::new(IconName::Pipette))
+        .tooltip("Pick the screen's color in the viewer")
+        .map(|button| if picking { button.primary() } else { button.ghost() })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.ui.key_color_pick = if this.ui.key_color_pick == Some((layer, effect)) { None } else { Some((layer, effect)) };
+            cx.notify();
+        }));
+    div()
+        .flex()
+        .flex_col()
+        .pb_1()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(24.0))
+                .child(div().flex_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).child("Key Color"))
+                .child(div().w(px(36.0)).h(px(16.0)).rounded(px(3.0)).border_1().border_color(hsla(color::HAIRLINE)).bg(rgba(swatch)))
+                .child(picker),
+        )
+        .children(picking.then(|| div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::ACCENT)).child("Now click the green or blue screen in the viewer.")))
 }
 
 pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {

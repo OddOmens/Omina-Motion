@@ -60,6 +60,7 @@ pub enum Switch {
     Solo,
     Locked,
     EffectsEnabled,
+    MotionBlur,
 }
 
 impl Switch {
@@ -70,6 +71,7 @@ impl Switch {
             Self::Solo => &mut switches.solo,
             Self::Locked => &mut switches.locked,
             Self::EffectsEnabled => &mut switches.effects_enabled,
+            Self::MotionBlur => &mut switches.motion_blur,
         }
     }
 }
@@ -1296,6 +1298,11 @@ impl EditorState {
         self.view_range = FrameRange::new(0.0, duration);
         self.current_frame = self.current_frame.min(settings.duration_frames - 1);
         Ok(())
+    }
+
+    /// Sets the open composition's motion blur shutter, from the Composition Settings dialog.
+    pub fn set_motion_blur(&mut self, settings: studio_core::motion_blur::MotionBlur) -> Result<(), String> {
+        studio_core::motion_blur::set_motion_blur(&mut self.project, self.active_comp, settings)
     }
 
     /// Opens a composition in the viewer and timeline.
