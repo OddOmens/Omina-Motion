@@ -4,6 +4,8 @@
 //! - **Remove Silences:** cuts the pauses out of talking footage (jump cuts).
 //! - **Mark Beats:** puts a marker on every beat of a song, for cutting to the music.
 //! - **Track Motion:** pins a layer to a point that moves in a video.
+//! - **Split at Scene Cuts / Mark Scene Cuts:** finds the hard cuts in a video clip (see
+//!   `studio_media::find_scene_cuts`) and splits the clip into its shots, or marks them.
 //! - **Auto Reframe:** makes a version of a clip in another shape (9:16 from 16:9, say) that
 //!   follows the subject, using the background-removal model to find it.
 //!
@@ -173,6 +175,83 @@ pub fn mark_beats(workspace: &mut Workspace, layer: Id, window: &mut Window, cx:
             let frames: Vec<i64> = beats.iter().map(|seconds| start + (seconds * fps).round() as i64).filter(|frame| (in_frame..out_frame).contains(frame)).collect();
             let added = studio_core::edit::replace_markers(composition, "Beat", &frames);
             window.push_notification(format!("Marked {added} beats. Moves and cuts snap to them.").as_str(), cx);
+        },
+        window,
+        cx,
+    );
+}
+
+/// What to do at each scene cut found in a clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneCutAction {
+    /// Split the clip there, so each shot is a clip of its own.
+    Split,
+    /// Put a timeline marker there.
+    Mark,
+}
+
+/// The shortest shot looked for, in seconds: cuts closer together than this are taken to be
+/// one (a flash or a very quick dissolve), keeping the clearest.
+const MIN_SHOT_SECONDS: f64 = 0.25;
+
+/// Finds the hard cuts in video clip `layer` in the background, then splits it at each (one
+/// undo step) or marks each on the timeline, as `action` says. Only the part of the video the
+/// clip shows is looked at.
+pub fn scene_cuts(workspace: &mut Workspace, layer: Id, action: SceneCutAction, window: &mut Window, cx: &mut Context<Workspace>) {
+    let state = &workspace.state;
+    let composition = state.composition();
+    let Some(found) = composition.layer(layer) else { return };
+    let LayerContent::Footage { item } = found.content else { return };
+    let Some((path, rate)) = state.project.item(item).and_then(|item| item.path.clone().zip(item.frame_rate)) else { return };
+    let comp_rate = composition.frame_rate;
+    // Each source frame the clip shows, with the first composition frame showing it. A frame
+    // shown twice in a row (a slower source) is looked at once.
+    let mut shown: Vec<(i64, i64)> = Vec::new();
+    for frame in found.in_frame..found.out_frame {
+        let source = found.source_frame(frame, comp_rate, rate).max(0);
+        if shown.last().is_none_or(|&(_, last)| last != source) {
+            shown.push((frame, source));
+        }
+    }
+    let sources: Vec<i64> = shown.iter().map(|&(_, source)| source).collect();
+    let min_shot = ((rate.fps().min(comp_rate.fps()) * MIN_SHOT_SECONDS).round() as usize).max(1);
+    let comp = state.active_comp;
+    // Where the clip was, to make sure it is still there when the search ends.
+    let timing = (found.in_frame, found.out_frame, found.start_frame);
+    let label = match action {
+        SceneCutAction::Split => "Finding scene cuts",
+        SceneCutAction::Mark => "Marking scene cuts",
+    };
+    run(
+        workspace,
+        label,
+        move |progress, cancelled| studio_media::find_scene_cuts(&path, &sources, min_shot, progress, cancelled).map_err(|error| error.to_string()),
+        move |this, cuts, window, cx| {
+            let frames: Vec<i64> = cuts.iter().filter_map(|&position| shown.get(position)).map(|&(frame, _)| frame).collect();
+            let unchanged = this.state.project.composition(comp).and_then(|composition| composition.layer(layer)).is_some_and(|found| (found.in_frame, found.out_frame, found.start_frame) == timing);
+            let message = if !unchanged {
+                "The clip was moved, trimmed or deleted while its scene cuts were found. Try again.".to_owned()
+            } else if frames.is_empty() {
+                "No scene cuts were found in this clip.".to_owned()
+            } else {
+                match action {
+                    SceneCutAction::Split => {
+                        let made = this.state.split_layer_at_frames(comp, layer, &frames);
+                        if made == 0 {
+                            // `cut::split_layers` leaves locked clips, and clips whose track matte doesn't span the cut, alone.
+                            "The clip couldn't be split: it is locked, or its track matte doesn't span the cuts.".to_owned()
+                        } else {
+                            format!("Split the clip at {made} scene cut{} into {} shots.", if made == 1 { "" } else { "s" }, made + 1)
+                        }
+                    }
+                    SceneCutAction::Mark => {
+                        let Some(composition) = this.state.project.composition_mut(comp) else { return };
+                        let added = studio_core::edit::replace_markers(composition, "Scene", &frames);
+                        format!("Marked {added} scene cut{}. Moves and cuts snap to them.", if added == 1 { "" } else { "s" })
+                    }
+                }
+            };
+            window.push_notification(message.as_str(), cx);
         },
         window,
         cx,

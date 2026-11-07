@@ -33,6 +33,7 @@ pub mod precompose;
 pub mod project;
 pub mod properties;
 pub mod settings;
+pub mod subtitles;
 pub mod start_screen;
 pub mod templates;
 pub mod timeline;

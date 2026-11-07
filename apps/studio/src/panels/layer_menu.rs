@@ -1,14 +1,32 @@
 //! A layer's right-click menu, the same in the timeline (on a clip) and in the viewer (on the
 //! picture): rename, duplicate, pre-compose or ungroup, morph one shape into another or turn
-//! it into a path, flip, reset the transform, split, delete and export. It acts on the layer right-clicked, or on the whole selection when that
-//! layer is part of it, as in After Effects. The menu reads the editor when it opens, so what
+//! it into a path, flip, reset the transform, split (at the playhead, or a video at its scene
+//! cuts), delete and export (a caption layer also as subtitles). It acts on the layer
+//! right-clicked, or on the whole selection when that layer is part of it, as in After Effects. The menu reads the editor when it opens, so what
 //! it offers matches the layers it will act on.
 
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Context, WeakEntity, Window};
 use studio_core::model::Id;
+use studio_core::subtitles::SubtitleFormat;
 
+use super::analysis::SceneCutAction;
 use crate::workspace::{EditTarget, Workspace};
+
+/// Finds the scene cuts in the selected clip (the one the menu was opened on).
+fn scene_cuts(workspace: &mut Workspace, action: SceneCutAction, window: &mut Window, cx: &mut Context<Workspace>) {
+    if let Some(&layer) = workspace.state.selected_layers.first() {
+        super::analysis::scene_cuts(workspace, layer, action, window, cx);
+    }
+}
+
+/// Saves the selected caption layer's captions as a subtitle file.
+fn export_subtitles(workspace: &mut Workspace, format: SubtitleFormat, window: &mut Window, cx: &mut Context<Workspace>) {
+    if let Some(&layer) = workspace.state.selected_layers.first() {
+        super::subtitles::export(workspace, layer, format, window, cx);
+    }
+}
 
 /// The layers a menu on `clicked` acts on: the selection if `clicked` is in it (or nothing
 /// particular was clicked), otherwise `clicked` alone. Locked layers are left out.
@@ -50,6 +68,10 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         let nested = single.and_then(|layer| workspace.state.nested_composition(layer));
         let has_picture = single.and_then(|layer| workspace.state.composition().layer(layer)).is_some_and(|layer| layer.content.has_picture());
         let busy = workspace.ui.export_job.is_some();
+        // A video clip at normal speed can be split at its scene cuts, when no other analysis runs.
+        let video_clip = single.and_then(|layer| workspace.state.composition().layer(layer)).filter(|layer| matches!(layer.content, studio_core::model::LayerContent::Footage { .. }));
+        let can_find_cuts = video_clip.is_some_and(|layer| layer.time.is_normal()) && workspace.ui.analysis_job.is_none();
+        let is_captions = single.and_then(|layer| workspace.state.composition().layer(layer)).is_some_and(|layer| matches!(layer.content, studio_core::model::LayerContent::Captions { .. }));
         let depended_on = single.is_some_and(|layer| studio_core::bake::is_depended_on(&workspace.state.project, workspace.state.active_comp, layer));
         let some = !layers.is_empty();
         // Morph To works on two shapes, the first morphing into the second (see `panels::morph`).
@@ -97,10 +119,18 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
             .item(item("Reset Transform", &layers, some, &weak, |this, _, _| this.state.reset_selection_transform()))
             .separator()
             .item(item("Split at Playhead", &layers, some, &weak, |this, window, cx| this.split_layer(window, cx)))
+            .when(video_clip.is_some(), |menu| {
+                menu.item(item("Split at Scene Cuts", &layers, can_find_cuts, &weak, |this, window, cx| scene_cuts(this, SceneCutAction::Split, window, cx)))
+                    .item(item("Mark Scene Cuts", &layers, can_find_cuts, &weak, |this, window, cx| scene_cuts(this, SceneCutAction::Mark, window, cx)))
+            })
             .item(item("Delete", &layers, some, &weak, |this, _, _| {
                 this.state.delete_selection();
             }))
             .separator()
+            .when(is_captions, |menu| {
+                menu.item(item("Export Captions as SRT…", &layers, true, &weak, |this, window, cx| export_subtitles(this, SubtitleFormat::Srt, window, cx)))
+                    .item(item("Export Captions as WebVTT…", &layers, true, &weak, |this, window, cx| export_subtitles(this, SubtitleFormat::WebVtt, window, cx)))
+            })
             .item(item("Quick Export Layer", &layers, single.is_some() && has_picture && !busy, &weak, |this, window, cx| {
                 if let Some(&layer) = this.state.selected_layers.first() {
                     super::export::quick_export_layer(this, layer, false, window, cx);
