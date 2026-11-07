@@ -1,156 +1,121 @@
-//! Motion tracking: following one point of a video from frame to frame, so text or graphics
-//! can be pinned to it. A small square of picture around the point is looked for in the next
-//! frame, near where it was, by best match (normalized cross-correlation, so changes in
-//! brightness don't throw it). The square is refreshed from each frame as it goes, so the
-//! track keeps up with things that turn or change shape slowly.
+//! Motion tracking on clips: following one point of a video from frame to frame, so text or
+//! graphics can be pinned to it (Track Motion), and measuring how the whole picture moves, so
+//! shaky footage can be steadied (Stabilize). This file decodes the frames; the matching
+//! itself is in `motion.rs`.
 
 use std::path::Path;
 
 use studio_core::animation::Vec2;
 
 use crate::decode::{MediaError, VideoDecoder};
+use crate::motion::{FrameMotion, GrayFrame, PointFollower, Pyramid, TrackSettings, global_motion};
 
 /// Frames are tracked at this width: detailed enough, and quick.
 const WIDTH: u32 = 640;
-/// The square followed, and how far it is looked for each frame, in pixels at `WIDTH`.
-const PATCH: i32 = 15; // half the side
-const SEARCH: i32 = 40;
 
-/// A frame in gray, for matching.
-struct Gray {
-    width: i32,
-    height: i32,
-    pixels: Vec<f32>,
+/// A point followed through a clip. Points are fractions of the picture's width and height.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackedPoint {
+    /// The point in each source frame it was found in, in order of frame.
+    pub points: Vec<(i64, Vec2)>,
+    /// Going back from the clicked frame, the frame where the point was lost, if it was.
+    pub lost_before: Option<i64>,
+    /// Going forward from the clicked frame, the frame where the point was lost, if it was.
+    pub lost_after: Option<i64>,
 }
 
-impl Gray {
-    fn from_rgba(rgba: &[u8], width: u32, height: u32) -> Self {
-        let pixels = rgba.chunks(4).map(|pixel| 0.299 * f32::from(pixel[0]) + 0.587 * f32::from(pixel[1]) + 0.114 * f32::from(pixel[2])).collect();
-        Self { width: width as i32, height: height as i32, pixels }
-    }
-
-    fn at(&self, x: i32, y: i32) -> f32 {
-        self.pixels[(y.clamp(0, self.height - 1) * self.width + x.clamp(0, self.width - 1)) as usize]
-    }
-
-    /// The square around (`x`, `y`), with its average taken away (for normalized matching).
-    fn patch(&self, x: i32, y: i32) -> Vec<f32> {
-        let values: Vec<f32> = (-PATCH..=PATCH).flat_map(|dy| (-PATCH..=PATCH).map(move |dx| (dx, dy))).map(|(dx, dy)| self.at(x + dx, y + dy)).collect();
-        let mean = values.iter().sum::<f32>() / values.len() as f32;
-        values.into_iter().map(|value| value - mean).collect()
-    }
+/// Decodes source frame `index` and turns it gray, ready for matching.
+fn pyramid_at(decoder: &mut VideoDecoder, index: i64) -> Result<Pyramid, MediaError> {
+    let frame = decoder.frame(index)?;
+    let gray = GrayFrame::from_rgba(&frame.rgba, frame.width, frame.height).ok_or_else(|| MediaError(format!("frame {index} came back the wrong size")))?;
+    Ok(Pyramid::new(gray))
 }
 
-/// How alike two mean-removed patches are: 1 for the same, down to -1.
-fn likeness(a: &[f32], b: &[f32]) -> f32 {
-    let (mut cross, mut a2, mut b2) = (0.0, 0.0, 0.0);
-    for (x, y) in a.iter().zip(b) {
-        cross += x * y;
-        a2 += x * x;
-        b2 += y * y;
-    }
-    if a2 <= 1e-6 || b2 <= 1e-6 { 0.0 } else { cross / (a2 * b2).sqrt() }
-}
-
-/// Where the template is found in `frame`, searching around (`x`, `y`).
-fn find(frame: &Gray, template: &[f32], x: i32, y: i32) -> (i32, i32, f32) {
-    let mut best = (x, y, f32::MIN);
-    // Every other pixel first, then the pixels around the best of those.
-    for dy in (-SEARCH..=SEARCH).step_by(2) {
-        for dx in (-SEARCH..=SEARCH).step_by(2) {
-            let score = likeness(template, &frame.patch(x + dx, y + dy));
-            if score > best.2 {
-                best = (x + dx, y + dy, score);
-            }
-        }
-    }
-    let (cx, cy, _) = best;
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            let score = likeness(template, &frame.patch(cx + dx, cy + dy));
-            if score > best.2 {
-                best = (cx + dx, cy + dy, score);
-            }
-        }
-    }
-    best
+/// The error for a job stopped part way (the caller ignores it, having asked to stop).
+fn cancelled_error() -> MediaError {
+    MediaError("Cancelled".into())
 }
 
 /// Follows the point `start` (fractions of the picture's width and height) from source frame
-/// `from` through to `to` (exclusive), and back to `back_to`. Returns the point in every frame
-/// of `back_to..to`, in order, as fractions. `progress` is told how far along it is (0–1).
-pub fn track_point(path: &Path, start: Vec2, from: i64, back_to: i64, to: i64, progress: &dyn Fn(f32), cancelled: &dyn Fn() -> bool) -> Result<Vec<(i64, Vec2)>, MediaError> {
+/// `from` forward to `to` (exclusive), and backward to `back_to`. Each way stops where the
+/// point is lost. `progress` is told how far along it is (0–1).
+pub fn track_point(path: &Path, start: Vec2, from: i64, back_to: i64, to: i64, progress: &dyn Fn(f32), cancelled: &dyn Fn() -> bool) -> Result<TrackedPoint, MediaError> {
+    if !(back_to <= from && from < to) {
+        return Err(MediaError(format!("frames {back_to}..{to} don't include frame {from}")));
+    }
+    if !(0.0..=1.0).contains(&start.x) || !(0.0..=1.0).contains(&start.y) {
+        return Err(MediaError("the point to follow is outside the picture".into()));
+    }
     let mut decoder = VideoDecoder::open(path, WIDTH, true)?;
-    let gray = |decoder: &mut VideoDecoder, index: i64| -> Result<Gray, MediaError> {
-        let frame = decoder.frame(index)?;
-        Ok(Gray::from_rgba(&frame.rgba, frame.width, frame.height))
-    };
-    let first = gray(&mut decoder, from)?;
-    let to_pixels = |point: Vec2, frame: &Gray| ((point.x * frame.width as f32).round() as i32, (point.y * frame.height as f32).round() as i32);
-    let to_fraction = |x: i32, y: i32, frame: &Gray| Vec2::new(x as f32 / frame.width as f32, y as f32 / frame.height as f32);
-    let (sx, sy) = to_pixels(start, &first);
-    let total = ((to - from) + (from - back_to)).max(1) as f32;
+    let first = pyramid_at(&mut decoder, from)?;
+    let size = Vec2::new(first.frame().width() as f32, first.frame().height() as f32);
+    let start_pixels = Vec2::new(start.x * size.x, start.y * size.y);
+    let total = ((to - from - 1) + (from - back_to)).max(1) as f32;
     let mut done = 0.0;
-    let mut forward = vec![(from, start)];
+    let mut result = TrackedPoint::default();
     // One direction at a time, each from the clicked frame.
-    for (range, direction) in [((from + 1)..to, 1), (back_to..from, -1)] {
-        let mut template = first.patch(sx, sy);
-        let (mut x, mut y) = (sx, sy);
-        let frames: Vec<i64> = if direction > 0 { range.collect() } else { range.rev().collect() };
-        for index in frames {
+    let directions: [Vec<i64>; 2] = [((from + 1)..to).collect(), (back_to..from).rev().collect()];
+    for (direction, frames) in directions.iter().enumerate() {
+        let mut follower = PointFollower::new(from, &first, start_pixels, TrackSettings::default())
+            .ok_or_else(|| MediaError("There's no detail at that point to follow. Pick a spot with clear edges or texture.".into()))?;
+        for &index in frames {
             if cancelled() {
-                return Ok(Vec::new());
+                return Err(cancelled_error());
             }
-            let frame = gray(&mut decoder, index)?;
-            let (nx, ny, score) = find(&frame, &template, x, y);
-            // A poor match (something passing in front) keeps the old template, so the track
-            // can pick the point up again once it is clear.
-            if score > 0.6 {
-                template = frame.patch(nx, ny);
-            }
-            (x, y) = (nx, ny);
-            forward.push((index, to_fraction(x, y, &frame)));
+            let still_found = follower.push(index, &pyramid_at(&mut decoder, index)?);
             done += 1.0;
             progress(done / total);
+            if !still_found {
+                break;
+            }
+        }
+        let followed = follower.finish();
+        let as_fraction = |&(index, point): &(i64, Vec2)| (index, Vec2::new(point.x / size.x, point.y / size.y));
+        // Both directions start with the clicked frame: keep it once.
+        let skip = usize::from(direction == 1);
+        result.points.extend(followed.points.iter().skip(skip).map(as_fraction));
+        if direction == 0 {
+            result.lost_after = followed.lost_at;
+        } else {
+            result.lost_before = followed.lost_at;
         }
     }
-    forward.sort_by_key(|(index, _)| *index);
-    Ok(forward)
+    result.points.sort_by_key(|(index, _)| *index);
+    Ok(result)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// How the picture of a clip moves from frame to frame, measured on frames `width` × `height`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionAnalysis {
+    pub width: u32,
+    pub height: u32,
+    /// The first source frame measured.
+    pub first_frame: i64,
+    /// Entry `i` is the motion from frame `first_frame + i` to the next, in pixels at `width`;
+    /// `None` where it couldn't be measured (a cut, a blank or blurred frame).
+    pub steps: Vec<Option<FrameMotion>>,
+}
 
-    /// A frame of soft noise with a bright cross at (`cx`, `cy`).
-    fn frame(cx: i32, cy: i32) -> Gray {
-        let (width, height) = (160, 120);
-        let pixels = (0..height)
-            .flat_map(|y| (0..width).map(move |x| (x, y)))
-            .map(|(x, y): (i32, i32)| {
-                let noise = (((x * 73 + y * 151) % 17) as f32) * 2.0;
-                let cross = (x - cx).abs() <= 1 && (y - cy).abs() <= 6 || (y - cy).abs() <= 1 && (x - cx).abs() <= 6;
-                if cross { 230.0 } else { 40.0 + noise }
-            })
-            .collect();
-        Gray { width, height, pixels }
+/// Measures the camera's motion across source frames `from..to` of the clip at `path`.
+/// `progress` is told how far along it is (0–1).
+pub fn measure_motion(path: &Path, from: i64, to: i64, progress: &dyn Fn(f32), cancelled: &dyn Fn() -> bool) -> Result<MotionAnalysis, MediaError> {
+    if to - from < 2 {
+        return Err(MediaError("the clip needs at least two frames to steady".into()));
     }
-
-    #[test]
-    fn a_moving_cross_is_found_where_it_went() {
-        let before = frame(60, 50);
-        let after = frame(73, 44);
-        let (x, y, score) = find(&after, &before.patch(60, 50), 60, 50);
-        assert_eq!((x, y), (73, 44));
-        assert!(score > 0.8, "{score}");
+    let mut decoder = VideoDecoder::open(path, WIDTH, true)?;
+    let mut previous = pyramid_at(&mut decoder, from)?;
+    let (width, height) = (previous.frame().width() as u32, previous.frame().height() as u32);
+    let mut steps = Vec::with_capacity((to - from - 1) as usize);
+    for index in (from + 1)..to {
+        if cancelled() {
+            return Err(cancelled_error());
+        }
+        let next = pyramid_at(&mut decoder, index)?;
+        steps.push(global_motion(&previous, &next));
+        previous = next;
+        progress((index - from) as f32 / (to - from - 1) as f32);
     }
-
-    #[test]
-    fn matching_ignores_overall_brightness() {
-        let a = vec![1.0, -1.0, 2.0, -2.0];
-        let b: Vec<f32> = a.iter().map(|value| value * 3.0).collect();
-        assert!((likeness(&a, &b) - 1.0).abs() < 1e-6);
-    }
+    Ok(MotionAnalysis { width, height, first_frame: from, steps })
 }
 
 /// Tracks the middle of a test pattern square moving across a dark frame (from (150, 180),
@@ -161,9 +126,9 @@ mod tests {
 fn tracks_a_real_clip() {
     let path = std::env::var("TRACK_CLIP").unwrap();
     let start = Vec2::new(150.0 / 640.0, 180.0 / 360.0);
-    let points = track_point(Path::new(&path), start, 0, 0, 24, &|_| {}, &|| false).unwrap();
-    assert_eq!(points.len(), 24);
-    for (index, point) in points {
+    let tracked = track_point(Path::new(&path), start, 0, 0, 24, &|_| {}, &|| false).unwrap();
+    assert_eq!(tracked.points.len(), 24);
+    for (index, point) in tracked.points {
         let seconds = index as f32 / 12.0;
         let expected = Vec2::new((150.0 + seconds * 150.0) / 640.0, (180.0 + seconds * 20.0) / 360.0);
         assert!((point.x - expected.x).abs() < 0.01 && (point.y - expected.y).abs() < 0.015, "frame {index}: {point:?} vs {expected:?}");

@@ -5455,3 +5455,214 @@ fn stress_500_layers(cx: &mut TestAppContext) {
     let ms = visual.update(|_, cx| workspace.read(cx).render.last_render_ms);
     println!("viewer render alone (last frame): {ms:?} ms");
 }
+
+/// The sample project's `A-cam_01.mov` layer.
+const A_CAM_LAYER: Id = Id(104);
+/// Test clips are this size; the A-cam layer shows them at 1920 × 1080, six times larger.
+const TEST_CLIP_SIZE: (u32, u32) = (320, 180);
+
+/// A smooth, detailed made-up picture (0–255) defined everywhere, so it can be drawn moved by
+/// any amount: a random value on a 6-pixel lattice, blended between lattice points.
+fn test_texture(x: f32, y: f32) -> f32 {
+    let corner = |cx: i32, cy: i32| (((cx.wrapping_mul(374_761_393) ^ cy.wrapping_mul(668_265_263)).wrapping_mul(1_274_126_177) >> 8) & 0xff) as f32;
+    let (gx, gy) = (x / 6.0, y / 6.0);
+    let (left, top) = (gx.floor(), gy.floor());
+    let (fx, fy) = (gx - left, gy - top);
+    let (left, top) = (left as i32, top as i32);
+    let upper = corner(left, top) * (1.0 - fx) + corner(left + 1, top) * fx;
+    let lower = corner(left, top + 1) * (1.0 - fx) + corner(left + 1, top + 1) * fx;
+    upper * (1.0 - fy) + lower * fy
+}
+
+/// Writes a 24 fps ProRes clip of `frames` frames, each pixel's gray drawn by `picture(frame,
+/// x, y)`, and sets up the A-cam layer to show such a clip full frame from frame 0 for exactly
+/// its length. Returns the clip's path, for `with_clip_file`.
+fn use_test_clip(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, name: &str, frames: i64, picture: impl Fn(i64, f32, f32) -> f32) -> std::path::PathBuf {
+    let path = scratch_folder(name).join("clip.mov");
+    let (width, height) = TEST_CLIP_SIZE;
+    let rate = studio_core::time::FrameRate::new(24, 1);
+    let mut writer = studio_media::MovieWriter::create(&path, studio_media::MovieSettings::new(studio_media::MovieFormat::ProRes422Hq, width, height, rate, None)).unwrap();
+    for frame in 0..frames {
+        let bgra: Vec<u8> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let gray = picture(frame, x as f32, y as f32).clamp(0.0, 255.0) as u8;
+                [gray, gray, gray, 255]
+            })
+            .collect();
+        writer.write_video(&bgra, width, height).unwrap();
+    }
+    writer.finish().unwrap();
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let item = ws.state.project.items.iter_mut().find(|item| item.id == studio_core::sample::ids::A_CAM).unwrap();
+        item.frame_rate = Some(rate);
+        item.size = Some(Vec2::new(1920.0, 1080.0));
+        item.duration_seconds = Some(frames as f64 / 24.0);
+        let layer = ws.state.composition_mut_for_test().layer_mut(A_CAM_LAYER).unwrap();
+        layer.size = Vec2::new(1920.0, 1080.0);
+        layer.out_frame = frames;
+        layer.transform = Some(studio_core::model::Transform::centered(layer.size, Vec2::new(960.0, 540.0)));
+        ws.state.record_history(false);
+        cx.notify();
+    }));
+    path
+}
+
+/// Runs `act` (which starts a background job) with the A-cam item pointing at `clip`, then
+/// takes the file away again before anything is drawn. The jobs read the path when they start;
+/// the viewer's decoder, which would otherwise open the file too, wakes the window from its own
+/// thread, and the headless test scheduler doesn't allow that.
+fn with_clip_file(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, clip: &std::path::Path, act: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::App)) {
+    let set_path = |visual: &mut VisualTestContext, path: Option<std::path::PathBuf>| {
+        visual.update(|_, cx| workspace.update(cx, |ws, _| {
+            ws.state.project.items.iter_mut().find(|item| item.id == studio_core::sample::ids::A_CAM).unwrap().path = path;
+        }));
+    };
+    set_path(visual, Some(clip.to_path_buf()));
+    visual.update(act);
+    set_path(visual, None);
+}
+
+#[gpui_kit::test]
+fn track_motion_pins_a_layer_to_a_moving_square(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // A detailed square moving 4 px right and 1 down each frame over a faint background; its
+    // center is at (64 + 4f, 84 + f) in the clip's pixels.
+    let center = |frame: i64| Vec2::new(64.0 + 4.0 * frame as f32, 84.0 + frame as f32);
+    let clip = use_test_clip(&workspace, visual, "track-square", 48, |frame, x, y| {
+        let corner = center(frame) - Vec2::new(24.0, 24.0);
+        let inside = (corner.x..corner.x + 48.0).contains(&x) && (corner.y..corner.y + 48.0).contains(&y);
+        if inside { test_texture(x - corner.x, y - corner.y) } else { 40.0 + test_texture(x + 500.0, y) * 0.1 }
+    });
+    // The title (on from frame 24) is pinned from frame 30 to the square's middle, as a click
+    // there in the viewer does (`track_motion_waits_for_a_click_on_a_video` covers the click).
+    with_clip_file(&workspace, visual, &clip, |window, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        ws.state.set_current_frame(30);
+        crate::panels::analysis::track_motion(ws, TITLE, A_CAM_LAYER, center(30) * 6.0, window, cx);
+    }));
+    render(visual);
+    visual.update(|window, _| assert!(window.try_find_by_label("Cancel").is_some(), "the top bar shows the job with a Cancel button"));
+    wait_for_analysis(&workspace, visual);
+    render(visual);
+    let position = |visual: &mut VisualTestContext, frame: i64| match title_value(&workspace, visual, POSITION, frame) {
+        PropertyValue::Pair(position) => position,
+        other => panic!("position is 2D, not {other:?}"),
+    };
+    let keys = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().property(POSITION, 0).unwrap().keyframes);
+    assert_eq!(keys, (24..48).collect::<Vec<_>>(), "a keyframe on every frame the title and the clip share");
+    let at_click = position(visual, 30);
+    for frame in 24..48 {
+        // Six composition pixels to each of the clip's.
+        let expected = at_click + (center(frame) - center(30)) * 6.0;
+        let found = position(visual, frame);
+        assert!((found - expected).length() < 4.0, "frame {frame}: {found:?}, expected {expected:?}");
+    }
+    // One undo takes the whole track off.
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    let keys = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().property(POSITION, 0).unwrap().keyframes);
+    assert_eq!(keys, vec![24, 48], "back to the sample's own two keyframes");
+}
+
+#[gpui_kit::test]
+fn stabilize_steadies_a_shaky_clip_and_comes_off_in_one_step(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // The whole picture shakes by a few pixels each frame.
+    let shake = |frame: i64| Vec2::new(3.0 * (frame as f32 * 1.7).sin(), 2.0 * (frame as f32 * 2.3).cos());
+    let clip = use_test_clip(&workspace, visual, "stabilize-shake", 24, |frame, x, y| {
+        let moved = shake(frame);
+        test_texture(x - moved.x, y - moved.y)
+    });
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(A_CAM_LAYER, false);
+        ws.state.set_current_frame(0);
+        cx.notify();
+    }));
+    render(visual);
+    let layer = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(A_CAM_LAYER).unwrap().clone());
+    let before = layer(visual);
+    // The heading's + starts it (pressed while the item has its file).
+    with_clip_file(&workspace, visual, &clip, |window, cx| window.click("stabilize-add", cx));
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.analysis_job.is_some()), "the job started");
+    render(visual);
+    visual.update(|window, _| assert!(window.try_find_by_label("Cancel").is_some(), "the top bar shows the job with a Cancel button"));
+    wait_for_analysis(&workspace, visual);
+    render(visual);
+
+    // Where a fixed point of the scene (the clip's middle on a still frame) is on screen.
+    let on_screen = |visual: &mut VisualTestContext, frame: i64| visual.update(|_, cx| {
+        let composition = workspace.read(cx).state.composition();
+        let in_clip = (Vec2::new(160.0, 90.0) + shake(frame)) * 6.0;
+        studio_core::transform::world_transform(composition, A_CAM_LAYER, frame as f64).unwrap().apply(in_clip)
+    });
+    let jitter = |points: &[Vec2]| points.windows(3).map(|three| (three[2] - three[1] - (three[1] - three[0])).length()).sum::<f32>() / (points.len() - 2) as f32;
+    let steadied: Vec<Vec2> = (0..24).map(|frame| on_screen(visual, frame)).collect();
+    let stabilized = layer(visual);
+    let stabilization = stabilized.stabilization.as_ref().expect("stabilized");
+    assert!(stabilization.zoom > 1.0, "enlarged to hide the edges: {}", stabilization.zoom);
+    let shaky: Vec<Vec2> = (0..24).map(|frame| (Vec2::new(160.0, 90.0) + shake(frame)) * 6.0).collect();
+    let (shaky, steadied) = (jitter(&shaky), jitter(&steadied));
+    assert!(steadied < shaky * 0.25, "the scene shakes {shaky:.1} px a frame before and {steadied:.1} after");
+
+    // The smoothness menu steadies it again from what was measured.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        if !ws.ui.section_open("stabilize") {
+            ws.ui.toggle_section("stabilize");
+        }
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("stabilize-smoothness", cx));
+    render(visual);
+    click_label(visual, "25%");
+    render(visual);
+    assert_eq!(layer(visual).stabilization.unwrap().smoothness, 25.0);
+
+    // Undo goes back through each step: the smoothness, then stabilizing itself.
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(layer(visual), stabilized);
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(layer(visual), before, "one undo puts the layer back exactly");
+    visual.update(|window, cx| window.press("cmd-shift-z", cx));
+    render(visual);
+    assert_eq!(layer(visual), stabilized);
+    // The heading's trash takes it off, exactly, in one step too.
+    visual.update(|window, cx| window.click("stabilize-remove", cx));
+    render(visual);
+    assert_eq!(layer(visual), before);
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(layer(visual), stabilized);
+}
+
+#[gpui_kit::test]
+fn stabilize_is_offered_for_video_only_and_explains_a_missing_file(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // Text has no Stabilize.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("stabilize-add")).is_none());
+    // The sample's video has no file behind it: the job doesn't start.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(A_CAM_LAYER, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("stabilize-add", cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.analysis_job.is_none()));
+    assert!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(A_CAM_LAYER).unwrap().stabilization.is_none()));
+    // The right-click menu offers it for the clip too.
+    visual.update(|window, cx| window.right_click(("clip-body", A_CAM_LAYER.0 as usize), cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find_by_label("Stabilize")).is_some());
+}

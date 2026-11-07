@@ -760,6 +760,10 @@ pub struct Layer {
     /// For a shape layer: keyframes that morph its outline (and its fill and stroke) over time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub morph: Option<crate::morph::ShapeMorph>,
+    /// For a footage layer steadied with Stabilize: the measured motion, the settings and the
+    /// transform from before, so it can be changed or taken off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization: Option<crate::stabilize::Stabilization>,
 }
 
 /// How fast a footage layer's source plays, and whether backwards.

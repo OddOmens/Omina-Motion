@@ -22,6 +22,7 @@ mod layer_time;
 mod library;
 mod morph;
 mod snap;
+mod stabilize;
 mod viewer;
 
 use std::collections::HashSet;

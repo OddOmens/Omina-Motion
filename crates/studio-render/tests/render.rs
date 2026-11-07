@@ -37,6 +37,7 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         time: Default::default(),
         animation: Default::default(),
         morph: None,
+        stabilization: None,
     }
 }
 
