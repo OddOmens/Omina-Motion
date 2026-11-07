@@ -15,6 +15,7 @@ pub mod resize;
 pub mod elements;
 pub mod enhance;
 pub mod export;
+pub mod export_queue;
 pub mod export_dialog;
 pub mod fields;
 pub mod gradient_editor;

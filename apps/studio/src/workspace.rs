@@ -25,6 +25,7 @@ use crate::theme::{color, hsla};
 
 actions!(studio, [
     TogglePlayback,
+    RenderAndPlay,
     NextFrame,
     PreviousFrame,
     NextTenFrames,
@@ -85,6 +86,7 @@ actions!(studio, [
     Open,
     Export,
     Package,
+    ExportQueue,
     TrimInToPlayhead,
     TrimOutToPlayhead,
     SplitLayer,
@@ -183,6 +185,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Browse Versions…", BrowseVersions),
             MenuItem::separator(),
             MenuItem::action("Export…", Export),
+            MenuItem::action("Export Queue…", ExportQueue),
             MenuItem::action("Package…", Package),
             MenuItem::separator(),
             MenuItem::action("Import…", Import),
@@ -538,6 +541,8 @@ pub struct UiState {
     pub recovery_failing: bool,
     /// When the last version of the project was kept (see `versions`).
     pub last_version_at: Option<std::time::Instant>,
+    /// Render & Play is rendering the work area, to play it once every frame is ready.
+    pub render_then_play: bool,
     /// A library save that failed, to try again (with whether to back up first).
     pub library_save_failed: Option<bool>,
     /// The Mockups panel's choices and its device pictures.
@@ -558,6 +563,8 @@ pub struct UiState {
     /// The Export dialog's choices, and the export running now, if any.
     pub export_choice: panels::export::ExportChoice,
     pub export_job: Option<panels::export::ExportJob>,
+    /// Exports saved to run later, one after another (File ▸ Export Queue…).
+    pub export_queue: panels::export_queue::ExportQueue,
     /// The package File ▸ Package… is making now, if any.
     pub package_job: Option<panels::package::PackageJob>,
     /// The Export dialog's preview: the frame picked and the picture drawn for it.
@@ -814,11 +821,15 @@ impl Workspace {
                 let _ = ahead_ready.try_send(());
             });
             let timeline = panels.timeline.entity_id();
-            cx.spawn(async move |_, cx| {
+            cx.spawn(async move |this, cx| {
                 while ahead_arrived.recv().await.is_ok() {
                     // At most a few redraws a second: the line needn't follow every frame.
                     cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
                     cx.update(|cx| cx.notify(timeline));
+                    // Render & Play starts playing once its frames are all in.
+                    if this.update(cx, |this, cx| this.check_render_then_play(cx)).is_err() {
+                        break;
+                    }
                 }
             })
             .detach();
@@ -944,6 +955,7 @@ impl Workspace {
                 start_screen: None,
                 recovery_failing: false,
                 last_version_at: None,
+                render_then_play: false,
                 library_save_failed: None,
                 mockups: Default::default(),
                 element_pictures: HashMap::new(),
@@ -952,6 +964,7 @@ impl Workspace {
                 window_title: String::new(),
                 export_choice: Default::default(),
                 export_job: None,
+                export_queue: Default::default(),
                 package_job: None,
                 export_preview: Default::default(),
                 dialog_subscriptions: Vec::new(),
@@ -1051,8 +1064,53 @@ impl Workspace {
     }
 
     pub fn toggle_playback(&mut self, cx: &mut Context<Self>) {
+        self.ui.render_then_play = false;
         self.state.toggle_playback(Instant::now());
         self.sound.sync(&mut self.state);
+        cx.notify();
+    }
+
+    /// Render & Play, as After Effects' preview does: renders every frame of the work area
+    /// ahead (from its start), then plays it in a loop at full speed. The timeline shows how
+    /// far it has got, with Cancel. With rendering ahead switched off, it just plays.
+    pub fn render_and_play(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ui.settings.render_ahead_mb == 0 {
+            window.push_notification("Rendering ahead is off (Settings ▸ Playback), so this plays without rendering first.", cx);
+            if !self.state.is_playing() {
+                self.toggle_playback(cx);
+            }
+            return;
+        }
+        if self.state.is_playing() {
+            self.toggle_playback(cx);
+        }
+        self.state.current_frame = self.state.work_area.start as i64;
+        self.ui.render_then_play = true;
+        self.notify_timeline(cx);
+        cx.notify();
+    }
+
+    /// While Render & Play waits: the frames done and the frames to do, if the cache is on it.
+    pub fn render_then_play_progress(&self) -> Option<(usize, usize)> {
+        if !self.ui.render_then_play {
+            return None;
+        }
+        self.render.preview.readiness(&self.state.project, self.state.active_comp, self.state.work_area).or(Some((0, 1)))
+    }
+
+    /// Starts playing once Render & Play's frames are all ready. Called as frames arrive.
+    pub fn check_render_then_play(&mut self, cx: &mut Context<Self>) {
+        let Some((done, wanted)) = self.render_then_play_progress() else { return };
+        if done < wanted || wanted == 0 {
+            return;
+        }
+        self.ui.render_then_play = false;
+        self.state.loop_playback = true;
+        self.state.current_frame = self.state.work_area.start as i64;
+        if !self.state.is_playing() {
+            self.state.toggle_playback(Instant::now());
+            self.sound.sync(&mut self.state);
+        }
         cx.notify();
     }
 
@@ -1533,6 +1591,7 @@ impl Render for Workspace {
             .when(self.ui.start_screen.is_none(), |root| {
                 root
                 .on_action(cx.listener(|this, _: &TogglePlayback, _, cx| this.toggle_playback(cx)))
+                .on_action(cx.listener(|this, _: &RenderAndPlay, window, cx| this.render_and_play(window, cx)))
                 .on_action(cx.listener(|this, _: &NextFrame, _, cx| this.step(1, cx)))
                 .on_action(cx.listener(|this, _: &PreviousFrame, _, cx| this.step(-1, cx)))
                 .on_action(cx.listener(|this, _: &NextTenFrames, _, cx| this.step(10, cx)))
@@ -1638,6 +1697,7 @@ impl Render for Workspace {
                     cx.notify();
                 }))
                 .on_action(cx.listener(|this, _: &Precompose, window, cx| panels::precompose::open(this, window, cx)))
+                .on_action(cx.listener(|this, _: &ExportQueue, window, cx| panels::export_queue::open(this, window, cx)))
                 .on_action(cx.listener(|this, _: &UngroupComposition, window, cx| this.ungroup_selected(window, cx)))
                 .on_action(cx.listener(|this, _: &MorphTo, window, cx| panels::morph::open(this, window, cx)))
                 .on_action(cx.listener(|this, _: &FlipHorizontal, _, cx| {

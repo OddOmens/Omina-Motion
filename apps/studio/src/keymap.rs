@@ -51,6 +51,7 @@ macro_rules! command {
 /// Every command, in the order Settings lists them.
 pub static COMMANDS: &[Command] = &[
     command!("toggle-playback", "Play or pause", "Playback", NotTyping, TogglePlayback),
+    command!("render-and-play", "Render & Play the work area", "Playback", NotTyping, RenderAndPlay),
     command!("next-frame", "Next frame", "Playback", NotTyping, NextFrame),
     command!("previous-frame", "Previous frame", "Playback", NotTyping, PreviousFrame),
     command!("next-five-frames", "Five frames on", "Playback", NotTyping, NextFiveFrames),
@@ -156,6 +157,7 @@ pub struct Shortcuts {
 /// Studio's shortcuts: command id and key, one row per key.
 const STUDIO: &[(&str, &str)] = &[
     ("toggle-playback", "space"),
+    ("render-and-play", "shift-space"),
     ("next-frame", "pagedown"),
     ("next-frame", "cmd-]"),
     ("previous-frame", "pageup"),

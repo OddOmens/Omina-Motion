@@ -146,6 +146,17 @@ impl PreviewCache {
         self.lock().frames.get(&frame).cloned()
     }
 
+    /// How far rendering `range` of `comp` from exactly `project` has got: frames done, and
+    /// frames that can be done (the whole range, or as many as fit in the memory set aside).
+    /// `None` while the cache is working on something else (or nothing).
+    pub fn readiness(&self, project: &Project, comp: Id, range: FrameRange) -> Option<(usize, usize)> {
+        let state = self.lock();
+        let job = state.job.as_ref().filter(|job| job.comp == comp && *job.project == *project)?;
+        let (start, end) = (range.start.floor() as i64, (range.end.ceil() as i64).max(range.start.floor() as i64 + 1));
+        let done = state.frames.range(start..end).count();
+        Some((done, ((end - start) as usize).min(job.budget)))
+    }
+
     /// The runs of frames rendered ahead (first frame, frame after the last), for the ruler.
     pub fn ranges(&self) -> Vec<(i64, i64)> {
         let state = self.lock();

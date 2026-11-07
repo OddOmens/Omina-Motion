@@ -5578,3 +5578,107 @@ fn keyframing_speed_remaps_time_and_the_stopwatch_puts_it_back(cx: &mut TestAppC
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().clone()), before);
 }
+
+#[gpui_kit::test]
+fn render_and_play_renders_the_work_area_then_plays_it(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.settings.render_ahead_mb = 256;
+        ws.state.set_work_area(studio_core::time::FrameRange::new(6.0, 18.0));
+        ws.state.current_frame = 40;
+        ws.state.loop_playback = false;
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("tracks-render-play", cx));
+    render(visual);
+    // It goes to the work area's start and waits, showing its progress, instead of playing.
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert!(!ws.state.is_playing() && ws.ui.render_then_play);
+        assert_eq!(ws.state.current_frame, 6);
+    });
+    visual.update(|window, _| assert!(window.try_find("render-play-progress").is_some()));
+    // As frames arrive (the editor checks as they do), it starts playing once all twelve are in.
+    let started = std::time::Instant::now();
+    while !visual.update(|_, cx| workspace.read(cx).state.is_playing()) {
+        assert!(started.elapsed().as_secs() < 30, "it never started playing");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        visual.update(|_, cx| workspace.update(cx, |ws, cx| ws.check_render_then_play(cx)));
+        render(visual);
+    }
+    let (ready, looping) = visual.update(|_, cx| (workspace.read(cx).render.preview.ranges(), workspace.read(cx).state.loop_playback));
+    assert!(ready.iter().any(|&(start, end)| start <= 6 && end >= 18), "{ready:?}");
+    assert!(looping, "it plays the work area in a loop");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| ws.toggle_playback(cx)));
+
+    // Cancel stops waiting; with rendering ahead off it just plays.
+    visual.update(|window, cx| window.click("tracks-render-play", cx));
+    render(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_work_area(studio_core::time::FrameRange::new(0.0, 200.0)); cx.notify(); }));
+    render(visual);
+    visual.update(|window, cx| window.click("render-play-cancel", cx));
+    render(visual);
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.render_then_play));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.ui.settings.render_ahead_mb = 0; cx.notify(); }));
+    visual.update(|window, cx| window.press("shift-space", cx));
+    assert!(visual.update(|_, cx| workspace.read(cx).state.is_playing()));
+}
+
+#[gpui_kit::test]
+fn the_export_queue_runs_its_exports_one_after_another(cx: &mut TestAppContext) {
+    use crate::panels::export_queue::QueueStatus;
+    let folder = scratch_folder("export-queue");
+    let (workspace, visual) = open(cx);
+    // Two short exports go into the queue from the Export dialog's Add to Queue….
+    let mut paths = Vec::new();
+    for name in ["First.mp4", "Second.mp4"] {
+        open_export_dialog(&workspace, visual);
+        visual.update(|window, cx| window.click("export-queue-add", cx));
+        visual.run_until_parked();
+        let chosen = folder.join(name);
+        visual.simulate_new_path_selection(|_| Some(chosen.clone()));
+        visual.run_until_parked();
+        render(visual);
+        paths.push(chosen);
+    }
+    visual.update(|_, cx| {
+        let queue = &workspace.read(cx).ui.export_queue;
+        assert_eq!(queue.items.len(), 2);
+        assert!(queue.items.iter().all(|item| item.status == QueueStatus::Waiting), "nothing runs until started");
+    });
+    assert!(paths.iter().all(|path| !path.exists()));
+    // An edit made now doesn't change what's queued: each export keeps the project as it was.
+    make_an_edit(&workspace, visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_ne!(ws.ui.export_queue.items[0].project, ws.state.project, "the queued export kept the project from before the edit");
+    });
+    // File ▸ Export Queue… lists them; Start Queue runs both.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::ExportQueue), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("export-queue-start", cx));
+    render(visual);
+    let started = std::time::Instant::now();
+    while visual.update(|_, cx| workspace.read(cx).ui.export_queue.running) {
+        assert!(started.elapsed().as_secs() < 120, "the queue never finished");
+        wait_for_export(&workspace, visual);
+        visual.executor().advance_clock(std::time::Duration::from_millis(100));
+        visual.run_until_parked();
+    }
+    visual.update(|_, cx| {
+        let queue = &workspace.read(cx).ui.export_queue;
+        assert!(queue.items.iter().all(|item| item.status == QueueStatus::Done), "{:?}", queue.items.iter().map(|item| item.status.clone()).collect::<Vec<_>>());
+    });
+    for path in &paths {
+        assert!(std::fs::metadata(path).is_ok_and(|file| file.len() > 0), "{} was written", path.display());
+    }
+    // Clear Finished empties the list.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::ExportQueue), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("export-queue-clear", cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.export_queue.items.is_empty()));
+    std::fs::remove_dir_all(&folder).unwrap();
+}

@@ -242,7 +242,9 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             this.state.loop_playback = !this.state.loop_playback;
             cx.notify();
         })))
-        .child(div().pl_2().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)));
+        .child(icon_button("tracks-render-play", IconName::Film, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Render & Play: render the work area, then play it smoothly", "render-and-play"), workspace.ui.render_then_play, cx.listener(|this, _, window, cx| this.render_and_play(window, cx))))
+        .child(div().pl_2().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)))
+        .children(render_progress(workspace, cx));
     let right = side()
         .justify_end()
         .child(icon_button("tracks-compact", IconName::Rows3, "Compact Tracks", workspace.ui.settings.compact_timeline, cx.listener(|this, _, _, cx| {
@@ -273,6 +275,26 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             cx.notify();
         })));
     div().size_full().flex().items_center().gap_2().px_2().child(left).child(middle).child(right)
+}
+
+/// While Render & Play renders: how far it has got, and Cancel.
+fn render_progress(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl IntoElement + use<>> {
+    let (done, wanted) = workspace.render_then_play_progress()?;
+    let percent = (done * 100).checked_div(wanted.max(1)).unwrap_or(0).min(100);
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .pl_2()
+            .text_size(px(12.0))
+            .text_color(hsla(color::MUTED))
+            .child(div().id("render-play-progress").child(format!("Rendering {percent}%")).test_support())
+            .child(icon_button("render-play-cancel", IconName::Close, "Cancel", false, cx.listener(|this, _, _, cx| {
+                this.ui.render_then_play = false;
+                cx.notify();
+            }))),
+    )
 }
 
 /// The track rows with their clips.

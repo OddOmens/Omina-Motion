@@ -74,6 +74,8 @@ Inside `apps/studio/src`:
 - Quick Export (a clip's right-click menu, `panels/export.rs`): renders one layer alone (`studio-core/src/bake.rs`)
   to ProRes 4444 with transparency in an Exports folder beside the project; Export and Replace imports it
   into the project's Exports folder and puts it in the layer's place.
+- The export queue (`panels/export_queue.rs`, File ▸ Export Queue…): the Export dialog's Add to Queue… saves an
+  export with the project as it is then; Start Queue runs them one after another.
 - File ▸ Package… (`panels/package.rs`, `package_writer.rs`, `studio-core/src/package.rs`), like After
   Effects' Collect Files: the project and every file it links to (footage, images, sound, LUT files) in one
   zip. Inside a folder named after the package, the media is copied into folders that mirror the Project
@@ -140,8 +142,10 @@ Inside `apps/studio/src`:
   They are stored in Studio's settings folder as `libraries.json`, with backups in `Library Backups`.
 - `panels/analysis.rs`: background jobs that study a clip first: Remove Silences (`studio-core/src/silence.rs`),
   Mark Beats (`studio-media/src/beats.rs`; markers snap), Track Motion (`studio-media/src/track.rs`) and Auto
-  Reframe (follows the subject with the background-removal model). Speed, reverse and ramps are in
-  `studio-core/src/speed.rs`; the mixer plays sped-up sound, ducks music under a voice, and gates noise.
+  Reframe (follows the subject with the background-removal model). Speed, reverse, ramps and freeze frames
+  (Insert Freeze Frame, a clip's right-click menu) are in `studio-core/src/speed.rs`; Speed is also a
+  keyframeable property (`PropertyPath::Speed`), which remaps time; the mixer plays sped-up sound, ducks music
+  under a voice, and gates noise.
 - Sound in nested compositions (`studio-core/src/audio.rs`, `composition_audio`): the sound inside a nested
   composition plays where its layer starts, heard only while that layer shows, at any depth. The composition
   layer's audio switch, solo, volume, fades, ducking and noise gate apply to everything inside it (its Audio
@@ -221,7 +225,8 @@ Inside `apps/studio/src`:
   Properties, Sync shows every caption of a layer some frames later or earlier (kept when another look is
   applied), and each transcript phrase's start and end can be typed or dragged; its words stretch to fit
   without crossing their neighbors (`captions::retime_phrase`).
-- `state/copy.rs`: copy, paste and duplicate (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`.
+- `state/copy.rs`: copy, paste, Paste Attributes (Alt+Cmd+V, `panels/paste_attributes.rs`) and duplicate
+  (Cmd+C, Cmd+V, Cmd+D), on top of `studio-core/src/copy.rs`, and Close Gaps (`studio-core/src/cut.rs`).
 - `keymap.rs`: every command that can have a shortcut, the Studio, After Effects and Premiere Pro sets, and
   the person's own changes (Settings ▸ Keyboard Shortcuts). Tooltips and menu labels read keys from it, so
   they follow custom shortcuts.
@@ -229,7 +234,8 @@ Inside `apps/studio/src`:
   of work under Studio's settings folder (`Versions`), listed and restored from File ▸ Browse Versions….
 - `preview_cache.rs`: rendering ahead: a background thread with its own renderer renders the frames after the
   playhead and keeps them in memory (Settings ▸ Playback), so playback shows them; a green line on the ruler
-  marks them. The renderer also draws runs of simple layers (normal blending, no effects, matte or mask) in
+  marks them. Render & Play (Shift+Space, the film button by the timeline's transport) renders the whole work
+  area first, then plays it in a loop. The renderer also draws runs of simple layers (normal blending, no effects, matte or mask) in
   one pass. `cargo test -p studio --release stress_500_layers -- --ignored --nocapture` measures a 500-layer
   project; the timeline only draws the tracks near what can be seen.
 - `workspace.rs`: the window, keyboard shortcuts, playback loop and panel layout. Cmd+[ / Cmd+] step a frame

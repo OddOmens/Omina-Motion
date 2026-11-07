@@ -73,6 +73,12 @@ fn starting_folder(project_file: Option<&Path>) -> PathBuf {
 /// Asks where to save the export, then starts it. A PNG sequence is saved as a folder of
 /// that name.
 pub fn choose_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    choose_file_then(workspace, false, window, cx);
+}
+
+/// Asks where to save the export, then starts it, or with `queue`, adds it to the export
+/// queue (see `export_queue`) as the project is now.
+pub fn choose_file_then(workspace: &mut Workspace, queue: bool, window: &mut Window, cx: &mut Context<Workspace>) {
     let format = workspace.ui.export_choice.format;
     let name = &workspace.state.composition().name;
     let suggested = match format.extension() {
@@ -88,7 +94,14 @@ pub fn choose_file(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
         {
             path.set_extension(extension);
         }
-        this.update_in(cx, |this, window, cx| start(this, path, window, cx)).ok();
+        this.update_in(cx, |this, window, cx| {
+            if queue {
+                super::export_queue::add(this, path, window, cx);
+            } else {
+                start(this, path, window, cx);
+            }
+        })
+        .ok();
     })
     .detach();
 }
@@ -102,6 +115,8 @@ enum AfterExport {
     Announce,
     /// Import the movie into the project's Exports folder and put it in place of `layer`.
     Replace { comp: Id, layer: Id },
+    /// Item `index` of the export queue: note how it went, then start the next.
+    Queued { index: usize },
 }
 
 /// Where quick exports go: an Exports folder beside the saved project, or in Movies (Videos)
@@ -166,12 +181,12 @@ pub fn chosen_frames(state: &crate::state::EditorState, choice: &ExportChoice) -
     }
 }
 
-/// Starts exporting a snapshot of the project to `path` on a background thread.
-pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
+/// What the Export dialog's current choices export to `path`, from the open composition.
+pub fn request_for(workspace: &Workspace, path: PathBuf) -> ExportRequest {
     let choice = workspace.ui.export_choice;
     let state = &workspace.state;
     let frames = chosen_frames(state, &choice);
-    let request = ExportRequest {
+    ExportRequest {
         frame_rate: choice.frame_rate,
         include_audio: choice.include_audio,
         scale: choice.scale,
@@ -179,9 +194,19 @@ pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: 
         speed: choice.speed,
         audio_kbps: choice.audio_kbps,
         ..ExportRequest::new(state.active_comp, frames, choice.format, path)
-    };
-    let project = state.project.clone();
+    }
+}
+
+/// Starts exporting a snapshot of the project to `path` on a background thread.
+pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
+    let request = request_for(workspace, path);
+    let project = workspace.state.project.clone();
     run(workspace, project, request, AfterExport::Nothing, window, cx);
+}
+
+/// Exports one item of the export queue; when it ends, the queue moves on (see `export_queue`).
+pub(crate) fn start_queued(workspace: &mut Workspace, index: usize, project: studio_core::model::Project, request: ExportRequest, window: &mut Window, cx: &mut Context<Workspace>) {
+    run(workspace, project, request, AfterExport::Queued { index }, window, cx);
 }
 
 /// Removes the unfinished file of an export that Studio didn't live to finish (it quit or
@@ -247,6 +272,11 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
                     cx.quit();
                     return false;
                 }
+                // A queued export reports to the queue, which starts the next one.
+                if let AfterExport::Queued { index } = after {
+                    super::export_queue::finished(this, index, outcome, window, cx);
+                    return false;
+                }
                 match outcome {
                     // What the format couldn't hold gets a notice of its own, listing it.
                     Ok(Outcome::Finished { left_out }) if !left_out.is_empty() && after == AfterExport::Nothing => {
@@ -261,6 +291,7 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
                             window.push_notification(format!("Exported “{file_name}” to {folder}.").as_str(), cx);
                         }
                         AfterExport::Replace { comp, layer } => replace_with_movie(this, &path, comp, layer, window, cx),
+                        AfterExport::Queued { .. } => unreachable!("queued exports report to the queue above"),
                     },
                     Ok(Outcome::Cancelled) => window.push_notification("Export cancelled.", cx),
                     Err(error) => {

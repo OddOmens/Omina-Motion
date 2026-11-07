@@ -3,7 +3,8 @@
 //! rate, length, sound). On the right, the settings, grouped: the format (and for H.264 and
 //! H.265 their quality and encoding speed), the picture (size and frame rate), which frames,
 //! and the sound. Every choice is kept in `ExportChoice` between exports; Export… asks where
-//! to save, then `export::start` runs it in the background.
+//! to save, then `export::start` runs it in the background. Add to Queue… saves the export to
+//! run later with others (see `export_queue`).
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -167,6 +168,14 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut gpui_kit::C
             .footer(
                 DialogFooter::new()
                     .child(DialogClose::new().trigger(|button| button.outline().label("Cancel").w(px(100.0))))
+                    .child({
+                        // Saves these settings as a queued export, to run later with others.
+                        let queue = target.clone();
+                        Button::new("export-queue-add").outline().label("Add to Queue…").on_click(move |_, window, cx| {
+                            window.close_dialog(cx);
+                            queue.update(cx, |this, cx| super::export::choose_file_then(this, true, window, cx)).ok();
+                        })
+                    })
                     .child(DialogAction::new().child(Button::new("export-ok").primary().icon(IconName::Download).label("Export…").w(px(132.0)))),
             )
             .on_ok(move |_, window, cx| {
