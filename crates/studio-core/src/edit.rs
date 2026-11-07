@@ -65,6 +65,7 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         time: Default::default(),
         animation: Default::default(),
         morph: None,
+        stabilization: None,
         content,
     })
 }
@@ -798,6 +799,7 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
             time: Default::default(),
             animation: Default::default(),
             morph: None,
+            stabilization: None,
         },
     );
     crate::tracks::normalize(composition);

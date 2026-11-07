@@ -6,6 +6,7 @@
 //! - **Track Motion:** pins a layer to a point that moves in a video.
 //! - **Split at Scene Cuts / Mark Scene Cuts:** finds the hard cuts in a video clip (see
 //!   `studio_media::find_scene_cuts`) and splits the clip into its shots, or marks them.
+//! - **Stabilize:** steadies shaky footage by moving the layer against the camera's motion.
 //! - **Auto Reframe:** makes a version of a clip in another shape (9:16 from 16:9, say) that
 //!   follows the subject, using the background-removal model to find it.
 //!
@@ -289,22 +290,22 @@ pub fn track_motion(workspace: &mut Workspace, target: Id, footage: Id, at: Vec2
         workspace,
         "Tracking motion",
         move |progress, cancelled| studio_media::track_point(&path, start, from, back_to, to, progress, cancelled).map_err(|error| error.to_string()),
-        move |this, points, window, cx| {
-            if points.is_empty() {
-                return;
-            }
+        move |this, tracked, window, cx| {
             let Some(composition) = this.state.project.composition(comp) else { return };
             let Some(footage_layer) = composition.layer(footage) else { return };
             let Some(target_layer) = composition.layer(target) else { return };
             let Some(base) = target_layer.transform.as_ref().map(|transform| transform.position.value_at(frame as f64)) else { return };
+            let points: std::collections::HashMap<i64, Vec2> = tracked.points.iter().copied().collect();
+            // Where the point is on screen at a composition frame, if it was found in the source
+            // frame shown then.
             let point_on_screen = |comp_frame: i64| -> Option<Vec2> {
-                let index = footage_layer.source_frame(comp_frame, comp_rate, rate);
-                let fraction = points.iter().find(|(tracked, _)| *tracked == index).or_else(|| points.iter().min_by_key(|(tracked, _)| (tracked - index).abs()))?.1;
+                let fraction = points.get(&footage_layer.source_frame(comp_frame, comp_rate, rate))?;
                 let world = studio_core::transform::world_transform(composition, footage, comp_frame as f64)?;
                 Some(world.apply(Vec2::new(fraction.x * size.x, fraction.y * size.y)))
             };
-            let Some(anchor) = point_on_screen(frame) else { return };
-            // The target moves by as much as the point does on screen, in its parent's space.
+            let Some(anchor) = point_on_screen(frame.clamp(first, end - 1)) else { return };
+            // The target moves by as much as the point does on screen, in its parent's space,
+            // on the frames the point was found; where it was lost, the layer stays put.
             let keys: Vec<Keyframe<Vec2>> = (first..end)
                 .filter_map(|comp_frame| {
                     let moved = point_on_screen(comp_frame)? - anchor;
@@ -312,18 +313,87 @@ pub fn track_motion(workspace: &mut Workspace, target: Id, footage: Id, at: Vec2
                     Some(Keyframe { frame: comp_frame, value: base + to_parent.apply_vector(moved), easing: Easing::Linear })
                 })
                 .collect();
-            if keys.is_empty() {
+            if keys.len() < 2 {
+                window.push_notification("The point was lost straight away. Try a spot with more contrast that stays in view.", cx);
                 return;
             }
             let count = keys.len();
             if let Some(transform) = this.state.project.composition_mut(comp).and_then(|composition| composition.layer_mut(target)).and_then(|layer| layer.transform.as_mut()) {
                 transform.position = Animated::keyframed(keys);
             }
-            window.push_notification(format!("Tracked {count} frames. The layer now follows the point.").as_str(), cx);
+            let message = if tracked.lost_before.is_some() || tracked.lost_after.is_some() {
+                format!("Tracked {count} frames. The point was lost after that (hidden or out of frame), so the layer only follows it while it was found.")
+            } else {
+                format!("Tracked {count} frames. The layer now follows the point.")
+            };
+            window.push_notification(message.as_str(), cx);
         },
         window,
         cx,
     );
+}
+
+/// Stabilize: measures how the camera moves through footage layer `layer` in the background,
+/// then steadies the layer against it (see `studio_core::stabilize`) in one undo step.
+pub fn stabilize(workspace: &mut Workspace, layer: Id, window: &mut Window, cx: &mut Context<Workspace>) {
+    let state = &workspace.state;
+    let composition = state.composition();
+    let Some(found) = composition.layer(layer) else { return };
+    let LayerContent::Footage { item } = found.content else { return };
+    let Some((path, rate)) = state.project.item(item).and_then(|item| item.path.clone().zip(item.frame_rate)) else {
+        window.push_notification("Stabilize needs the clip's video file, and it can't be found.", cx);
+        return;
+    };
+    // The source frames the layer shows (at any speed or direction), first to last.
+    let comp_rate = composition.frame_rate;
+    let shown: Vec<i64> = (found.in_frame..found.out_frame).map(|frame| found.source_frame(frame, comp_rate, rate).max(0)).collect();
+    let (Some(&from), Some(&to)) = (shown.iter().min(), shown.iter().max()) else { return };
+    if to <= from {
+        window.push_notification("The clip needs at least two frames to steady.", cx);
+        return;
+    }
+    let (comp, width) = (state.active_comp, found.size.x);
+    run(
+        workspace,
+        "Stabilizing",
+        move |progress, cancelled| studio_media::measure_motion(&path, from, to + 1, progress, cancelled).map_err(|error| error.to_string()),
+        move |this, analysis, window, cx| {
+            // Measured on smaller frames: scaled up to the layer's own pixels. Frames whose
+            // motion couldn't be measured (a cut, a blank frame) count as holding still.
+            let scale = width / analysis.width.max(1) as f32;
+            let unmeasured = analysis.steps.iter().filter(|step| step.is_none()).count();
+            let steps = analysis
+                .steps
+                .iter()
+                .map(|step| step.map_or_else(Default::default, |motion| studio_core::stabilize::CameraStep { shift: motion.shift * scale, degrees: motion.rotation.to_degrees() }))
+                .collect();
+            let motion = studio_core::stabilize::MeasuredMotion { first_frame: analysis.first_frame, steps };
+            let message = match this.state.stabilize_layer(comp, layer, motion, studio_core::stabilize::DEFAULT_SMOOTHNESS) {
+                Ok(fit) => stabilized_message(fit, unmeasured),
+                Err(error) => error.to_string(),
+            };
+            window.push_notification(message.as_str(), cx);
+        },
+        window,
+        cx,
+    );
+}
+
+/// What to tell the user after stabilizing: how much the clip was enlarged, whether any edges
+/// still show, and how many frames couldn't be measured.
+pub fn stabilized_message(fit: studio_core::stabilize::Stabilized, unmeasured: usize) -> String {
+    let mut message = if fit.zoom > 1.0 {
+        format!("Stabilized. The clip is enlarged to {:.0}% to keep its edges out of view.", fit.zoom * 100.0)
+    } else {
+        "Stabilized.".to_owned()
+    };
+    if fit.edges_show {
+        message.push_str(" The shake is too strong to hide every edge; try a lower smoothness.");
+    }
+    if unmeasured > 0 {
+        message.push_str(&format!(" {unmeasured} frames couldn't be measured and are held still."));
+    }
+    message
 }
 
 /// Samples taken each second when following the subject for Auto Reframe.

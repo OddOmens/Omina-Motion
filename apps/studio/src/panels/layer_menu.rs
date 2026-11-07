@@ -1,9 +1,9 @@
 //! A layer's right-click menu, the same in the timeline (on a clip) and in the viewer (on the
 //! picture): rename, duplicate, pre-compose or ungroup, morph one shape into another or turn
-//! it into a path, flip, reset the transform, paste attributes, split (at the playhead, or a
-//! video at its scene cuts), freeze a frame, delete, close gaps and export (a caption layer also
-//! as subtitles). It acts on the layer right-clicked, or on the whole selection when that layer
-//! is part of it, as in After Effects. The menu reads the editor when it opens, so what
+//! it into a path, flip, reset the transform, stabilize a video, paste attributes, split (at the
+//! playhead, or a video at its scene cuts), freeze a frame, delete, close gaps and export (a
+//! caption layer also as subtitles). It acts on the layer right-clicked, or on the whole selection
+//! when that layer is part of it, as in After Effects. The menu reads the editor when it opens, so what
 //! it offers matches the layers it will act on.
 
 use gpui_kit::component::WindowExt as _;
@@ -71,12 +71,16 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         let has_picture = single.and_then(|layer| workspace.state.composition().layer(layer)).is_some_and(|layer| layer.content.has_picture());
         let busy = workspace.ui.export_job.is_some();
         // A video clip at normal speed can be split at its scene cuts, when no other analysis runs.
-        let video_clip = single.and_then(|layer| workspace.state.composition().layer(layer)).filter(|layer| matches!(layer.content, studio_core::model::LayerContent::Footage { .. }));
+        let video_clip = single.and_then(|layer| workspace.state.composition().layer(layer)).filter(|layer| matches!(layer.content, studio_core::model::LayerContent::Footage { .. }) && layer.time.hold.is_none());
         let can_find_cuts = video_clip.is_some_and(|layer| layer.time.is_normal()) && workspace.ui.analysis_job.is_none();
         let is_captions = single.and_then(|layer| workspace.state.composition().layer(layer)).is_some_and(|layer| matches!(layer.content, studio_core::model::LayerContent::Captions { .. }));
         let depended_on = single.is_some_and(|layer| studio_core::bake::is_depended_on(&workspace.state.project, workspace.state.active_comp, layer));
         let some = !layers.is_empty();
         let can_freeze = single.is_some_and(|layer| workspace.state.can_freeze_at_playhead(layer));
+        // Stabilize is for one video layer; once on, the menu offers to take it off instead.
+        let footage = single.and_then(|layer| workspace.state.composition().layer(layer)).filter(|layer| matches!(layer.content, studio_core::model::LayerContent::Footage { .. }));
+        let stabilized = footage.is_some_and(|layer| layer.stabilization.is_some());
+        let analysing = workspace.ui.analysis_job.is_some();
         // Morph To works on two shapes, the first morphing into the second (see `panels::morph`).
         let can_morph = layers.len() == 2 && studio_core::morph::can_morph(workspace.state.composition(), layers[0], layers[1]).is_ok();
         let is_box_shape = single.and_then(|layer| workspace.state.composition().layer(layer)).is_some_and(|layer| {
@@ -122,6 +126,19 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
                 this.state.flip_selection(false);
             }))
             .item(item("Reset Transform", &layers, some, &weak, |this, _, _| this.state.reset_selection_transform()))
+            .item(if stabilized {
+                item("Remove Stabilization", &layers, true, &weak, |this, _, _| {
+                    if let Some(&layer) = this.state.selected_layers.first() {
+                        this.state.remove_stabilization(layer);
+                    }
+                })
+            } else {
+                item("Stabilize", &layers, footage.is_some() && !analysing, &weak, |this, window, cx| {
+                    if let Some(&layer) = this.state.selected_layers.first() {
+                        super::analysis::stabilize(this, layer, window, cx);
+                    }
+                })
+            })
             .separator()
             .item(item("Split at Playhead", &layers, some, &weak, |this, window, cx| this.split_layer(window, cx)))
             .item(item("Insert Freeze Frame", &layers, can_freeze, &weak, |this, _, _| {

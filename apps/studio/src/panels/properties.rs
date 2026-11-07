@@ -7,7 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{Disableable as _, Icon, Sizable as _};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, WindowExt as _};
 use gpui_kit::{
     AnyElement, App, Context, Div, ElementId, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px,
@@ -320,6 +320,46 @@ fn track_section(layer: &Layer, workspace: &Workspace) -> Div {
     div().child(if picking { status_line("Click the point to follow in the viewer.") } else { add_note() })
 }
 
+/// Whether a layer can be stabilized: video with a transform.
+fn stabilizable(layer: &Layer) -> bool {
+    // A freeze frame holds one picture, so it has no shake to steady.
+    layer.transform.is_some() && matches!(layer.content, LayerContent::Footage { .. }) && layer.time.hold.is_none()
+}
+
+/// Stabilize: how smooth the steadied camera is and how much the clip was enlarged. Until the
+/// clip is stabilized the heading's + starts it.
+fn stabilize_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    let Some(stabilization) = layer.stabilization.as_ref() else {
+        let note = if workspace.ui.analysis_job.is_some() { status_line("Another analysis is running.") } else { add_note() };
+        return div().child(note);
+    };
+    let enlarged = if stabilization.zoom > 1.0 { format!("Enlarged to {:.0}% to hide the moving edges.", stabilization.zoom * 100.0) } else { "Steady without enlarging.".to_owned() };
+    div().child(labeled_row("Smoothness", smoothness_menu(layer.id, stabilization.smoothness, cx))).child(status_line(enlarged))
+}
+
+/// The Smoothness menu of a stabilized clip: choosing one steadies it again from the motion
+/// already measured, which is instant.
+fn smoothness_menu(id: Id, current: f32, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let target = cx.weak_entity();
+    Button::new("stabilize-smoothness").outline().small().label(format!("{current:.0}%")).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+        studio_core::stabilize::SMOOTHNESS_CHOICES.into_iter().fold(menu, |menu, smoothness| {
+            let target = target.clone();
+            menu.item(PopupMenuItem::new(format!("{smoothness:.0}%")).checked(smoothness == current).on_click(move |_, window, cx: &mut App| {
+                target
+                    .update(cx, |this, cx| {
+                        match this.state.set_stabilize_smoothness(id, smoothness) {
+                            Ok(Some(fit)) if fit.edges_show => window.push_notification(super::analysis::stabilized_message(fit, 0).as_str(), cx),
+                            Ok(_) => {}
+                            Err(error) => window.push_notification(error.to_string().as_str(), cx),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+            }))
+        })
+    })
+}
+
 /// The Auto Reframe menu: one shape per item; choosing one starts the job.
 fn reframe_menu(id: Id, cx: &mut Context<Workspace>) -> impl IntoElement {
     let target = cx.weak_entity();
@@ -576,6 +616,7 @@ const TRANSFORM_INFO: &str = "Where the layer sits, its size, turn and opacity. 
 const SPEED_INFO: &str = "A steady speed changes the clip's length; a ramp keeps it. Sound is silent while a clip ramps or plays backwards.";
 const REFRAME_INFO: &str = "Makes a new composition in another shape, moving the clip to keep its subject in frame. Remove Background clicks pick the subject; otherwise it follows the middle.";
 const TRACK_INFO: &str = "Pins this layer to something moving in a video: its position follows the point you click.";
+const STABILIZE_INFO: &str = "Steadies shaky footage: measures how the camera moves, smooths that path and moves the clip against the shake, enlarging it just enough to hide the edges.";
 const CUTOUT_INFO: &str = "Pick a subject to cut it out of its background, or an object to take it out of the shot. Click what to keep, Option-click what to leave out.";
 const ENHANCE_INFO: &str = "Removes background noise and hum, then EQs, de-esses and evens out the voice to podcast loudness. Runs on this Mac; the original file is untouched.";
 
@@ -608,6 +649,25 @@ fn track_add(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) 
     let (icon, tip) = if picking { (IconName::X, "Cancel") } else { (IconName::Plus, "Track Motion") };
     heading_button("track-motion-add", icon, tip, picking, cx.listener(move |this, _, _, cx| {
         this.ui.track_pick = if this.ui.track_pick == Some(id) { None } else { Some(id) };
+        cx.notify();
+    }))
+    .disabled(workspace.ui.analysis_job.is_some())
+    .into_any_element()
+}
+
+/// The Stabilize heading's button: + measures the clip's motion and steadies it, and once it
+/// is stabilized the trash puts the layer back as it was.
+fn stabilize_button(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let id = layer.id;
+    if layer.stabilization.is_some() {
+        return heading_button("stabilize-remove", IconName::Trash, "Remove Stabilization", false, cx.listener(move |this, _, _, cx| {
+            this.state.remove_stabilization(id);
+            cx.notify();
+        }))
+        .into_any_element();
+    }
+    heading_button("stabilize-add", IconName::Plus, "Stabilize", false, cx.listener(move |this, _, window, cx| {
+        super::analysis::stabilize(this, id, window, cx);
         cx.notify();
     }))
     .disabled(workspace.ui.analysis_job.is_some())
@@ -1045,6 +1105,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .child(transform)
         .children(text)
         .children((studio_core::speed::has_speed(&layer.content) && layer.time.hold.is_none()).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
+        .children(stabilizable(layer).then(|| fold("stabilize", "Stabilize", Some(STABILIZE_INFO), [None, Some(stabilize_button(layer, workspace, cx))], workspace, cx, |cx| stabilize_section(layer, workspace, cx))))
         .children(trackable(layer).then(|| fold("track", "Track Motion", Some(TRACK_INFO), [None, Some(track_add(layer, workspace, cx))], workspace, cx, |_| track_section(layer, workspace))))
         .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", Some(CUTOUT_INFO), [None, Some(cutout_button(layer, workspace, cx))], workspace, cx, |cx| cutout_section(layer, workspace, cx))))
         .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, [None, None], workspace, cx, |cx| audio_section(layer, workspace, cx))))
@@ -1097,6 +1158,7 @@ fn section_icon(key: &str) -> IconName {
         "easing" => IconName::Spline,
         "speed" => IconName::Hourglass,
         "track" => IconName::Crosshair,
+        "stabilize" => IconName::Scan,
         "cutout" => IconName::Eraser,
         "audio" => IconName::Volume2,
         "enhance" => IconName::AudioLines,

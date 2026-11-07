@@ -56,6 +56,7 @@ fn layer(id: u64, name: &str, label: LabelColor, content: LayerContent, size: Ve
         time: Default::default(),
         animation: Default::default(),
         morph: None,
+        stabilization: None,
     }
 }
 

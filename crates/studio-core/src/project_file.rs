@@ -283,6 +283,12 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             {
                 return damaged(&format!("shape layer \"{}\" has a broken morph", layer.name));
             }
+            // Stabilizing is for video, with usable settings.
+            if let Some(stabilization) = &layer.stabilization
+                && (!matches!(layer.content, crate::model::LayerContent::Footage { .. }) || !stabilization.is_sound())
+            {
+                return damaged(&format!("layer \"{}\" has damaged stabilization", layer.name));
+            }
             // Background removal is for pictures, with a sane number of clicks on the picture.
             if let Some(cutout) = &layer.cutout
                 && (!crate::cutout::can_cut_out(layer)

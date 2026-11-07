@@ -2,7 +2,8 @@
 //! server that decodes on background threads so playback and scrubbing never wait
 //! on the decoder. It implements `studio_core::media::VideoSource` for the renderer.
 //! It also decodes and mixes audio, plays it through the sound card, and writes movie files,
-//! and makes the timeline's filmstrip thumbnails and waveforms in the background.
+//! makes the timeline's filmstrip thumbnails and waveforms in the background, and tracks
+//! motion in clips (`motion.rs`, `track.rs`).
 
 mod audio;
 mod beats;
@@ -12,6 +13,7 @@ mod encode;
 mod exact;
 mod hardware;
 mod mixer;
+mod motion;
 mod peaks;
 mod player;
 mod proxy;
@@ -33,4 +35,5 @@ pub use proxy::{PROXY_WIDTH, ProxyManager, ProxyStatus, build_proxy, cache_size,
 pub use peaks::{PeakCache, Peaks, audio_peaks};
 pub use server::FrameServer;
 pub use thumbnails::Thumbnailer;
-pub use track::track_point;
+pub use motion::{FrameMotion, GrayFrame, PatchTemplate, PointFollower, PointTracker, Pyramid, TrackSettings, find_patch, global_motion};
+pub use track::{MotionAnalysis, TrackedPoint, measure_motion, track_point};

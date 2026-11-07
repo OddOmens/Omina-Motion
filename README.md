@@ -150,15 +150,24 @@ Inside `apps/studio/src`:
   text styles, linked wherever they are used; the model and syncing are in `studio-core/src/library.rs`).
   They are stored in Studio's settings folder as `libraries.json`, with backups in `Library Backups`.
 - `panels/analysis.rs`: background jobs that study a clip first: Remove Silences (`studio-core/src/silence.rs`),
-  Mark Beats (`studio-media/src/beats.rs`; markers snap), Track Motion (`studio-media/src/track.rs`) and Auto
-  Reframe (follows the subject with the background-removal model). Split at Scene Cuts and Mark Scene Cuts (a
-  video clip's right-click menu, at normal speed) find the hard cuts in the part of the video the clip shows
+  Mark Beats (`studio-media/src/beats.rs`; markers snap), Track Motion, Stabilize and Auto Reframe (follows the
+  subject with the background-removal model). Split at Scene Cuts and Mark Scene Cuts (a video clip's
+  right-click menu, at normal speed) find the hard cuts in the part of the video the clip shows
   (`studio-media/src/scenes.rs`: per-quarter color histograms compared frame to frame, a cut being a change
   several times the usual change around it, so pans, shaky cameras and fades don't count), then split the
-  clip into its shots in one undo step or put a "Scene" marker at each. Speed, reverse, ramps and freeze frames
-  (Insert Freeze Frame, a clip's right-click menu) are in `studio-core/src/speed.rs`; Speed is also a
-  keyframeable property (`PropertyPath::Speed`), which remaps time; the mixer plays sped-up sound, ducks music
-  under a voice, and gates noise.
+  clip into its shots in one undo step or put a "Scene" marker at each.
+- Tracking: `studio-media/src/motion.rs` is the engine, on gray frames in memory: a patch is found in the next
+  frame by normalized cross-correlation, searched coarse to fine over a pyramid of smaller copies and refined
+  to a fraction of a pixel; the match score is a confidence, so a point that vanishes is reported lost instead
+  of drifting. A grid of patches with medians gives the whole frame's shift and turn. `track.rs` runs both on
+  clips. Track Motion (a graphic's Properties: + then click the video) keyframes the layer to follow the point
+  where it was found. Stabilize (a video's Properties or right-click menu; `studio-core/src/stabilize.rs`)
+  smooths the measured camera path (Smoothness, 10–100%), keyframes position and, if the camera turned,
+  rotation against the shake, and enlarges the clip just enough to hide the edges; the transform from before
+  is kept on the layer, so Remove Stabilization (the card's trash) puts it back exactly.
+- Speed, reverse, ramps and freeze frames (Insert Freeze Frame, a clip's right-click menu) are in
+  `studio-core/src/speed.rs`; Speed is also a keyframeable property (`PropertyPath::Speed`), which remaps time;
+  the mixer plays sped-up sound, ducks music under a voice, and gates noise.
 - Sound in nested compositions (`studio-core/src/audio.rs`, `composition_audio`): the sound inside a nested
   composition plays where its layer starts, heard only while that layer shows, at any depth. The composition
   layer's audio switch, solo, volume, fades, ducking and noise gate apply to everything inside it (its Audio

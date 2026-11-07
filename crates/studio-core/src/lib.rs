@@ -41,6 +41,7 @@ pub mod text_animation;
 pub mod snap;
 pub mod speed;
 pub mod subtitles;
+pub mod stabilize;
 pub mod time;
 pub mod tracks;
 pub mod transform;
