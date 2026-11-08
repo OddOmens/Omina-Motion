@@ -21,6 +21,7 @@ mod keyframes;
 mod layer_time;
 mod library;
 mod morph;
+mod nodes;
 mod snap;
 mod stabilize;
 mod viewer;

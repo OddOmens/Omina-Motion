@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use studio_core::animation::Vec2;
+use studio_core::effect_graph;
 use studio_core::media::{VideoFrame, VideoSource};
 use studio_core::model::{Id, Layer, LayerContent, LutSource, Paint, Project, Rgba, ShapeKind, ShapeStyle, TextStyle};
 use studio_core::transform::{Affine, world_transform};
@@ -29,6 +30,10 @@ const PATH_CACHE_LIMIT: usize = 32;
 const MASK_PASS: u32 = 60;
 /// The effect shader pass that mixes one more moment into a motion-blurred layer's average.
 const MOTION_BLUR_PASS: u32 = 84;
+/// Finishes an object matte's edge: moves it in or out and hardens it (see `effect.wgsl`).
+const MATTE_EDGE_PASS: u32 = 85;
+/// How far Shift Edge at 100% moves a hard edge, in output pixels before the layer's scale.
+const SHIFT_EDGE_REACH: f32 = 6.0;
 
 #[derive(Debug)]
 pub struct RenderError(pub String);
@@ -779,48 +784,169 @@ impl Renderer {
         self.effect_pass(encoder, targets, 1, &[sigma, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, spare, spare, to);
     }
 
-    /// Runs `layer`'s enabled effects on the image in slot `image`, ping-ponging with `other`
-    /// and using the aux slots as scratch. Returns the slot that holds the result.
+    /// Runs one pass of `effect` from slot `from` into `to`, using the aux slots as scratch
+    /// (and `to` itself between a glow's or shadow's steps). Returns false when the pass draws
+    /// nothing, such as a LUT not chosen yet; `to` is then left as it was.
     #[allow(clippy::too_many_arguments)]
-    fn apply_effects(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, layer: &Layer, frame: f64, time: f32, scale: f32, mut image: usize, mut other: usize) -> usize {
+    fn run_pass(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, effect: &studio_core::model::Effect, pass: Pass, time: f32, from: usize, to: usize) -> bool {
+        match pass {
+            Pass::Shader { id, params } => self.effect_pass(encoder, targets, id, &params, time, from, from, to),
+            Pass::Blur { sigma } => self.blur(encoder, targets, sigma, from, slot::AUX_A, to),
+            Pass::Glow { threshold, sigma, intensity } => {
+                self.effect_pass(encoder, targets, 30, &[threshold, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, from, from, slot::AUX_A);
+                self.blur(encoder, targets, sigma, slot::AUX_A, to, slot::AUX_B);
+                self.effect_pass(encoder, targets, 31, &[intensity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, from, slot::AUX_B, to);
+            }
+            Pass::Lut { intensity } => {
+                let loaded = effect.lut.as_ref().and_then(|source| self.luts.get(source)).and_then(|(_, lut)| lut.as_ref());
+                let Some(lut) = loaded.filter(|_| intensity > 0.0) else { return false };
+                self.lut_pass(encoder, targets, lut, intensity, from, to);
+            }
+            Pass::Shadow { offset, opacity, sigma } => {
+                self.effect_pass(encoder, targets, 32, &[offset[0], offset[1], opacity, 0.0, 0.0, 0.0, 0.0, 0.0], time, from, from, slot::AUX_A);
+                self.blur(encoder, targets, sigma, slot::AUX_A, to, slot::AUX_B);
+                self.effect_pass(encoder, targets, 33, &[0.0; 8], time, from, slot::AUX_B, to);
+            }
+        }
+        true
+    }
+
+    /// Runs `layer`'s effects on the image in slot `image`, ping-ponging with `other` and using
+    /// the aux slots as scratch. Returns the slot that holds the result. A layer edited as
+    /// nodes runs its graph instead (see `apply_graph`); `world` places its object matte.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_effects(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, layer: &Layer, world: Affine, frame: f64, time: f32, scale: f32, mut image: usize, mut other: usize) -> usize {
         if !layer.switches.effects_enabled {
             return image;
+        }
+        if layer.effect_graph.wired {
+            return self.apply_graph(encoder, targets, layer, world, frame, time, scale, image, other);
         }
         for effect in layer.effects.iter().filter(|effect| effect.enabled) {
             let Some(passes) = effects::passes(effect, frame, scale) else { continue };
             for pass in passes {
-                match pass {
-                    Pass::Shader { id, params } => {
-                        self.effect_pass(encoder, targets, id, &params, time, image, image, other);
-                        std::mem::swap(&mut image, &mut other);
-                    }
-                    Pass::Blur { sigma } => {
-                        self.blur(encoder, targets, sigma, image, slot::AUX_A, other);
-                        std::mem::swap(&mut image, &mut other);
-                    }
-                    Pass::Glow { threshold, sigma, intensity } => {
-                        self.effect_pass(encoder, targets, 30, &[threshold, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, image, slot::AUX_A);
-                        self.blur(encoder, targets, sigma, slot::AUX_A, other, slot::AUX_B);
-                        self.effect_pass(encoder, targets, 31, &[intensity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, slot::AUX_B, other);
-                        std::mem::swap(&mut image, &mut other);
-                    }
-                    Pass::Lut { intensity } => {
-                        let loaded = effect.lut.as_ref().and_then(|source| self.luts.get(source)).and_then(|(_, lut)| lut.as_ref());
-                        if let Some(lut) = loaded.filter(|_| intensity > 0.0) {
-                            self.lut_pass(encoder, targets, lut, intensity, image, other);
-                            std::mem::swap(&mut image, &mut other);
-                        }
-                    }
-                    Pass::Shadow { offset, opacity, sigma } => {
-                        self.effect_pass(encoder, targets, 32, &[offset[0], offset[1], opacity, 0.0, 0.0, 0.0, 0.0, 0.0], time, image, image, slot::AUX_A);
-                        self.blur(encoder, targets, sigma, slot::AUX_A, other, slot::AUX_B);
-                        self.effect_pass(encoder, targets, 33, &[0.0; 8], time, image, slot::AUX_B, other);
-                        std::mem::swap(&mut image, &mut other);
-                    }
+                if self.run_pass(encoder, targets, effect, pass, time, image, other) {
+                    std::mem::swap(&mut image, &mut other);
                 }
             }
         }
         image
+    }
+
+    /// Runs a layer's node graph (see `studio_core::effect_graph::plan`) on the picture in slot
+    /// `image`. Its registers live in the graph slots after the fixed ones (made beforehand by
+    /// `ensure_graph_slots`); `other` is free meanwhile and receives the result. Returns the slot
+    /// holding what the layer shows: transparent when nothing feeds the Output, and the
+    /// unchanged picture for a graph with a loop in it.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_graph(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, layer: &Layer, world: Affine, frame: f64, time: f32, scale: f32, image: usize, other: usize) -> usize {
+        let Some(plan) = effect_graph::plan(layer) else { return image };
+        if targets.work.len() < slot::COUNT + plan.registers.saturating_sub(1) {
+            return image; // Not expected: slots are made for every plan before drawing.
+        }
+        let register = |r: effect_graph::Register| if r == 0 { image } else { slot::COUNT + r - 1 };
+        for step in &plan.steps {
+            match *step {
+                effect_graph::Step::Clear { out } => self.clear(encoder, &targets.work[register(out)].view, [0.0; 4]),
+                effect_graph::Step::Matte { out } => self.draw_matte(encoder, targets, layer, world, scale, register(out)),
+                effect_graph::Step::Effect { effect, input, mask, scratch, out } => {
+                    let effect = &layer.effects[effect];
+                    let target = register(scratch.unwrap_or(out));
+                    // Steps after the first ping-pong between the target and `other`.
+                    let mut current = register(input);
+                    for pass in effects::passes(effect, frame, scale).unwrap_or_default() {
+                        let next = if current == target { other } else { target };
+                        if self.run_pass(encoder, targets, effect, pass, time, current, next) {
+                            current = next;
+                        }
+                    }
+                    if current != target {
+                        self.effect_pass(encoder, targets, 0, &[0.0; 8], time, current, current, target);
+                    }
+                    if let (Some(mask), Some(scratch)) = (mask, scratch) {
+                        // The effect's result where the mask covers, the input elsewhere.
+                        self.composite(encoder, targets, register(input), register(scratch), Some(register(mask)), [0, 1, 1], 1.0, register(out));
+                    }
+                }
+                effect_graph::Step::Merge { background, foreground, mask, blend, opacity, out } => {
+                    let matte_mode = if mask.is_some() { 1 } else { 0 };
+                    self.composite(encoder, targets, register(background), register(foreground), mask.map(register), [blend as u32, matte_mode, 0], opacity, register(out));
+                }
+            }
+        }
+        match plan.output {
+            Some(0) => image,
+            Some(result) => {
+                self.effect_pass(encoder, targets, 0, &[0.0; 8], time, register(result), register(result), other);
+                other
+            }
+            None => {
+                self.clear(encoder, &targets.work[other].view, [0.0; 4]);
+                other
+            }
+        }
+    }
+
+    /// Draws `layer`'s object matte into slot `to`, stretched over the layer's box and with its
+    /// edge finished: white where the object is, transparent elsewhere (and everywhere while no
+    /// matte has been made). Uses the aux slots as scratch.
+    fn draw_matte(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, layer: &Layer, world: Affine, scale: f32, to: usize) {
+        let (Some((_, mask)), Some(cutout)) = (self.cutouts.get(&layer.id), layer.cutout.as_ref()) else {
+            self.clear(encoder, &targets.work[to].view, [0.0; 4]);
+            return;
+        };
+        let fit = Vec2::new(layer.size.x / mask.size.x.max(1.0), layer.size.y / mask.size.y.max(1.0));
+        self.draw_source(encoder, targets, to, Affine::scale(fit).then(world), scale, &Source::Texture(&mask.view), (Vec2::default(), mask.size));
+        self.finish_matte_edge(encoder, targets, &cutout.edges, world, scale, to);
+    }
+
+    /// Feathers, shifts and hardens the matte in `slot` (white with its coverage as alpha) by
+    /// `edges`, in place, using the aux slots as scratch. Settings at their defaults do nothing.
+    fn finish_matte_edge(&self, encoder: &mut wgpu::CommandEncoder, targets: &Targets, edges: &studio_core::model::MatteEdges, world: Affine, scale: f32, slot: usize) {
+        let (contrast, shift) = (edges.contrast / 100.0, edges.shift_edge / 100.0);
+        if edges.feather <= 0.0 && contrast <= 0.0 && shift == 0.0 {
+            return;
+        }
+        // Source pixels to output pixels: the layer's own scale (its x axis) times the output's.
+        let layer_scale = world.apply_vector(Vec2::new(1.0, 0.0)).length().max(0.01);
+        let feather = edges.feather * layer_scale * scale;
+        let reach = shift.abs() * SHIFT_EDGE_REACH * scale.max(0.25);
+        // A hard edge must be softened before it can be moved: the blur spreads it over the
+        // distance it moves, and the edge pass then puts it at the new place.
+        let sigma = (feather + reach) * 0.5;
+        if sigma > 0.01 {
+            self.blur(encoder, targets, sigma, slot, slot::AUX_A, slot::AUX_B);
+        } else {
+            self.effect_pass(encoder, targets, 0, &[0.0; 8], 0.0, slot, slot, slot::AUX_B);
+        }
+        // Shifting out (positive) lowers the level the edge sits at, so more of the soft edge counts.
+        let center = 0.5 - shift * 0.45;
+        let width = 1.0 - contrast * 0.98;
+        self.effect_pass(encoder, targets, MATTE_EDGE_PASS, &[center, width, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, slot::AUX_B, slot::AUX_B, slot);
+    }
+
+    /// Makes sure the work textures at `index` include enough graph slots for every node graph
+    /// in `composition`, adding full-size textures as needed (they are kept for later frames).
+    fn ensure_graph_slots(&mut self, index: usize, composition: &studio_core::model::Composition) {
+        let needed = composition.layers.iter().filter_map(effect_graph::plan).map(|plan| plan.registers.saturating_sub(1)).max().unwrap_or(0);
+        let (width, height, have) = {
+            let targets = &self.targets[index];
+            (targets.width, targets.height, targets.work.len())
+        };
+        for _ in have..slot::COUNT + needed {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("graph"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: WORK_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            self.targets[index].work.push(Target { texture, view });
+        }
     }
 
     /// Composites `layer_slot` over the backdrop in `from`, writing `to`.
@@ -855,7 +981,7 @@ impl Renderer {
         if shaper.is_active_at(frame.frame) {
             self.draw_layer(encoder, targets, frame.project, shaper, world, frame.scale, frame.text_keys, slot::MATTE_A);
         }
-        let drawn = self.apply_effects(encoder, targets, shaper, frame.at, frame.time, frame.scale, slot::MATTE_A, slot::MATTE_B);
+        let drawn = self.apply_effects(encoder, targets, shaper, world, frame.at, frame.time, frame.scale, slot::MATTE_A, slot::MATTE_B);
         Some(self.fade_matte(encoder, targets, drawn, opacity_at(shaper, frame.at)))
     }
 
@@ -1286,6 +1412,7 @@ impl Renderer {
         self.luts.retain(|source, _| luts_used.contains(source));
 
         let index = self.ensure_targets(width, height);
+        self.ensure_graph_slots(index, composition);
         let targets = &self.targets[index];
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         let (mut accum, mut spare) = (slot::ACCUM_A, slot::ACCUM_B);
@@ -1316,8 +1443,8 @@ impl Renderer {
             let Some(world) = world_transform(composition, layer.id, at) else { continue };
             let opacity = opacity_at(layer, at);
 
-            let has_effects = layer.switches.effects_enabled && layer.effects.iter().any(|effect| effect.enabled);
-            let cut_out = layer.cutout.is_some() && self.cutouts.contains_key(&layer.id);
+            let has_effects = layer.switches.effects_enabled && (layer.effect_graph.wired || layer.effects.iter().any(|effect| effect.enabled));
+            let cut_out = layer.cutout.is_some() && self.cutouts.contains_key(&layer.id) && !effect_graph::uses_matte(layer);
             // A layer moving while the shutter is open is drawn several times and averaged, so
             // it can't join a batch; a still one (or one with its switch off) is drawn as usual.
             let shutter = studio_core::motion_blur::shutter_transforms(composition, layer, at);
@@ -1341,7 +1468,7 @@ impl Renderer {
             if matches!(layer.content, LayerContent::Adjustment) {
                 // Effects run on a copy of everything below, then blend back in where the layer covers.
                 self.effect_pass(&mut encoder, targets, 0, &[0.0; 8], time, accum, accum, slot::LAYER_A);
-                let adjusted = self.apply_effects(&mut encoder, targets, layer, at, time, scale, slot::LAYER_A, slot::LAYER_B);
+                let adjusted = self.apply_effects(&mut encoder, targets, layer, world, at, time, scale, slot::LAYER_A, slot::LAYER_B);
                 let coverage = self.adjustment_coverage(&mut encoder, targets, &shapers, index, layer, world, adjusted);
                 self.composite(&mut encoder, targets, accum, adjusted, Some(coverage), [0, 0, 1], opacity, spare);
                 std::mem::swap(&mut accum, &mut spare);
@@ -1353,18 +1480,19 @@ impl Renderer {
                 None => self.draw_layer(&mut encoder, targets, project, layer, world, scale, &text_keys, slot::LAYER_A),
             }
             // Background removal comes first, so effects (a glow, a shadow) follow the cut-out.
-            let (drawn, spare_layer) = match (self.cutouts.get(&layer.id), layer.cutout.as_ref()) {
-                (Some((_, mask)), Some(cutout)) => {
+            // A node graph that uses the object matte itself gets the whole picture instead.
+            let cutout = layer.cutout.as_ref().filter(|_| !effect_graph::uses_matte(layer));
+            let (drawn, spare_layer) = match (self.cutouts.get(&layer.id), cutout) {
+                (Some(_), Some(cutout)) => {
                     // The mask covers the whole picture, so it is stretched over the layer's box.
-                    let fit = Vec2::new(layer.size.x / mask.size.x.max(1.0), layer.size.y / mask.size.y.max(1.0));
-                    self.draw_source(&mut encoder, targets, slot::MATTE_A, Affine::scale(fit).then(world), scale, &Source::Texture(&mask.view), (Vec2::default(), mask.size));
+                    self.draw_matte(&mut encoder, targets, layer, world, scale, slot::MATTE_A);
                     let remove = if cutout.remove { 1.0 } else { 0.0 };
                     self.effect_pass(&mut encoder, targets, MASK_PASS, &[remove, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, slot::LAYER_A, slot::MATTE_A, slot::LAYER_B);
                     (slot::LAYER_B, slot::LAYER_A)
                 }
                 _ => (slot::LAYER_A, slot::LAYER_B),
             };
-            let mut image = self.apply_effects(&mut encoder, targets, layer, at, time, scale, drawn, spare_layer);
+            let mut image = self.apply_effects(&mut encoder, targets, layer, world, at, time, scale, drawn, spare_layer);
 
             // A mask layer keeps the image only inside (or only outside) what the mask draws.
             if let Some((drawn, hide)) = self.draw_mask(&mut encoder, targets, &shapers, layer) {

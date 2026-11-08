@@ -12,7 +12,7 @@ use gpui_kit::{AnyElement, Context, ElementId, IntoElement, ParentElement, Style
 use studio_core::model::{Id, Layer};
 use studio_core::property::PropertyPath;
 
-use super::chrome::{CardHeading, card, card_list, hint, list_row};
+use super::chrome::{CardHeading, card, card_list, hint, icon_button, list_row};
 use super::fields::property_row;
 use crate::theme::{color, hsla, size};
 use crate::workspace::Workspace;
@@ -24,7 +24,7 @@ fn effect_key(layer: &Layer, effect: Id) -> String {
 }
 
 /// The icon an effect's card shows, after its category in the Effects panel.
-fn category_icon(effect: &str) -> IconName {
+pub(super) fn category_icon(effect: &str) -> IconName {
     match studio_core::effects::category_of(effect).map(|category| category.name) {
         Some("Blur & Sharpen") => IconName::CircleDashed,
         Some("Transform") => IconName::Crop,
@@ -40,8 +40,9 @@ fn category_icon(effect: &str) -> IconName {
     }
 }
 
-/// The line at the top of the tab: which layer's effects these are, and the Add Effect menu.
-fn layer_line(layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoElement {
+/// The line at the top of the tab: which layer's effects these are, the button that opens
+/// them in the Nodes panel, and the Add Effect menu.
+fn layer_line(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let count = match layer.effects.len() {
         0 => "no effects".to_owned(),
         1 => "1 effect".to_owned(),
@@ -55,11 +56,15 @@ fn layer_line(layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoElement {
         .text_color(hsla(color::TEXT))
         .child(Icon::new(IconName::Layers).size(px(12.0)).text_color(hsla(color::MUTED)))
         .child(div().flex_1().min_w_0().truncate().child(format!("{} · {count}", layer.name)))
-        .child(add_effect_menu(layer, cx))
+        .child(icon_button("fx-open-nodes", IconName::Workflow, "Edit as Nodes: wire effects together in the Nodes panel", workspace.ui.nodes.open, cx.listener(|this, _, _, cx| {
+            this.ui.nodes.open = !this.ui.nodes.open;
+            cx.notify();
+        })))
+        .child(add_effect_menu("fx-add".into(), layer, cx))
 }
 
 /// The Add Effect menu: every effect the renderer draws that suits the layer, by category.
-fn add_effect_menu(layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoElement {
+fn add_effect_menu(id: ElementId, layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let layer_id = layer.id;
     let categories: Vec<(&'static str, Vec<&'static str>)> = studio_core::effects::CATEGORIES
         .iter()
@@ -68,7 +73,7 @@ fn add_effect_menu(layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoEleme
         .filter(|(_, effects)| !effects.is_empty())
         .collect();
     let weak = cx.weak_entity();
-    Button::new("fx-add").outline().small().icon(Icon::new(IconName::Plus)).tooltip("Add Effect (or drag one from the Effects panel onto a clip)").dropdown_menu(move |menu, _, _| {
+    Button::new(id).outline().small().icon(Icon::new(IconName::Plus)).tooltip("Add Effect (or drag one from the Effects panel onto a clip)").dropdown_menu(move |menu, _, _| {
         let mut menu = menu.scrollable(true).max_h(px(420.0));
         for (index, (category, effects)) in categories.iter().enumerate() {
             if index > 0 {
@@ -155,15 +160,18 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         return hint(message).into_any_element();
     };
     let layer_id = layer.id;
-    let mut list = card_list("effect-controls").child(layer_line(layer, cx));
+    let mut list = card_list("effect-controls").child(layer_line(layer, workspace, cx));
     if layer.effects.is_empty() {
         list = list.child(list_row().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("No effects yet. Press + to add one."));
     }
+    // The node picked in the Nodes panel is marked here and kept open.
+    let picked = workspace.ui.nodes.selected;
     for effect in &layer.effects {
         let effect_id = effect.id;
         let key = effect_key(layer, effect_id);
+        let is_picked = picked == Some(studio_core::effect_graph::NodeId::Effect(effect_id));
         // Effects start open; folding one records it.
-        let open = !workspace.state.expanded_rows.contains(&key);
+        let open = is_picked || !workspace.state.expanded_rows.contains(&key);
         let heading = CardHeading {
             id: ElementId::Name(format!("fx-twirl:{}", effect_id.0).into()),
             icon: Some(category_icon(&effect.name)),
@@ -174,10 +182,15 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             trailing: super::color_grade::effect_buttons(|part| format!("fx-{part}:{}", effect_id.0), layer_id, effect_id, effect.enabled, cx),
         };
         let body = open.then(|| effect_body(layer_id, effect, workspace, cx));
-        list = list.child(card(heading, cx.listener(move |this, _, _, cx| {
+        let card = card(heading, cx.listener(move |this, _, _, cx| {
             this.state.toggle_row(&key);
             cx.notify();
-        }), body));
+        }), body);
+        list = list.child(div().when(is_picked, |wrap| wrap.border_l_2().border_color(hsla(color::ACCENT))).child(card));
+    }
+    // Merge nodes exist only in the node graph; their settings show here too.
+    for merge in &layer.effect_graph.merges {
+        list = list.child(super::nodes::merge_card(layer_id, merge, picked == Some(studio_core::effect_graph::NodeId::Merge(merge.id)), workspace, cx));
     }
     list.into_any_element()
 }

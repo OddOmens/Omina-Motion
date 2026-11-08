@@ -477,7 +477,7 @@ fn ai_page(settings: &AppSettings, cx: &mut Context<Workspace>) -> impl IntoElem
                     .bg(hsla(color::PANEL))
                     .text_size(px(size::SMALL_TEXT))
                     .text_color(hsla(color::MUTED))
-                    .child("Captions use Whisper (about 150 MB), and Remove Background and Auto Reframe use MobileSAM (about 40 MB). Each is downloaded once from huggingface.co, and Studio asks first, the first time it's needed. Enhance Speech's models come built in."),
+                    .child("Captions use Whisper (about 150 MB), and Object Matte and Auto Reframe use MobileSAM (about 40 MB). Each is downloaded once from huggingface.co, and Studio asks first, the first time it's needed. Enhance Speech's models come built in."),
             )
     })
 }

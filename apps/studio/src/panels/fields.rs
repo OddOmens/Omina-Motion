@@ -39,6 +39,43 @@ pub enum FieldTarget {
     /// When the caption phrase made of words `first..end` starts (`start`) or ends, in
     /// seconds of the composition.
     CaptionPhrase { layer: Id, first: usize, end: usize, start: bool },
+    /// One of an object matte's edge settings.
+    MatteEdge { layer: Id, setting: MatteEdgeSetting },
+}
+
+/// An object matte edge setting a field edits (see `model::MatteEdges`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatteEdgeSetting {
+    Feather,
+    Contrast,
+    ShiftEdge,
+    ReduceChatter,
+    RefineDetail,
+}
+
+impl MatteEdgeSetting {
+    pub const ALL: [Self; 5] = [Self::Feather, Self::Contrast, Self::ShiftEdge, Self::ReduceChatter, Self::RefineDetail];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Feather => "Feather",
+            Self::Contrast => "Contrast",
+            Self::ShiftEdge => "Shift Edge",
+            Self::ReduceChatter => "Reduce Chatter",
+            Self::RefineDetail => "Refine Detail",
+        }
+    }
+
+    /// The setting's value in `edges`, or a place to write it.
+    fn slot(self, edges: &mut studio_core::model::MatteEdges) -> &mut f32 {
+        match self {
+            Self::Feather => &mut edges.feather,
+            Self::Contrast => &mut edges.contrast,
+            Self::ShiftEdge => &mut edges.shift_edge,
+            Self::ReduceChatter => &mut edges.reduce_chatter,
+            Self::RefineDetail => &mut edges.refine_detail,
+        }
+    }
 }
 
 /// How a field's number is shown and how fast it scrubs.
@@ -128,6 +165,11 @@ impl FieldTarget {
                 let fps = state.composition().frame_rate.fps();
                 Some(((frame as f64 / fps) as f32, FieldFormat { step: 0.005, decimals: 2, unit: " s", rotation: false }))
             }
+            Self::MatteEdge { layer, setting } => {
+                let mut edges = state.composition().layer(layer)?.cutout.as_ref()?.edges;
+                let unit = if setting == MatteEdgeSetting::Feather { "px" } else { "%" };
+                Some((*setting.slot(&mut edges), FieldFormat { step: 0.5, decimals: 0, unit, rotation: false }))
+            }
         }
     }
 
@@ -146,6 +188,12 @@ impl FieldTarget {
             Self::CaptionPhrase { layer, first, end, start } => {
                 let frame = (f64::from(value) * state.composition().frame_rate.fps()).round() as i64;
                 state.retime_caption_phrase(layer, first..end, start, frame);
+            }
+            Self::MatteEdge { layer, setting } => {
+                if let Some(mut edges) = state.composition().layer(layer).and_then(|layer| layer.cutout.as_ref()).map(|cut| cut.edges) {
+                    *setting.slot(&mut edges) = value;
+                    state.set_matte_edges(layer, edges);
+                }
             }
         }
     }

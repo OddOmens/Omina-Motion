@@ -271,6 +271,14 @@ fn key_pick_preview(workspace: &Workspace) -> Option<studio_core::model::Project
     Some(project)
 }
 
+/// The project as the viewer shows it while the Selection or Matte view of a keyed layer is
+/// chosen (see `studio_core::key_view`). `None` while the plain result is shown.
+fn key_view_preview(workspace: &Workspace) -> Option<studio_core::model::Project> {
+    let view = workspace.ui.key_view?;
+    let layer = keyed_layer(workspace)?;
+    studio_core::key_view::preview(&workspace.state.project, workspace.state.active_comp, layer, view)
+}
+
 /// What is shown while text is being typed into a text layer: `base` (the project, or a LUT
 /// preview of it) with that layer's text swapped for what is in the field so far, so the viewer
 /// draws it exactly as it will look, in the layer's own font, style and effects. Nothing is
@@ -318,7 +326,7 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
         .chain(previewed)
         .collect();
     workspace.render.media.release_unused(|path| footage.contains(path));
-    let previewed = with_typed_text(workspace, lut_preview(workspace).or_else(|| key_pick_preview(workspace)), cx);
+    let previewed = with_typed_text(workspace, lut_preview(workspace).or_else(|| key_pick_preview(workspace)).or_else(|| key_view_preview(workspace)), cx);
     let state = &workspace.state;
     let shown = previewed.as_ref().unwrap_or(&state.project);
     // Rendering ahead: while paused, the background renderer is told what is on screen; while
@@ -455,6 +463,7 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
             cx.notify();
         })))
         .when(workspace.has(crate::features::Feature::Guides), |bar| bar.child(super::guides::guides_menu(workspace, cx)))
+        .children(key_view_switch(workspace, cx))
 }
 
 /// Viewer drags: moving the selection, or scaling from a corner handle.
@@ -547,30 +556,239 @@ fn picking_layer(workspace: &Workspace) -> Option<Id> {
     workspace.ui.cutout_pick.filter(|layer| workspace.state.selected_layers == [*layer])
 }
 
-/// The clicks picking a cut-out's subject: green dots on what to keep, red on what to leave out.
-fn cutout_clicks_overlay(workspace: &Workspace) -> Vec<AnyElement> {
-    let Some(layer) = picking_layer(workspace) else { return Vec::new() };
+/// The layer the viewer's key views are about: the one whose subject is being picked, or else
+/// the only selected layer. Either way it must be keyed (have an Object Matte or a key).
+fn keyed_layer(workspace: &Workspace) -> Option<Id> {
+    let single = match workspace.state.selected_layers.as_slice() {
+        [layer] => Some(*layer),
+        _ => None,
+    };
     let composition = workspace.state.composition();
-    let (width, height) = (composition.width as f32, composition.height as f32);
-    workspace
-        .state
-        .cutout_clicks_on_screen(layer)
-        .into_iter()
-        .map(|(at, keep)| {
-            div()
-                .absolute()
-                .left(relative(at.x / width))
-                .top(relative(at.y / height))
-                .ml(px(-6.0))
-                .mt(px(-6.0))
-                .size(px(12.0))
-                .rounded_full()
-                .border_2()
-                .border_color(gpui_kit::rgb(0xffffff))
-                .bg(gpui_kit::rgb(if keep { 0x22c55e } else { 0xef4444 }))
-                .into_any_element()
+    picking_layer(workspace).or(single).filter(|layer| composition.layer(*layer).is_some_and(studio_core::key_view::is_keyed))
+}
+
+/// A brush stroke being painted on an object matte: the layer, whether it adds to the object,
+/// and the points so far (composition pixels).
+#[derive(Clone, Debug)]
+pub struct MattePaint {
+    layer: Id,
+    add: bool,
+    points: Vec<Vec2>,
+}
+
+/// The brush radius the object matte starts with, and its limits, in screen points.
+pub const DEFAULT_BRUSH: f32 = 18.0;
+const BRUSH_RANGE: (f32, f32) = (3.0, 200.0);
+
+/// Starts a stroke on the painted layer at `point` (Option-drag takes away from the object).
+/// A stroke left over from a press released outside the viewer is finished first.
+fn start_matte_stroke(workspace: &mut Workspace, layer: Id, point: Vec2, add: bool, window: &mut Window, cx: &mut Context<Workspace>) {
+    finish_matte_stroke(workspace, window, cx);
+    workspace.ui.matte_paint = Some(MattePaint { layer, add, points: vec![point] });
+}
+
+/// Adds the stroke being painted to the layer's matte, and remakes the matte for this frame.
+pub(crate) fn finish_matte_stroke(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(paint) = workspace.ui.matte_paint.take() else { return };
+    let radius = workspace.ui.matte_brush / viewer_scale(workspace).max(f32::EPSILON);
+    if workspace.state.add_matte_stroke(paint.layer, &paint.points, radius, paint.add) {
+        super::cutout::make_masks(workspace, paint.layer, false, window, cx);
+    }
+}
+
+/// Makes the brush bigger (`grow`) or smaller by one step.
+fn resize_brush(workspace: &mut Workspace, grow: bool) {
+    let factor = if grow { 1.25 } else { 0.8 };
+    workspace.ui.matte_brush = (workspace.ui.matte_brush * factor).clamp(BRUSH_RANGE.0, BRUSH_RANGE.1).round();
+}
+
+/// The strokes painted on this frame (green on the object, red where it isn't), the one being
+/// painted, and the brush outline under the pointer, drawn over the picture.
+fn matte_strokes_overlay(workspace: &Workspace) -> Option<AnyElement> {
+    let layer = picking_layer(workspace)?;
+    let composition = workspace.state.composition();
+    let comp_size = Vec2::new(composition.width as f32, composition.height as f32);
+    let scale = viewer_scale(workspace).max(f32::EPSILON);
+    let mut strokes = workspace.state.matte_strokes_on_screen(layer);
+    let brush = workspace.ui.matte_brush / scale;
+    if let Some(paint) = workspace.ui.matte_paint.as_ref().filter(|paint| paint.layer == layer) {
+        strokes.push((paint.points.clone(), brush, paint.add));
+    }
+    let pointer = workspace.ui.matte_pointer.map(|at| (at, brush));
+    Some(
+        gpui_kit::canvas(|_, _, _| (), move |bounds, _, window, _| {
+            let place = |at: Vec2| {
+                gpui_kit::point(
+                    bounds.origin.x + bounds.size.width * (at.x / comp_size.x),
+                    bounds.origin.y + bounds.size.height * (at.y / comp_size.y),
+                )
+            };
+            let to_screen = f32::from(bounds.size.width) / comp_size.x;
+            for (points, radius, add) in &strokes {
+                // Each stroke is filled as round dabs along its path, all in one shape, so the
+                // translucent tint stays even where the dabs overlap.
+                let r = (radius * to_screen).max(1.0);
+                let tint = gpui_kit::rgba(if *add { (KEEP_COLOR << 8) | 0x80 } else { (LEAVE_OUT_COLOR << 8) | 0x80 });
+                let mut shape = gpui_kit::PathBuilder::fill();
+                let mut dab = |center: gpui_kit::Point<gpui_kit::Pixels>| {
+                    let r = px(r);
+                    shape.move_to(gpui_kit::point(center.x + r, center.y));
+                    shape.arc_to(gpui_kit::point(r, r), px(0.0), false, true, gpui_kit::point(center.x - r, center.y));
+                    shape.arc_to(gpui_kit::point(r, r), px(0.0), false, true, gpui_kit::point(center.x + r, center.y));
+                    shape.close();
+                };
+                let mut previous = place(points[0]);
+                dab(previous);
+                for at in &points[1..] {
+                    let next = place(*at);
+                    let (dx, dy) = (f32::from(next.x - previous.x), f32::from(next.y - previous.y));
+                    let steps = ((dx * dx + dy * dy).sqrt() / (r * 0.5)).ceil().max(1.0) as usize;
+                    for step in 1..=steps {
+                        let t = step as f32 / steps as f32;
+                        dab(gpui_kit::point(previous.x + px(dx * t), previous.y + px(dy * t)));
+                    }
+                    previous = next;
+                }
+                if let Ok(shape) = shape.build() {
+                    window.paint_path(shape, tint);
+                }
+            }
+            if let Some((at, radius)) = pointer {
+                let center = place(at);
+                let r = px(radius * to_screen);
+                let mut ring = gpui_kit::PathBuilder::stroke(px(1.5));
+                ring.move_to(gpui_kit::point(center.x + r, center.y));
+                ring.arc_to(gpui_kit::point(r, r), px(0.0), false, true, gpui_kit::point(center.x - r, center.y));
+                ring.arc_to(gpui_kit::point(r, r), px(0.0), false, true, gpui_kit::point(center.x + r, center.y));
+                if let Ok(ring) = ring.build() {
+                    window.paint_path(ring, gpui_kit::rgb(0xffffff));
+                }
+            }
         })
-        .collect()
+        .absolute()
+        .size_full()
+        .into_any_element(),
+    )
+}
+
+/// Green for strokes on the object, red for strokes on what isn't part of it.
+const KEEP_COLOR: u32 = 0x22c55e;
+const LEAVE_OUT_COLOR: u32 = 0xef4444;
+
+/// A small dark label floating over the picture.
+fn viewer_chip() -> gpui_kit::Div {
+    div()
+        .absolute()
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded(px(4.0))
+        .bg(gpui_kit::rgba(0x000000b8))
+        .text_size(px(size::SMALL_TEXT))
+        .text_color(gpui_kit::rgb(0xffffff))
+}
+
+/// While an object matte is being painted: how to paint, the brush size, how many strokes this
+/// frame has and whether the matte is being made, with a Done button that stops painting.
+fn picking_hint(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    use gpui_kit::component::Sizable as _;
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    let layer = picking_layer(workspace)?;
+    let strokes = workspace.state.matte_strokes_on_screen(layer).len();
+    let marker = |add: bool| div().size(px(10.0)).flex_none().rounded_full().bg(gpui_kit::rgb(if add { KEEP_COLOR } else { LEAVE_OUT_COLOR }));
+    let finding = workspace.ui.cutout_job.as_ref().is_some_and(|job| job.layer == layer);
+    let progress = if finding {
+        "Making the matte…".to_owned()
+    } else {
+        match strokes {
+            0 => "No strokes on this frame".to_owned(),
+            1 => "1 stroke here".to_owned(),
+            count => format!("{count} strokes here"),
+        }
+    };
+    let brush_button = |id: &'static str, label: &'static str, grow: bool, cx: &mut Context<Workspace>| {
+        Button::new(id).ghost().xsmall().label(label).tooltip(if grow { "Bigger brush" } else { "Smaller brush" }).on_click(cx.listener(move |this, _, _, cx| {
+            resize_brush(this, grow);
+            cx.notify();
+        }))
+    };
+    Some(
+        viewer_chip()
+            .id("viewer-picking-hint")
+            .test_support()
+            .bottom(px(10.0))
+            .left_0()
+            .right_0()
+            .mx_auto()
+            .w(px(560.0))
+            .child(marker(true))
+            .child("Paint the object")
+            .child(marker(false))
+            .child("Option-paint to take away")
+            .child(div().flex_1())
+            .child(brush_button("viewer-brush-smaller", "\u{2212}", false, cx))
+            .child(div().text_color(gpui_kit::rgba(0xffffffaa)).child(format!("Brush {:.0}", workspace.ui.matte_brush)))
+            .child(brush_button("viewer-brush-bigger", "+", true, cx))
+            .child(div().text_color(gpui_kit::rgba(0xffffffaa)).child(progress))
+            .child(Button::new("viewer-picking-done").primary().xsmall().label("Done").on_click(cx.listener(move |this, _, _, cx| {
+                super::cutout::toggle_picking(this, layer);
+                cx.notify();
+            })))
+            .into_any_element(),
+    )
+}
+
+/// Says what the picture shows while a key view is on, so gray or black areas aren't mistaken
+/// for the real result.
+fn key_view_legend(workspace: &Workspace) -> Option<AnyElement> {
+    use studio_core::key_view::KeyView;
+    // A LUT or key color preview replaces the key view, so its legend would be wrong then.
+    if workspace.ui.lut_hover.is_some() || workspace.ui.key_color_pick.is_some() {
+        return None;
+    }
+    let view = workspace.ui.key_view?;
+    keyed_layer(workspace)?;
+    let swatch = |rgb: u32| div().size(px(10.0)).flex_none().rounded(px(2.0)).border_1().border_color(gpui_kit::rgba(0xffffff88)).bg(gpui_kit::rgb(rgb));
+    let (kept, removed): ((u32, &str), (u32, &str)) = match view {
+        KeyView::Selection => ((KEEP_COLOR, "Full color is kept"), (0x3a3a3a, "gray is removed")),
+        KeyView::Matte => ((0xffffff, "White is kept"), (0x000000, "black is removed")),
+    };
+    Some(
+        viewer_chip()
+            .id("viewer-key-legend")
+            .test_support()
+            .top(px(6.0))
+            .left(px(6.0))
+            .child(div().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(view.name()))
+            .child(swatch(kept.0))
+            .child(kept.1)
+            .child(swatch(removed.0))
+            .child(removed.1)
+            .into_any_element(),
+    )
+}
+
+/// The footer's choice of how to show a keyed layer: its result, what the key selects, or its
+/// matte. Shown only while a keyed layer is selected.
+fn key_view_switch(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl IntoElement + use<>> {
+    use gpui_kit::component::{Selectable as _, Sizable as _};
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
+    use studio_core::key_view::KeyView;
+    keyed_layer(workspace)?;
+    let current = workspace.ui.key_view;
+    let choices: [(&str, &str, Option<KeyView>, &str); 3] = [
+        ("viewer-key-result", "Result", None, "Show the finished picture"),
+        ("viewer-key-selection", "Selection", Some(KeyView::Selection), "Show what the key keeps in color and what it removes in gray"),
+        ("viewer-key-matte", "Matte", Some(KeyView::Matte), "Show the key in black and white: white is kept, black is removed"),
+    ];
+    Some(choices.into_iter().fold(div().flex().items_center().gap_0p5().pl_1().border_l_1().border_color(hsla(color::BORDER)), |row, (id, label, view, tip)| {
+        row.child(Button::new(id).ghost().xsmall().label(label).tooltip(tip).selected(current == view).on_click(cx.listener(move |this, _, _, cx| {
+            this.ui.key_view = view;
+            cx.notify();
+        })))
+    }))
 }
 
 /// The color of the rendered frame at composition point `point`, as shown (transparent areas
@@ -833,12 +1051,10 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         cx.notify();
         return;
     }
-    // Picking a subject to cut out: clicks mark what to keep (Option: what to leave out), and
-    // each one updates the mask.
+    // Painting an object matte: a press starts a stroke on what belongs to the object (Option:
+    // on what doesn't); it is added when the button comes up.
     if let Some(layer) = picking_layer(workspace) {
-        if workspace.state.add_cutout_click(layer, point, !event.modifiers.alt) {
-            super::cutout::make_masks(workspace, layer, false, window, cx);
-        }
+        start_matte_stroke(workspace, layer, point, !event.modifiers.alt, window, cx);
         cx.notify();
         return;
     }
@@ -1328,7 +1544,9 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .children((workspace.ui.guides && workspace.has(crate::features::Feature::Guides)).then(|| super::guides::guides_overlay(workspace)))
         .children(selection_overlay(workspace, cx))
         .children(pen_draft_overlay(workspace))
-        .children(cutout_clicks_overlay(workspace))
+        .children(matte_strokes_overlay(workspace))
+        .children(key_view_legend(workspace))
+        .children(picking_hint(workspace, cx))
         .children(typing)
         .children(effect_drop_highlight(workspace))
         .children(slot_drop_highlight(workspace));
@@ -1357,6 +1575,26 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         .on_mouse_down(MouseButton::Middle, cx.listener(|this, event: &MouseDownEvent, _, cx| {
             this.ui.middle_pan = Some(((f32::from(event.position.x), f32::from(event.position.y)), this.ui.viewer_pan));
             cx.notify();
+        }))
+        // The brush outline follows the pointer while an object matte is being painted.
+        .when(picking_layer(workspace).is_some(), |viewer| {
+            viewer.cursor(gpui_kit::CursorStyle::Crosshair).on_mouse_move(cx.listener(|this, event: &gpui_kit::MouseMoveEvent, _, cx| {
+                this.ui.matte_pointer = Some(to_comp(this, f32::from(event.position.x), f32::from(event.position.y)));
+                cx.notify();
+            }))
+        })
+        // A stroke ends when the button comes up (a press without a drag paints a dot).
+        .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| {
+            if this.ui.matte_paint.is_some() {
+                finish_matte_stroke(this, window, cx);
+                cx.notify();
+            }
+        }))
+        .on_drop(cx.listener(|this, _: &ViewerDrag, window, cx| {
+            if this.ui.matte_paint.is_some() {
+                finish_matte_stroke(this, window, cx);
+                cx.notify();
+            }
         }))
         .on_mouse_move(cx.listener(|this, event: &gpui_kit::MouseMoveEvent, _, cx| {
             let Some(((x, y), (pan_x, pan_y))) = this.ui.middle_pan else { return };
@@ -1438,6 +1676,20 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
             cx.notify();
         }))
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<ViewerDrag>, _, cx| {
+            // Painting an object matte: the stroke follows the pointer.
+            if this.ui.matte_paint.is_some() {
+                let point = to_comp(this, f32::from(event.event.position.x), f32::from(event.event.position.y));
+                this.ui.matte_pointer = Some(point);
+                // Points closer than a screen point add nothing to the stroke.
+                let spacing = 1.0 / viewer_scale(this).max(f32::EPSILON);
+                if let Some(paint) = this.ui.matte_paint.as_mut()
+                    && paint.points.last().is_none_or(|last| (*last - point).length() >= spacing)
+                {
+                    paint.points.push(point);
+                }
+                cx.notify();
+                return;
+            }
             // Dragging across text being typed selects it.
             if let Some((layer, anchor)) = this.ui.text_select {
                 let point = to_comp(this, f32::from(event.event.position.x), f32::from(event.event.position.y));

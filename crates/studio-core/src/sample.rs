@@ -51,6 +51,7 @@ fn layer(id: u64, name: &str, label: LabelColor, content: LayerContent, size: Ve
         switches: LayerSwitches::default(),
         transform: has_picture.then(|| Transform::centered(size, COMP_SIZE * 0.5)),
         effects: Vec::new(),
+        effect_graph: Default::default(),
         has_audio: false,
         audio: Default::default(),
         time: Default::default(),

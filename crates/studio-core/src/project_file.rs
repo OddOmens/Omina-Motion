@@ -124,6 +124,8 @@ pub fn from_text_with(text: &str) -> Result<(Project, EditorView, EditorSettings
     let file: FileIn = serde_json::from_value(value).map_err(|error| format!("The project file is damaged: {error}"))?;
     let FileIn { mut project, mut view, mut settings } = file;
     restore_effect_info(&mut project);
+    repair_effect_graphs(&mut project);
+    upgrade_matte_clicks(&mut project);
     fill_missing_start_frames(&mut project);
     switch_on_nested_sound(&mut project);
     fill_missing_tracks(&mut project);
@@ -289,14 +291,14 @@ pub(crate) fn check(project: &Project) -> Result<(), String> {
             {
                 return damaged(&format!("layer \"{}\" has damaged stabilization", layer.name));
             }
-            // Background removal is for pictures, with a sane number of clicks on the picture.
+            // An object matte is for pictures, with a sane number of strokes on the picture.
             if let Some(cutout) = &layer.cutout
                 && (!crate::cutout::can_cut_out(layer)
-                    || cutout.clicks.len() > crate::model::MAX_CUTOUT_CLICKS
-                    || cutout.clicks.iter().any(|click| !((0.0..=1.0).contains(&click.at.x) && (0.0..=1.0).contains(&click.at.y)))
+                    || cutout.strokes.len() > crate::model::MAX_MATTE_STROKES
+                    || !cutout.strokes.iter().all(|stroke| crate::cutout::stroke_is_valid(stroke) && stroke.frame.abs() <= MAX_FRAME)
                     || cutout.frames.is_some_and(|(start, end)| end <= start || start.abs() > MAX_FRAME || end.abs() > MAX_FRAME))
             {
-                return damaged(&format!("layer \"{}\" has a damaged background removal", layer.name));
+                return damaged(&format!("layer \"{}\" has a damaged object matte", layer.name));
             }
             // Text set on a path needs a pen path in the same composition.
             if let Some(on) = layer.text_path
@@ -367,6 +369,29 @@ fn fill_missing_start_frames(project: &mut Project) {
     for layer in project.compositions.iter_mut().flat_map(|comp| &mut comp.layers) {
         if layer.start_frame == crate::model::Layer::UNSET_START {
             layer.start_frame = layer.in_frame;
+        }
+    }
+}
+
+/// Object mattes saved as clicks (before brush strokes) become strokes; edge settings out of
+/// range are brought back in.
+fn upgrade_matte_clicks(project: &mut Project) {
+    for cutout in project.compositions.iter_mut().flat_map(|comp| &mut comp.layers).filter_map(|layer| layer.cutout.as_mut()) {
+        if cutout.old_clicks.len() > crate::model::MAX_MATTE_STROKES {
+            cutout.old_clicks.truncate(crate::model::MAX_MATTE_STROKES);
+        }
+        crate::cutout::upgrade_clicks(cutout);
+        cutout.edges = cutout.edges.clamped();
+    }
+}
+
+/// Node graphs from a file edited by hand may point at nodes that aren't there or hold an
+/// out-of-range Merge opacity; those links are dropped and opacities brought into range.
+fn repair_effect_graphs(project: &mut Project) {
+    for layer in project.compositions.iter_mut().flat_map(|comp| &mut comp.layers) {
+        crate::effect_graph::sanitize(layer);
+        for merge in &mut layer.effect_graph.merges {
+            merge.opacity = if merge.opacity.is_finite() { merge.opacity.clamp(0.0, 1.0) } else { 1.0 };
         }
     }
 }

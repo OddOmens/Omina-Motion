@@ -32,6 +32,7 @@ fn solid(id: u64, color: u32, size: Vec2, position: Vec2) -> Layer {
         switches: LayerSwitches::default(),
         transform: Some(Transform::centered(size, position)),
         effects: Vec::new(),
+        effect_graph: Default::default(),
         has_audio: false,
         audio: Default::default(),
         time: Default::default(),
@@ -170,6 +171,58 @@ fn adjustment_layers_affect_everything_below() {
     adjustment.effects.push(effects::instantiate(effects::find("Tint").unwrap(), Id(9)));
     let result = pixel(&render(&project(vec![adjustment, full(3, 0xff0000)])), 50, 50);
     assert!(result[0] == result[1] && result[1] == result[2] && result[0] > 20, "red became gray: {result:?}");
+}
+
+#[test]
+fn a_node_graph_decides_what_a_layer_shows() {
+    use studio_core::effect_graph::{self, InputPort, NodeId};
+    // A red layer with Invert (id 9) and Crop (id 10, keeping only the left half).
+    let red_with_effects = || {
+        let mut layer = full(2, 0xff0000);
+        layer.effects.push(effects::instantiate(effects::find("Invert").unwrap(), Id(9)));
+        let mut crop = effects::instantiate(effects::find("Crop").unwrap(), Id(10));
+        crop.properties[1].value = Animated::constant(50.0);
+        layer.effects.push(crop);
+        layer
+    };
+    let (invert, crop) = (NodeId::Effect(Id(9)), NodeId::Effect(Id(10)));
+    let shown = |layer: Layer| {
+        let frame = render(&project(vec![layer]));
+        (pixel(&frame, 25, 50), pixel(&frame, 75, 50))
+    };
+
+    // Unwired, the effects run as a chain: inverted, then cropped to the left half.
+    assert_eq!(shown(red_with_effects()), ([0, 255, 255], [0, 0, 0]));
+
+    // Source straight to Output bypasses both effects.
+    let mut bypass = red_with_effects();
+    effect_graph::connect(&mut bypass, NodeId::Source, NodeId::Output, InputPort::Main).unwrap();
+    assert_eq!(shown(bypass), ([255, 0, 0], [255, 0, 0]));
+
+    // The crop as Invert's mask: inverted only on the left, the plain picture on the right.
+    let mut masked = red_with_effects();
+    effect_graph::connect(&mut masked, NodeId::Source, crop, InputPort::Main).unwrap();
+    effect_graph::connect(&mut masked, NodeId::Source, invert, InputPort::Main).unwrap();
+    effect_graph::connect(&mut masked, crop, invert, InputPort::Mask).unwrap();
+    effect_graph::connect(&mut masked, invert, NodeId::Output, InputPort::Main).unwrap();
+    let (left, right) = shown(masked);
+    assert!(close(left, [0, 255, 255]) && close(right, [255, 0, 0]), "{left:?} {right:?}");
+
+    // A Merge screening the inverted picture over the original: red screen cyan is white.
+    let mut merged = red_with_effects();
+    let merge = effect_graph::add_merge(&mut merged, Id(11));
+    effect_graph::merge_mut(&mut merged, Id(11)).unwrap().blend = BlendMode::Screen;
+    effect_graph::connect(&mut merged, NodeId::Source, merge, InputPort::Background).unwrap();
+    effect_graph::connect(&mut merged, NodeId::Source, invert, InputPort::Main).unwrap();
+    effect_graph::connect(&mut merged, invert, merge, InputPort::Foreground).unwrap();
+    effect_graph::connect(&mut merged, merge, NodeId::Output, InputPort::Main).unwrap();
+    let (left, right) = shown(merged);
+    assert!(close(left, [255, 255, 255]) && close(right, [255, 255, 255]), "{left:?} {right:?}");
+
+    // Nothing connected to the Output: the layer shows nothing.
+    let mut empty = red_with_effects();
+    effect_graph::disconnect(&mut empty, NodeId::Output, InputPort::Main);
+    assert_eq!(shown(empty), ([0, 0, 0], [0, 0, 0]));
 }
 
 /// A full-frame solid of `color` with the catalog effect `name`, its parameters set to `values`
@@ -1047,41 +1100,84 @@ fn a_mask_layer_shows_or_hides_the_layer_it_masks_and_is_not_drawn_itself() {
     assert!(close(pixel(&hidden, 15, 15), [255, 0, 0]), "red everywhere else");
 }
 
-#[test]
-fn a_cut_out_shows_only_what_its_mask_keeps_or_only_what_it_removes() {
-    use studio_core::model::{Cutout, CutoutClick, ProjectItem, ProjectItemKind};
-    let folder = std::env::temp_dir().join(format!("studio-cutout-{}", std::process::id()));
-    std::fs::create_dir_all(&folder).unwrap();
+/// A 100 × 100 red picture layer (id 2) with an object matte whose mask keeps the left half
+/// (the mask is 20 × 20, so it is stretched), set by `setup`, rendered. The files live in
+/// `folder`, which the caller removes.
+fn matted(folder: &std::path::Path, setup: impl FnOnce(&mut Layer)) -> studio_render::RenderedFrame {
+    use studio_core::model::{Cutout, MatteStroke, ProjectItem, ProjectItemKind};
+    std::fs::create_dir_all(folder).unwrap();
     let picture = folder.join("red.png");
     image::RgbaImage::from_pixel(50, 50, image::Rgba([255, 0, 0, 255])).save(&picture).unwrap();
-    // The mask keeps the left half of the picture (at its own, smaller size).
     image::GrayImage::from_fn(20, 20, |x, _| image::Luma([if x < 10 { 255 } else { 0 }])).save(folder.join("0.png")).unwrap();
-    let cut = |remove| {
-        let mut layer = full(2, 0);
-        layer.content = LayerContent::Image { item: Id(63) };
-        let clicks = vec![CutoutClick { at: Vec2::new(0.25, 0.5), keep: true }];
-        layer.cutout = Some(Cutout { frame: 0, clicks, remove, masks: Some(folder.clone()), frames: Some((0, 1)) });
-        let mut project = project(vec![layer]);
-        project.items.push(ProjectItem {
-            id: Id(63),
-            name: "red.png".into(),
-            kind: ProjectItemKind::Image,
-            label: LabelColor::Aqua,
-            parent: None,
-            size: Some(Vec2::new(50.0, 50.0)),
-            duration_seconds: None,
-            frame_rate: None,
-            has_audio: false,
-            color: None,
-            path: Some(picture.clone()),
-        });
-        render(&project)
-    };
-    let kept = cut(false);
+    let mut layer = full(2, 0);
+    layer.content = LayerContent::Image { item: Id(63) };
+    let strokes = vec![MatteStroke { frame: 0, points: vec![Vec2::new(0.25, 0.5)], radius: 0.02, add: true }];
+    layer.cutout = Some(Cutout { strokes, masks: Some(folder.to_path_buf()), frames: Some((0, 1)), ..Cutout::default() });
+    setup(&mut layer);
+    let mut project = project(vec![layer]);
+    project.items.push(ProjectItem {
+        id: Id(63),
+        name: "red.png".into(),
+        kind: ProjectItemKind::Image,
+        label: LabelColor::Aqua,
+        parent: None,
+        size: Some(Vec2::new(50.0, 50.0)),
+        duration_seconds: None,
+        frame_rate: None,
+        has_audio: false,
+        color: None,
+        path: Some(picture),
+    });
+    render(&project)
+}
+
+#[test]
+fn a_cut_out_shows_only_what_its_mask_keeps_or_only_what_it_removes() {
+    let folder = std::env::temp_dir().join(format!("studio-cutout-{}", std::process::id()));
+    let kept = matted(&folder, |_| {});
     assert!(close(pixel(&kept, 20, 50), [255, 0, 0]), "the kept half shows");
     assert!(close(pixel(&kept, 80, 50), [0, 0, 0]), "the rest is cut away");
-    let removed = cut(true);
+    let removed = matted(&folder, |layer| layer.cutout.as_mut().unwrap().remove = true);
     assert!(close(pixel(&removed, 20, 50), [0, 0, 0]) && close(pixel(&removed, 80, 50), [255, 0, 0]), "or the other way round");
+    std::fs::remove_dir_all(&folder).ok();
+}
+
+#[test]
+fn an_object_mattes_edge_can_be_feathered_shifted_and_hardened() {
+    use studio_core::model::MatteEdges;
+    let folder = std::env::temp_dir().join(format!("studio-matte-edges-{}", std::process::id()));
+    let with = |edges: MatteEdges| matted(&folder, |layer| layer.cutout.as_mut().unwrap().edges = edges);
+    let plain = with(MatteEdges::default());
+    // The stretched mask's edge ramps over a few pixels around x = 50.
+    assert_eq!(pixel(&plain, 54, 50)[0], 0);
+    assert_eq!(pixel(&plain, 43, 50)[0], 255);
+
+    let out = with(MatteEdges { shift_edge: 100.0, ..MatteEdges::default() });
+    assert!(pixel(&out, 54, 50)[0] > 128, "Shift Edge out grows the matte: {:?}", pixel(&out, 54, 50));
+    let inward = with(MatteEdges { shift_edge: -100.0, ..MatteEdges::default() });
+    // Moving in leaves the blur's soft edge, so it is compared with the unshifted matte.
+    assert!(pixel(&inward, 46, 50)[0] + 40 < pixel(&plain, 46, 50)[0], "Shift Edge in shrinks it: {:?}", pixel(&inward, 46, 50));
+
+    let feathered = with(MatteEdges { feather: 20.0, ..MatteEdges::default() });
+    let (inside, outside) = (pixel(&feathered, 42, 50)[0], pixel(&feathered, 58, 50)[0]);
+    assert!(inside < 250 && inside > 100 && outside > 20 && outside < 200, "Feather softens both sides: {inside} {outside}");
+    let hardened = with(MatteEdges { feather: 20.0, contrast: 100.0, ..MatteEdges::default() });
+    assert!(pixel(&hardened, 42, 50)[0] > inside && pixel(&hardened, 58, 50)[0] < outside, "Contrast hardens the feathered edge");
+    std::fs::remove_dir_all(&folder).ok();
+}
+
+#[test]
+fn the_object_matte_node_masks_effects_in_a_node_graph() {
+    use studio_core::effect_graph::{self, InputPort, NodeId};
+    let folder = std::env::temp_dir().join(format!("studio-matte-node-{}", std::process::id()));
+    let frame = matted(&folder, |layer| {
+        layer.effects.push(effects::instantiate(effects::find("Invert").unwrap(), Id(9)));
+        effect_graph::add_matte_node(layer);
+        effect_graph::connect(layer, NodeId::Matte, NodeId::Effect(Id(9)), InputPort::Mask).unwrap();
+    });
+    // The graph uses the matte itself, so the whole picture shows: inverted where the matte is.
+    assert!(close(pixel(&frame, 20, 50), [0, 255, 255]), "{:?}", pixel(&frame, 20, 50));
+    assert!(close(pixel(&frame, 80, 50), [255, 0, 0]), "{:?}", pixel(&frame, 80, 50));
     std::fs::remove_dir_all(&folder).ok();
 }
 
@@ -1853,4 +1949,51 @@ fn a_motion_blurred_layer_composites_like_any_other() {
     let middle = pixel(&frame, 50, 50);
     assert!(middle[0] > 60 && middle[0] < 200 && middle[2] > 150, "a faded smear over blue: {middle:?}");
     assert!(close(pixel(&frame, 20, 50), [0, 0, 255]), "the blue shows outside the path");
+}
+
+/// A 100 × 100 picture, green screen on its left half and red on its right, with a Keyer
+/// taking the green out, and how the viewer's `view` of that key renders.
+fn key_view_frame(view: studio_core::key_view::KeyView) -> studio_render::RenderedFrame {
+    use studio_core::model::{ProjectItem, ProjectItemKind};
+    let path = std::env::temp_dir().join(format!("studio-key-view-{}-{}.png", view.name(), std::process::id()));
+    image::RgbaImage::from_fn(100, 100, |x, _| if x < 50 { image::Rgba([0, 255, 0, 255]) } else { image::Rgba([255, 0, 0, 255]) }).save(&path).unwrap();
+    let mut layer = full(2, 0);
+    layer.content = LayerContent::Image { item: Id(60) };
+    layer.effects.push(effects::instantiate(effects::find("Keyer").unwrap(), Id(61)));
+    let mut project = project(vec![layer]);
+    project.items.push(ProjectItem {
+        id: Id(60),
+        name: "screen.png".into(),
+        kind: ProjectItemKind::Image,
+        label: LabelColor::Aqua,
+        parent: None,
+        size: Some(Vec2::new(100.0, 100.0)),
+        duration_seconds: None,
+        frame_rate: None,
+        has_audio: false,
+        color: None,
+        path: Some(path.clone()),
+    });
+    let shown = studio_core::key_view::preview(&project, Id(1), Id(2), view).expect("the layer is keyed");
+    let frame = render(&shown);
+    std::fs::remove_file(&path).unwrap();
+    frame
+}
+
+#[test]
+fn the_selection_view_shows_what_a_key_removes_gray_and_outlines_what_it_keeps() {
+    let frame = key_view_frame(studio_core::key_view::KeyView::Selection);
+    assert!(close(pixel(&frame, 80, 50), [255, 0, 0]), "kept: full color, got {:?}", pixel(&frame, 80, 50));
+    let removed = pixel(&frame, 20, 50);
+    let spread = removed.iter().max().unwrap() - removed.iter().min().unwrap();
+    assert!(spread <= 3 && (20..120).contains(&removed[0]), "removed: dim gray, got {removed:?}");
+    let edge = pixel(&frame, 49, 50);
+    assert!(edge.iter().all(|&channel| channel > 200), "a white line at the edge, got {edge:?}");
+}
+
+#[test]
+fn the_matte_view_shows_kept_white_and_removed_black() {
+    let frame = key_view_frame(studio_core::key_view::KeyView::Matte);
+    assert!(close(pixel(&frame, 80, 50), [255, 255, 255]), "kept, got {:?}", pixel(&frame, 80, 50));
+    assert!(close(pixel(&frame, 20, 50), [0, 0, 0]), "removed, got {:?}", pixel(&frame, 20, 50));
 }

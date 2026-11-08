@@ -49,9 +49,8 @@ pub fn resize_composition(project: &mut Project, comp: Id, width: u32, height: u
     for layer in &source.layers {
         let mut copy = layer.clone();
         copy.id = ids[&layer.id];
-        for effect in &mut copy.effects {
-            effect.id = project.allocate_id();
-        }
+        // Fresh ids for its effects and Merge nodes, with its node graph pointed at them.
+        crate::effect_graph::reassign_ids(&mut copy, || project.allocate_id());
         let remap = |id: Id| ids.get(&id).copied();
         copy.parent = copy.parent.and_then(remap);
         copy.mask = copy.mask.and_then(|mask| remap(mask.layer).map(|layer| crate::model::LayerMask { layer, ..mask }));

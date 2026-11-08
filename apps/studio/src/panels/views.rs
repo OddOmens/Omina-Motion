@@ -23,6 +23,7 @@ pub enum PanelKind {
     Captions,
     Elements,
     Mockups,
+    Nodes,
 }
 
 /// A panel view: renders one panel from the shared workspace state.
@@ -77,6 +78,7 @@ impl Render for PanelView {
                     PanelKind::Captions => captions::render(workspace, cx).into_any_element(),
                     PanelKind::Elements => elements::render(workspace, cx).into_any_element(),
                     PanelKind::Mockups => mockups::render(workspace, cx).into_any_element(),
+                    PanelKind::Nodes => nodes::render(workspace, cx).into_any_element(),
                 }
             })
             .unwrap_or_else(|_| div().into_any_element());

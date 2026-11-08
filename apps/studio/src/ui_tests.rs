@@ -330,6 +330,110 @@ fn effect_controls_edit_effect_parameters(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_nodes_panel_connects_disconnects_merges_and_deletes(cx: &mut TestAppContext) {
+    use crate::panels::nodes::{input_id, node_id, output_id};
+    use studio_core::effect_graph::{self, InputPort, NodeId};
+    let (workspace, visual) = open(cx);
+    let a_cam = Id(104);
+    let blur = NodeId::Effect(Id(202));
+    let layer = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(a_cam).unwrap().clone());
+    let fed = |visual: &mut VisualTestContext, node: NodeId, port: InputPort| effect_graph::source_of(&layer(visual), node, port);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(a_cam, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("tab:Properties:1".into()), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("fx-open-nodes", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("nodes-fit", cx));
+    render(visual);
+    visual.update(|window, _| {
+        window.find(node_id(NodeId::Source));
+        window.find(node_id(blur));
+        window.find(node_id(NodeId::Output));
+    });
+    assert!(!layer(visual).effect_graph.wired, "nothing is rewired just by looking");
+
+    // Source's output dragged onto the Output's input bypasses the blur.
+    visual.update(|window, cx| window.drag_to(output_id(NodeId::Source), input_id(NodeId::Output, InputPort::Main), cx));
+    render(visual);
+    assert_eq!(fed(visual, NodeId::Output, InputPort::Main), Some(NodeId::Source));
+    assert!(layer(visual).effect_graph.wired);
+
+    // Pulling that wire off the input and dropping it on empty canvas disconnects it.
+    let canvas = visual.update(|window, _| window.find("nodes-canvas").bounds());
+    let empty = point(canvas.origin.x + px(12.0), canvas.origin.y + canvas.size.height - px(12.0));
+    let input = center_of(visual, input_id(NodeId::Output, InputPort::Main));
+    visual.update(|window, cx| window.drag(input, empty, cx));
+    render(visual);
+    assert_eq!(fed(visual, NodeId::Output, InputPort::Main), None);
+
+    // Wires can be drawn from an empty input back to an output, too.
+    visual.update(|window, cx| window.drag_to(input_id(NodeId::Output, InputPort::Main), output_id(blur), cx));
+    render(visual);
+    assert_eq!(fed(visual, NodeId::Output, InputPort::Main), Some(blur));
+
+    // A Merge from the footer's Add menu, wired in: Source under the blurred picture.
+    visual.update(|window, cx| window.click("nodes-add", cx));
+    render(visual);
+    click_label(visual, "Merge");
+    render(visual);
+    let merge = layer(visual).effect_graph.merges.first().map(|merge| NodeId::Merge(merge.id)).expect("a Merge was added");
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.nodes.selected, Some(merge), "the new node is picked"));
+    let NodeId::Merge(merge_id) = merge else { unreachable!() };
+    visual.update(|window, cx| window.click("nodes-fit", cx));
+    render(visual);
+    visual.update(|window, cx| window.drag_to(output_id(NodeId::Source), input_id(merge, InputPort::Background), cx));
+    render(visual);
+    visual.update(|window, cx| window.drag_to(output_id(blur), input_id(merge, InputPort::Foreground), cx));
+    render(visual);
+    visual.update(|window, cx| window.drag_to(output_id(merge), input_id(NodeId::Output, InputPort::Main), cx));
+    render(visual);
+    assert_eq!(fed(visual, merge, InputPort::Background), Some(NodeId::Source));
+    assert_eq!(fed(visual, merge, InputPort::Foreground), Some(blur));
+    assert_eq!(fed(visual, NodeId::Output, InputPort::Main), Some(merge));
+    let plan = effect_graph::plan(&layer(visual)).unwrap();
+    assert!(matches!(plan.steps.last(), Some(effect_graph::Step::Merge { .. })), "{:?}", plan.steps);
+
+    // A connection that would loop is refused and changes nothing.
+    visual.update(|window, cx| window.drag_to(output_id(merge), input_id(blur, InputPort::Main), cx));
+    render(visual);
+    assert_eq!(fed(visual, blur, InputPort::Main), Some(NodeId::Source));
+
+    // The Merge's settings are in the Effects tab: its blend mode and opacity.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("merge-blend:{}", merge_id.0).into()), cx));
+    render(visual);
+    click_label(visual, "Screen");
+    render(visual);
+    let slider = visual.update(|window, _| window.find(ElementId::Name(format!("merge-opacity:{}", merge_id.0).into())).bounds());
+    visual.update(|window, cx| window.click_at(ElementId::Name(format!("merge-opacity:{}", merge_id.0).into()), point(slider.size.width * 0.25, px(8.0)), cx));
+    render(visual);
+    let settings = layer(visual).effect_graph.merges[0].clone();
+    assert_eq!(settings.blend, studio_core::model::BlendMode::Screen);
+    assert!((settings.opacity - 0.25).abs() < 0.03, "{}", settings.opacity);
+
+    // Dragging a node's title moves it.
+    let before = effect_graph::position(&layer(visual), blur);
+    let title = center_of(visual, ElementId::Name("node-title:effect-202".into()));
+    visual.update(|window, cx| window.drag(title, point(title.x + px(60.0), title.y + px(30.0)), cx));
+    render(visual);
+    let after = effect_graph::position(&layer(visual), blur);
+    assert!(after.x > before.x + 20.0 && after.y > before.y + 10.0, "{before:?} → {after:?}");
+
+    // Picking the Merge and pressing Delete removes it; undo brings it back.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("node-title:merge-{}", merge_id.0).into()), cx));
+    render(visual);
+    visual.update(|window, cx| window.press("delete", cx));
+    render(visual);
+    assert!(layer(visual).effect_graph.merges.is_empty());
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(layer(visual).effect_graph.merges.len(), 1);
+}
+
+#[gpui_kit::test]
 fn the_type_tool_places_text_and_typing_sets_it(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-t", cx));
@@ -2974,7 +3078,8 @@ fn a_masked_layer_shows_its_mask_and_how_it_masks(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn picking_a_subject_places_clicks_on_the_picture_and_asks_before_downloading(cx: &mut TestAppContext) {
+fn painting_an_object_matte_lays_strokes_on_the_picture_and_asks_before_downloading(cx: &mut TestAppContext) {
+    use crate::panels::fields::{FieldTarget, MatteEdgeSetting};
     let (workspace, visual) = open(cx);
     let layer = visual.update(|_, cx| {
         workspace.update(cx, |ws, cx| {
@@ -2990,15 +3095,25 @@ fn picking_a_subject_places_clicks_on_the_picture_and_asks_before_downloading(cx
     visual.update(|window, cx| window.click("cutout-add", cx));
     render(visual);
     assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.cutout_pick), Some(layer));
-    // A click on the subject (the image's top-left quarter). The model is not on this (test)
-    // computer, so Studio asks before downloading it, and nothing runs until that is agreed.
-    let keep = screen_point(&workspace, visual, Vec2::new(860.0, 490.0));
-    click_at(visual, keep);
+    let strokes = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().cutout.clone().unwrap().strokes);
+    // A stroke dragged across the object (the image's top-left quarter). The model is not on this
+    // (test) computer, so Studio asks before downloading it, and nothing runs until agreed.
+    let (from, to) = (screen_point(&workspace, visual, Vec2::new(860.0, 490.0)), screen_point(&workspace, visual, Vec2::new(920.0, 520.0)));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
     assert!(visual.update(|window, _| window.try_find_by_label("Download and Continue")).is_some());
     assert!(visual.update(|_, cx| workspace.read(cx).ui.cutout_job.is_none()));
     click_label(visual, "Cancel");
     render(visual);
-    // Then an Option-click on something to leave out.
+    let painted = strokes(visual);
+    assert_eq!(painted.len(), 1);
+    assert!(painted[0].add && painted[0].points.len() >= 2, "{painted:?}");
+    assert!((painted[0].points[0].x - 0.25).abs() < 0.01 && (painted[0].points[0].y - 0.25).abs() < 0.01, "{painted:?}");
+
+    // The brush can be made bigger; the next stroke is wider.
+    visual.update(|window, cx| window.click("viewer-brush-bigger", cx));
+    render(visual);
+    // Then an Option-press (a dot) on something that isn't part of the object.
     let leave_out = screen_point(&workspace, visual, Vec2::new(1060.0, 590.0));
     visual.update(|window, cx| {
         window.change_modifiers(gpui_kit::Modifiers::alt(), cx);
@@ -3007,9 +3122,86 @@ fn picking_a_subject_places_clicks_on_the_picture_and_asks_before_downloading(cx
         window.change_modifiers(gpui_kit::Modifiers::default(), cx);
     });
     render(visual);
-    let clicks = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().cutout.clone().unwrap().clicks);
-    assert_eq!(clicks.iter().map(|click| click.keep).collect::<Vec<_>>(), vec![true, false]);
-    assert!((clicks[0].at.x - 0.25).abs() < 0.01 && (clicks[0].at.y - 0.25).abs() < 0.01, "{clicks:?}");
+    if visual.update(|window, _| window.try_find_by_label("Cancel")).is_some() {
+        click_label(visual, "Cancel");
+        render(visual);
+    }
+    let painted = strokes(visual);
+    assert_eq!(painted.iter().map(|stroke| stroke.add).collect::<Vec<_>>(), vec![true, false]);
+    assert!(painted[1].radius > painted[0].radius, "the bigger brush: {} vs {}", painted[1].radius, painted[0].radius);
+
+    // Refine Edge settings take typed values.
+    let feather = FieldTarget::MatteEdge { layer, setting: MatteEdgeSetting::Feather };
+    visual.update(|window, cx| window.click(field_id(feather), cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("12", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    let edges = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().cutout.clone().unwrap().edges);
+    assert_eq!(edges.feather, 12.0);
+
+    // Clear Frame takes this frame's strokes away again.
+    visual.update(|window, cx| window.click("cutout-clear-frame", cx));
+    render(visual);
+    assert!(strokes(visual).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_keyed_layer_can_be_viewed_as_its_selection_or_its_matte(cx: &mut TestAppContext) {
+    use studio_core::key_view::KeyView;
+    let (workspace, visual) = open(cx);
+    let layer = visual.update(|_, cx| {
+        workspace.update(cx, |ws, cx| {
+            let item = studio_core::edit::import_image(&mut ws.state.project, "/media/portrait.png".into(), Vec2::new(400.0, 200.0));
+            let comp = ws.state.active_comp;
+            let layer = studio_core::edit::add_layer_from_item(&mut ws.state.project, comp, item, 0, 0).unwrap();
+            ws.state.select_layer(layer, false);
+            cx.notify();
+            layer
+        })
+    });
+    tall_window(visual);
+    let find = |visual: &mut gpui_kit::VisualTestContext, id: &'static str| visual.update(|window, _| window.try_find(id)).is_some();
+    let view = |visual: &mut gpui_kit::VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.key_view);
+    assert!(!find(visual, "viewer-key-selection"), "nothing is keyed yet, so there is nothing to view");
+    // Picking starts in the Selection view, with a hint on how to pick.
+    visual.update(|window, cx| window.click("cutout-add", cx));
+    render(visual);
+    assert_eq!(view(visual), Some(KeyView::Selection));
+    assert!(find(visual, "viewer-picking-hint"));
+    assert!(!find(visual, "viewer-key-legend"), "no strokes yet, so nothing is selected to show");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.add_matte_stroke(layer, &[Vec2::new(860.0, 490.0)], 10.0, true);
+        cx.notify();
+    }));
+    render(visual);
+    assert!(find(visual, "viewer-key-legend") && find(visual, "viewer-key-matte"));
+    // Done stops picking; the view stays, as the layer is still selected.
+    visual.update(|window, cx| window.click("viewer-picking-done", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.cutout_pick), None);
+    assert!(!find(visual, "viewer-picking-hint") && find(visual, "viewer-key-legend"));
+    visual.update(|window, cx| window.click("viewer-key-matte", cx));
+    render(visual);
+    assert_eq!(view(visual), Some(KeyView::Matte));
+    visual.update(|window, cx| window.click("viewer-key-result", cx));
+    render(visual);
+    assert_eq!(view(visual), None);
+    assert!(!find(visual, "viewer-key-legend"), "the plain result needs no legend");
+    // A green screen key counts too.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.clear_cutout(layer);
+        let comp = ws.state.active_comp;
+        studio_core::edit::add_effect(&mut ws.state.project, comp, layer, "Keyer").unwrap();
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("viewer-key-selection", cx));
+    render(visual);
+    assert_eq!(view(visual), Some(KeyView::Selection));
+    assert!(find(visual, "viewer-key-legend"));
 }
 
 #[gpui_kit::test]

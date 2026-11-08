@@ -147,7 +147,7 @@ pub const GROUPS: &[(&str, &[FeatureInfo])] = &[
         AI_GROUP,
         &[
             info(Feature::Captions, "Captions", "Generate Captions, and the Captions panel on the rail."),
-            info(Feature::RemoveBackground, "Remove Background", "Picking a subject out of footage and images."),
+            info(Feature::RemoveBackground, "Object Matte", "Painting an object out of footage and images, like Roto Brush."),
             info(Feature::AutoReframe, "Auto Reframe", "New shapes of a clip that follow its subject."),
             info(Feature::EnhanceSpeech, "Enhance Speech", "Cleaning up voice recordings."),
         ],

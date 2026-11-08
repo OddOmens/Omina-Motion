@@ -174,6 +174,7 @@ pub fn insert_freeze_frame(project: &mut Project, comp_id: Id, layer_id: Id, fra
     hold.time = LayerTime { hold: Some(held), ..LayerTime::default() };
     hold.has_audio = false;
     hold.effects.clear();
+    hold.effect_graph = Default::default();
     hold.track = track;
     let above = composition.layers.iter().position(|other| other.id == layer_id).unwrap_or(0);
     composition.layers.insert(above, hold);

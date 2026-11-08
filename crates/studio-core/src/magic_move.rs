@@ -218,9 +218,8 @@ fn copied(project: &mut Project, layers: &[Layer], delta: i64) -> Vec<Layer> {
             let mut copy = original.clone();
             copy.id = project.allocate_id();
             new_ids.insert(original.id, copy.id);
-            for effect in &mut copy.effects {
-                effect.id = project.allocate_id();
-            }
+            // Fresh ids for its effects and Merge nodes, with its node graph pointed at them.
+            crate::effect_graph::reassign_ids(&mut copy, || project.allocate_id());
             copy.shift_in_time(delta);
             copy
         })
@@ -241,9 +240,8 @@ fn copied(project: &mut Project, layers: &[Layer], delta: i64) -> Vec<Layer> {
 fn bridge(project: &mut Project, layer: &Layer, frame: i64, window: Window) -> Layer {
     let mut copy = layer.clone();
     copy.id = project.allocate_id();
-    for effect in &mut copy.effects {
-        effect.id = project.allocate_id();
-    }
+    // Fresh ids for its effects and Merge nodes, with its node graph pointed at them.
+    crate::effect_graph::reassign_ids(&mut copy, || project.allocate_id());
     copy.in_frame = window.start;
     copy.out_frame = window.end;
     copy.track_matte = TrackMatte::None;

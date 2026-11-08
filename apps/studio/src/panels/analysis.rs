@@ -412,10 +412,14 @@ pub fn auto_reframe(workspace: &mut Workspace, layer: Id, format: Format, window
     // Source frames to look at, a few a second across the clip.
     let step = ((comp_rate.fps() / REFRAME_SAMPLES_PER_SECOND).round() as i64).max(1);
     let samples: Vec<(i64, i64)> = (found.in_frame..found.out_frame).step_by(step as usize).map(|frame| (frame, found.source_frame(frame, comp_rate, rate).max(0))).collect();
-    let clicks: Vec<studio_cutout::Click> = match found.cutout.as_ref() {
-        Some(cut) if !cut.clicks.is_empty() => cut.clicks.iter().map(|click| studio_cutout::Click { x: click.at.x, y: click.at.y, keep: click.keep }).collect(),
-        _ => vec![studio_cutout::Click { x: 0.5, y: 0.45, keep: true }],
-    };
+    // An object matte's strokes on its first painted frame say what the subject is (each
+    // stroke's points as clicks); otherwise the subject is taken to be in the middle.
+    let painted: Vec<studio_cutout::Click> = found
+        .cutout
+        .as_ref()
+        .and_then(|cut| cut.base_frames().first().map(|&frame| cut.strokes_on(frame).flat_map(|stroke| stroke.points.iter().map(|at| studio_cutout::Click { x: at.x, y: at.y, keep: stroke.add })).take(32).collect::<Vec<_>>()))
+        .unwrap_or_default();
+    let clicks = if painted.is_empty() { vec![studio_cutout::Click { x: 0.5, y: 0.45, keep: true }] } else { painted };
     let model = super::cutout::model_folder();
     let comp = state.active_comp;
     let start_reframe = move |this: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
@@ -542,9 +546,8 @@ fn reframed_composition(project: &mut studio_core::model::Project, comp: Id, lay
     let position_for = |center: Vec2| keep_covered(frame * 0.5 - Vec2::new((center.x * size.x - anchor.x) * scale, (center.y * size.y - anchor.y) * scale));
     let mut copy = original;
     copy.id = project.allocate_id();
-    for effect in &mut copy.effects {
-        effect.id = project.allocate_id();
-    }
+    // Fresh ids for its effects and Merge nodes, with its node graph pointed at them.
+    studio_core::effect_graph::reassign_ids(&mut copy, || project.allocate_id());
     copy.parent = None;
     copy.mask = None;
     copy.track_matte = studio_core::model::TrackMatte::None;

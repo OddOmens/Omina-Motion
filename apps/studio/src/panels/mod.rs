@@ -10,6 +10,7 @@ pub mod color_picker;
 pub mod color_well;
 pub mod composition_settings;
 pub mod effect_controls;
+pub mod nodes;
 pub mod effects;
 pub mod resize;
 pub mod elements;

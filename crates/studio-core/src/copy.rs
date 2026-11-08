@@ -62,9 +62,8 @@ pub(crate) fn insert_copies(project: &mut Project, comp_id: Id, originals: &[Lay
         let mut copy = original.clone();
         copy.id = project.allocate_id();
         new_ids.insert(original.id, copy.id);
-        for effect in &mut copy.effects {
-            effect.id = project.allocate_id();
-        }
+        // Fresh ids for its effects and Merge nodes, with its node graph pointed at them.
+        crate::effect_graph::reassign_ids(&mut copy, || project.allocate_id());
         copy.shift_in_time(delta);
         copies.push(copy);
     }
@@ -139,9 +138,8 @@ fn copy_composition(project: &mut Project, id: Id, copy_id: Id) -> Option<Compos
         let fresh = project.allocate_id();
         new_ids.insert(layer.id, fresh);
         layer.id = fresh;
-        for effect in &mut layer.effects {
-            effect.id = project.allocate_id();
-        }
+        // Fresh ids for its effects and Merge nodes, with its node graph pointed at them.
+        crate::effect_graph::reassign_ids(layer, || project.allocate_id());
     }
     let moved = |old: Id| new_ids.get(&old).copied();
     for layer in &mut composition.layers {
@@ -215,7 +213,9 @@ pub fn paste_attributes(project: &mut Project, comp_id: Id, source: &Layer, targ
                 for property in &mut copy.properties {
                     property.value.shift(delta);
                 }
+                let id = copy.id;
                 layer.effects.push(copy);
+                crate::effect_graph::effect_added(layer, id);
             }
         }
         // Speed only means something between two footage clips that play (not freeze frames).

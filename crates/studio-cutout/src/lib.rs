@@ -1,19 +1,29 @@
-//! Background removal: a few clicks on a picture ("keep this", "not this") pick out a subject,
-//! with the MobileSAM segmentation model run locally through Candle (on the Mac's GPU where there
-//! is one). Nothing leaves the computer.
+//! Background removal: a few clicks or painted strokes on a picture ("keep this", "not this")
+//! pick out a subject, with the MobileSAM segmentation model run locally through Candle (on the
+//! Mac's GPU where there is one). Nothing leaves the computer.
 //!
 //! The model is one file, `MODEL_FILE`, published at huggingface.co/lmz/candle-sam (a Candle
 //! conversion of MobileSAM, Apache-2.0). The app downloads it once; this crate only reads it.
 //!
-//! For video, the subject is followed from frame to frame: each frame is segmented again with
-//! points placed deep inside the previous frame's mask, and of the model's guesses the one that
-//! overlaps the previous mask most is kept, so the cut-out does not jump between objects.
+//! For video, the subject is followed from frame to frame: the model is given a few points deep
+//! inside the previous frame's mask and a box around it, and of the model's guesses the one that
+//! overlaps the previous mask most is kept, so the cut-out does not jump between objects. Masks can then have their edges refined (`Mask::with_edges`) and their flicker over
+//! time calmed (`reduce_chatter`).
+
+mod edges;
+mod prompt;
+mod sam;
+mod strokes;
 
 use std::path::Path;
 
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::segment_anything::sam::{self, Sam};
+
+pub use edges::{reduce_chatter, EdgeSettings, Guide, SHIFT_EDGE_RANGE};
+use prompt::{follow_prompt, low_res_overlap, stroke_prompt, Prompt};
+use sam::{ModelPrompt, Sam, LOW_RES};
+pub use strokes::Stroke;
 
 /// The model's file, as named in its Hugging Face repository.
 pub const MODEL_FILE: &str = "mobile_sam-tiny-vitt.safetensors";
@@ -26,37 +36,6 @@ pub const MODEL_BYTES: u64 = 40_613_024;
 
 /// The longest side pictures are segmented at (the model's own input size).
 pub const WORK_SIZE: u32 = sam::IMAGE_SIZE as u32;
-/// The model's low-resolution mask covers the padded square input at this many cells a side.
-const LOW_RES: usize = 256;
-/// How far (in work-size pixels) edge refinement looks around each pixel, and how much it
-/// smooths: larger smoothing keeps the mask solid over texture inside the subject.
-const REFINE_RADIUS: usize = 6;
-const REFINE_SMOOTHING: f32 = 0.002;
-
-/// The average of `values` (a `width × height` grid) over the square of `radius` around each
-/// cell, smaller at the borders. Uses a summed-area table, so the cost doesn't grow with radius.
-fn box_mean(values: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
-    // Sums in f64: a whole frame of f32 additions would lose precision.
-    let stride = width + 1;
-    let mut sums = vec![0.0f64; stride * (height + 1)];
-    for y in 0..height {
-        let mut row = 0.0;
-        for x in 0..width {
-            row += f64::from(values[y * width + x]);
-            sums[(y + 1) * stride + x + 1] = sums[y * stride + x + 1] + row;
-        }
-    }
-    let mut means = Vec::with_capacity(width * height);
-    for y in 0..height {
-        let (top, bottom) = (y.saturating_sub(radius), (y + radius + 1).min(height));
-        for x in 0..width {
-            let (left, right) = (x.saturating_sub(radius), (x + radius + 1).min(width));
-            let total = sums[bottom * stride + right] - sums[top * stride + right] - sums[bottom * stride + left] + sums[top * stride + left];
-            means.push((total / ((bottom - top) * (right - left)) as f64) as f32);
-        }
-    }
-    means
-}
 
 /// Something that went wrong, in words for the user.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,7 +76,13 @@ pub struct Mask {
 }
 
 impl Mask {
-    fn at(&self, x: u32, y: u32) -> u8 {
+    /// A mask of `width × height` that keeps nothing.
+    fn empty(width: u32, height: u32) -> Mask {
+        Mask { width, height, alpha: vec![0; (width * height) as usize] }
+    }
+
+    /// The kept amount of the pixel at column `x`, row `y`.
+    pub(crate) fn at(&self, x: u32, y: u32) -> u8 {
         self.alpha[(y * self.width + x) as usize]
     }
 
@@ -116,37 +101,6 @@ impl Mask {
             either += usize::from(a || b);
         }
         if either == 0 { 0.0 } else { both as f32 / either as f32 }
-    }
-
-    /// Makes the mask's edges follow the edges in the picture it was made from, so hair,
-    /// fingers and the outline of clothing are cut along what is really there rather than the
-    /// model's rounded, low-resolution outline. `rgba` is that picture, `width * 4` bytes a
-    /// row; it is scaled to the mask's size first if it differs.
-    ///
-    /// This is a guided filter (He, Sun and Tang, 2010): within each small window the mask is
-    /// fitted as a straight-line function of the picture's brightness, so the mask changes where
-    /// the picture changes, and stays smooth where it doesn't.
-    pub fn refine(&self, rgba: &[u8], width: u32, height: u32) -> Mask {
-        let (w, h) = (self.width as usize, self.height as usize);
-        let Some(picture) = image::RgbaImage::from_raw(width, height, rgba.to_vec()) else { return self.clone() };
-        let picture = if (width, height) == (self.width, self.height) { picture } else { image::imageops::resize(&picture, self.width, self.height, image::imageops::FilterType::Triangle) };
-        let guide: Vec<f32> = picture.pixels().map(|p| (0.299 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.114 * f32::from(p[2])) / 255.0).collect();
-        let kept: Vec<f32> = self.alpha.iter().map(|&a| f32::from(a) / 255.0).collect();
-        let mean = |values: &[f32]| box_mean(values, w, h, REFINE_RADIUS);
-        let product = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(a, b)| a * b).collect::<Vec<f32>>();
-        let (mean_guide, mean_kept) = (mean(&guide), mean(&kept));
-        let (mean_square, mean_cross) = (mean(&product(&guide, &guide)), mean(&product(&guide, &kept)));
-        let mut slope = vec![0.0; w * h];
-        let mut offset = vec![0.0; w * h];
-        for i in 0..w * h {
-            let variance = mean_square[i] - mean_guide[i] * mean_guide[i];
-            let covariance = mean_cross[i] - mean_guide[i] * mean_kept[i];
-            slope[i] = covariance / (variance + REFINE_SMOOTHING);
-            offset[i] = mean_kept[i] - slope[i] * mean_guide[i];
-        }
-        let (slope, offset) = (mean(&slope), mean(&offset));
-        let alpha = (0..w * h).map(|i| ((slope[i] * guide[i] + offset[i]).clamp(0.0, 1.0) * 255.0).round() as u8).collect();
-        Mask { width: self.width, height: self.height, alpha }
     }
 
     /// Saves it as a grayscale PNG.
@@ -203,53 +157,82 @@ impl Segmenter {
         Ok(Prepared { embedding, width: work_width, height: work_height })
     }
 
-    /// The model's guesses at the object `clicks` point to, at the prepared picture's size, each
-    /// with the model's own confidence in it (0–1).
-    fn guesses(&self, picture: &Prepared, clicks: &[Click], several: bool) -> Result<Vec<(Mask, f32)>, CutoutError> {
-        let points: Vec<(f64, f64, bool)> = clicks.iter().map(|click| (f64::from(click.x), f64::from(click.y), click.keep)).collect();
-        let (low_res, scores) = self.model.forward_for_embeddings(&picture.embedding, picture.height as usize, picture.width as usize, &points, several)?;
-        let low_res = low_res.i(0)?.to_dtype(DType::F32)?.to_vec3::<f32>()?;
+    /// The model's four masks for `prompt` on a prepared picture, as low-resolution logits, with
+    /// its confidence in each (0–1). Mask 0 is its answer for a precise prompt; masks 1–3 its
+    /// alternative readings of an ambiguous one.
+    fn decode(&self, picture: &Prepared, prompt: &Prompt) -> Result<Guesses, CutoutError> {
+        let (width, height) = (picture.width as f32, picture.height as f32);
+        let points: Vec<(f32, f32, bool)> = prompt.points.iter().map(|click| (click.x * width, click.y * height, click.keep)).collect();
+        let model_prompt = ModelPrompt { points: &points, bbox: prompt.bbox.map(|bounds| bounds.in_pixels(picture.width, picture.height)), mask: None };
+        let (low_res, scores) = self.model.predict(&picture.embedding, &model_prompt)?;
+        let logits = low_res.i(0)?.to_dtype(DType::F32)?.to_vec3::<f32>()?;
         let scores = scores.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-        Ok(low_res.iter().zip(scores).map(|(logits, score)| (upsample(logits, picture.width, picture.height), score)).collect())
+        Ok(Guesses { logits, scores })
+    }
+
+    /// Asks the model about `prompt` and picks its best guess, at the prepared picture's size.
+    /// With a reference mask, the guess most like it wins (the model's confidence breaks near ties),
+    /// so the result stays on the same subject. Otherwise, a lone point is ambiguous (a shirt,
+    /// the person, the group) and the most confident alternative reading wins; for anything more
+    /// precise the model's single answer is used, as its authors advise.
+    fn best_guess(&self, picture: &Prepared, prompt: &Prompt) -> Result<Mask, CutoutError> {
+        let guesses = self.decode(picture, prompt)?;
+        let candidates: Vec<usize> = match &prompt.reference {
+            Some(_) => (0..guesses.scores.len()).collect(),
+            None if prompt.points.len() <= 1 && prompt.bbox.is_none() => (1..guesses.scores.len()).collect(),
+            None => vec![0],
+        };
+        let rating = |index: usize| match &prompt.reference {
+            Some(reference) => low_res_overlap(&guesses.logits[index], reference, picture.width, picture.height) + guesses.scores[index] * 0.1,
+            None => guesses.scores[index],
+        };
+        let best = candidates.into_iter().filter(|&index| index < guesses.logits.len()).max_by(|&a, &b| rating(a).total_cmp(&rating(b))).ok_or_else(|| CutoutError("the model gave no answer".into()))?;
+        Ok(upsample(&guesses.logits[best], picture.width, picture.height))
     }
 
     /// Picks out what `clicks` point to on a still picture, or the first frame of a video.
     pub fn segment(&self, picture: &Prepared, clicks: &[Click]) -> Result<Mask, CutoutError> {
-        // With a single click the model offers a few readings (a shirt, the person, the group);
-        // with more clicks one answer is better, as the model's authors advise.
-        let several = clicks.len() <= 1;
-        let guesses = self.guesses(picture, clicks, several)?;
-        guesses.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(mask, _)| mask).ok_or_else(|| CutoutError("the model gave no answer".into()))
+        self.best_guess(picture, &Prompt { points: clicks.to_vec(), ..Default::default() })
     }
 
-    /// Picks out the same subject in the next frame of a video, from the previous frame's mask.
-    /// `removes` are the clicks marking things to remove, which are kept where they still fall
-    /// outside the subject.
-    pub fn follow(&self, picture: &Prepared, previous: &Mask, removes: &[Click]) -> Result<Mask, CutoutError> {
-        let mut clicks = inside_points(previous);
-        if clicks.is_empty() {
-            // The subject was lost (it left the picture): nothing to keep in this frame.
-            return Ok(Mask { width: picture.width, height: picture.height, alpha: vec![0; (picture.width * picture.height) as usize] });
-        }
-        let outside = |click: &&Click| {
-            let (x, y) = (((click.x * previous.width as f32) as u32).min(previous.width - 1), ((click.y * previous.height as f32) as u32).min(previous.height - 1));
-            previous.at(x, y) < 128
+    /// Picks out what painted `strokes` mark, at the prepared picture's size, refining `previous`
+    /// (this frame's mask so far, if any). The strokes become the model's prompt: points along
+    /// them, plus, with a previous mask, points deep inside it and a box around it once the strokes
+    /// are painted on. Then they are enforced: whatever an add stroke covers is kept and whatever a
+    /// remove stroke covers is removed, whatever the model thought.
+    pub fn segment_strokes(&self, picture: &Prepared, strokes: &[Stroke], previous: Option<&Mask>) -> Result<Mask, CutoutError> {
+        let mut mask = match stroke_prompt(strokes, previous, picture.width, picture.height) {
+            Some(prompt) => self.best_guess(picture, &prompt)?,
+            None => Mask::empty(picture.width, picture.height),
         };
-        clicks.extend(removes.iter().filter(outside).copied());
-        let guesses = self.guesses(picture, &clicks, true)?;
-        // The guess most like the previous frame wins, so the cut-out stays on one subject;
-        // the model's confidence breaks near ties.
-        let same_size = |mask: &Mask| mask.width == previous.width && mask.height == previous.height;
-        guesses
-            .into_iter()
-            .map(|(mask, score)| {
-                let likeness = if same_size(&mask) { mask.overlap(previous) } else { 0.0 };
-                (mask, likeness + score * 0.1)
-            })
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(mask, _)| mask)
-            .ok_or_else(|| CutoutError("the model gave no answer".into()))
+        strokes::paint_strokes(&mut mask, strokes);
+        Ok(mask)
     }
+
+    /// Picks out the same subject in the next frame of a video from the previous frame's mask:
+    /// the model is given points deep inside it and a box around it (with room to move), and of
+    /// its four guesses the one most like the previous mask wins. The box keeps the cut-out from
+    /// spreading onto, or jumping to, similar things nearby.
+    /// Keeps nothing once the previous mask keeps nothing (the subject left the picture).
+    pub fn propagate(&self, picture: &Prepared, previous: &Mask) -> Result<Mask, CutoutError> {
+        self.follow(picture, previous, &[])
+    }
+
+    /// `propagate`, also passing `removes`, the clicks marking things to remove, which are kept
+    /// where they still fall outside the subject.
+    pub fn follow(&self, picture: &Prepared, previous: &Mask, removes: &[Click]) -> Result<Mask, CutoutError> {
+        match follow_prompt(previous, removes, picture.width, picture.height) {
+            Some(prompt) => self.best_guess(picture, &prompt),
+            None => Ok(Mask::empty(picture.width, picture.height)),
+        }
+    }
+}
+
+/// The model's masks for one prompt: low-resolution logits (`LOW_RES` square, covering the padded
+/// input) and the model's confidence in each.
+struct Guesses {
+    logits: Vec<Vec<Vec<f32>>>,
+    scores: Vec<f32>,
 }
 
 /// Scales the model's low-resolution mask (logits over the padded square input) up to the
@@ -331,11 +314,11 @@ pub fn inside_points(mask: &Mask) -> Vec<Click> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A mask keeping a filled rectangle.
-    fn rectangle(width: u32, height: u32, keep: std::ops::Range<u32>, rows: std::ops::Range<u32>) -> Mask {
+    pub(crate) fn rectangle(width: u32, height: u32, keep: std::ops::Range<u32>, rows: std::ops::Range<u32>) -> Mask {
         let alpha = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| if keep.contains(&x) && rows.contains(&y) { 255 } else { 0 }).collect();
         Mask { width, height, alpha }
     }
@@ -365,12 +348,6 @@ mod tests {
         assert!(refined.at(47, 10) > rough.at(47, 10) + 60, "kept up to the real edge: {}", refined.at(47, 10));
         assert!(refined.at(55, 10) < 40, "and not past it: {}", refined.at(55, 10));
         assert!(refined.at(10, 10) > 240, "the inside stays kept");
-    }
-
-    #[test]
-    fn box_means_average_their_neighbourhood() {
-        let values = [0.0, 0.0, 3.0, 3.0];
-        assert_eq!(box_mean(&values, 4, 1, 1), vec![0.0, 1.0, 2.0, 3.0]);
     }
 
     #[test]

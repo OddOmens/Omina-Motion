@@ -375,6 +375,10 @@ pub fn set_loop(project: &mut Project, comp: Id, layer_id: Id, looping: Option<L
             clear(&mut transform.opacity, (start, end), start);
         }
         if previous == Some(Loop::Wiggle) {
+            let wiggles: Vec<_> = layer.effects.iter().filter(|effect| effect.name == "Wiggle").map(|effect| effect.id).collect();
+            for wiggle in wiggles {
+                crate::effect_graph::remove_node(layer, crate::effect_graph::NodeId::Effect(wiggle));
+            }
             layer.effects.retain(|effect| effect.name != "Wiggle");
         }
     }

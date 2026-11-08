@@ -60,6 +60,7 @@ fn layer_from_item(item: &ProjectItem, composition: &Composition, in_frame: i64,
         switches: LayerSwitches { visible: has_picture, audio: has_audio, ..LayerSwitches::default() },
         transform: has_picture.then(|| Transform::centered(size, composition.size() * 0.5)),
         effects: Vec::new(),
+        effect_graph: Default::default(),
         has_audio,
         audio: Default::default(),
         time: Default::default(),
@@ -115,6 +116,7 @@ pub fn separate_audio(project: &mut Project, comp_id: Id, layer_id: Id) -> Optio
         content: LayerContent::Audio { item },
         transform: None,
         effects: Vec::new(),
+        effect_graph: Default::default(),
         parent: None,
         track_matte: TrackMatte::None,
         mask: None,
@@ -257,6 +259,7 @@ pub fn add_effect(project: &mut Project, comp_id: Id, layer_id: Id, name: &str) 
     let id = project.allocate_id();
     let layer = project.composition_mut(comp_id)?.layer_mut(layer_id)?;
     layer.effects.push(crate::effects::instantiate(definition, id));
+    crate::effect_graph::effect_added(layer, id);
     Some(id)
 }
 
@@ -390,6 +393,7 @@ pub fn stagger_layers(composition: &mut Composition, layers: &[Id], step: Option
 /// Removes an effect from a layer.
 pub fn remove_effect(composition: &mut Composition, layer_id: Id, effect_id: Id) {
     if let Some(layer) = composition.layer_mut(layer_id) {
+        crate::effect_graph::remove_node(layer, crate::effect_graph::NodeId::Effect(effect_id));
         layer.effects.retain(|effect| effect.id != effect_id);
     }
 }
@@ -794,6 +798,7 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
             switches: LayerSwitches::default(),
             transform: Some(transform),
             effects: Vec::new(),
+            effect_graph: Default::default(),
             has_audio: false,
             audio: Default::default(),
             time: Default::default(),

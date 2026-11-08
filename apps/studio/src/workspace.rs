@@ -306,6 +306,8 @@ pub enum PanelId {
     Captions,
     Elements,
     Mockups,
+    /// The node graph of the selected layer's effects.
+    Nodes,
 }
 
 /// The editing tools on the rail.
@@ -617,8 +619,17 @@ pub struct UiState {
     /// copy failed or was cancelled, which aren't tried again until their settings change.
     pub enhance_job: Option<panels::enhance::EnhanceJob>,
     pub enhance_skipped: Vec<(Id, studio_core::model::SpeechEnhance)>,
-    /// The layer whose subject is being picked: clicks in the viewer go to its cut-out.
+    /// The layer whose object matte is being painted: strokes in the viewer go to it.
     pub cutout_pick: Option<Id>,
+    /// The stroke being painted in the viewer, if a press is under way.
+    pub matte_paint: Option<panels::viewer::MattePaint>,
+    /// The object matte brush's radius, in screen points.
+    pub matte_brush: f32,
+    /// Where the pointer is over the picture (composition pixels), for the brush outline.
+    pub matte_pointer: Option<studio_core::animation::Vec2>,
+    /// How the viewer shows a keyed layer (one with an Object Matte or a green screen key):
+    /// its plain result (`None`), or what the key keeps and removes (see `key_view`).
+    pub key_view: Option<studio_core::key_view::KeyView>,
     /// The color picker, while it is open.
     pub color_picker: Option<panels::color_picker::Picker>,
     /// Whether the eyedropper's color menu (current color, recent picks, swatches) is open, and
@@ -634,6 +645,8 @@ pub struct UiState {
     pub white_balance_pick: Option<(Id, Id)>,
     /// The Keyer (layer, effect) waiting for a click in the viewer to pick its key color.
     pub key_color_pick: Option<(Id, Id)>,
+    /// The Nodes panel: whether it is open, where its canvas is looking, and what is picked.
+    pub nodes: panels::nodes::NodesUi,
     /// Where the Color panel's three color wheels and its sliders are on screen, for dragging,
     /// and whether one is pressed (so the press and the drag after it are one undo step).
     pub wheel_bounds: [panels::chrome::MeasuredBounds; 3],
@@ -735,6 +748,7 @@ struct Panels {
     captions: Entity<PanelView>,
     elements: Entity<PanelView>,
     mockups: Entity<PanelView>,
+    nodes: Entity<PanelView>,
     clock: Entity<PlaybackClock>,
 }
 
@@ -748,9 +762,10 @@ impl Panels {
         let libraries = view(PanelKind::Libraries);
         let (templates, captions, elements) = (view(PanelKind::Templates), view(PanelKind::Captions), view(PanelKind::Elements));
         let mockups = view(PanelKind::Mockups);
+        let nodes = view(PanelKind::Nodes);
         let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id()];
         let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed, project.entity_id()));
-        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, templates, captions, elements, mockups, clock }
+        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, templates, captions, elements, mockups, nodes, clock }
     }
 }
 
@@ -1009,6 +1024,10 @@ impl Workspace {
                 import_job: None,
                 track_pick: None,
                 cutout_pick: None,
+                matte_paint: None,
+                matte_brush: panels::viewer::DEFAULT_BRUSH,
+                matte_pointer: None,
+                key_view: None,
                 effect_drop_layer: None,
                 slot_drop: None,
                 color_well: false,
@@ -1017,6 +1036,7 @@ impl Workspace {
                 eyedropper_press: false,
                 white_balance_pick: None,
                 key_color_pick: None,
+                nodes: Default::default(),
                 wheel_bounds: Default::default(),
                 grade_pressed: false,
                 slider_bounds: Default::default(),
@@ -1473,6 +1493,13 @@ impl Workspace {
     /// Delete key. In the Project panel it asks before deleting the selected item (and the layers
     /// that use it); elsewhere it deletes selected keyframes, or else the selected layers.
     pub(crate) fn delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // In the Nodes panel, Delete removes the picked node.
+        if self.ui.active_panel == PanelId::Nodes {
+            if panels::nodes::delete_selected(self) {
+                cx.notify();
+            }
+            return;
+        }
         if self.ui.active_panel != PanelId::Project {
             self.state.delete_selection();
             cx.notify();
@@ -1597,7 +1624,15 @@ impl Render for Workspace {
                                     .child(resizable_panel().child(cached(&panels.viewer))),
                             ),
                         )
-                        .child(resizable_panel().size_range(px(180.0)..px(2000.0)).child(cached(&panels.timeline))),
+                        // The Nodes panel, while open, shares the bottom row with the timeline.
+                        .child(resizable_panel().size_range(px(180.0)..px(2000.0)).child(if self.ui.nodes.open {
+                            h_resizable("workspace-bottom")
+                                .child(resizable_panel().child(cached(&panels.timeline)))
+                                .child(resizable_panel().size(px(560.0)).size_range(px(320.0)..px(1600.0)).child(cached(&panels.nodes)))
+                                .into_any_element()
+                        } else {
+                            cached(&panels.timeline).into_any_element()
+                        })),
                 ),
             )
             .child(

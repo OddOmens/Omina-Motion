@@ -1,12 +1,12 @@
-//! Background removal on the selected footage or image layer: placing clicks that pick out the
-//! subject, and recording the masks the background job makes from them (see
-//! `panels::cutout`).
+//! The object matte on the selected footage or image layer: painting brush strokes that mark
+//! the object (and what isn't part of it), and recording the masks the background job makes
+//! from them (see `panels::cutout`).
 
 use std::path::PathBuf;
 
 use studio_core::animation::Vec2;
 use studio_core::cutout;
-use studio_core::model::{CutoutClick, Id, LayerContent};
+use studio_core::model::{Id, LayerContent, MatteEdges, MatteStroke};
 use studio_core::transform::world_transform;
 
 use super::EditorState;
@@ -58,27 +58,49 @@ impl EditorState {
         }
     }
 
-    /// Adds a click at `point` (composition pixels) on a cut-out layer's picture, at the
-    /// playhead: one marking something to keep, or (with `keep` false) to leave out. Returns
-    /// whether it landed on the picture.
-    pub fn add_cutout_click(&mut self, layer: Id, point: Vec2, keep: bool) -> bool {
+    /// Adds a brush stroke painted along `points` (composition pixels) with a brush `radius`
+    /// composition pixels wide, on the layer's picture at the playhead: one marking the object,
+    /// or (with `add` false) something that isn't part of it. Returns whether it was added.
+    pub fn add_matte_stroke(&mut self, layer: Id, points: &[Vec2], radius: f32, add: bool) -> bool {
         let comp = self.composition();
         let Some(target) = comp.layer(layer).filter(|target| target.is_active_at(self.current_frame)) else { return false };
         let Some(to_local) = world_transform(comp, layer, self.current_frame as f64).and_then(|world| world.inverse()) else { return false };
-        let local = to_local.apply(point);
-        let at = Vec2::new(local.x / target.size.x.max(1.0), local.y / target.size.y.max(1.0));
+        let size = Vec2::new(target.size.x.max(1.0), target.size.y.max(1.0));
+        let local: Vec<Vec2> = points.iter().map(|point| to_local.apply(*point)).map(|at| Vec2::new(at.x / size.x, at.y / size.y)).collect();
+        // A stroke that stays off the picture paints nothing.
+        if !local.iter().any(|at| (0.0..=1.0).contains(&at.x) && (0.0..=1.0).contains(&at.y)) {
+            return false;
+        }
+        let radius = to_local.apply_vector(Vec2::new(radius, 0.0)).length() / size.x;
         let Some(frame) = self.cutout_frame_at_playhead(layer) else { return false };
-        cutout::add_click(self.composition_mut(), layer, CutoutClick { at, keep }, frame)
+        cutout::add_stroke(self.composition_mut(), layer, MatteStroke { frame, points: local, radius, add })
     }
 
-    /// Where a cut-out's clicks are on screen (composition pixels) and whether each keeps or
-    /// leaves out, while the playhead is on the frame they were placed on.
-    pub fn cutout_clicks_on_screen(&self, layer: Id) -> Vec<(Vec2, bool)> {
+    /// The strokes painted on the frame at the playhead, on screen: each one's points and brush
+    /// radius in composition pixels, and whether it adds to the object.
+    pub fn matte_strokes_on_screen(&self, layer: Id) -> Vec<(Vec<Vec2>, f32, bool)> {
         let comp = self.composition();
         let Some(target) = comp.layer(layer) else { return Vec::new() };
-        let Some(cut) = target.cutout.as_ref().filter(|cut| self.cutout_frame_at_playhead(layer) == Some(cut.frame)) else { return Vec::new() };
+        let (Some(cut), Some(frame)) = (target.cutout.as_ref(), self.cutout_frame_at_playhead(layer)) else { return Vec::new() };
         let Some(world) = world_transform(comp, layer, self.current_frame as f64) else { return Vec::new() };
-        cut.clicks.iter().map(|click| (world.apply(Vec2::new(click.at.x * target.size.x, click.at.y * target.size.y)), click.keep)).collect()
+        let place = |at: &Vec2| world.apply(Vec2::new(at.x * target.size.x, at.y * target.size.y));
+        cut.strokes_on(frame)
+            .map(|stroke| {
+                let radius = world.apply_vector(Vec2::new(stroke.radius * target.size.x, 0.0)).length();
+                (stroke.points.iter().map(place).collect(), radius, stroke.add)
+            })
+            .collect()
+    }
+
+    /// Removes the strokes on the frame at the playhead. Returns whether there were any.
+    pub fn clear_matte_frame(&mut self, layer: Id) -> bool {
+        let Some(frame) = self.cutout_frame_at_playhead(layer) else { return false };
+        cutout::clear_frame(self.composition_mut(), layer, frame)
+    }
+
+    /// Changes how the matte's edge is finished.
+    pub fn set_matte_edges(&mut self, layer: Id, edges: MatteEdges) {
+        cutout::set_edges(self.composition_mut(), layer, edges);
     }
 
     pub fn clear_cutout(&mut self, layer: Id) {
@@ -89,17 +111,17 @@ impl EditorState {
         cutout::set_remove(self.composition_mut(), layer, remove);
     }
 
-    /// Records masks the background job made from `clicks`. This follows the user's clicks
+    /// Records masks the background job made from `strokes`. This follows the user's strokes
     /// rather than being an edit of its own, so it is not an undo step.
-    pub fn record_cutout_masks(&mut self, comp: Id, layer: Id, clicks: &[CutoutClick], folder: PathBuf, frames: (i64, i64)) -> bool {
+    pub fn record_cutout_masks(&mut self, comp: Id, layer: Id, strokes: &[MatteStroke], folder: PathBuf, frames: (i64, i64)) -> bool {
         self.settle_drags();
         let Some(composition) = self.project.composition_mut(comp) else { return false };
-        if !cutout::set_masks(composition, layer, clicks, folder.clone(), frames) {
+        if !cutout::set_masks(composition, layer, strokes, folder.clone(), frames) {
             return false;
         }
         self.history.absorb_everywhere(|project| {
             if let Some(composition) = project.composition_mut(comp) {
-                cutout::set_masks(composition, layer, clicks, folder.clone(), frames);
+                cutout::set_masks(composition, layer, strokes, folder.clone(), frames);
             }
         });
         true
@@ -111,18 +133,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clicks_land_on_the_layers_picture_where_they_were_made() {
+    fn strokes_land_on_the_layers_picture_where_they_were_painted() {
         let mut state = EditorState::new();
         let item = studio_core::edit::import_image(&mut state.project, "/media/portrait.png".into(), Vec2::new(400.0, 200.0));
         let comp = state.active_comp;
         let layer = studio_core::edit::add_layer_from_item(&mut state.project, comp, item, 0, 0).unwrap();
         // The image is centered in the 1920 × 1080 frame: 760..1160 across, 440..640 down.
-        assert!(state.add_cutout_click(layer, Vec2::new(860.0, 490.0), true));
-        assert!(!state.add_cutout_click(layer, Vec2::new(100.0, 100.0), true), "off the picture");
+        assert!(state.add_matte_stroke(layer, &[Vec2::new(860.0, 490.0), Vec2::new(960.0, 540.0)], 20.0, true));
+        assert!(!state.add_matte_stroke(layer, &[Vec2::new(100.0, 100.0)], 20.0, true), "off the picture");
         let cut = state.composition().layer(layer).unwrap().cutout.clone().unwrap();
-        assert_eq!(cut.clicks, vec![CutoutClick { at: Vec2::new(0.25, 0.25), keep: true }]);
-        let shown = state.cutout_clicks_on_screen(layer);
-        assert!((shown[0].0 - Vec2::new(860.0, 490.0)).length() < 1e-3);
+        assert_eq!(cut.strokes.len(), 1);
+        assert_eq!(cut.strokes[0].points, vec![Vec2::new(0.25, 0.25), Vec2::new(0.5, 0.5)]);
+        assert!((cut.strokes[0].radius - 0.05).abs() < 1e-4, "20 px of a 400 px picture");
+        let shown = state.matte_strokes_on_screen(layer);
+        assert!((shown[0].0[0] - Vec2::new(860.0, 490.0)).length() < 1e-3);
+        assert!((shown[0].1 - 20.0).abs() < 1e-3);
         assert_eq!(state.cutout_source(layer).unwrap().frames, None, "an image has one frame");
+        assert!(state.clear_matte_frame(layer));
+        assert!(state.matte_strokes_on_screen(layer).is_empty());
     }
 }

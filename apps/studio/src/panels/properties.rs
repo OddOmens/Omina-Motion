@@ -182,8 +182,9 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     })
 }
 
-/// Remove Background, for footage and images: pick the subject by clicking it in the viewer,
-/// choose whether to keep it or take it out, and for video, follow it through the clip.
+/// Object Matte, for footage and images, like After Effects' Roto Brush: paint over the object
+/// in the viewer (Option-paint what isn't part of it), choose whether to keep it or take it
+/// out, follow it through a clip, and finish its edge.
 fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
     let id = layer.id;
     let target = cx.weak_entity();
@@ -192,36 +193,49 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
     let is_video = matches!(layer.content, LayerContent::Footage { .. });
     let cut = layer.cutout.as_ref();
     let mut section = div();
-    let pick = Button::new("cutout-pick")
+    let paint = Button::new("cutout-pick")
         .small()
-        .icon(Icon::new(IconName::WandSparkles))
-        .label(if picking { "Done Picking" } else if cut.is_some() { "Pick Again" } else { "Pick Subject" })
+        .icon(Icon::new(IconName::Brush))
+        .label(if picking { "Done Painting" } else { "Paint Object" })
         .when(picking, |button| button.primary())
         .when(!picking, |button| button.outline())
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.ui.cutout_pick = if this.ui.cutout_pick == Some(id) { None } else { Some(id) };
+            super::cutout::toggle_picking(this, id);
             cx.notify();
         }));
     if picking {
-        section = section.child(status_line("Click to keep, Option-click to leave out."));
+        section = section.child(status_line("Paint over the object; Option-paint over what isn't part of it."));
     }
-    // Until there is a cut-out, the heading's + starts picking.
+    // Until there is a matte, the heading's + starts painting.
     let Some(cut) = cut else {
         return section.when(!picking, |section| section.child(add_note()));
     };
-    section = section.child(div().py_1().child(pick));
-    let modes = [("Keep Subject", false), ("Remove Subject", true)].map(|(label, remove)| (label.to_owned(), remove == cut.remove, remove)).to_vec();
-    let mode_label = if cut.remove { "Remove Subject" } else { "Keep Subject" };
-    section = section.child(labeled_row("Picked", choice_menu("cutout-mode", mode_label.to_owned(), modes, move |this, remove| this.state.set_cutout_remove(id, remove), target)));
-    // Where the masks stand: being made, made for one frame, or followed through the clip.
+    let here = workspace.state.matte_strokes_on_screen(id).len();
+    let clear_frame = Button::new("cutout-clear-frame")
+        .outline()
+        .small()
+        .label("Clear Frame")
+        .tooltip("Remove the strokes on this frame")
+        .disabled(here == 0)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            if this.state.clear_matte_frame(id) {
+                super::cutout::make_masks(this, id, false, window, cx);
+            }
+            cx.notify();
+        }));
+    section = section.child(div().py_1().flex().gap_1().child(paint).child(clear_frame));
+    let modes = [("Keep Object", false), ("Remove Object", true)].map(|(label, remove)| (label.to_owned(), remove == cut.remove, remove)).to_vec();
+    let mode_label = if cut.remove { "Remove Object" } else { "Keep Object" };
+    section = section.child(labeled_row("Matte", choice_menu("cutout-mode", mode_label.to_owned(), modes, move |this, remove| this.state.set_cutout_remove(id, remove), target)));
+    // Where the masks stand: being made, made for some frames, or followed through the clip.
     let state = match (job, cut.frames) {
-        (Some(job), _) if job.tracking => "Following the subject through the clip…".to_owned(),
-        (Some(_), _) => "Finding the subject…".to_owned(),
-        (None, None) if cut.clicks.is_empty() => "Click the subject in the viewer.".to_owned(),
+        (Some(job), _) if job.tracking => "Following the object through the clip…".to_owned(),
+        (Some(_), _) => "Making the matte…".to_owned(),
+        (None, None) if cut.strokes.is_empty() => "Paint over the object in the viewer.".to_owned(),
         (None, None) => "Not made yet.".to_owned(),
-        (None, Some((start, end))) if is_video && end - start <= 1 => "Made for the clicked frame. Track it to follow the subject through the clip.".to_owned(),
-        (None, Some((start, end))) if is_video => format!("Following the subject over {} frames.", end - start),
-        (None, Some(_)) => "Cut out.".to_owned(),
+        (None, Some((start, end))) if is_video && end - start <= 1 => "Made for this frame. Propagate it to follow the object through the clip.".to_owned(),
+        (None, Some((start, end))) if is_video => format!("Following the object over {} frames.", end - start),
+        (None, Some(_)) => "Matte made.".to_owned(),
     };
     section = section.child(status_line(state));
     if is_video {
@@ -231,13 +245,21 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
                 Button::new("cutout-track")
                     .outline()
                     .small()
-                    .label("Track Through Clip")
-                    .disabled(busy || cut.clicks.is_empty())
+                    .label("Propagate Through Clip")
+                    .tooltip("Follow the matte from the painted frames to the rest of the clip")
+                    .disabled(busy || cut.strokes.is_empty())
                     .on_click(cx.listener(move |this, _, window, cx| super::cutout::make_masks(this, id, true, window, cx))),
             ),
         );
     }
-    section
+    // Refine Edge: Feather, Contrast and Shift Edge show at once; Reduce Chatter and Refine
+    // Detail shape the masks as they are made.
+    section = section.child(div().pt_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Refine Edge"));
+    for setting in super::fields::MatteEdgeSetting::ALL {
+        let field = super::fields::value_field(super::fields::FieldTarget::MatteEdge { layer: id, setting }, workspace, cx);
+        section = section.child(labeled_row(setting.label(), field));
+    }
+    section.child(status_line("Reduce Chatter and Refine Detail apply when the matte is next made."))
 }
 
 /// Duck Under: another layer with sound that this one gets quieter under (music under a voice).
@@ -615,10 +637,10 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
 /// What each section is for, shown by the info button on its heading.
 const TRANSFORM_INFO: &str = "Where the layer sits, its size, turn and opacity. Pick a corner, an edge or the center for the anchor point, or drag the anchor in the viewer.";
 const SPEED_INFO: &str = "A steady speed changes the clip's length; a ramp keeps it. Sound is silent while a clip ramps or plays backwards.";
-const REFRAME_INFO: &str = "Makes a new composition in another shape, moving the clip to keep its subject in frame. Remove Background clicks pick the subject; otherwise it follows the middle.";
+const REFRAME_INFO: &str = "Makes a new composition in another shape, moving the clip to keep its subject in frame. An Object Matte's strokes pick the subject; otherwise it follows the middle.";
 const TRACK_INFO: &str = "Pins this layer to something moving in a video: its position follows the point you click.";
 const STABILIZE_INFO: &str = "Steadies shaky footage: measures how the camera moves, smooths that path and moves the clip against the shake, enlarging it just enough to hide the edges.";
-const CUTOUT_INFO: &str = "Pick a subject to cut it out of its background, or an object to take it out of the shot. Click what to keep, Option-click what to leave out.";
+const CUTOUT_INFO: &str = "Paint over an object to cut it out of its background, or to take it out of the shot, like Roto Brush. Paint what belongs to it, Option-paint what doesn't; paint again on later frames to correct it.";
 const ENHANCE_INFO: &str = "Removes background noise and hum, then EQs, de-esses and evens out the voice to podcast loudness. Runs on this Mac; the original file is untouched.";
 
 /// The note in a section that is empty until the heading's + adds something.
@@ -675,20 +697,20 @@ fn stabilize_button(layer: &Layer, workspace: &Workspace, cx: &mut Context<Works
     .into_any_element()
 }
 
-/// The Remove Background heading's button: + picks a subject while there is no cut-out, and
-/// the trash clears the cut-out once there is one.
+/// The Object Matte heading's button: + starts painting while there is no matte, and the
+/// trash clears the matte once there is one.
 fn cutout_button(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let id = layer.id;
     if layer.cutout.is_none() {
         let picking = workspace.ui.cutout_pick == Some(id);
-        let (icon, tip) = if picking { (IconName::X, "Done Picking") } else { (IconName::Plus, "Pick Subject") };
+        let (icon, tip) = if picking { (IconName::X, "Done Painting") } else { (IconName::Plus, "Paint Object") };
         return heading_button("cutout-add", icon, tip, picking, cx.listener(move |this, _, _, cx| {
-            this.ui.cutout_pick = if this.ui.cutout_pick == Some(id) { None } else { Some(id) };
+            super::cutout::toggle_picking(this, id);
             cx.notify();
         }))
         .into_any_element();
     }
-    heading_button("cutout-clear", IconName::Trash, "Clear Cut-out", false, cx.listener(move |this, _, _, cx| {
+    heading_button("cutout-clear", IconName::Trash, "Clear Matte", false, cx.listener(move |this, _, _, cx| {
         if this.ui.cutout_job.as_ref().is_some_and(|job| job.layer == id) {
             super::cutout::cancel(this);
         }
@@ -1108,7 +1130,7 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
         .children((workspace.has(Feature::Speed) && studio_core::speed::has_speed(&layer.content) && layer.time.hold.is_none()).then(|| fold("speed", "Speed", Some(SPEED_INFO), [Some(speed_reset(layer, cx)), None], workspace, cx, |cx| speed_section(layer, workspace, cx))))
         .children((workspace.has(Feature::Stabilize) && stabilizable(layer)).then(|| fold("stabilize", "Stabilize", Some(STABILIZE_INFO), [None, Some(stabilize_button(layer, workspace, cx))], workspace, cx, |cx| stabilize_section(layer, workspace, cx))))
         .children((workspace.has(Feature::TrackMotion) && trackable(layer)).then(|| fold("track", "Track Motion", Some(TRACK_INFO), [None, Some(track_add(layer, workspace, cx))], workspace, cx, |_| track_section(layer, workspace))))
-        .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Remove Background", Some(CUTOUT_INFO), [None, Some(cutout_button(layer, workspace, cx))], workspace, cx, |cx| cutout_section(layer, workspace, cx))))
+        .children((studio_core::cutout::can_cut_out(layer) && workspace.ui.settings.ai.remove_background).then(|| fold("cutout", "Object Matte", Some(CUTOUT_INFO), [None, Some(cutout_button(layer, workspace, cx))], workspace, cx, |cx| cutout_section(layer, workspace, cx))))
         .children(workspace.state.has_sound(layer.id).then(|| fold("audio", "Audio", None, [None, None], workspace, cx, |cx| audio_section(layer, workspace, cx))))
         .children((workspace.state.can_enhance(layer.id) && workspace.ui.settings.ai.enhance_speech).then(|| fold("enhance", "Enhance Speech", Some(ENHANCE_INFO), [None, Some(enhance_button(layer, cx))], workspace, cx, |cx| enhance_section(layer, workspace, cx))))
         .into_any_element()

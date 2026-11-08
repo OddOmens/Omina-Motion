@@ -744,6 +744,10 @@ pub struct Layer {
     /// `None` for layers without a picture, such as audio.
     pub transform: Option<Transform>,
     pub effects: Vec<Effect>,
+    /// How the effects are connected when the layer is edited as nodes (see `effect_graph`).
+    /// Layers never rewired leave it out, and their effects run in list order.
+    #[serde(default, skip_serializing_if = "crate::effect_graph::EffectGraph::is_default")]
+    pub effect_graph: crate::effect_graph::EffectGraph,
     /// For footage, whether the file has sound. For a nested composition it is always set, so
     /// its audio switch is the one that counts; whether it actually makes sound depends on
     /// what is inside (see `audio::layer_has_sound`).
@@ -860,38 +864,112 @@ impl MaskMode {
     }
 }
 
-/// Background removal on a footage or image layer: clicks on one frame pick out a subject, and
-/// masks made from them (by the `studio-cutout` model, followed through the clip for video)
-/// cut it out of everything around it.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+/// An object matte on a footage or image layer, made like After Effects' Roto Brush: brush
+/// strokes painted on the picture mark what belongs to the object (and Option-strokes what
+/// doesn't), the `studio-cutout` model turns them into a matte, and for video the matte is
+/// followed from frame to frame. Strokes on later frames correct it from there on.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cutout {
-    /// The source frame the clicks were placed on (0 for an image).
-    pub frame: i64,
-    pub clicks: Vec<CutoutClick>,
-    /// Remove what was picked (an object to take out) instead of keeping it (a subject to
+    /// Every stroke painted, each on one source frame.
+    #[serde(default)]
+    pub strokes: Vec<MatteStroke>,
+    /// Remove what was painted (an object to take out) instead of keeping it (a subject to
     /// take out of its background).
     #[serde(default)]
     pub remove: bool,
+    /// How the matte's edge is finished.
+    #[serde(default)]
+    pub edges: MatteEdges,
     /// The folder holding the masks, one grayscale PNG per source frame (`<frame>.png`), in
     /// Studio's cache. `None` until masks are made.
     #[serde(default)]
     pub masks: Option<std::path::PathBuf>,
-    /// The source frames that have masks made from the current clicks (start, end exclusive).
+    /// The source frames that have masks made from the current strokes (start, end exclusive).
     /// Frames outside it use the nearest mask made.
     #[serde(default)]
     pub frames: Option<(i64, i64)>,
+    /// Files from before strokes saved clicks on one frame instead; they become short strokes
+    /// when the file is read (see `cutout::upgrade_clicks`) and are never written.
+    #[serde(default, rename = "clicks", skip_serializing)]
+    pub old_clicks: Vec<CutoutClick>,
+    #[serde(default, rename = "frame", skip_serializing)]
+    pub old_click_frame: i64,
 }
 
-/// A click picking out a cut-out's subject: where on the source picture (fractions of its width
-/// and height) and whether it marks something to keep or something to leave out.
+/// One brush stroke on the picture: the path it was painted along (fractions of the picture's
+/// width and height), the brush radius (a fraction of the picture's width), and whether it
+/// adds to the object or takes away from it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MatteStroke {
+    /// The source frame it was painted on (0 for an image).
+    pub frame: i64,
+    pub points: Vec<Vec2>,
+    pub radius: f32,
+    pub add: bool,
+}
+
+/// How an object matte's edge is finished, as in After Effects' Refine Edge settings.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MatteEdges {
+    /// Softens the edge by blurring the matte, in source pixels.
+    #[serde(default)]
+    pub feather: f32,
+    /// Makes a soft edge harder, as a percentage.
+    #[serde(default)]
+    pub contrast: f32,
+    /// Moves the edge in (negative) or out (positive), as a percentage of the feather plus a
+    /// few pixels.
+    #[serde(default)]
+    pub shift_edge: f32,
+    /// Smooths the edge over neighboring frames so it doesn't flicker, as a percentage.
+    #[serde(default)]
+    pub reduce_chatter: f32,
+    /// How closely the edge follows fine detail such as hair, as a percentage.
+    #[serde(default = "MatteEdges::default_detail")]
+    pub refine_detail: f32,
+}
+
+impl Default for MatteEdges {
+    fn default() -> Self {
+        Self { feather: 0.0, contrast: 0.0, shift_edge: 0.0, reduce_chatter: 0.0, refine_detail: Self::default_detail() }
+    }
+}
+
+impl MatteEdges {
+    fn default_detail() -> f32 {
+        50.0
+    }
+
+    /// The allowed range of each setting, in the order above.
+    pub const FEATHER_RANGE: (f32, f32) = (0.0, 200.0);
+    pub const PERCENT_RANGE: (f32, f32) = (0.0, 100.0);
+    pub const SHIFT_RANGE: (f32, f32) = (-100.0, 100.0);
+
+    /// The same settings brought into range (anything not a number goes back to its default).
+    pub fn clamped(self) -> Self {
+        let fit = |value: f32, (low, high): (f32, f32), default: f32| if value.is_finite() { value.clamp(low, high) } else { default };
+        Self {
+            feather: fit(self.feather, Self::FEATHER_RANGE, 0.0),
+            contrast: fit(self.contrast, Self::PERCENT_RANGE, 0.0),
+            shift_edge: fit(self.shift_edge, Self::SHIFT_RANGE, 0.0),
+            reduce_chatter: fit(self.reduce_chatter, Self::PERCENT_RANGE, 0.0),
+            refine_detail: fit(self.refine_detail, Self::PERCENT_RANGE, Self::default_detail()),
+        }
+    }
+}
+
+/// A click from the point picker that strokes replaced: where on the source picture
+/// (fractions of its width and height) and whether it marked something to keep. Only read
+/// from older files.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CutoutClick {
     pub at: Vec2,
     pub keep: bool,
 }
 
-/// The most clicks a cut-out can have.
-pub const MAX_CUTOUT_CLICKS: usize = 64;
+/// The most strokes an object matte can have, and the most points one stroke keeps.
+pub const MAX_MATTE_STROKES: usize = 500;
+pub const MAX_STROKE_POINTS: usize = 1000;
 
 impl Cutout {
     /// The mask file for source frame `index`: the nearest frame that has one, or `None` when no
@@ -900,6 +978,19 @@ impl Cutout {
         let (folder, (start, end)) = (self.masks.as_ref()?, self.frames?);
         let index = index.clamp(start, (end - 1).max(start));
         Some(folder.join(format!("{index}.png")))
+    }
+
+    /// The strokes painted on source frame `frame`.
+    pub fn strokes_on(&self, frame: i64) -> impl Iterator<Item = &MatteStroke> {
+        self.strokes.iter().filter(move |stroke| stroke.frame == frame)
+    }
+
+    /// The source frames that have strokes ("base frames"), earliest first.
+    pub fn base_frames(&self) -> Vec<i64> {
+        let mut frames: Vec<i64> = self.strokes.iter().map(|stroke| stroke.frame).collect();
+        frames.sort_unstable();
+        frames.dedup();
+        frames
     }
 }
 
@@ -1160,9 +1251,10 @@ impl Project {
     fn highest_id(items: &[ProjectItem], compositions: &[Composition]) -> u64 {
         let layers = compositions.iter().flat_map(|comp| &comp.layers);
         let layer_ids = layers.clone().map(|layer| layer.id.0);
-        let effect_ids = layers.flat_map(|layer| &layer.effects).map(|effect| effect.id.0);
+        let effect_ids = layers.clone().flat_map(|layer| &layer.effects).map(|effect| effect.id.0);
+        let merge_ids = layers.flat_map(|layer| &layer.effect_graph.merges).map(|merge| merge.id.0);
         let ids = items.iter().map(|item| item.id.0).chain(compositions.iter().map(|comp| comp.id.0));
-        ids.chain(layer_ids).chain(effect_ids).max().unwrap_or(0)
+        ids.chain(layer_ids).chain(effect_ids).chain(merge_ids).max().unwrap_or(0)
     }
 
     /// Makes sure new ids start above every id in use, for example after loading a file

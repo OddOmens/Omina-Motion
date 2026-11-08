@@ -64,6 +64,11 @@ Inside `apps/studio/src`:
   against the picture (`studio_cutout::Mask::refine`), and Settings > AI Models > Run cooler rests the GPU
   between frames. `CUTOUT_MODEL=<folder> cargo test -p studio-cutout --release --test speed -- --ignored
   --nocapture` times each stage.
+- Key views (`studio-core/src/key_view.rs`, the viewer bar's Result / Selection / Matte): for a layer with
+  Remove Background or a keying effect, Selection draws what is kept in color with a white edge over the
+  whole picture in dim gray, and Matte draws the layer alone in black and white. Both are a copy of the
+  project (the layer plus an unkeyed copy under it) that the ordinary renderer draws; picking a subject
+  turns Selection on.
 - The Export dialog (⌘M, `panels/export_dialog.rs`): a preview of the frames being exported, with a scrubber
   across exactly that range and frame-step arrows, over a checkerboard when the format keeps transparency;
   a summary of the file (size, frame rate, length, sound, and its size for a fixed bitrate); and grouped

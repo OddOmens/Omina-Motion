@@ -88,6 +88,7 @@ pub fn ungroup(project: &mut Project, comp_id: Id, layer_id: Id) -> Result<Ungro
         carrier.name = format!("{} (placement)", nested_layer.name);
         carrier.content = LayerContent::Solid { color: Rgba::TRANSPARENT };
         carrier.effects.clear();
+        carrier.effect_graph = Default::default();
         carrier.mask = None;
         carrier.track_matte = TrackMatte::None;
         carrier.cutout = None;

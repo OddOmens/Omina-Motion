@@ -815,7 +815,7 @@ fn models(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::D
         .child(card(vec![
             feature("ai-all", "Show AI features", "Turn off to hide everything below at once. Hidden features keep what they already made (captions, cut-outs, cleaned sound).", ai.any(), |settings, on| settings.ai = crate::app_settings::AiFeatures::all(on)),
             feature("ai-captions", "Captions", "Generate Captions, and the Captions panel on the rail.", ai.captions, |settings, on| settings.ai.captions = on),
-            feature("ai-cutout", "Remove Background", "Picking a subject out of footage and images.", ai.remove_background, |settings, on| settings.ai.remove_background = on),
+            feature("ai-cutout", "Object Matte", "Painting an object out of footage and images, like Roto Brush.", ai.remove_background, |settings, on| settings.ai.remove_background = on),
             feature("ai-reframe", "Auto Reframe", "New shapes of a clip that follow its subject.", ai.auto_reframe, |settings, on| settings.ai.auto_reframe = on),
             feature("ai-enhance", "Enhance Speech", "Cleaning up voice recordings.", ai.enhance_speech, |settings, on| settings.ai.enhance_speech = on),
         ]))
@@ -828,7 +828,7 @@ fn models(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::D
         .child(group_title("Models"))
         .child(card(vec![
             model_row("model-whisper", "Whisper (tiny)", "Speech to text, for captions. About 150 MB, from huggingface.co.", super::captions::model_folder(), studio_captions::model_present(&super::captions::model_folder()), super::captions::fetch_model, shown),
-            model_row("model-sam", "MobileSAM", "Finding subjects, for Remove Background and Auto Reframe. About 40 MB, from huggingface.co; checked before use.", super::cutout::model_folder(), studio_cutout::model_present(&super::cutout::model_folder()), || super::cutout::fetch_model(&super::cutout::model_folder(), &|| false), shown),
+            model_row("model-sam", "MobileSAM", "Finding objects, for Object Matte and Auto Reframe. About 40 MB, from huggingface.co; checked before use.", super::cutout::model_folder(), studio_cutout::model_present(&super::cutout::model_folder()), || super::cutout::fetch_model(&super::cutout::model_folder(), &|| false), shown),
             built_in_row("DeepFilterNet3", "Studio noise removal, for Enhance Speech."),
             built_in_row("RNNoise", "Light noise removal, for Enhance Speech."),
         ]))

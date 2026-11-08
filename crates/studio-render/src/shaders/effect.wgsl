@@ -825,6 +825,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         case 84u: {
             return mix(c, textureSampleLevel(aux, linear_sampler, uv, 0.0), u.p0.x);
         }
+        // Object matte edge (not a catalog effect), on a white matte that was blurred first:
+        // p0.x is where the edge falls (0.5 leaves it; lower moves it out, higher moves it in)
+        // and p0.y how wide the soft edge stays (1 leaves it; smaller is harder).
+        case 85u: {
+            // Bend the coverage so the level p0.x lands on one half, keeping 0 and 1 where they
+            // are (the object's inside stays solid), then steepen around one half.
+            let level = clamp(u.p0.x, 0.01, 0.99);
+            let bent = select(0.5 + 0.5 * (c.a - level) / (1.0 - level), 0.5 * c.a / level, c.a < level);
+            let a = clamp((bent - 0.5) / max(u.p0.y, 0.001) + 0.5, 0.0, 1.0);
+            return vec4(a, a, a, a);
+        }
         default: { return c; }
     }
 }

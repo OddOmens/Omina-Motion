@@ -45,9 +45,8 @@ pub(crate) fn matte_group_ids(composition: &Composition, layer: Id) -> Vec<Id> {
 fn duplicate(project: &mut Project, layer: &Layer) -> Layer {
     let mut copy = layer.clone();
     copy.id = project.allocate_id();
-    for effect in &mut copy.effects {
-        effect.id = project.allocate_id();
-    }
+    // Fresh ids for its effects and Merge nodes, with its node graph pointed at them.
+    crate::effect_graph::reassign_ids(&mut copy, || project.allocate_id());
     copy
 }
 
