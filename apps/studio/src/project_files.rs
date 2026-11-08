@@ -90,11 +90,15 @@ impl Workspace {
 
     /// Opens the last project if Settings asks for that and it is still there; otherwise shows
     /// the start screen.
+    /// The very first time, the welcome setup shows over it.
     fn start(&mut self, settings: &app_settings::AppSettings, window: &mut Window, cx: &mut Context<Self>) {
         let last = settings.last_project.clone().filter(|path| path.exists());
         match last {
             Some(last) if settings.start_with == app_settings::StartWith::LastProject => self.open_file(last, window, cx),
             _ => crate::panels::start_screen::show(self, window, cx),
+        }
+        if !settings.onboarded {
+            crate::panels::onboarding::show(self, cx);
         }
     }
 

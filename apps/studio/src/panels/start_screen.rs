@@ -10,7 +10,7 @@ use gpui_kit::component::Icon;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
 use studio_core::templates::TEMPLATES;
 
@@ -114,7 +114,13 @@ fn presets_row(cx: &mut Context<Workspace>) -> impl IntoElement {
     let cards = PRESETS.iter().enumerate().map(|(index, &(name, suits, width, height, fps))| {
         // The shape, at most 36 points either way.
         let scale = 36.0 / width.max(height) as f32;
-        let shape = div().w(px(width as f32 * scale)).h(px(height as f32 * scale)).rounded(px(3.0)).border_1().border_color(hsla(color::MUTED)).bg(hsla(color::INSET));
+        let shape = div()
+            .w(px(width as f32 * scale))
+            .h(px(height as f32 * scale))
+            .rounded(px(3.0))
+            .border_1()
+            .border_color(hsla(color::ACCENT).opacity(0.7))
+            .bg(linear_gradient(135.0, linear_color_stop(hsla(color::ACCENT).opacity(0.45), 0.0), linear_color_stop(hsla(color::ACCENT).opacity(0.1), 1.0)));
         div()
             .id(("start-preset", index))
             .flex_1()
@@ -127,6 +133,7 @@ fn presets_row(cx: &mut Context<Workspace>) -> impl IntoElement {
             .justify_center()
             .gap_1()
             .rounded(px(10.0))
+            .bg(hsla(color::PANEL))
             .border_1()
             .border_color(hsla(color::HAIRLINE))
             .cursor_pointer()
@@ -214,10 +221,11 @@ pub fn shown_recent(recent: &[RecentProject], filter: &str) -> Vec<RecentProject
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let screen = workspace.ui.start_screen.as_ref()?;
     let page = match screen.tab {
-        StartTab::Home => home_page(screen, cx).into_any_element(),
+        StartTab::Home => home_page(workspace, screen, cx).into_any_element(),
         StartTab::Templates => templates_page(workspace, cx).into_any_element(),
     };
-    let body = div().flex_1().min_h_0().flex().child(sidebar(screen.tab, cx)).child(div().flex_1().min_w_0().flex().flex_col().child(page));
+    let main = div().relative().flex_1().min_w_0().flex().flex_col().child(accent_glow(320.0)).child(page);
+    let body = div().flex_1().min_h_0().flex().child(sidebar(screen.tab, cx)).child(main);
     let screen = div()
         .id("start-screen")
         .absolute()
@@ -235,6 +243,29 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyE
     // deferred overlay: deferred overlays paint above the window's notifications, which would
     // then be hidden under the start screen and couldn't be clicked.
     Some(screen.into_any_element())
+}
+
+/// A soft wash of the accent color fading down from the top of a screen, drawn behind its
+/// content so a full-window page isn't a flat field of one color. Shared with the welcome setup.
+pub(crate) fn accent_glow(height: f32) -> gpui_kit::Div {
+    div().absolute().top_0().left_0().right_0().h(px(height)).bg(linear_gradient(
+        180.0,
+        linear_color_stop(hsla(color::ACCENT).opacity(0.14), 0.0),
+        linear_color_stop(hsla(color::ACCENT).opacity(0.0), 1.0),
+    ))
+}
+
+/// Studio's mark: a clapperboard on an accent tile, `side` points square.
+pub(crate) fn brand_mark(side: f32) -> gpui_kit::Div {
+    div()
+        .size(px(side))
+        .flex_none()
+        .rounded(px(side * 0.24))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(linear_gradient(135.0, linear_color_stop(hsla(color::ACCENT), 0.0), linear_color_stop(hsla(color::ACCENT).opacity(0.7), 1.0)))
+        .child(Icon::new(IconName::Clapperboard).size(px(side * 0.56)).text_color(gpui_kit::white()))
 }
 
 /// Studio's name on the left, and a button to go to the editor on the right.
@@ -259,9 +290,7 @@ fn top_bar(cx: &mut Context<Workspace>) -> impl IntoElement {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(
-                    div().size(px(30.0)).rounded(px(7.0)).flex().items_center().justify_center().bg(hsla(color::ACCENT)).child(Icon::new(IconName::Clapperboard).size(px(17.0)).text_color(gpui_kit::white())),
-                )
+                .child(brand_mark(30.0))
                 .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Studio")),
         )
         .child(close)
@@ -303,6 +332,7 @@ fn sidebar(tab: StartTab, cx: &mut Context<Workspace>) -> impl IntoElement {
         .flex_col()
         .gap_1()
         .p_5()
+        .bg(hsla(color::PANEL))
         .border_r_1()
         .border_color(hsla(color::HAIRLINE))
         .child(div().flex().flex_col().gap_1p5().child(new).child(open))
@@ -312,7 +342,7 @@ fn sidebar(tab: StartTab, cx: &mut Context<Workspace>) -> impl IntoElement {
 }
 
 /// The Home page: a welcome, and the recent projects with a filter.
-fn home_page(screen: &StartScreen, cx: &mut Context<Workspace>) -> impl IntoElement {
+fn home_page(workspace: &Workspace, screen: &StartScreen, cx: &mut Context<Workspace>) -> impl IntoElement {
     let filter = screen.filter.read(cx).value().to_string();
     let recent = app_settings::load().recent_projects;
     let shown = shown_recent(&recent, &filter);
@@ -340,7 +370,24 @@ fn home_page(screen: &StartScreen, cx: &mut Context<Workspace>) -> impl IntoElem
         .min_h_0()
         .overflow_y_scroll()
         .child(header)
-        .when(rows.is_empty(), |list| list.child(div().p_4().text_color(hsla(color::MUTED)).child(empty)))
+        .when(rows.is_empty(), |list| {
+            list.child(
+                div()
+                    .id("start-recent-empty")
+                    .m_3()
+                    .p_5()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(hsla(color::HAIRLINE))
+                    .bg(hsla(color::PANEL))
+                    .child(div().size(px(34.0)).flex_none().rounded_full().flex().items_center().justify_center().bg(hsla(color::ACCENT).opacity(0.15)).child(Icon::new(IconName::Film).size(px(16.0)).text_color(hsla(color::ACCENT))))
+                    .child(div().text_color(hsla(color::MUTED)).child(empty))
+                    .test_support(),
+            )
+        })
         .children(rows);
     div()
         .flex_1()
@@ -349,11 +396,38 @@ fn home_page(screen: &StartScreen, cx: &mut Context<Workspace>) -> impl IntoElem
         .flex_col()
         .gap_4()
         .px(px(48.0))
-        .pt(px(36.0))
+        .pt(px(28.0))
         .pb_6()
-        .child(div().flex().justify_center().child(div().text_size(px(26.0)).child("Welcome to Studio")))
+        .child(hero(recent.iter().filter(|project| project.path.exists()).count()))
         .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("New project"))
         .child(presets_row(cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Start from a template"))
+                .child(
+                    div()
+                        .id("start-see-templates")
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_color(hsla(color::ACCENT))
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(hsla(color::TEXT)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(screen) = this.ui.start_screen.as_mut() {
+                                screen.tab = StartTab::Templates;
+                            }
+                            cx.notify();
+                        }))
+                        .child(format!("All {} templates", TEMPLATES.len()))
+                        .child(Icon::new(IconName::ChevronRight).size(px(14.0)))
+                        .test_support(),
+                ),
+        )
+        .child(super::templates::start_screen_strip(workspace, HOME_TEMPLATES, cx))
         .child(
             div()
                 .flex()
@@ -363,6 +437,35 @@ fn home_page(screen: &StartScreen, cx: &mut Context<Workspace>) -> impl IntoElem
                 .child(div().w(px(260.0)).child(Input::new(&screen.filter).prefix(Icon::new(IconName::Search).size(px(14.0)).text_color(hsla(color::MUTED))).cleanable(true))),
         )
         .child(list)
+}
+
+/// How many templates the Home page shows in its strip.
+const HOME_TEMPLATES: usize = 16;
+
+/// The banner across the top of Home: a welcome over a wash of the accent color.
+fn hero(recent: usize) -> impl IntoElement {
+    let (title, about) = if recent == 0 {
+        ("Welcome to Studio", "Start a project at the size you need, or from a ready-made template.".to_owned())
+    } else {
+        ("Welcome back", format!("Pick up one of your {recent} recent project{}, or start something new.", if recent == 1 { "" } else { "s" }))
+    };
+    div()
+        .id("start-hero")
+        .relative()
+        .flex_none()
+        .h(px(108.0))
+        .px_6()
+        .flex()
+        .items_center()
+        .gap_4()
+        .rounded(px(14.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(hsla(color::ACCENT).opacity(0.35))
+        .bg(linear_gradient(100.0, linear_color_stop(hsla(color::ACCENT).opacity(0.42), 0.0), linear_color_stop(hsla(color::ACCENT).opacity(0.06), 1.0)))
+        .child(brand_mark(52.0))
+        .child(div().flex().flex_col().gap_1().child(div().text_size(px(24.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title)).child(div().text_color(hsla(color::TEXT)).opacity(0.75).child(about)))
+        .test_support()
 }
 
 /// One recent project: its name and folder, when it was opened, and its size. A click opens it;

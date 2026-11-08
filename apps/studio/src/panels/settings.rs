@@ -181,23 +181,7 @@ fn change(shown: &SharedShown, workspace: &WeakEntity<Workspace>, window: &mut W
     }
     workspace
         .update(cx, |this, cx| {
-            this.ui.project_columns = settings.project_columns;
-            this.state.import_folders = settings.import_folders.clone();
-            // Features turned off let go of anything of theirs that is open: their panel, their
-            // tool, their overlay.
-            if !settings.panel_on(this.ui.left_panel) {
-                this.ui.left_panel = crate::workspace::LeftPanel::Media;
-            }
-            if !settings.tool_on(this.ui.tool) {
-                this.set_tool(crate::workspace::Tool::Selection);
-            }
-            if !settings.feature_on(crate::features::Feature::Guides) {
-                this.ui.guides = false;
-            }
-            if !settings.ai.remove_background {
-                this.ui.cutout_pick = None;
-            }
-            this.ui.settings = settings;
+            this.use_settings(settings);
             cx.notify();
         })
         .ok();
@@ -301,6 +285,17 @@ fn general(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::
         .child(group_title("Starting up"))
         .child(card(vec![
             setting("When Studio starts", "Show the start screen, or go straight back to the project you were working on.", menu("general-start", start_choices, now.start_with, shown, workspace, |settings, start| settings.start_with = start)),
+            setting(
+                "Welcome setup",
+                "Pick a theme, the tools and features you want, and whether to use AI, step by step.",
+                {
+                    let workspace = workspace.clone();
+                    Button::new("general-welcome").outline().small().label("Show Again").on_click(move |_, window, cx| {
+                        window.close_dialog(cx);
+                        workspace.update(cx, super::onboarding::show).ok();
+                    })
+                },
+            ),
             setting("Recovery copy", "How often unsaved work is kept aside, so a crash loses little. Offered back on the next start.", menu("general-recovery", recovery, now.recovery_seconds, shown, workspace, |settings, seconds| settings.recovery_seconds = seconds)),
         ]))
         .child(group_title("Versions"))
@@ -328,73 +323,24 @@ fn appearance(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_ki
     let now = shown.borrow().settings.clone();
     let themes = ThemeName::ALL.into_iter().map(|theme| {
         let (shown, workspace) = (shown.clone(), workspace.clone());
-        let selected = now.theme == theme;
-        // A small picture of the theme: its background, a panel, a line of text and an accent.
-        let (background, panel, text) = match theme {
-            ThemeName::Dark => (0x070708, 0x18181b, 0xededef),
-            ThemeName::Black => (0x000000, 0x111111, 0xf2f2f2),
-            ThemeName::Light => (0xe9e9ec, 0xffffff, 0x18181b),
-        };
-        let accent = now.accent.value();
-        div()
-            .id(("theme", theme as usize))
-            .flex_1()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .cursor_pointer()
+        theme_choice(theme, now.accent, now.theme == theme)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, window, cx| {
                 let accent = shown.borrow().settings.accent;
                 change(&shown, &workspace, window, cx, |settings| settings.theme = theme);
                 set_look(theme, accent, cx);
             })
-            .child(
-                div()
-                    .h(px(84.0))
-                    .rounded(px(10.0))
-                    .border_2()
-                    .border_color(hsla(if selected { color::ACCENT } else { color::HAIRLINE }))
-                    .bg(rgb(background))
-                    .p_2()
-                    .flex()
-                    .gap_1p5()
-                    .child(div().w(px(18.0)).rounded(px(4.0)).bg(rgb(panel)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .rounded(px(4.0))
-                            .bg(rgb(panel))
-                            .p_1p5()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().h(px(5.0)).w(px(46.0)).rounded(px(2.0)).bg(rgb(text)))
-                            .child(div().h(px(4.0)).w(px(30.0)).rounded(px(2.0)).bg(rgb(text)).opacity(0.5))
-                            .child(div().mt_auto().h(px(8.0)).w(px(26.0)).rounded(px(4.0)).bg(rgb(accent))),
-                    ),
-            )
-            .child(div().flex().items_center().gap_1p5().text_size(px(size::TEXT)).text_color(hsla(if selected { color::TEXT } else { color::MUTED })).child(theme.name()))
             .test_support()
     });
     let accents = Accent::ALL.into_iter().map(|accent| {
         let (shown, workspace) = (shown.clone(), workspace.clone());
-        let selected = now.accent == accent;
-        div()
-            .id(("accent", accent as usize))
-            .size(px(28.0))
-            .rounded_full()
-            .border_2()
-            .border_color(hsla(if selected { color::TEXT } else { color::RAISED }))
-            .p(px(3.0))
-            .cursor_pointer()
+        accent_choice(accent, now.accent == accent)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(move |_, window, cx| {
                 let theme = shown.borrow().settings.theme;
                 change(&shown, &workspace, window, cx, |settings| settings.accent = accent);
                 set_look(theme, accent, cx);
             })
-            .child(div().size_full().rounded_full().bg(rgb(accent.value())))
             .test_support()
     });
     div()
@@ -403,6 +349,63 @@ fn appearance(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_ki
         .child(div().flex().gap_3().children(themes))
         .child(group_title("Accent color"))
         .child(card(vec![setting(now.accent.name(), "Used for selections, buttons and highlights.", div().flex().gap_1().children(accents))]))
+}
+
+/// A theme to pick: a small picture of it (its background, a panel, a line of text and the
+/// accent) with its name under it. Shared by Settings ▸ Appearance and the welcome setup.
+pub(super) fn theme_choice(theme: ThemeName, accent: Accent, selected: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let (background, panel, text) = match theme {
+        ThemeName::Dark => (0x070708, 0x18181b, 0xededef),
+        ThemeName::Black => (0x000000, 0x111111, 0xf2f2f2),
+        ThemeName::Light => (0xe9e9ec, 0xffffff, 0x18181b),
+    };
+    let accent = accent.value();
+    div()
+        .id(("theme", theme as usize))
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .cursor_pointer()
+        .child(
+            div()
+                .h(px(84.0))
+                .rounded(px(10.0))
+                .border_2()
+                .border_color(hsla(if selected { color::ACCENT } else { color::HAIRLINE }))
+                .bg(rgb(background))
+                .p_2()
+                .flex()
+                .gap_1p5()
+                .child(div().w(px(18.0)).rounded(px(4.0)).bg(rgb(panel)))
+                .child(
+                    div()
+                        .flex_1()
+                        .rounded(px(4.0))
+                        .bg(rgb(panel))
+                        .p_1p5()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().h(px(5.0)).w(px(46.0)).rounded(px(2.0)).bg(rgb(text)))
+                        .child(div().h(px(4.0)).w(px(30.0)).rounded(px(2.0)).bg(rgb(text)).opacity(0.5))
+                        .child(div().mt_auto().h(px(8.0)).w(px(26.0)).rounded(px(4.0)).bg(rgb(accent))),
+                ),
+        )
+        .child(div().flex().items_center().gap_1p5().text_size(px(size::TEXT)).text_color(hsla(if selected { color::TEXT } else { color::MUTED })).child(theme.name()))
+}
+
+/// An accent color to pick: a round swatch, ringed when it is the one in use.
+pub(super) fn accent_choice(accent: Accent, selected: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id(("accent", accent as usize))
+        .size(px(28.0))
+        .rounded_full()
+        .border_2()
+        .border_color(hsla(if selected { color::TEXT } else { color::RAISED }))
+        .p(px(3.0))
+        .cursor_pointer()
+        .child(div().size_full().rounded_full().bg(rgb(accent.value())))
 }
 
 fn playback(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {

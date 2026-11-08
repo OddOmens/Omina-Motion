@@ -257,6 +257,9 @@ Inside `apps/studio/src`:
 - `keymap.rs`: every command that can have a shortcut, the Studio, After Effects and Premiere Pro sets, and
   the person's own changes (Settings ▸ Keyboard Shortcuts). Tooltips and menu labels read keys from it, so
   they follow custom shortcuts.
+- `panels/onboarding.rs`: the welcome setup on the first launch (and from Settings ▸ General): theme and
+  accent, a starting set of tools and features, and whether to use local AI at all. Each choice is saved
+  as it's made.
 - `features.rs`: tools and features that can be turned off (Settings ▸ Tools & Features). One that is off is
   left out of the tool bar, the rail, the menu bar, right-click menus and Properties, and its shortcut is
   unbound. New Comp, Import, Settings, Select, Hand and the Media panel are always on.

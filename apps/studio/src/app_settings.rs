@@ -73,6 +73,9 @@ pub struct AppSettings {
     pub cooler_background_removal: bool,
     /// Which AI features are shown (Settings > AI Models).
     pub ai: AiFeatures,
+    /// Whether the welcome setup (theme, features, AI) has been through, so it shows only on
+    /// the first launch. Settings ▸ General can show it again.
+    pub onboarded: bool,
     /// Tools and features turned off (Settings > Features; see `features`). The AI ones live
     /// in `ai` instead.
     #[serde(deserialize_with = "crate::features::read_features_off")]
@@ -304,6 +307,7 @@ impl Default for AppSettings {
             compact_timeline: false,
             cooler_background_removal: false,
             ai: AiFeatures::default(),
+            onboarded: false,
             features_off: std::collections::BTreeSet::new(),
             shortcuts: crate::keymap::Shortcuts::default(),
             versions: VersionSettings::default(),

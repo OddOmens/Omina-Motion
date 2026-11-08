@@ -144,7 +144,7 @@ pub const GROUPS: &[(&str, &[FeatureInfo])] = &[
         ],
     ),
     (
-        "AI",
+        AI_GROUP,
         &[
             info(Feature::Captions, "Captions", "Generate Captions, and the Captions panel on the rail."),
             info(Feature::RemoveBackground, "Remove Background", "Picking a subject out of footage and images."),
@@ -153,6 +153,72 @@ pub const GROUPS: &[(&str, &[FeatureInfo])] = &[
         ],
     ),
 ];
+
+/// Starting points for the welcome setup's "What will you make?": each turns on every tool and
+/// feature except its own short list. The AI features are chosen separately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus {
+    Everything,
+    VideoEditing,
+    MotionDesign,
+    Basics,
+}
+
+impl Focus {
+    pub const ALL: [Focus; 4] = [Self::Everything, Self::VideoEditing, Self::MotionDesign, Self::Basics];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Everything => "Everything",
+            Self::VideoEditing => "Video editing",
+            Self::MotionDesign => "Motion design",
+            Self::Basics => "Just the basics",
+        }
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            Self::Everything => "Every tool and feature Studio has.",
+            Self::VideoEditing => "Cutting footage together: trims, speed, stabilizing and scene cuts.",
+            Self::MotionDesign => "Animating shapes and text: the pen, morphs, the graph editor.",
+            Self::Basics => "Cut, add text and effects, export. Fewer buttons to learn.",
+        }
+    }
+
+    /// What this starting point turns off.
+    pub fn off(self) -> &'static [Feature] {
+        use Feature::*;
+        match self {
+            Self::Everything => &[],
+            Self::VideoEditing => &[PenTool, RotateTool, Morph, MagicMove, Mockups, GraphEditor, SequenceLayers],
+            Self::MotionDesign => &[TrackSelect, RippleTool, RollTool, RateStretchTool, SlipTool, SlideTool, SceneCuts, CloseGaps, FreezeFrame, Stabilize],
+            Self::Basics => &[
+                TrackSelect, RippleTool, RollTool, RateStretchTool, SlipTool, SlideTool, ZoomTool, PenTool, RotateTool, Eyedropper, NewLayer, Libraries, Mockups, Precompose, PasteAttributes, SceneCuts,
+                Stabilize, TrackMotion, Morph, MagicMove, MagicResize, Markers, SequenceLayers, GraphEditor, Guides, RenderAndPlay, ExportQueue, CaptionFiles, Package,
+            ],
+        }
+    }
+
+    /// Turns every non-AI feature on, except this starting point's list.
+    pub fn apply(self, settings: &mut AppSettings) {
+        for feature in non_ai_features() {
+            settings.set_feature(feature, !self.off().contains(&feature));
+        }
+    }
+
+    /// The starting point the current choices match exactly, if any.
+    pub fn matching(settings: &AppSettings) -> Option<Self> {
+        Self::ALL.into_iter().find(|focus| non_ai_features().all(|feature| settings.feature_on(feature) != focus.off().contains(&feature)))
+    }
+}
+
+/// The group that holds the AI features, which have a page of their own in the welcome setup.
+pub const AI_GROUP: &str = "AI";
+
+/// Every feature outside the AI group.
+pub fn non_ai_features() -> impl Iterator<Item = Feature> {
+    GROUPS.iter().filter(|(group, _)| *group != AI_GROUP).flat_map(|(_, features)| features.iter().map(|info| info.feature))
+}
 
 impl Feature {
     /// The setting's id in Settings, for its switch.
@@ -317,6 +383,21 @@ mod tests {
         assert!(!settings.feature_on(Feature::ExportQueue));
         settings.set_feature(Feature::Export, true);
         assert!(settings.feature_on(Feature::ExportQueue));
+    }
+
+    #[test]
+    fn starting_points_set_the_non_ai_features_and_are_recognized() {
+        let mut settings = AppSettings::default();
+        assert_eq!(Focus::matching(&settings), Some(Focus::Everything));
+        settings.set_feature(Feature::Captions, false);
+        Focus::Basics.apply(&mut settings);
+        assert_eq!(Focus::matching(&settings), Some(Focus::Basics));
+        assert!(!settings.feature_on(Feature::PenTool) && settings.feature_on(Feature::CutTool) && settings.feature_on(Feature::Export));
+        assert!(!settings.feature_on(Feature::Captions), "AI choices are left alone");
+        settings.set_feature(Feature::PenTool, true);
+        assert_eq!(Focus::matching(&settings), None, "a hand-picked mix matches none");
+        Focus::Everything.apply(&mut settings);
+        assert!(settings.features_off.is_empty());
     }
 
     #[test]

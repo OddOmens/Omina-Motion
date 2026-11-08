@@ -6263,3 +6263,110 @@ fn click_in_settings(visual: &mut VisualTestContext, over_page: gpui_kit::Point<
     visual.update(|window, cx| window.click(element(), cx));
     render(visual);
 }
+
+#[gpui_kit::test]
+fn the_welcome_setup_runs_on_first_launch_and_applies_each_choice(cx: &mut TestAppContext) {
+    use crate::features::Feature;
+    use crate::panels::onboarding::Step;
+    use crate::theme::{Accent, ThemeName};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let step = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.onboarding);
+    let settings = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.settings.clone());
+    let click = |visual: &mut VisualTestContext, id: ElementId| {
+        visual.update(|window, cx| window.click(id, cx));
+        render(visual);
+    };
+    // A first launch: the setup shows over the start screen.
+    assert!(!crate::app_settings::load().onboarded);
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.restore_session(window, cx)));
+    render(visual);
+    assert_eq!(step(visual), Some(Step::Look));
+    assert!(start_screen_showing(&workspace, visual), "the start screen waits underneath");
+    // Escape doesn't skip it by accident, and the editor's shortcuts wait too.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    assert_eq!(step(visual), Some(Step::Look));
+
+    // 1. Look: Light, teal. Each applies straight away.
+    click(visual, ("theme", ThemeName::Light as usize).into());
+    click(visual, ("accent", Accent::Teal as usize).into());
+    assert_eq!((settings(visual).theme, settings(visual).accent), (ThemeName::Light, Accent::Teal));
+    click(visual, "onboarding-next".into());
+    assert_eq!(step(visual), Some(Step::Features));
+
+    // 2. Features: "Just the basics", then the Pen back on by hand.
+    click(visual, ("onboarding-focus", 3_usize).into());
+    assert!(!settings(visual).feature_on(Feature::PenTool) && !settings(visual).feature_on(Feature::GraphEditor));
+    assert!(settings(visual).feature_on(Feature::CutTool));
+    click(visual, ElementId::Name("onboarding-feature-pen-tool".into()));
+    assert!(settings(visual).feature_on(Feature::PenTool));
+    click(visual, "onboarding-next".into());
+
+    // 3. AI: on by default; No AI hides it all, and Use local AI brings back a choice of each.
+    assert_eq!(step(visual), Some(Step::Ai));
+    click(visual, "onboarding-ai-off".into());
+    assert!(!settings(visual).ai.any());
+    assert!(visual.update(|window, _| window.try_find(ElementId::Name("onboarding-feature-captions".into()))).is_none(), "no AI choices while it's off");
+    click(visual, "onboarding-ai-on".into());
+    click(visual, ElementId::Name("onboarding-feature-captions".into()));
+    let ai = settings(visual).ai;
+    assert!(!ai.captions && ai.remove_background && ai.auto_reframe && ai.enhance_speech);
+    click(visual, "onboarding-back".into());
+    assert_eq!(step(visual), Some(Step::Features), "Back goes back");
+    click(visual, "onboarding-next".into());
+    click(visual, "onboarding-ai-off".into());
+    click(visual, "onboarding-next".into());
+
+    // 4. Done: a summary, then Start Creating closes it for good.
+    assert_eq!(step(visual), Some(Step::Done));
+    assert!(visual.update(|window, _| window.try_find("onboarding-summary")).is_some());
+    click(visual, "onboarding-next".into());
+    assert_eq!(step(visual), None);
+    let saved = crate::app_settings::load();
+    assert!(saved.onboarded);
+    assert_eq!((saved.theme, saved.accent), (ThemeName::Light, Accent::Teal));
+    assert!(!saved.feature_on(Feature::GraphEditor) && saved.feature_on(Feature::PenTool) && !saved.ai.any(), "every choice is remembered");
+    // The editor behind follows: no Captions on the rail, no graph editor button.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    for hidden in ["rail-captions", "easings"] {
+        assert!(visual.update(|window, _| window.try_find(hidden)).is_none(), "{hidden} is hidden");
+    }
+
+    // The next launch goes straight to the start screen.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.start_screen = None;
+        ws.restore_session(window, cx);
+    }));
+    render(visual);
+    assert_eq!(step(visual), None);
+
+    // Settings ▸ General can show it again; Skip Setup keeps what's there.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    click(visual, "general-welcome".into());
+    assert_eq!(step(visual), Some(Step::Look));
+    click(visual, "onboarding-skip".into());
+    assert_eq!(step(visual), None);
+    assert_eq!(settings(visual).theme, ThemeName::Light);
+}
+
+#[gpui_kit::test]
+fn the_start_screens_home_shows_a_welcome_and_a_strip_of_templates(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| crate::panels::start_screen::show(ws, window, cx)));
+    render(visual);
+    for id in ["start-hero", "start-template-strip", "start-recent-empty"] {
+        assert!(visual.update(|window, _| window.try_find(id)).is_some(), "{id} shows");
+    }
+    // A template in the strip starts a project from it, as on the Templates page.
+    assert!(visual.update(|window, _| window.try_find(("start-template", 0_usize))).is_some());
+    // "All templates" goes to the Templates page.
+    visual.update(|window, cx| window.click("start-see-templates", cx));
+    render(visual);
+    let tab = visual.update(|_, cx| workspace.read(cx).ui.start_screen.as_ref().map(|screen| screen.tab));
+    assert_eq!(tab, Some(crate::panels::start_screen::StartTab::Templates));
+}

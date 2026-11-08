@@ -564,6 +564,8 @@ pub struct UiState {
     pub checking_for_updates: bool,
     /// The start screen, while it shows over the editor.
     pub start_screen: Option<panels::start_screen::StartScreen>,
+    /// The welcome setup's page, while it shows (see `panels::onboarding`).
+    pub onboarding: Option<panels::onboarding::Step>,
     /// Whether the last recovery copy failed (said once, until it works again).
     pub recovery_failing: bool,
     /// When the last version of the project was kept (see `versions`).
@@ -982,6 +984,7 @@ impl Workspace {
                 template_gallery: false,
                 checking_for_updates: false,
                 start_screen: None,
+                onboarding: None,
                 recovery_failing: false,
                 last_version_at: None,
                 render_then_play: false,
@@ -1234,6 +1237,27 @@ impl Workspace {
             window.push_notification("Select two or more layers, in the order they should play.", cx);
         } else if self.state.stagger_selection(step) {
             cx.notify();
+        }
+    }
+
+    /// Takes changed settings into the editor, whose panels read them as they draw. Features
+    /// turned off let go of anything of theirs that is open: their panel, their tool, their
+    /// overlay, a background-removal pick.
+    pub fn use_settings(&mut self, settings: crate::app_settings::AppSettings) {
+        self.ui.project_columns = settings.project_columns;
+        self.state.import_folders = settings.import_folders.clone();
+        if !settings.panel_on(self.ui.left_panel) {
+            self.ui.left_panel = LeftPanel::Media;
+        }
+        self.ui.settings = settings;
+        if !self.ui.settings.tool_on(self.ui.tool) {
+            self.set_tool(Tool::Selection);
+        }
+        if !self.has(crate::features::Feature::Guides) {
+            self.ui.guides = false;
+        }
+        if !self.ui.settings.ai.remove_background {
+            self.ui.cutout_pick = None;
         }
     }
 
@@ -1504,7 +1528,8 @@ impl Render for Workspace {
             self.ui.slot_drop = None;
         }
         // The Templates panel's pictures are made here, a few per frame, as it needs them.
-        let start_templates = self.ui.start_screen.as_ref().is_some_and(|screen| screen.tab == panels::start_screen::StartTab::Templates);
+        // Both start screen pages show templates (Home a strip of them).
+        let start_templates = self.ui.start_screen.is_some();
         if self.ui.left_panel == LeftPanel::Templates || self.ui.template_gallery || start_templates {
             panels::templates::make_pictures(self, window, cx);
         }
@@ -1590,6 +1615,10 @@ impl Render for Workspace {
             .key_context(KEY_CONTEXT)
             // Escape closes the start screen or the template gallery.
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+                // The welcome setup is left with its own buttons, so Escape can't skip it by accident.
+                if this.ui.onboarding.is_some() {
+                    return;
+                }
                 if this.ui.start_screen.is_some() {
                     panels::start_screen::hide(this);
                     cx.notify();
@@ -1628,7 +1657,7 @@ impl Render for Workspace {
             // The editor's own commands are only there while the editor shows. Behind the start
             // screen, shortcuts and menu commands would otherwise change a project nobody can see;
             // without a handler, their menu items are greyed out too.
-            .when(self.ui.start_screen.is_none(), |root| {
+            .when(self.ui.start_screen.is_none() && self.ui.onboarding.is_none(), |root| {
                 root
                 .on_action(cx.listener(|this, _: &TogglePlayback, _, cx| this.toggle_playback(cx)))
                 .on_action(cx.listener(|this, _: &RenderAndPlay, window, cx| this.render_and_play(window, cx)))
@@ -1873,6 +1902,7 @@ impl Render for Workspace {
             .children(panels::color_picker::popover(self, cx))
             .children(panels::templates::gallery(self, cx))
             .children(panels::start_screen::render(self, cx))
+            .children(panels::onboarding::render(self, cx))
             .children(panels::importing::popup(self, cx))
     }
 }

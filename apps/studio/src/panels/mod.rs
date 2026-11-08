@@ -28,6 +28,7 @@ pub mod magic_move;
 pub mod lut_previews;
 pub mod mockups;
 pub mod morph;
+pub mod onboarding;
 pub mod motion;
 pub mod package;
 pub mod paste_attributes;

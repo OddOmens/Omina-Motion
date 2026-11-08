@@ -448,6 +448,19 @@ pub fn start_screen_cards(workspace: &Workspace, cx: &mut Context<Workspace>) ->
         .child(div().id("start-template-list").flex_1().min_h_0().overflow_y_scroll().pr_2().child(div().flex().flex_wrap().gap_4().children(cards)))
 }
 
+/// The start screen's Home strip: one row of small template cards, each starting a new project
+/// from it like the Templates page's cards. Up to `count` are laid out, wrapping; the row is one
+/// card tall and clips the rest, so it fills whatever width there is with whole cards only.
+pub fn start_screen_strip(workspace: &Workspace, count: usize, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let cards: Vec<_> = shown(workspace).into_iter().take(count).map(|index| card(workspace, index, STRIP_CARD_WIDTH, CardPlace::StartScreen, cx)).collect();
+    // The picture, plus room for the name and a two-line category under it.
+    let row_height = card_height(workspace.ui.template_format) * STRIP_CARD_WIDTH / CARD_WIDTH + 56.0;
+    div().id("start-template-strip").flex_none().h(px(row_height)).flex().flex_wrap().gap_x_3().gap_y_6().overflow_hidden().children(cards).test_support()
+}
+
+/// Card width in the start screen's Home strip, in points.
+const STRIP_CARD_WIDTH: f32 = 96.0;
+
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let formats = format_chips(workspace, "template-format", cx);
     let categories = category_chips(workspace, "template-category", cx);
