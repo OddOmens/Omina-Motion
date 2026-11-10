@@ -1196,5 +1196,5 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         2 => super::color_grade::body(workspace, cx),
         _ => super::motion::body(workspace, cx),
     };
-    panel(PanelId::Properties, &["Properties", "Effects", "Color", "Motion"], None, body, workspace, cx)
+    panel(PanelId::Properties, &["Layer", "Effects", "Color", "Motion"], None, body, workspace, cx)
 }

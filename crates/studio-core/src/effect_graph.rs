@@ -140,7 +140,7 @@ pub fn has_output(node: NodeId) -> bool {
 pub fn nodes(layer: &Layer) -> Vec<NodeId> {
     let graph = &layer.effect_graph;
     let mut nodes = vec![NodeId::Source];
-    nodes.extend(layer.effects.iter().map(|effect| NodeId::Effect(effect.id)));
+    nodes.extend(picture_effects(layer).map(|effect| NodeId::Effect(effect.id)));
     nodes.extend(graph.merges.iter().map(|merge| NodeId::Merge(merge.id)));
     if graph.matte_node {
         nodes.push(NodeId::Matte);
@@ -154,9 +154,15 @@ pub fn contains(layer: &Layer, node: NodeId) -> bool {
     match node {
         NodeId::Source | NodeId::Output => true,
         NodeId::Matte => layer.effect_graph.matte_node,
-        NodeId::Effect(id) => layer.effects.iter().any(|effect| effect.id == id),
+        NodeId::Effect(id) => picture_effects(layer).any(|effect| effect.id == id),
         NodeId::Merge(id) => layer.effect_graph.merges.iter().any(|merge| merge.id == id),
     }
+}
+
+/// The layer's effects on its picture, in list order. Effects on its sound run in the mixer,
+/// not in the graph.
+pub fn picture_effects(layer: &Layer) -> impl Iterator<Item = &crate::model::Effect> {
+    layer.effects.iter().filter(|effect| !crate::effects::is_audio(&effect.name))
 }
 
 /// The links of the chain an unwired layer runs: Source through every effect in list order to
@@ -164,7 +170,7 @@ pub fn contains(layer: &Layer, node: NodeId) -> bool {
 fn chain_links(layer: &Layer) -> Vec<Link> {
     let mut links = Vec::with_capacity(layer.effects.len() + 1);
     let mut previous = NodeId::Source;
-    for effect in &layer.effects {
+    for effect in picture_effects(layer) {
         let node = NodeId::Effect(effect.id);
         links.push(Link { from: previous, to: node, port: InputPort::Main });
         previous = node;
@@ -297,8 +303,9 @@ pub fn remove_node(layer: &mut Layer, node: NodeId) {
 /// Hooks a newly added effect into a wired graph: it goes in just before the Output, so adding
 /// an effect from a menu or the Effects panel puts it last, as in the list view.
 pub fn effect_added(layer: &mut Layer, effect: Id) {
+    let is_sound = layer.effects.iter().any(|candidate| candidate.id == effect && crate::effects::is_audio(&candidate.name));
     let graph = &mut layer.effect_graph;
-    if !graph.wired {
+    if !graph.wired || is_sound {
         return;
     }
     let node = NodeId::Effect(effect);

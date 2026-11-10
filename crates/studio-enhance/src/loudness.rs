@@ -3,7 +3,7 @@
 //! quiet blocks (pauses) are left out so silence doesn't drag the number down. The result is
 //! in LUFS; podcasts and social video aim for about -16.
 
-use crate::filters::Biquad;
+use studio_dsp::Biquad;
 
 /// Builds the two K-weighting stages for 48 kHz: a shelf that lifts the treble the way the head
 /// does, then a low cut. The coefficients are the ones ITU-R BS.1770 gives for 48 kHz.

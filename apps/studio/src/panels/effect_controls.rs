@@ -8,7 +8,7 @@ use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::{AnyElement, Context, ElementId, IntoElement, ParentElement, Styled, div, prelude::FluentBuilder as _, px, rgba};
+use gpui_kit::{AnyElement, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement, Styled, TestSupportExt as _, div, prelude::FluentBuilder as _, px, rgba};
 use studio_core::model::{Id, Layer};
 use studio_core::property::PropertyPath;
 
@@ -21,6 +21,12 @@ use crate::workspace::Workspace;
 /// but in its own "controls/" namespace so the two panels twirl independently.
 fn effect_key(layer: &Layer, effect: Id) -> String {
     format!("controls/{}/{}", layer.id.0, effect.0)
+}
+
+/// Whether Studio can use the catalog effect `name`: the renderer draws it, or the mixer runs
+/// it on sound. Effects that do neither yet aren't offered.
+pub(crate) fn is_usable(name: &str) -> bool {
+    studio_render::effects::is_rendered(name) || studio_core::effects::is_audio(name)
 }
 
 /// The icon an effect's card shows, after its category in the Effects panel.
@@ -36,6 +42,7 @@ pub(super) fn category_icon(effect: &str) -> IconName {
         Some("Motion") => IconName::MoveHorizontal,
         Some("Retro & Glitch") => IconName::Ghost,
         Some("Transition") => IconName::SquarePlay,
+        Some(studio_core::effects::AUDIO_CATEGORY) => IconName::AudioLines,
         _ => IconName::Sparkles,
     }
 }
@@ -56,20 +63,44 @@ fn layer_line(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>)
         .text_color(hsla(color::TEXT))
         .child(Icon::new(IconName::Layers).size(px(12.0)).text_color(hsla(color::MUTED)))
         .child(div().flex_1().min_w_0().truncate().child(format!("{} · {count}", layer.name)))
+        .child(save_preset_button(layer, cx))
         .child(icon_button("fx-open-nodes", IconName::Workflow, "Edit as Nodes: wire effects together in the Nodes panel", workspace.ui.nodes.open, cx.listener(|this, _, _, cx| {
             this.ui.nodes.open = !this.ui.nodes.open;
+            // Opened, it comes to the front of its tab group, wherever it has been moved to.
+            if this.ui.nodes.open {
+                this.reveal(crate::workspace::PanelId::Nodes);
+            }
             cx.notify();
         })))
         .child(add_effect_menu("fx-add".into(), layer, cx))
 }
 
-/// The Add Effect menu: every effect the renderer draws that suits the layer, by category.
+/// Saves the layer's effects (color corrections and sound effects included) as one of the
+/// user's presets, and shows it under My Presets in the Effects panel, named after the layer
+/// and ready to be renamed.
+fn save_preset_button(layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoElement {
+    use gpui_kit::component::Disableable as _;
+    let (layer_id, name, empty) = (layer.id, format!("{} Look", layer.name), layer.effects.is_empty());
+    icon_button("fx-save-preset", IconName::BookmarkPlus, "Save as Preset: keep these effects to use on other clips", false, cx.listener(move |this, _, window, cx| {
+        if let Some(id) = this.state.save_effect_preset(layer_id, &name) {
+            this.ui.left_panel = crate::workspace::LeftPanel::Effects;
+            this.ui.open_effect_categories.insert(super::effects::MY_PRESETS);
+            let named = this.state.libraries.preset(id).map(|preset| preset.name.clone()).unwrap_or_default();
+            this.begin_edit(crate::workspace::EditTarget::LibraryName(id), named, window, cx);
+        }
+        cx.notify();
+    }))
+    .disabled(empty)
+}
+
+/// The Add Effect menu: every effect Studio can use (on the picture or the sound) that suits
+/// the layer, by category.
 fn add_effect_menu(id: ElementId, layer: &Layer, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let layer_id = layer.id;
     let categories: Vec<(&'static str, Vec<&'static str>)> = studio_core::effects::CATEGORIES
         .iter()
         .filter(|category| studio_core::effects::suits(category, &layer.content))
-        .map(|category| (category.name, category.effects.iter().map(|effect| effect.name).filter(|name| studio_render::effects::is_rendered(name)).collect::<Vec<_>>()))
+        .map(|category| (category.name, category.effects.iter().map(|effect| effect.name).filter(|name| is_usable(name)).collect::<Vec<_>>()))
         .filter(|(_, effects)| !effects.is_empty())
         .collect();
     let weak = cx.weak_entity();
@@ -97,10 +128,10 @@ fn add_effect_menu(id: ElementId, layer: &Layer, cx: &mut Context<Workspace>) ->
 
 /// One effect's controls: the LUT chooser for Apply LUT, then each parameter's row (with its
 /// keyframe buttons) and, where it helps, a slider under it.
-fn effect_body(layer: Id, effect: &studio_core::model::Effect, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+pub(super) fn effect_body(layer: Id, effect: &studio_core::model::Effect, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let effect_id = effect.id;
     let mut body = div().flex().flex_col();
-    if !studio_render::effects::is_rendered(&effect.name) {
+    if !is_usable(&effect.name) {
         body = body.child(div().pb_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("This effect is not drawn by the renderer yet; its settings are kept."));
     }
     if effect.name == "Apply LUT" {
@@ -166,8 +197,18 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     }
     // The node picked in the Nodes panel is marked here and kept open.
     let picked = workspace.ui.nodes.selected;
-    for effect in &layer.effects {
+    // Color effects show as one line, where the first of them runs, instead of a card each:
+    // they are edited in the Color tab.
+    let graded = super::color_grade::graded_effects(workspace, layer_id);
+    let first_graded = layer.effects.iter().position(|effect| graded.contains(&effect.id));
+    for (index, effect) in layer.effects.iter().enumerate() {
         let effect_id = effect.id;
+        if graded.contains(&effect_id) {
+            if Some(index) == first_graded {
+                list = list.child(color_line(graded.len(), cx));
+            }
+            continue;
+        }
         let key = effect_key(layer, effect_id);
         let is_picked = picked == Some(studio_core::effect_graph::NodeId::Effect(effect_id));
         // Effects start open; folding one records it.
@@ -193,6 +234,27 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         list = list.child(super::nodes::merge_card(layer_id, merge, picked == Some(studio_core::effect_graph::NodeId::Merge(merge.id)), workspace, cx));
     }
     list.into_any_element()
+}
+
+/// The single line standing for the Color tab's corrections, with a button that opens it.
+fn color_line(count: usize, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let label = if count == 1 { "1 correction".to_owned() } else { format!("{count} corrections") };
+    list_row()
+        .id("fx-color-line")
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .border_b_1()
+        .border_color(hsla(color::HAIRLINE))
+        .text_size(px(size::SMALL_TEXT))
+        .child(Icon::new(IconName::Palette).size(px(13.0)).text_color(hsla(color::MUTED)))
+        .child(div().text_color(hsla(color::TEXT)).child("Color"))
+        .child(div().flex_1().min_w_0().truncate().text_color(hsla(color::MUTED)).child(label))
+        .child(Button::new("fx-open-color").ghost().small().label("Edit in Color").on_click(cx.listener(|this, _, _, cx| {
+            this.ui.tabs.insert(crate::workspace::PanelId::Properties, 2);
+            cx.notify();
+        })))
+        .test_support()
 }
 
 /// Puts every parameter of an effect back to its catalog default (keyframing animated ones).

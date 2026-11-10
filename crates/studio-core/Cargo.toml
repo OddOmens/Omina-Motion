@@ -14,6 +14,9 @@ serde = { version = "1", features = ["derive"] }
 # `float_roundtrip` reads every number back exactly as it was written, so a project that is
 # saved and reopened is identical (the default parser can be off in the last digit).
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# Reads SVG files (resolving styles, `<use>`, transforms and arcs) into plain paths, for SVG
+# import. Text and system fonts are left out: SVG text isn't brought in.
+usvg = { version = "=0.45.1", default-features = false }
 
 [lints]
 workspace = true

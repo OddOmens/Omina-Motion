@@ -54,6 +54,16 @@ Inside `apps/studio/src`:
   Libraries, Effects and so on); at the bottom New Comp, Import, Export and Settings. Tools that share a
   button (Select / Track Select, Cut / Ripple / Roll / Slip / Slide, Hand / Zoom), the Shape button and the
   Eyedropper open a menu under them when held or right-clicked.
+- `panels/dock.rs`: movable panels. Every panel sits in gpui-kit's dock: drag a panel's tab onto another
+  panel's edge to put it beside (left, right, above, below) or onto its middle or tabs to join its group,
+  and drag the dividers to resize. The arrangement is saved in the app settings (`workspace_layout`) and
+  restored at launch; Window ▸ Reset Workspace puts the standard one back. The side panel is one panel
+  that moves as a whole: the rail's buttons pick what it shows (Media, Effects, Libraries and so on) and
+  bring it to the front wherever it has been moved.
+- `panels/workspaces.rs`: named workspaces, as in After Effects. Window ▸ Workspace lists Standard (built
+  in, can't be changed or deleted) and the saved ones, with Save as New Workspace…, Update Current
+  Workspace, Delete Workspace… and Reset Workspace (back to the current workspace as saved). They live in
+  the app settings (`saved_workspaces`, `current_workspace`); one that can't be read falls back to Standard.
 - Premiere's trim tools (ripple, roll, slide, moving a group) are in `studio-core/src/trim_tools.rs`;
   `state/layer_time.rs` applies each drag afresh to the timing as it was when the drag began.
 - Pen paths: the model and geometry are in `studio-core/src/path.rs`; drawing and point dragging are in

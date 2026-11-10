@@ -100,7 +100,7 @@ fn contours(commands: &[Command], origin: Vec2) -> Vec<ShapePath> {
             points[0].handle_in = last.handle_in;
         }
         if points.len() > 1 {
-            contours.push(ShapePath { points: std::mem::take(points), closed: true });
+            contours.push(ShapePath { points: std::mem::take(points), closed: true, ..Default::default() });
         }
         points.clear();
     }

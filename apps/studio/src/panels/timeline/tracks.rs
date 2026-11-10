@@ -14,10 +14,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
+use gpui_kit::component::{Disableable as _, Icon};
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Bounds, Context, Div, DragMoveEvent, ImageSource, InteractiveElement, IntoElement, MouseButton,
+    AnyElement, AppContext as _, Bounds, Context, Div, DragMoveEvent, ElementId, ImageSource, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, ParentElement, RenderImage, StatefulInteractiveElement, Styled, TestSupportExt as _, Window, canvas, div, fill,
     img, point, prelude::FluentBuilder as _, px, relative, rgba, size as gpui_size,
 };
@@ -34,6 +34,9 @@ use crate::panels::chrome::{EmptyDragView, icon_button};
 use crate::state::{KeyframeRef, LayerTimeEdit, Switch};
 use crate::theme::{color, hsla};
 use crate::workspace::{EditTarget, EffectDrag, ProjectItemDrag, Tool, Workspace};
+
+/// Width of the track headers left of the rows: the track's number and its eye and mute buttons.
+pub const HEADER_WIDTH: f32 = 84.0;
 
 /// Row heights: the main track is tallest, as in CapCut; sound tracks are shorter.
 const MAIN_HEIGHT: f32 = 58.0;
@@ -257,7 +260,7 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             cx.notify();
         })))
         .when(workspace.has(crate::features::Feature::RenderAndPlay), |bar| bar.child(icon_button("tracks-render-play", IconName::Film, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Render & Play: render the work area, then play it smoothly", "render-and-play"), workspace.ui.render_then_play, cx.listener(|this, _, window, cx| this.render_and_play(window, cx)))))
-        .child(div().pl_2().font_family("Menlo").text_size(px(13.0)).text_color(hsla(color::TEXT)).child(format_timecode(state.current_frame, rate)))
+        .child(div().pl_2().font_family(crate::theme::MONO_FONT).text_size(px(13.0)).text_color(hsla(color::TIME)).child(format_timecode(state.current_frame, rate)))
         .children(render_progress(workspace, cx));
     let right = side()
         .justify_end()
@@ -430,6 +433,115 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
         .child(div().absolute().top_0().bottom_0().left(relative(playhead)).w(px(1.0)).bg(hsla(color::PLAYHEAD)))
         .children(snap)
         .children(drop_line)
+}
+
+/// The headers beside the track rows, top to bottom: each track's number (01 at the top), an
+/// eye that hides or shows its clips, and a speaker that mutes or unmutes them. A button is
+/// greyed out on a track where it would do nothing (no sound on a title track, say).
+pub fn headers(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let state = &workspace.state;
+    let compact = workspace.ui.settings.compact_timeline;
+    let rows = layout(workspace).into_iter().enumerate().map(|(index, (track, height))| {
+        div()
+            .id(ElementId::Name(format!("track-header:{track}").into()))
+            .h(px(height))
+            .flex_none()
+            .border_b_1()
+            .border_color(hsla(color::BORDER))
+            .bg(hsla(if track == MAIN_TRACK { color::PANEL } else { color::INSET }))
+            .child(
+                // Lined up with the track's own row, above any keyframe rows of opened clips.
+                div()
+                    .h(px(base_height(track, compact)))
+                    .flex()
+                    .items_center()
+                    .gap_0p5()
+                    .px_1p5()
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("track-number:{track}").into()))
+                            .w(px(20.0))
+                            .flex_none()
+                            .font_family(crate::theme::MONO_FONT)
+                            .text_size(px(11.0))
+                            .text_color(hsla(color::MUTED))
+                            .child(track_number(index))
+                            .test_support(),
+                    )
+                    .child(track_toggle(state, Some(track), Switch::Visible, cx))
+                    .child(track_toggle(state, Some(track), Switch::Audio, cx)),
+            )
+            .test_support()
+            .into_any_element()
+    });
+    div()
+        .id("track-headers")
+        .w(px(HEADER_WIDTH))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .border_r_1()
+        .border_color(hsla(color::HAIRLINE))
+        // A press here isn't a press on the tracks (which would move the playhead).
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .children(rows.collect::<Vec<_>>())
+}
+
+/// The eye (Visible) or speaker (Audio) button for one track, or for every track with `None`.
+/// It shows the crossed-out icon while the switch is off for all of them, and is greyed out
+/// where it would do nothing.
+fn track_toggle(state: &crate::state::EditorState, track: Option<i32>, switch: Switch, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let on = state.track_switch(track, switch);
+    let off = on == Some(false);
+    let (icon, which, verb) = match (switch, off) {
+        (Switch::Audio, false) => (IconName::Volume2, "track-mute", "Mute"),
+        (Switch::Audio, true) => (IconName::VolumeX, "track-mute", "Unmute"),
+        (_, false) => (IconName::Eye, "track-eye", "Hide"),
+        (_, true) => (IconName::EyeOff, "track-eye", "Show"),
+    };
+    let (id, tip) = match track {
+        Some(track) => (format!("{which}:{track}"), format!("{verb} this track")),
+        None => (format!("{which}:all"), format!("{verb} every track")),
+    };
+    icon_button(ElementId::Name(id.into()), icon, tip, off, cx.listener(move |this, _, _, cx| {
+        let turn_on = this.state.track_switch(track, switch) == Some(false);
+        this.state.set_track_switch(track, switch, turn_on);
+        cx.notify();
+    }))
+    .disabled(on.is_none())
+}
+
+/// The top of the track header column, beside the navigator and ruler: one block whose bottom
+/// row, level with the ruler, holds the eye and mute buttons for every track at once.
+pub fn headers_top(workspace: &Workspace, height: f32, bottom_row: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let state = &workspace.state;
+    div()
+        .id("track-headers-top")
+        .w(px(HEADER_WIDTH))
+        .h(px(height))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .justify_end()
+        .border_r_1()
+        .border_b_1()
+        .border_color(hsla(color::HAIRLINE))
+        .child(
+            div()
+                .h(px(bottom_row))
+                .flex()
+                .items_center()
+                .gap_0p5()
+                .px_1p5()
+                .child(div().w(px(20.0)).flex_none().text_size(px(10.0)).text_color(hsla(color::MUTED)).child("All"))
+                .child(track_toggle(state, None, Switch::Visible, cx))
+                .child(track_toggle(state, None, Switch::Audio, cx)),
+        )
+}
+
+/// The number shown on the `index`th track from the top: 01, 02, and so on.
+fn track_number(index: usize) -> String {
+    format!("{:02}", index + 1)
 }
 
 /// A small icon toggle on a clip's header; the icon shows the state (crossed out when off).
@@ -938,3 +1050,16 @@ fn waveform(layer: &Layer, peaks: Option<Arc<Peaks>>, height: f32, ink: u32, wor
     .into_any_element()
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::track_number;
+
+    #[test]
+    fn tracks_are_numbered_from_01_with_two_digits() {
+        assert_eq!(track_number(0), "01");
+        assert_eq!(track_number(8), "09");
+        assert_eq!(track_number(11), "12");
+        assert_eq!(track_number(99), "100");
+    }
+}

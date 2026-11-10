@@ -40,6 +40,23 @@ pub const CATEGORIES: &[EffectCategory] = &[
                 name: "Sharpen",
                 parameters: &[(param("Sharpen Amount", "", 0.5, 0.0, 500.0, 0), 20.0)],
             },
+            // An even average of the pixels within the radius, repeated Iterations times; more
+            // iterations round the square blur into a smooth one.
+            EffectDefinition {
+                name: "Box Blur",
+                parameters: &[(param("Blur Radius", "px", 0.2, 0.0, 500.0, 1), 10.0), (param("Iterations", "", 0.05, 1.0, 5.0, 0), 3.0)],
+            },
+            // Sharpens by adding back the difference between the picture and a blurred copy of
+            // it. Threshold (0-255 display levels) leaves smooth areas, where that difference is
+            // small, untouched so grain and noise aren't sharpened.
+            EffectDefinition {
+                name: "Unsharp Mask",
+                parameters: &[
+                    (param("Amount", "%", 0.5, 0.0, 500.0, 0), 80.0),
+                    (param("Radius", "px", 0.05, 0.1, 250.0, 1), 3.0),
+                    (param("Threshold", "", 0.5, 0.0, 255.0, 0), 0.0),
+                ],
+            },
         ],
     },
     // Moving, cutting and repeating the picture without changing its colors.
@@ -58,6 +75,19 @@ pub const CATEGORIES: &[EffectCategory] = &[
             },
             // One side of a line through the center reflected onto the other.
             EffectDefinition { name: "Mirror", parameters: &[(param("Axis Angle", "°", 0.5, -3600.0, 3600.0, 1), 0.0), (param("Center Offset", "%", 0.2, -50.0, 50.0, 1), 0.0)] },
+            // Moves, scales, turns and fades the picture, like After Effects' Transform effect:
+            // each setting keyframes, and in a node graph it moves just one branch. It turns and
+            // scales about the middle of the frame.
+            EffectDefinition {
+                name: "Transform",
+                parameters: &[
+                    (param("Position X", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Position Y", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Scale", "%", 0.2, 0.0, 1000.0, 1), 100.0),
+                    (param("Rotation", "°", 0.5, -3600.0, 3600.0, 1), 0.0),
+                    (param("Opacity", "%", 0.2, PERCENT.0, PERCENT.1, 1), 100.0),
+                ],
+            },
             // Shifts the picture with wraparound, so what leaves one edge comes back at the other.
             EffectDefinition { name: "Offset", parameters: &[(param("Shift X", "%", 0.2, -100.0, 100.0, 1), 0.0), (param("Shift Y", "%", 0.2, -100.0, 100.0, 1), 0.0)] },
             EffectDefinition {
@@ -153,6 +183,65 @@ pub const CATEGORIES: &[EffectCategory] = &[
                 name: "Vibrance",
                 parameters: &[(param("Vibrance", "", 0.5, -100.0, 100.0, 0), 0.0), (param("Saturation", "", 0.5, -100.0, 100.0, 0), 0.0)],
             },
+            // Builds each output channel from a mix of the input's red, green and blue (in %).
+            // The defaults leave the picture as it is; putting 100% of red into green, say,
+            // copies the red channel into green.
+            EffectDefinition {
+                name: "Channel Mixer",
+                parameters: &[
+                    (param("Red-Red", "%", 0.5, -200.0, 200.0, 0), 100.0),
+                    (param("Red-Green", "%", 0.5, -200.0, 200.0, 0), 0.0),
+                    (param("Red-Blue", "%", 0.5, -200.0, 200.0, 0), 0.0),
+                    (param("Green-Red", "%", 0.5, -200.0, 200.0, 0), 0.0),
+                    (param("Green-Green", "%", 0.5, -200.0, 200.0, 0), 100.0),
+                    (param("Green-Blue", "%", 0.5, -200.0, 200.0, 0), 0.0),
+                    (param("Blue-Red", "%", 0.5, -200.0, 200.0, 0), 0.0),
+                    (param("Blue-Green", "%", 0.5, -200.0, 200.0, 0), 0.0),
+                    (param("Blue-Blue", "%", 0.5, -200.0, 200.0, 0), 100.0),
+                ],
+            },
+            // Brings out detail in dark areas and pulls back bright ones, leaving black, white and
+            // the colors' hues where they are.
+            EffectDefinition {
+                name: "Shadow/Highlight",
+                parameters: &[(param("Shadow Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 35.0), (param("Highlight Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0)],
+            },
+            // Maps the picture's brightness onto three colors (0-255 display values): shadows,
+            // midtones and highlights. Blend With Original brings the picture back in.
+            EffectDefinition {
+                name: "Tritone",
+                parameters: &[
+                    (param("Highlights Red", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Highlights Green", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Highlights Blue", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Midtones Red", "", 0.5, 0.0, 255.0, 0), 127.0),
+                    (param("Midtones Green", "", 0.5, 0.0, 255.0, 0), 100.0),
+                    (param("Midtones Blue", "", 0.5, 0.0, 255.0, 0), 70.0),
+                    (param("Shadows Red", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Shadows Green", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Shadows Blue", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Blend With Original", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0),
+                ],
+            },
+            // Changes the saturation and lightness of one family of colors at a time (reds,
+            // yellows, greens, cyans, blues or magentas), leaving the others and grays alone.
+            EffectDefinition {
+                name: "Selective Color",
+                parameters: &[
+                    (param("Reds Saturation", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Reds Lightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Yellows Saturation", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Yellows Lightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Greens Saturation", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Greens Lightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Cyans Saturation", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Cyans Lightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Blues Saturation", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Blues Lightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Magentas Saturation", "", 0.5, -100.0, 100.0, 0), 0.0),
+                    (param("Magentas Lightness", "", 0.5, -100.0, 100.0, 0), 0.0),
+                ],
+            },
         ],
     },
     EffectCategory {
@@ -181,6 +270,27 @@ pub const CATEGORIES: &[EffectCategory] = &[
             EffectDefinition { name: "Kaleidoscope", parameters: &[(param("Segments", "", 0.05, 2.0, 32.0, 0), 6.0), (param("Rotation", "°", 0.5, -3600.0, 3600.0, 1), 0.0)] },
             // Rectangular to polar: the top edge wraps round to the center, the bottom to the rim.
             EffectDefinition { name: "Polar Coordinates", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
+            // Moves each corner of the frame by its offset (in pixels) and stretches the picture
+            // onto the new four-sided shape in perspective. Outside the shape is clear.
+            EffectDefinition {
+                name: "Corner Pin",
+                parameters: &[
+                    (param("Top Left X", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Top Left Y", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Top Right X", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Top Right Y", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Bottom Left X", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Bottom Left Y", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Bottom Right X", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                    (param("Bottom Right Y", "px", 0.5, -10000.0, 10000.0, 1), 0.0),
+                ],
+            },
+            // A camera lens's bending: positive curvature bows straight lines outward (barrel),
+            // negative pinches them in (pincushion).
+            EffectDefinition { name: "Lens Distortion", parameters: &[(param("Curvature", "%", 0.5, -100.0, 100.0, 0), 30.0)] },
+            // Wraps the middle of the picture around a ball: positive amounts swell it toward
+            // you, negative ones push it away. Radius is a percentage of half the frame's shorter side.
+            EffectDefinition { name: "Spherize", parameters: &[(param("Amount", "%", 0.5, -100.0, 100.0, 0), 50.0), (param("Radius", "%", 0.2, PERCENT.0, PERCENT.1, 1), 50.0)] },
         ],
     },
     EffectCategory {
@@ -191,6 +301,71 @@ pub const CATEGORIES: &[EffectCategory] = &[
             EffectDefinition { name: "Fractal Noise", parameters: &[(param("Contrast", "", 0.5, 0.0, 10000.0, 1), 100.0), (param("Brightness", "", 0.5, -10000.0, 10000.0, 1), 0.0), (param("Evolution", "°", 0.5, -100000.0, 100000.0, 1), 0.0)] },
             // A white outline around the layer's shape, drawn outside its edge.
             EffectDefinition { name: "Stroke", parameters: &[(param("Brush Size", "px", 0.1, 0.0, 200.0, 1), 4.0), (param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 1), 100.0)] },
+            // Lines of one color (0-255 display values) every Size pixels across and down,
+            // centered on the frame and drawn over the layer.
+            EffectDefinition {
+                name: "Grid",
+                parameters: &[
+                    (param("Size", "px", 0.5, 2.0, 2000.0, 0), 40.0),
+                    (param("Line Width", "px", 0.1, 0.0, 500.0, 1), 2.0),
+                    (param("Color Red", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Color Green", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Color Blue", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0),
+                ],
+            },
+            // Squares of Size pixels, centered on the frame, every other one filled with the color
+            // (0-255 display values) and the rest showing the layer.
+            EffectDefinition {
+                name: "Checkerboard",
+                parameters: &[
+                    (param("Size", "px", 0.5, 2.0, 2000.0, 0), 40.0),
+                    (param("Color Red", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Color Green", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Color Blue", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Opacity", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0),
+                ],
+            },
+            // A smooth blend between four colors (0-255 display values), one in each corner.
+            EffectDefinition {
+                name: "4-Color Gradient",
+                parameters: &[
+                    (param("Top Left Red", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Top Left Green", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Top Left Blue", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Top Right Red", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Top Right Green", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Top Right Blue", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Bottom Left Red", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Bottom Left Green", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Bottom Left Blue", "", 0.5, 0.0, 255.0, 0), 255.0),
+                    (param("Bottom Right Red", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Bottom Right Green", "", 0.5, 0.0, 255.0, 0), 0.0),
+                    (param("Bottom Right Blue", "", 0.5, 0.0, 255.0, 0), 255.0),
+                ],
+            },
+            // A band of light across the layer. Position runs from one side of the frame (0%) to
+            // the other (100%), so keyframing it sweeps the shine across; Angle tilts the band.
+            EffectDefinition {
+                name: "Light Sweep",
+                parameters: &[
+                    (param("Position", "%", 0.2, -100.0, 200.0, 1), 50.0),
+                    (param("Angle", "°", 0.5, -3600.0, 3600.0, 1), 30.0),
+                    (param("Width", "px", 0.5, 1.0, 4000.0, 0), 60.0),
+                    (param("Softness", "%", 0.5, PERCENT.0, PERCENT.1, 0), 60.0),
+                    (param("Intensity", "%", 0.5, 0.0, 500.0, 0), 80.0),
+                ],
+            },
+            // The glare of a bright light in a camera lens: a glow, a streak and a ring at the
+            // center (as % of the frame), and faint discs on the line through the frame's middle.
+            EffectDefinition {
+                name: "Lens Flare",
+                parameters: &[
+                    (param("Flare Center X", "%", 0.2, -50.0, 150.0, 1), 30.0),
+                    (param("Flare Center Y", "%", 0.2, -50.0, 150.0, 1), 30.0),
+                    (param("Flare Brightness", "%", 0.5, 0.0, 300.0, 0), 100.0),
+                ],
+            },
         ],
     },
     EffectCategory {
@@ -223,6 +398,21 @@ pub const CATEGORIES: &[EffectCategory] = &[
                     (param("Softness", "%", 0.5, PERCENT.0, PERCENT.1, 0), 20.0),
                     (param("Spill Suppression", "%", 0.5, PERCENT.0, PERCENT.1, 0), 50.0),
                     (param("Choke", "px", 0.05, 0.0, 20.0, 1), 0.0),
+                ],
+            },
+            // Shrinks the matte's edge inward by Choke Matte pixels, or grows it outward when
+            // negative.
+            EffectDefinition { name: "Simple Choker", parameters: &[(param("Choke Matte", "px", 0.05, -100.0, 100.0, 1), 1.0)] },
+            // Removes areas by brightness: those within Tolerance of the Threshold brightness turn
+            // clear, fading over Softness beyond that. Threshold 0 removes black, 100 white.
+            // Invert (1) keeps only that brightness instead.
+            EffectDefinition {
+                name: "Luma Key",
+                parameters: &[
+                    (param("Threshold", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0),
+                    (param("Tolerance", "%", 0.5, PERCENT.0, PERCENT.1, 0), 10.0),
+                    (param("Softness", "%", 0.5, PERCENT.0, PERCENT.1, 0), 10.0),
+                    (param("Invert", "", 0.05, 0.0, 1.0, 0), 0.0),
                 ],
             },
         ],
@@ -304,7 +494,147 @@ pub const CATEGORIES: &[EffectCategory] = &[
             EffectDefinition { name: "Gradient Wipe", parameters: &[(param("Transition Completion", "%", 0.5, PERCENT.0, PERCENT.1, 0), 0.0), (param("Softness", "%", 0.5, PERCENT.0, PERCENT.1, 0), 10.0)] },
         ],
     },
+    // Effects on a clip's sound, run as the mix plays and exports (see `studio_dsp`, whose
+    // names and setting order must match these). They don't change the picture.
+    EffectCategory {
+        name: AUDIO_CATEGORY,
+        effects: &[
+            // A low cut and a high cut, shelves at 120 Hz and 8 kHz, and one band to move.
+            EffectDefinition {
+                name: "EQ",
+                parameters: &[
+                    (param("Low Cut", "Hz", 1.0, 20.0, 1000.0, 0), 20.0),
+                    (param("Low Gain", "dB", 0.1, -24.0, 24.0, 1), 0.0),
+                    (param("Mid Frequency", "Hz", 5.0, 20.0, 20000.0, 0), 1000.0),
+                    (param("Mid Gain", "dB", 0.1, -24.0, 24.0, 1), 0.0),
+                    (param("High Gain", "dB", 0.1, -24.0, 24.0, 1), 0.0),
+                    (param("High Cut", "Hz", 10.0, 1000.0, 20000.0, 0), 20000.0),
+                ],
+            },
+            // Evens out loud and quiet moments.
+            EffectDefinition {
+                name: "Compressor",
+                parameters: &[
+                    (param("Threshold", "dB", 0.1, -60.0, 0.0, 1), -18.0),
+                    (param("Ratio", ":1", 0.05, 1.0, 20.0, 1), 4.0),
+                    (param("Attack", "ms", 0.1, 0.1, 200.0, 1), 10.0),
+                    (param("Release", "ms", 1.0, 10.0, 2000.0, 0), 150.0),
+                    (param("Makeup Gain", "dB", 0.1, 0.0, 24.0, 1), 0.0),
+                ],
+            },
+            // Keeps peaks under a ceiling.
+            EffectDefinition { name: "Limiter", parameters: &[(param("Ceiling", "dB", 0.1, -24.0, 0.0, 1), -1.0), (param("Release", "ms", 1.0, 10.0, 1000.0, 0), 80.0)] },
+            // Tames harsh "s" sounds.
+            EffectDefinition { name: "De-esser", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 50.0)] },
+            // Removes mains hum (50 or 60 Hz) and its harmonics.
+            EffectDefinition { name: "Hum Remover", parameters: &[(param("Frequency", "Hz", 1.0, 50.0, 60.0, 0), 60.0), (param("Harmonics", "", 0.05, 1.0, 8.0, 0), 4.0)] },
+            EffectDefinition { name: "Gain", parameters: &[(param("Gain", "dB", 0.1, -48.0, 24.0, 1), 0.0)] },
+            // -100 is all left, 100 all right.
+            EffectDefinition { name: "Pan", parameters: &[(param("Pan", "", 0.5, -100.0, 100.0, 0), 0.0)] },
+            EffectDefinition {
+                name: "Echo",
+                parameters: &[
+                    (param("Time", "ms", 1.0, 1.0, 2000.0, 0), 250.0),
+                    (param("Feedback", "%", 0.5, 0.0, 95.0, 0), 30.0),
+                    (param("Mix", "%", 0.5, PERCENT.0, PERCENT.1, 0), 30.0),
+                ],
+            },
+            // The sound of a room: Room Size sets how long the reflections ring on, Damping how
+            // quickly their treble fades, and Mix how much of the room is heard with the original.
+            EffectDefinition {
+                name: "Reverb",
+                parameters: &[
+                    (param("Room Size", "%", 0.5, PERCENT.0, PERCENT.1, 0), 50.0),
+                    (param("Damping", "%", 0.5, PERCENT.0, PERCENT.1, 0), 50.0),
+                    (param("Mix", "%", 0.5, PERCENT.0, PERCENT.1, 0), 25.0),
+                ],
+            },
+        ],
+    },
 ];
+
+/// Where an effect's on-screen point is measured from, so the viewer can draw a handle for it
+/// and turn a drag back into the effect's settings. Points are in composition pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PointOrigin {
+    /// Pixels from one of the layer's own corners (0 top left, 1 top right, 2 bottom right,
+    /// 3 bottom left), where it sits in the frame.
+    Corner(usize),
+    /// Percentages of the frame's width and height.
+    Percent,
+    /// Pixels from the middle of the frame.
+    Center,
+}
+
+/// A point an effect's settings describe, shown as a handle in the viewer: its name, the
+/// settings holding its x and y, and what they are measured from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EffectPoint {
+    pub label: &'static str,
+    pub x: usize,
+    pub y: usize,
+    pub origin: PointOrigin,
+}
+
+/// The on-screen points of the effect called `name` (none for most effects).
+pub fn points(name: &str) -> &'static [EffectPoint] {
+    const CORNER_PIN: [EffectPoint; 4] = [
+        EffectPoint { label: "Top Left", x: 0, y: 1, origin: PointOrigin::Corner(0) },
+        EffectPoint { label: "Top Right", x: 2, y: 3, origin: PointOrigin::Corner(1) },
+        EffectPoint { label: "Bottom Left", x: 4, y: 5, origin: PointOrigin::Corner(3) },
+        EffectPoint { label: "Bottom Right", x: 6, y: 7, origin: PointOrigin::Corner(2) },
+    ];
+    const LENS_FLARE: [EffectPoint; 1] = [EffectPoint { label: "Flare Center", x: 0, y: 1, origin: PointOrigin::Percent }];
+    const TRANSFORM: [EffectPoint; 1] = [EffectPoint { label: "Position", x: 0, y: 1, origin: PointOrigin::Center }];
+    match name {
+        "Corner Pin" => &CORNER_PIN,
+        "Lens Flare" => &LENS_FLARE,
+        "Transform" => &TRANSFORM,
+        _ => &[],
+    }
+}
+
+/// Where an effect's points are measured from: the frame's size, and the layer's own corners in
+/// the frame (clockwise from the top left), all in composition pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointSpace {
+    pub frame: crate::animation::Vec2,
+    pub layer_corners: [crate::animation::Vec2; 4],
+}
+
+impl EffectPoint {
+    /// Where the point is in `space`, given its two settings' values.
+    pub fn position(&self, values: (f32, f32), space: PointSpace) -> crate::animation::Vec2 {
+        use crate::animation::Vec2;
+        let frame = space.frame;
+        match self.origin {
+            PointOrigin::Corner(corner) => space.layer_corners[corner.min(3)] + Vec2::new(values.0, values.1),
+            PointOrigin::Percent => Vec2::new(values.0 / 100.0 * frame.x, values.1 / 100.0 * frame.y),
+            PointOrigin::Center => Vec2::new(frame.x * 0.5 + values.0, frame.y * 0.5 + values.1),
+        }
+    }
+
+    /// The two settings' values that put the point at `at` in `space`.
+    pub fn values(&self, at: crate::animation::Vec2, space: PointSpace) -> (f32, f32) {
+        let frame = space.frame;
+        match self.origin {
+            PointOrigin::Corner(corner) => {
+                let from = space.layer_corners[corner.min(3)];
+                (at.x - from.x, at.y - from.y)
+            }
+            PointOrigin::Percent => (at.x / frame.x.max(1.0) * 100.0, at.y / frame.y.max(1.0) * 100.0),
+            PointOrigin::Center => (at.x - frame.x * 0.5, at.y - frame.y * 0.5),
+        }
+    }
+}
+
+/// The name of the category of effects on sound.
+pub const AUDIO_CATEGORY: &str = "Audio";
+
+/// Whether the effect called `name` works on sound rather than on the picture.
+pub fn is_audio(name: &str) -> bool {
+    category_of(name).is_some_and(|category| category.name == AUDIO_CATEGORY)
+}
 
 pub fn find(name: &str) -> Option<&'static EffectDefinition> {
     CATEGORIES.iter().flat_map(|category| category.effects).find(|effect| effect.name == name)
@@ -319,6 +649,10 @@ pub fn category_of(name: &str) -> Option<&'static EffectCategory> {
 /// at all. Text, shapes and solids are flat colours you set directly, so colour correction is
 /// pointless on them, and they have no background to key out.
 pub fn suits(category: &EffectCategory, content: &LayerContent) -> bool {
+    // Sound effects suit what can have sound: audio, footage and nested compositions.
+    if category.name == AUDIO_CATEGORY {
+        return matches!(content, LayerContent::Audio { .. } | LayerContent::Footage { .. } | LayerContent::Composition { .. });
+    }
     match content {
         LayerContent::Audio { .. } => false,
         LayerContent::Text { .. } | LayerContent::Captions { .. } | LayerContent::Shape { .. } | LayerContent::Solid { .. } => !matches!(category.name, "Color Correction" | "Keying"),
@@ -329,6 +663,16 @@ pub fn suits(category: &EffectCategory, content: &LayerContent) -> bool {
 /// Whether the effect called `name` is useful on a layer showing `content` (see `suits`).
 pub fn suits_layer(name: &str, content: &LayerContent) -> bool {
     category_of(name).is_some_and(|category| suits(category, content))
+}
+
+/// Fills in an effect's display and range information from the catalog (it isn't saved with
+/// the effect). Parameters the catalog doesn't know keep an unlimited range.
+pub fn restore_info(effect: &mut Effect) {
+    let definition = find(&effect.name);
+    for (index, property) in effect.properties.iter_mut().enumerate() {
+        let known = definition.and_then(|definition| definition.parameters.get(index)).map(|(info, _)| *info);
+        property.info = known.filter(|info| info.name == property.name).unwrap_or(crate::property::PropertyInfo::unknown());
+    }
 }
 
 /// A new effect instance with every parameter at its default value.
@@ -343,6 +687,34 @@ pub fn instantiate(definition: &EffectDefinition, id: Id) -> Effect {
             .map(|&(info, default)| EffectProperty { name: info.name.to_owned(), info, value: Animated::constant(default) })
             .collect(),
         lut: None,
+    }
+}
+
+#[cfg(test)]
+mod points_tests {
+    use super::*;
+    use crate::animation::Vec2;
+
+    #[test]
+    fn on_screen_points_round_trip_through_their_settings() {
+        let frame = Vec2::new(1920.0, 1080.0);
+        // A 400 × 300 layer at (100, 50).
+        let layer_corners = [Vec2::new(100.0, 50.0), Vec2::new(500.0, 50.0), Vec2::new(500.0, 350.0), Vec2::new(100.0, 350.0)];
+        let space = PointSpace { frame, layer_corners };
+        for name in ["Corner Pin", "Lens Flare", "Transform"] {
+            let definition = find(name).unwrap();
+            for point in points(name) {
+                assert!(point.x < definition.parameters.len() && point.y < definition.parameters.len(), "{name}");
+                let at = Vec2::new(300.0, 200.0);
+                let (x, y) = point.values(at, space);
+                assert!((point.position((x, y), space) - at).length() < 1e-3, "{name} {}", point.label);
+            }
+        }
+        // Corner Pin's corners with no offset sit on the layer's own corners.
+        assert_eq!(points("Corner Pin")[3].position((0.0, 0.0), space), Vec2::new(500.0, 350.0));
+        assert_eq!(points("Corner Pin")[2].position((10.0, 0.0), space), Vec2::new(110.0, 350.0));
+        assert_eq!(points("Lens Flare")[0].position((50.0, 50.0), space), Vec2::new(960.0, 540.0));
+        assert!(points("Gaussian Blur").is_empty());
     }
 }
 

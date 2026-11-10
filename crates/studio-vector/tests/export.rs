@@ -36,7 +36,7 @@ impl Resources for FakeResources {
                     Vec::new()
                 } else {
                     let corners = [(left, top + 0.2 * em), (left + 0.5 * em, top + 0.2 * em), (left + 0.5 * em, top + em), (left, top + em)];
-                    vec![ShapePath { points: corners.iter().map(|&(x, y)| PathPoint::corner(Vec2::new(x, y))).collect(), closed: true }]
+                    vec![ShapePath { points: corners.iter().map(|&(x, y)| PathPoint::corner(Vec2::new(x, y))).collect(), closed: true, ..Default::default() }]
                 };
                 glyphs.push(GlyphOutline { start: line_start + at, line: line_index, left, width: advance, contours });
             }
@@ -195,7 +195,7 @@ fn mattes_masks_parents_and_gradients_map_to_lottie() {
         ..ShapeStyle::new(ShapeKind::Star)
     };
     let star = edit::add_shape_layer(&mut project, comp, star_style, Vec2::new(120.0, 60.0), Vec2::new(100.0, 100.0), 0).unwrap();
-    let pen = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.0)), PathPoint::smooth(Vec2::new(100.0, 50.0), Vec2::new(20.0, 0.0)), PathPoint::corner(Vec2::new(0.0, 100.0))], closed: true };
+    let pen = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.0)), PathPoint::smooth(Vec2::new(100.0, 50.0), Vec2::new(20.0, 0.0)), PathPoint::corner(Vec2::new(0.0, 100.0))], closed: true, ..Default::default() };
     let mask = edit::add_path_layer(&mut project, comp, &pen, ShapeStyle::new(ShapeKind::Path), 0).unwrap();
     let null = edit::add_null_layer(&mut project, comp, 0).unwrap();
     let composition = project.composition_mut(comp).unwrap();

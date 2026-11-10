@@ -253,6 +253,8 @@ pub fn value_field(target: FieldTarget, workspace: &Workspace, cx: &mut Context<
         .px_0p5()
         .border_b_1()
         .border_color(hsla(color::HAIRLINE))
+        // Fixed-width digits, so the number doesn't shift sideways while it is dragged.
+        .font_family(crate::theme::MONO_FONT)
         .text_color(hsla(color::VALUE))
         .cursor_ew_resize()
         .hover(|style| style.border_color(hsla(color::VALUE)))

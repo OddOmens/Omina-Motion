@@ -135,7 +135,7 @@ fn rounded(corners: &[Vec2], radius: f32, place: impl Fn(Vec2) -> Vec2) -> Shape
             points.push(PathPoint::corner(corner + along * (radius / meet.max(1e-3))));
         }
     }
-    let placed = ShapePath { points, closed: true };
+    let placed = ShapePath { points, closed: true, ..Default::default() };
     placed.mapped(place)
 }
 
@@ -180,7 +180,7 @@ fn circle(center: Vec2, radius: f32, place: impl Fn(Vec2) -> Vec2) -> ShapePath 
             PathPoint { at: center + direction * radius, handle_in: tangent * -handle, handle_out: tangent * handle }
         })
         .collect();
-    ShapePath { points, closed: true }.mapped(place)
+    ShapePath { points, closed: true, ..Default::default() }.mapped(place)
 }
 
 #[cfg(test)]
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn pen_paths_are_scaled_from_box_fractions_to_pixels() {
-        let path = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.0)), PathPoint::smooth(Vec2::new(1.0, 0.5), Vec2::new(0.1, 0.0))], closed: false };
+        let path = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.0)), PathPoint::smooth(Vec2::new(1.0, 0.5), Vec2::new(0.1, 0.0))], closed: false, ..Default::default() };
         let Some(Geometry::Path(placed)) = shape(&style(ShapeKind::Path, 0.0), Some(&path), Vec2::new(200.0, 100.0)) else { panic!() };
         assert_eq!(placed.points[1].at, Vec2::new(200.0, 50.0));
         assert!(close(placed.points[1].handle_out, Vec2::new(20.0, 0.0)));

@@ -16,10 +16,11 @@ use gpui_kit::{
 use crate::theme::{color, hsla, size};
 use crate::workspace::{PanelId, Workspace};
 
-/// A panel's frame: a header with its tab(s) and menu, the body, and an optional footer.
-/// With several tabs, clicking one switches the panel to it (see `UiState::tab`). With no tabs
-/// there is no header, for panels that show their title in their own toolbar.
-/// Pressing anywhere inside makes it the active panel (which decides what Delete acts on).
+/// A panel's frame: the body, an optional footer and, for panels with several tabs, a header
+/// with those tabs (clicking one switches the panel to it; see `UiState::tab`). The panel's own
+/// title is on its tab in the dock (see `panels::dock`), so a panel with a single title needs no
+/// header of its own. Pressing anywhere inside makes it the active panel (which decides what
+/// Delete acts on).
 pub fn panel(
     id: PanelId,
     tabs: &[&str],
@@ -29,83 +30,54 @@ pub fn panel(
     cx: &mut Context<Workspace>,
 ) -> Div {
     let active_tab = workspace.ui.tab(id);
-    let clickable = tabs.len() > 1;
-    let collapsible = matches!(id, PanelId::Properties | PanelId::Align);
-    let collapsed = collapsible && workspace.ui.collapsed_panels.contains(&id);
-    let header = div()
-        .h(px(size::PANEL_HEADER_HEIGHT))
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_1()
-        .border_b_1()
-        .border_color(hsla(color::HAIRLINE))
-        // Tabs share what room there is, a long title (a layer's name) shortened with an
-        // ellipsis, so the collapse button always stays in view.
-        .child(div().flex_1().min_w_0().h_full().flex().items_center().gap_1().overflow_hidden().children(tabs.iter().enumerate().map(|(index, title)| {
-            let selected = index == active_tab;
-            div()
-                .id(ElementId::Name(format!("tab:{id:?}:{index}").into()))
-                .h_full()
-                .min_w_0()
-                .flex_shrink(1.0)
-                .px_1p5()
-                .flex()
-                .items_center()
-                .text_color(hsla(if selected { color::TEXT } else { color::MUTED }))
-                .when(clickable && selected, |tab| tab.border_b_2().border_color(hsla(color::TEXT)))
-                .when(clickable, |tab| {
-                    tab.hover(|style| style.text_color(hsla(color::TEXT))).on_click(cx.listener(move |this, _, _, cx| {
+    let header = (tabs.len() > 1).then(|| {
+        div()
+            .h(px(size::PANEL_HEADER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .border_b_1()
+            .border_color(hsla(color::HAIRLINE))
+            // Tabs share what room there is, a long title shortened with an ellipsis.
+            .child(div().flex_1().min_w_0().h_full().flex().items_center().gap_1().overflow_hidden().children(tabs.iter().enumerate().map(|(index, title)| {
+                let selected = index == active_tab;
+                div()
+                    .id(ElementId::Name(format!("tab:{id:?}:{index}").into()))
+                    .h_full()
+                    .min_w_0()
+                    .flex_shrink(1.0)
+                    .px_1p5()
+                    .flex()
+                    .items_center()
+                    .text_color(hsla(if selected { color::TEXT } else { color::MUTED }))
+                    .when(selected, |tab| tab.border_b_2().border_color(hsla(color::TEXT)))
+                    .hover(|style| style.text_color(hsla(color::TEXT)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         this.ui.tabs.insert(id, index);
                         cx.notify();
                     }))
-                })
-                .child(div().min_w_0().truncate().child(SharedString::from(title.to_string())))
-                .test_support()
-        })))
-        // Panels in the right column fold away to their header.
-        .when(collapsible, |header| {
-            header.child(
-                div()
-                    .id(ElementId::Name(format!("collapse:{id:?}").into()))
-                    .size(px(22.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.0))
-                    .text_color(hsla(color::MUTED))
-                    .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.ui.collapsed_panels.remove(&id) {
-                            this.ui.collapsed_panels.insert(id);
-                        }
-                        cx.notify();
-                    }))
-                    .child(Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown }).size(px(14.0)))
-                    .test_support(),
-            )
-        });
+                    .child(div().min_w_0().truncate().child(SharedString::from(title.to_string())))
+                    .test_support()
+            })))
+    });
 
     div()
         .size_full()
         .flex()
         .flex_col()
         .overflow_hidden()
-        .rounded(px(size::PANEL_RADIUS))
         .bg(hsla(color::PANEL))
-        .border_1()
-        .border_color(hsla(color::PANEL))
         .capture_any_mouse_down(cx.listener(move |this, _, _, cx| {
             if this.ui.active_panel != id {
                 this.ui.active_panel = id;
                 cx.notify();
             }
         }))
-        .when(!tabs.is_empty(), |panel| panel.child(header))
-        .when(!collapsed, |panel| panel.child(div().flex_1().min_h_0().relative().child(body)))
-        .children(footer.filter(|_| !collapsed).map(|footer| {
+        .children(header)
+        .child(div().flex_1().min_h_0().relative().child(body))
+        .children(footer.map(|footer| {
             div()
                 .h(px(size::PANEL_FOOTER_HEIGHT))
                 .flex_none()

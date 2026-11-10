@@ -10,6 +10,8 @@ authors.workspace = true
 
 [dependencies]
 studio-core.workspace = true
+# Audio effects run on each clip as the mix plays.
+studio-dsp.workspace = true
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 # Only to switch on FFmpeg build options that ffmpeg-next doesn't pass through (see `bundled-ffmpeg`).
 ffmpeg-sys-next = { version = "9", default-features = false, optional = true }

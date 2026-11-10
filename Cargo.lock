@@ -7619,6 +7619,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "usvg 0.45.1",
 ]
 
 [[package]]
@@ -7633,12 +7634,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "studio-dsp"
+version = "0.1.0"
+
+[[package]]
 name = "studio-enhance"
 version = "0.1.0"
 dependencies = [
  "deep-filter-rt",
  "ndarray",
  "nnnoiseless",
+ "studio-dsp",
 ]
 
 [[package]]
@@ -7663,6 +7669,7 @@ dependencies = [
  "ffmpeg-sys-next",
  "rtrb",
  "studio-core",
+ "studio-dsp",
 ]
 
 [[package]]

@@ -82,11 +82,26 @@ impl EditorState {
         }
     }
 
-    /// Deletes a brand (with everything in it), color or text style. What used it keeps its look.
+    /// Deletes a brand (with everything in it), color, text style or preset. What used it keeps its look.
     pub fn delete_library_item(&mut self, id: LinkId) {
         if self.libraries.delete(id) {
             self.library_save = LibrarySave::Deleted;
         }
+    }
+
+    /// Saves `layer`'s effects as a preset called `name` (see `Libraries::add_preset`).
+    pub fn save_effect_preset(&mut self, layer: Id, name: &str) -> Option<LinkId> {
+        let source = self.composition().layer(layer)?.clone();
+        let id = self.libraries.add_preset(name, &source)?;
+        self.library_changed();
+        Some(id)
+    }
+
+    /// Adds a preset's effects to each of `layers`. Returns how many effects were added in all.
+    pub fn apply_effect_preset(&mut self, id: LinkId, layers: &[Id]) -> usize {
+        let Some(preset) = self.libraries.preset(id).cloned() else { return 0 };
+        let comp = self.active_comp;
+        layers.iter().map(|&layer| library::apply_preset(&mut self.project, comp, layer, &preset)).sum()
     }
 
     /// Changes a library color; everything linked to it follows.

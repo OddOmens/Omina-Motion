@@ -203,3 +203,55 @@ fn the_noise_gate_turns_quiet_hiss_down() {
     let after = loudness(&samples, 10_000..40_000);
     assert!(after < before * 0.2, "hiss {before} → {after}");
 }
+
+/// `tone_clip` with the catalog audio effect `name`, its settings set to `values` (by index;
+/// the rest at their defaults), and its keyframes read on the timeline's own clock at 30 fps.
+fn with_effect(name: &str, values: &[(usize, f32)]) -> AudioClip {
+    let mut effect = studio_core::effects::instantiate(studio_core::effects::find(name).unwrap(), Id(90));
+    for &(index, value) in values {
+        effect.properties[index].value = studio_core::animation::Animated::constant(value);
+    }
+    AudioClip { effects: vec![studio_core::audio::ClipEffect { effect, shift_seconds: 0.0, fps: 30.0 }], ..tone_clip(1, 0.0) }
+}
+
+/// The loudness of the tone (the second half of `tone.wav`) mixed through `clip`.
+fn tone_loudness(clip: AudioClip) -> f32 {
+    let mut mixer = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 0);
+    let mut out = vec![0.0; 96_000 * CHANNELS];
+    // Small blocks, as playback mixes them, so effects carry their memory across blocks.
+    for block in out.chunks_mut(1024 * CHANNELS) {
+        mixer.mix(std::slice::from_ref(&clip), block);
+    }
+    loudness(&out, 60_000..90_000)
+}
+
+#[test]
+fn audio_effects_change_the_sound_as_it_mixes() {
+    let plain = tone_loudness(tone_clip(1, 0.0));
+    let quieter = tone_loudness(with_effect("Gain", &[(0, -12.0)]));
+    assert!((quieter / plain - 0.251).abs() < 0.01, "-12 dB is a quarter: {}", quieter / plain);
+    // The tone is 440 Hz: a low cut at 1 kHz takes it away, a high cut at 2 kHz leaves it.
+    assert!(tone_loudness(with_effect("EQ", &[(0, 1000.0)])) < plain * 0.3, "low cut");
+    assert!((tone_loudness(with_effect("EQ", &[(5, 2000.0)])) / plain - 1.0).abs() < 0.03, "high cut above the tone");
+    // A sine's peak is √2 times its loudness; the limiter keeps the peak at its -30 dB ceiling.
+    let limited = tone_loudness(with_effect("Limiter", &[(0, -30.0)]));
+    let ceiling = 10f32.powf(-30.0 / 20.0);
+    assert!((limited * std::f32::consts::SQRT_2 - ceiling).abs() < ceiling * 0.1, "the peak sits at the ceiling: {limited}");
+}
+
+#[test]
+fn keyframed_audio_effect_settings_change_while_it_plays() {
+    // Gain falls from 0 dB at frame 30 (1 s, where the tone starts) to -40 dB at frame 60 (2 s).
+    let mut clip = with_effect("Gain", &[]);
+    clip.effects[0].effect.properties[0].value = studio_core::animation::Animated::keyframed(vec![
+        studio_core::animation::Keyframe::linear(30, 0.0),
+        studio_core::animation::Keyframe::linear(60, -40.0),
+    ]);
+    let mut mixer = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 0);
+    let mut out = vec![0.0; 96_000 * CHANNELS];
+    for block in out.chunks_mut(1024 * CHANNELS) {
+        mixer.mix(std::slice::from_ref(&clip), block);
+    }
+    let (early, late) = (loudness(&out, 50_000..56_000), loudness(&out, 86_000..92_000));
+    assert!(late < early * 0.2, "it fades as the keyframes say: {early} then {late}");
+}

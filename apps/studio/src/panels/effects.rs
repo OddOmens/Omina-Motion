@@ -48,6 +48,95 @@ fn selected_clips(workspace: &Workspace) -> Vec<(Id, String, LayerContent)> {
         .collect()
 }
 
+/// The name of the user's presets category, which also records whether it is unfolded.
+pub(crate) const MY_PRESETS: &str = "My Presets";
+
+/// My Presets: the effect presets the user saved (Save as Preset in the Effects tab), each
+/// applied by its + (to the selected clips) or by dragging it onto a clip. Double-click a name
+/// to rename it; the trash deletes it. Nothing shows until there is a preset.
+fn presets_section(workspace: &Workspace, can_apply: bool, cx: &mut Context<Workspace>) -> Vec<gpui_kit::AnyElement> {
+    let presets = &workspace.state.libraries.presets;
+    if presets.is_empty() {
+        return Vec::new();
+    }
+    let open = workspace.ui.open_effect_categories.contains(MY_PRESETS);
+    let mut rows = vec![
+        div()
+            .id("presets-category")
+            .h(px(size::ROW_HEIGHT + 4.0))
+            .mx_1()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .rounded(px(6.0))
+            .text_color(hsla(color::MUTED))
+            .hover(|style| style.bg(hsla(color::HOVER)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                if !this.ui.open_effect_categories.remove(MY_PRESETS) {
+                    this.ui.open_effect_categories.insert(MY_PRESETS);
+                }
+                cx.notify();
+            }))
+            .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)))
+            .child(format!("{MY_PRESETS} ({})", presets.len()))
+            .test_support()
+            .into_any_element(),
+    ];
+    if !open {
+        return rows;
+    }
+    for preset in presets {
+        let id = preset.id;
+        let apply = div()
+            .id(gpui_kit::ElementId::Name(format!("preset-apply:{}", id.0).into()))
+            .size(px(22.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.0))
+            .text_color(hsla(color::MUTED))
+            .hover(|style| style.bg(hsla(color::RAISED)).text_color(hsla(color::TEXT)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                let layers = this.state.selected_layers.clone();
+                this.state.apply_effect_preset(id, &layers);
+                cx.notify();
+            }))
+            .child(Icon::new(IconName::Plus).size(px(14.0)))
+            .test_support();
+        let delete = super::chrome::icon_button(gpui_kit::ElementId::Name(format!("preset-delete:{}", id.0).into()), IconName::Trash, "Delete preset", false, cx.listener(move |this, _, _, cx| {
+            this.state.delete_library_item(id);
+            cx.notify();
+        }))
+        .xsmall();
+        let drag = EffectDrag { name: preset.name.clone(), lut: None, preset: Some(id) };
+        rows.push(
+            div()
+                .id(gpui_kit::ElementId::Name(format!("preset:{}", id.0).into()))
+                .h(px(size::ROW_HEIGHT + 4.0))
+                .mx_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .pl(px(26.0))
+                .pr_1()
+                .rounded(px(6.0))
+                .cursor_grab()
+                .hover(|style| style.bg(hsla(color::HOVER)))
+                .on_drag(drag, |drag, _, _, cx| cx.new(|_| EffectDragPreview(drag.name.clone())))
+                .child(Icon::new(IconName::Bookmark).size(px(12.0)).text_color(hsla(color::MUTED)))
+                .child(super::libraries::name_label(id, &preset.name, workspace, cx))
+                .child(div().flex_none().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(preset.summary()))
+                .when(can_apply, |row| row.child(apply))
+                .child(delete)
+                .test_support()
+                .into_any_element(),
+        );
+    }
+    rows
+}
+
 /// A line of muted text under the panel's tab, saying what the list is for.
 fn note(text: String) -> impl IntoElement {
     div().px_3().py_2().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(text)
@@ -64,7 +153,9 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         [(_, name, _)] => format!("Effects for {name}"),
         clips => format!("Effects for {} clips", clips.len()),
     }));
-    // Transitions first: dragged onto the start or end of a clip, they go on that cut.
+    // The user's own presets first, the effects they reach for most.
+    list = list.children(presets_section(workspace, !selected.is_empty(), cx));
+    // Transitions next: dragged onto the start or end of a clip, they go on that cut.
     let pictures = selected.iter().all(|(_, _, content)| !matches!(content, LayerContent::Audio { .. }));
     if pictures {
         let open = workspace.ui.open_effect_categories.contains("Transitions");
@@ -103,7 +194,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             .effects
             .iter()
             .map(|definition| definition.name)
-            .filter(|name| studio_render::effects::is_rendered(name))
+            .filter(|name| super::effect_controls::is_usable(name))
             .collect();
         if effects.is_empty() || !offered(category) {
             continue;
@@ -198,7 +289,7 @@ fn lut_category(workspace: &Workspace, can_apply: bool, cx: &mut Context<Workspa
 fn lut_row(index: usize, source: LutSource, can_apply: bool, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let name = source.name();
     let thumbnail = super::color_grade::lut_thumbnail(Some(&source), px(48.0), px(27.0), workspace);
-    let drag = EffectDrag { name: "Apply LUT".to_owned(), lut: Some(source.clone()) };
+    let drag = EffectDrag { name: "Apply LUT".to_owned(), lut: Some(source.clone()), preset: None };
     let hovered_source = source.clone();
     let apply = div()
         .id(("lut-apply", index))
@@ -307,6 +398,8 @@ fn effect_row(effect: &'static str, can_apply: bool, cx: &mut Context<Workspace>
             for layer in this.state.selected_layers.clone() {
                 this.state.add_effect(layer, effect);
             }
+            // Its settings show where it is edited: color in the Color tab, the rest in Effects.
+            this.ui.tabs.insert(crate::workspace::PanelId::Properties, super::color_grade::tab_for_effect(effect));
             cx.notify();
         }))
         .child(Icon::new(IconName::Plus).size(px(14.0)))
@@ -324,7 +417,7 @@ fn effect_row(effect: &'static str, can_apply: bool, cx: &mut Context<Workspace>
         .rounded(px(6.0))
         .cursor_grab()
         .hover(|style| style.bg(hsla(color::HOVER)))
-        .on_drag(EffectDrag { name: effect.to_owned(), lut: None }, |drag, _, _, cx| cx.new(|_| EffectDragPreview(drag.name.clone())))
+        .on_drag(EffectDrag { name: effect.to_owned(), lut: None, preset: None }, |drag, _, _, cx| cx.new(|_| EffectDragPreview(drag.name.clone())))
         .child(Icon::new(IconName::Sparkles).size(px(12.0)).text_color(hsla(color::MUTED)))
         .child(div().flex_1().child(effect))
         .when(can_apply, |row| row.child(apply))

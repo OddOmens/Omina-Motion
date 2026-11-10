@@ -3,13 +3,16 @@
 //! no I/O of its own beyond the decoders, so it can be tested without a sound card.
 //!
 //! Along the way it plays clips at their speed (by decoding them at a shifted rate, which
-//! changes pitch like a tape), turns down background noise with each clip's noise gate, and
-//! ducks clips (music, say) while the clip they duck under (a voice) is speaking.
+//! changes pitch like a tape), turns down background noise with each clip's noise gate, runs
+//! each clip's audio effects (EQ, compressor and so on, with their keyframes), and ducks clips
+//! (music, say) while the clip they duck under (a voice) is speaking.
 
 use std::collections::HashMap;
 
 use studio_core::audio::AudioClip;
 use studio_core::model::Id;
+
+use studio_dsp::AudioEffect;
 
 use crate::audio::{AudioDecoder, CHANNELS};
 
@@ -32,6 +35,8 @@ struct Voice {
     /// The noise gate's state: the level it follows, and the gain it applies.
     gate_level: f32,
     gate_gain: f32,
+    /// The clip's audio effects with their memory, by effect id, in the order they run.
+    effects: Vec<(Id, AudioEffect)>,
 }
 
 /// A voice (the clip ducked under) counts as speaking above this level (RMS, about -34 dB).
@@ -149,6 +154,7 @@ impl Mixer {
             next_frame: None,
             gate_level: 0.0,
             gate_gain: 1.0,
+            effects: Vec::new(),
         });
         let Some(decoder) = voice.decoder.as_mut() else { return 0.0 };
         if voice.next_frame != Some(start) && decoder.seek(start - offset).is_err() {
@@ -164,6 +170,7 @@ impl Mixer {
         if clip.noise_gate > 0.0 {
             gate(samples, clip.noise_gate, sample_rate, &mut voice.gate_level, &mut voice.gate_gain);
         }
+        run_effects(clip, &mut voice.effects, start as f64 / f64::from(sample_rate), sample_rate, samples);
         let into = &mut block[(start - from) as usize * CHANNELS..];
         let fading = clip.fades();
         let span = (to - from).max(1) as f32;
@@ -178,6 +185,20 @@ impl Mixer {
             *mixed += value;
         }
         (energy / samples.len().max(1) as f32).sqrt()
+    }
+}
+
+/// Runs `clip`'s audio effects on its `samples` (interleaved stereo at `rate`), with settings
+/// read at `seconds`, the block's start on the timeline. `running` keeps each effect's memory
+/// from block to block; it is set up again when the clip's effects change (one added, removed
+/// or reordered), so an effect's memory never carries over to another.
+fn run_effects(clip: &AudioClip, running: &mut Vec<(Id, AudioEffect)>, seconds: f64, rate: u32, samples: &mut [f32]) {
+    let same = running.len() == clip.effects.len() && running.iter().zip(&clip.effects).all(|((id, _), wanted)| *id == wanted.effect.id);
+    if !same {
+        *running = clip.effects.iter().filter_map(|wanted| AudioEffect::new(&wanted.effect.name, rate).map(|effect| (wanted.effect.id, effect))).collect();
+    }
+    for (wanted, (_, effect)) in clip.effects.iter().filter(|wanted| AudioEffect::exists(&wanted.effect.name)).zip(running.iter_mut()) {
+        effect.process(&wanted.settings_at(seconds), rate, samples);
     }
 }
 

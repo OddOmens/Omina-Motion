@@ -219,7 +219,12 @@ fn shown_layer(workspace: &Workspace) -> Option<&Layer> {
 /// Picks `node`: its settings show in the Effects tab (the Object Matte's in Properties).
 fn pick(workspace: &mut Workspace, node: NodeId) {
     workspace.ui.nodes.selected = Some(node);
+    // A correction the Color tab edits opens there; it is only a line in the Effects tab.
+    let graded = shown_layer(workspace).map(|layer| super::color_grade::graded_effects(workspace, layer.id)).unwrap_or_default();
     match node {
+        NodeId::Effect(effect) if graded.contains(&effect) => {
+            workspace.ui.tabs.insert(PanelId::Properties, 2);
+        }
         NodeId::Effect(_) | NodeId::Merge(_) => {
             workspace.ui.tabs.insert(PanelId::Properties, 1);
         }

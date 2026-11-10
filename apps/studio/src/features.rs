@@ -246,7 +246,7 @@ impl Feature {
         })
     }
 
-    /// The feature a rail panel belongs to, or `None` for the Media panel, which is always on.
+    /// The feature a side panel belongs to, or `None` for the Media panel, which is always on.
     pub fn of_panel(panel: LeftPanel) -> Option<Self> {
         Some(match panel {
             LeftPanel::Media => return None,

@@ -20,7 +20,7 @@ use crate::theme::{color, hsla, size};
 use crate::workspace::{EditTarget, PanelId, Workspace};
 
 /// A name that can be renamed in place: double-click it to type a new one.
-fn name_label(id: LinkId, name: &str, workspace: &Workspace, cx: &mut Context<Workspace>) -> gpui_kit::AnyElement {
+pub(crate) fn name_label(id: LinkId, name: &str, workspace: &Workspace, cx: &mut Context<Workspace>) -> gpui_kit::AnyElement {
     if let Some(input) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::LibraryName(id)).and_then(|editing| editing.input.line()) {
         return div().flex_1().child(Input::new(input).xsmall()).into_any_element();
     }
@@ -179,7 +179,7 @@ fn brand_section(brand: &Brand, workspace: &Workspace, cx: &mut Context<Workspac
                 }))
                 .child(color_picker::swatch(ElementId::Name(format!("library-color-chip:{}", color_id.0).into()), ColorTarget::Library(color_id), Some(item.color), cx))
                 .child(name_label(color_id, &item.name, workspace, cx))
-                .child(div().font_family("Menlo").text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(item.color.to_hex()))
+                .child(div().font_family(crate::theme::MONO_FONT).text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(item.color.to_hex()))
                 .child(delete_button(color_id, cx))
                 .test_support(),
         );

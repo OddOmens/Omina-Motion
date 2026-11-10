@@ -12,6 +12,7 @@
 
 pub mod aep;
 pub mod lottie;
+pub mod svg;
 mod riff;
 
 use std::collections::HashMap;
@@ -39,6 +40,9 @@ pub struct Scene {
     pub comps: Vec<SceneComp>,
     /// Things the file holds that weren't brought in, for the report.
     pub notes: Vec<String>,
+    /// Put what it holds at the top of the Project panel, not in a folder named after the
+    /// file (for a file that is a single composition, such as an SVG).
+    pub loose: bool,
 }
 
 /// A folder in the Project panel. Keys are the file's own ids, unique among folders, sources
@@ -103,6 +107,17 @@ pub enum SceneContent {
     Adjustment,
     Text(SceneText),
     Shapes(Vec<SceneShape>),
+    /// One vector shape as a layer of its own (an SVG shape): its outline in composition
+    /// pixels, and how it is filled and stroked.
+    Vector(Box<SceneVector>),
+}
+
+/// A vector shape that becomes one shape layer (see `SceneContent::Vector`).
+#[derive(Clone, Debug)]
+pub struct SceneVector {
+    pub path: ShapePath,
+    pub fill: Option<Paint>,
+    pub stroke: Option<Stroke>,
 }
 
 #[derive(Clone, Debug)]
@@ -222,7 +237,7 @@ pub fn build(project: &mut Project, scene: &Scene, name: &str, probe: &dyn Fn(&P
     }
     let mut working = project.clone();
     let mut notes = scene.notes.clone();
-    let root = crate::folders::add_folder(&mut working, name.trim(), None);
+    let root = (!scene.loose).then(|| crate::folders::add_folder(&mut working, name.trim(), None));
 
     // Folders, parents before children (the file's order may not be).
     let mut folders: HashMap<u64, Id> = HashMap::new();
@@ -231,7 +246,7 @@ pub fn build(project: &mut Project, scene: &Scene, name: &str, probe: &dyn Fn(&P
         let before = pending.len();
         pending.retain(|folder| {
             let parent = match folder.folder {
-                None => Some(root),
+                None => root,
                 Some(key) => folders.get(&key).copied(),
             };
             let Some(parent) = parent else { return true };
@@ -242,12 +257,12 @@ pub fn build(project: &mut Project, scene: &Scene, name: &str, probe: &dyn Fn(&P
         if pending.len() == before {
             // Folders inside folders that don't exist (or loop): put them at the top.
             for folder in pending.drain(..) {
-                let id = crate::folders::add_folder(&mut working, &folder.name, Some(root));
+                let id = crate::folders::add_folder(&mut working, &folder.name, root);
                 folders.insert(folder.key, id);
             }
         }
     }
-    let folder_of = |key: Option<u64>| key.and_then(|key| folders.get(&key).copied()).unwrap_or(root);
+    let folder_of = |key: Option<u64>| key.and_then(|key| folders.get(&key).copied()).or(root);
 
     // Sources.
     let mut sources: HashMap<u64, Id> = HashMap::new();
@@ -266,7 +281,7 @@ pub fn build(project: &mut Project, scene: &Scene, name: &str, probe: &dyn Fn(&P
         };
         if let Some(found) = working.items.iter_mut().find(|candidate| candidate.id == item) {
             found.name = source.name.clone();
-            found.parent = Some(folder_of(source.folder));
+            found.parent = folder_of(source.folder);
         }
         sources.insert(source.key, item);
     }
@@ -286,7 +301,7 @@ pub fn build(project: &mut Project, scene: &Scene, name: &str, probe: &dyn Fn(&P
         };
         let id = edit::new_composition(&mut working, &settings).map_err(|error| format!("“{}” couldn't be made: {error}", comp.name))?;
         if let Some(item) = working.items.iter_mut().find(|item| item.id == id) {
-            item.parent = Some(folder_of(comp.folder));
+            item.parent = folder_of(comp.folder);
         }
         comps.insert(comp.key, id);
     }
@@ -328,7 +343,7 @@ pub fn build(project: &mut Project, scene: &Scene, name: &str, probe: &dyn Fn(&P
     let mut order: Vec<&SceneComp> = scene.comps.iter().collect();
     order.sort_by_key(|comp| (used.contains(&comp.key), std::cmp::Reverse(comp.layers.len())));
     notes.dedup();
-    Ok(Imported { folder: Some(root), compositions: order.iter().map(|comp| comps[&comp.key]).collect(), notes })
+    Ok(Imported { folder: root, compositions: order.iter().map(|comp| comps[&comp.key]).collect(), notes })
 }
 
 /// A solid project item.
@@ -390,6 +405,17 @@ fn add_layer(project: &mut Project, comp: Id, layer: &SceneLayer, sources: &Hash
             let found = project.composition_mut(comp)?.layer_mut(id)?;
             found.content = LayerContent::Adjustment;
             found.switches.adjustment = true;
+            id
+        }
+        SceneContent::Vector(vector) => {
+            let style = ShapeStyle { fill: vector.fill, stroke: vector.stroke, ..ShapeStyle::new(ShapeKind::Path) };
+            let id = edit::add_path_layer(project, comp, &vector.path, style, in_frame)?;
+            // `add_path_layer` gives an open outline a stroke in place of its fill; a vector shape
+            // keeps exactly the fill and stroke it was drawn with.
+            if let Some(LayerContent::Shape { style, .. }) = project.composition_mut(comp)?.layer_mut(id).map(|layer| &mut layer.content) {
+                style.fill = vector.fill;
+                style.stroke = vector.stroke;
+            }
             id
         }
         SceneContent::Text(text) => {
@@ -589,6 +615,7 @@ impl Affine {
             Geometry::Path(path) => Geometry::Path(ShapePath {
                 points: path.points.iter().map(|point| PathPoint { at: self.point(point.at), handle_in: self.vector(point.handle_in), handle_out: self.vector(point.handle_out) }).collect(),
                 closed: path.closed,
+                ..Default::default()
             }),
         }
     }

@@ -510,7 +510,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                     .child(div().truncate().child(item.name.clone()))
                     .child(div().text_color(hsla(color::MUTED)).text_size(px(size::SMALL_TEXT)).child(item.kind.label()))
                     .child(div().text_color(hsla(color::MUTED)).text_size(px(size::SMALL_TEXT)).child(item.details()))
-                    .children(time.map(|time| div().text_color(hsla(color::VALUE)).text_size(px(size::SMALL_TEXT)).font_family("Menlo").child(time))),
+                    .children(time.map(|time| div().text_color(hsla(color::VALUE)).text_size(px(size::SMALL_TEXT)).font_family(crate::theme::MONO_FONT).child(time))),
             )
     }));
 
@@ -536,28 +536,6 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         let is_folder = kind == ProjectItemKind::Folder;
         let is_open = workspace.ui.folder_open(id);
         let is_selected = workspace.state.selected_item == Some(id);
-        // A folder's arrow opens and closes it with one click.
-        let twirl = if is_folder {
-            div()
-                .id(("folder-twirl", id.0 as usize))
-                .size(px(14.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.ui.toggle_folder(id);
-                    cx.notify();
-                }))
-                .child(Icon::new(if is_open { IconName::ChevronDown } else { IconName::ChevronRight }).size(px(12.0)).text_color(hsla(color::MUTED)))
-                .test_support()
-                .into_any_element()
-        } else {
-            div().w(px(14.0)).into_any_element()
-        };
-
         let mut row = div()
             .id(("project-item", id.0 as usize))
             .h(px(size::ROW_HEIGHT))
@@ -567,12 +545,13 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             .hover(|style| style.bg(hsla(color::HOVER)))
             .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
                 this.state.selected_item = Some(id);
-                // Double-click (or Enter) opens folders and compositions; double-clicking the
-                // name renames instead (see `item_name`).
-                let opens = event.click_count() >= 2 || event.is_keyboard();
-                if opens && is_folder {
+                // One click opens or closes a folder (the second click of a double-click leaves
+                // it be, so a double-click doesn't undo itself). Double-click (or Enter) opens a
+                // composition; double-clicking a name renames instead (see `item_name`).
+                if is_folder && (event.click_count() == 1 || event.is_keyboard()) {
                     this.ui.toggle_folder(id);
                 }
+                let opens = event.click_count() >= 2 || event.is_keyboard();
                 if opens && kind == ProjectItemKind::Composition {
                     this.state.open_composition(id);
                 }
@@ -587,7 +566,6 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                     .items_center()
                     .gap_1p5()
                     .pl(px(8.0 + depth as f32 * 14.0))
-                    .child(twirl)
                     // An expanded folder shows as open, as in Finder.
                     .child(Icon::new(if is_folder && is_open { IconName::FolderOpen } else { kind_icon(item.kind) }).size(px(14.0)).text_color(hsla(color::MUTED)))
                     .child(item_name(item, workspace, cx)),

@@ -45,6 +45,8 @@ pub(super) enum ViewerDrag {
     PathPoint { layer: Id, index: usize, part: PathPart, start: Vec2 },
     /// Moving one end of a shape's gradient, from where it started in composition pixels.
     GradientPoint { layer: Id, slot: super::PaintSlot, end: super::GradientEnd, start: Vec2 },
+    /// One of an effect's on-screen points (a Corner Pin corner, say), and where it started.
+    EffectPoint { layer: Id, effect: Id, point: usize, start: Vec2 },
 }
 
 /// A point of a pen path layer as shown in the viewer, in composition pixels.
@@ -341,6 +343,7 @@ impl EditorState {
                 }
             }
             ViewerDrag::GradientPoint { layer, slot, end, start } => self.place_gradient_end(layer, slot, end, start + delta),
+            ViewerDrag::EffectPoint { layer, effect, point, start } => self.place_effect_point(layer, effect, point, start + delta),
             ViewerDrag::DrawShape { layer, start } => {
                 // Shift keeps it square (or circular), as in every drawing tool.
                 let delta = if constrain {
@@ -363,6 +366,64 @@ impl EditorState {
             self.set_shape_box(layer, start - half, start + half);
         }
         self.viewer_drag = None;
+    }
+}
+
+/// One of an effect's on-screen points, where the viewer draws a handle for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectHandle {
+    pub effect: Id,
+    /// Its place in the effect's list of points (see `studio_core::effects::points`).
+    pub point: usize,
+    pub label: &'static str,
+    /// Where it is, in composition pixels.
+    pub at: Vec2,
+}
+
+impl EditorState {
+    /// The on-screen points of `layer`'s effects that are switched on, at the playhead.
+    pub fn effect_handles(&self, layer: Id) -> Vec<EffectHandle> {
+        let comp = self.composition();
+        let Some(target) = comp.layer(layer).filter(|target| target.switches.effects_enabled) else { return Vec::new() };
+        let Some(space) = self.effect_point_space(layer) else { return Vec::new() };
+        let at = self.current_frame as f64;
+        let mut handles = Vec::new();
+        for effect in target.effects.iter().filter(|effect| effect.enabled) {
+            for (index, point) in studio_core::effects::points(&effect.name).iter().enumerate() {
+                let value = |parameter: usize| effect.properties.get(parameter).map_or(0.0, |property| property.value.value_at(at));
+                handles.push(EffectHandle { effect: effect.id, point: index, label: point.label, at: point.position((value(point.x), value(point.y)), space) });
+            }
+        }
+        handles
+    }
+
+    /// What `layer`'s effect points are measured from at the playhead: the frame, and the
+    /// layer's own corners in it (so Corner Pin starts on the clip, not the frame).
+    fn effect_point_space(&self, layer: Id) -> Option<studio_core::effects::PointSpace> {
+        let comp = self.composition();
+        let layer_corners = studio_core::transform::layer_corners(comp, layer, self.current_frame as f64)?;
+        Some(studio_core::effects::PointSpace { frame: Vec2::new(comp.width as f32, comp.height as f32), layer_corners })
+    }
+
+    /// Starts dragging one of an effect's on-screen points in the viewer.
+    pub fn begin_effect_point_drag(&mut self, layer: Id, effect: Id, point: usize) {
+        if self.composition().layer(layer).is_none_or(|target| target.switches.locked) {
+            return;
+        }
+        let Some(start) = self.effect_handles(layer).into_iter().find(|handle| handle.effect == effect && handle.point == point).map(|handle| handle.at) else { return };
+        self.viewer_drag = Some(ViewerDrag::EffectPoint { layer, effect, point, start });
+    }
+
+    /// Puts one of an effect's on-screen points at `at` (composition pixels), setting the two
+    /// settings it is made of (keyframed where they are animated, like a typed value).
+    pub(super) fn place_effect_point(&mut self, layer: Id, effect: Id, point: usize, at: Vec2) {
+        let comp = self.composition();
+        let Some(space) = self.effect_point_space(layer) else { return };
+        let Some(name) = comp.layer(layer).and_then(|target| target.effects.iter().find(|candidate| candidate.id == effect)).map(|found| found.name.clone()) else { return };
+        let Some(definition) = studio_core::effects::points(&name).get(point).copied() else { return };
+        let (x, y) = definition.values(at, space);
+        self.set_property_component(layer, PropertyPath::Effect { effect, parameter: definition.x }, 0, x);
+        self.set_property_component(layer, PropertyPath::Effect { effect, parameter: definition.y }, 0, y);
     }
 }
 
@@ -563,5 +624,32 @@ mod tests {
         state.scale_linked = false;
         assert_eq!(scale_after(&mut state, Vec2::new(480.0, 0.0), false), PropertyValue::Pair(Vec2::new(150.0, 100.0)));
         assert_eq!(scale_after(&mut state, Vec2::new(480.0, 0.0), true), PropertyValue::Pair(Vec2::new(150.0, 150.0)));
+    }
+
+    #[test]
+    fn dragging_an_effect_point_moves_its_settings() {
+        let mut state = EditorState::new();
+        let a_cam = Id(104);
+        state.add_effect(a_cam, "Corner Pin");
+        let pin = state.effect_named(a_cam, "Corner Pin").unwrap();
+        let handles = state.effect_handles(a_cam);
+        assert_eq!(handles.iter().filter(|handle| handle.effect == pin).count(), 4);
+        // Each corner starts on the clip's own corner, wherever the clip sits.
+        let corners = layer_bounds_corners(&state, a_cam);
+        let at = |point: usize| handles.iter().find(|handle| handle.effect == pin && handle.point == point).unwrap().at;
+        assert_eq!((at(0), at(1), at(2), at(3)), (corners[0], corners[1], corners[3], corners[2]));
+        // The top left corner dragged 100 right and 50 down.
+        state.begin_effect_point_drag(a_cam, pin, 0);
+        state.drag_in_viewer(Vec2::new(100.0, 50.0), false);
+        state.end_viewer_drag();
+        let layer = state.composition().layer(a_cam).unwrap();
+        let value = |parameter| layer.property(PropertyPath::Effect { effect: pin, parameter }, 0).unwrap().value.component(0);
+        assert_eq!((value(0), value(1)), (100.0, 50.0));
+        assert_eq!(state.effect_handles(a_cam).iter().find(|handle| handle.effect == pin && handle.point == 0).unwrap().at, corners[0] + Vec2::new(100.0, 50.0));
+    }
+
+    /// `layer`'s corners in the composition at the playhead, clockwise from the top left.
+    fn layer_bounds_corners(state: &EditorState, layer: Id) -> [Vec2; 4] {
+        studio_core::transform::layer_corners(state.composition(), layer, state.current_frame as f64).unwrap()
     }
 }

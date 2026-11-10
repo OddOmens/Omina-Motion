@@ -28,6 +28,13 @@ fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) 
         crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx);
         crate::workspace::bind_keys(cx);
     });
+    open_window(cx, true)
+}
+
+/// Opens another editor window, as a fresh launch would (the app is already set up). With
+/// `standard_layout`, the panels are laid out in the standard arrangement at the window's final
+/// size; without it they keep whatever arrangement the window started with (a saved one, say).
+fn open_window(cx: &mut TestAppContext, standard_layout: bool) -> (Entity<Workspace>, &mut VisualTestContext) {
     let mut workspace = None;
     let (_, visual) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| Workspace::new(window, cx));
@@ -35,6 +42,13 @@ fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) 
         Root::new(view, window, cx)
     });
     visual.simulate_resize(size(px(1600.0), px(960.0)));
+    // The dock scales panels with the window, and the offscreen window starts at another size;
+    // laying the standard arrangement out again at the final size puts every panel where it
+    // would be in a window opened at 1600 × 960.
+    let view = workspace.clone().expect("workspace was built");
+    if standard_layout {
+        visual.update(|window, cx| view.update(cx, |ws, cx| ws.reset_workspace(window, cx)));
+    }
     // Measured bounds settle over two frames.
     for _ in 0..3 {
         visual.update(|window, cx| window.render_frame(cx));
@@ -248,16 +262,17 @@ fn dragging_a_graph_handle_makes_a_custom_curve(cx: &mut TestAppContext) {
 fn the_easings_button_shows_the_graph_editor_in_the_motion_tab(cx: &mut TestAppContext) {
     use crate::workspace::PanelId;
     let (workspace, visual) = open(cx);
-    // Even with the panel folded away and its Keyframe Easing section closed.
-    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+    // Even with the panel moved behind another tab and its Keyframe Easing section closed.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| {
         ws.state.select_layer(TITLE, false);
-        ws.ui.collapsed_panels.insert(PanelId::Properties);
+        ws.move_panel_behind(PanelId::Properties, PanelId::Align, window, cx);
         if ws.ui.section_open("easing") {
             ws.ui.toggle_section("easing");
         }
         cx.notify();
     }));
     render(visual);
+    assert!(visual.update(|_, cx| !workspace.read(cx).showing(PanelId::Properties)), "Properties starts behind Align");
     visual.update(|window, cx| window.click("easings", cx));
     render(visual);
     visual.update(|_, cx| {
@@ -431,6 +446,305 @@ fn the_nodes_panel_connects_disconnects_merges_and_deletes(cx: &mut TestAppConte
     visual.update(|window, cx| window.press("cmd-z", cx));
     render(visual);
     assert_eq!(layer(visual).effect_graph.merges.len(), 1);
+}
+
+#[gpui_kit::test]
+fn audio_effects_are_added_from_effect_controls_and_reach_the_mix(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let a_cam = Id(104);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(a_cam, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("tab:Properties:1".into()), cx));
+    render(visual);
+    // The Add Effect menu lists the sound effects under Audio, at the end: scroll down to them.
+    visual.update(|window, cx| window.click("fx-add", cx));
+    render(visual);
+    let first_item = visual.update(|window, _| window.find_by_label("Crop").bounds().center());
+    for _ in 0..40 {
+        if visual.update(|window, _| window.find_by_label("Compressor").bounds().center().y) < first_item.y + px(200.0) {
+            break;
+        }
+        visual.update(|window, cx| {
+            use gpui_kit::InputEvent as _;
+            let wheel = gpui_kit::ScrollEvent { position: first_item, delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(-120.0))), ..Default::default() };
+            window.dispatch_event(wheel.to_platform_input(), cx);
+        });
+        render(visual);
+    }
+    click_label(visual, "Compressor");
+    render(visual);
+    let compressor = visual.update(|_, cx| workspace.read(cx).state.effect_named(a_cam, "Compressor")).expect("the Compressor was added");
+
+    // Its Threshold is an ordinary field: a typed value is kept (and keyframes, being animated).
+    let threshold = FieldTarget::Property { layer: a_cam, path: PropertyPath::Effect { effect: compressor, parameter: 0 }, component: 0 };
+    visual.update(|window, cx| window.click(field_id(threshold), cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.input("-30", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    let value = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().layer(a_cam).unwrap().property(PropertyPath::Effect { effect: compressor, parameter: 0 }, state.current_frame).unwrap().value
+    });
+    assert_eq!(value, PropertyValue::Scalar(-30.0));
+
+    // It isn't drawn as a picture effect: no node in the node graph and no "not drawn" note.
+    visual.update(|_, cx| {
+        let layer = workspace.read(cx).state.composition().layer(a_cam).unwrap().clone();
+        assert!(!studio_core::effect_graph::nodes(&layer).contains(&studio_core::effect_graph::NodeId::Effect(compressor)));
+    });
+    assert!(visual.update(|window, _| window.try_find_by_label("This effect is not drawn by the renderer yet; its settings are kept.")).is_none());
+}
+
+#[gpui_kit::test]
+fn color_corrections_show_as_one_line_in_the_effects_tab(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
+    let (workspace, visual) = open(cx);
+    let a_cam = Id(104);
+    // A Basic Correction and Levels from the Color tab, besides the clip's own blur.
+    let (basic, levels, extra) = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(a_cam, false);
+        let (_, basic) = ws.state.add_grade_effect("Basic Correction").unwrap();
+        let (_, levels) = ws.state.add_grade_effect("Levels").unwrap();
+        // A second Levels added by hand isn't in the Color tab, so it keeps its own card.
+        let comp = ws.state.active_comp;
+        let extra = studio_core::edit::add_effect(&mut ws.state.project, comp, a_cam, "Levels").unwrap();
+        cx.notify();
+        (basic, levels, extra)
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("tab:Properties:1".into()), cx));
+    render(visual);
+    let card = |effect: Id| ElementId::Name(format!("fx-twirl:{}", effect.0).into());
+    visual.update(|window, _| {
+        assert!(window.try_find("fx-color-line").is_some(), "one line for the color effects");
+        assert!(window.try_find(card(basic)).is_none() && window.try_find(card(levels)).is_none(), "no card each");
+        assert!(window.try_find(card(extra)).is_none(), "a second Levels is a color effect too");
+        assert!(window.try_find(card(Id(202))).is_some(), "the blur keeps its card");
+    });
+    visual.update(|window, cx| window.click("fx-open-color", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.tab(PanelId::Properties), 2, "Edit in Color opens the Color tab"));
+    // The Color tab lists all three: its own two corrections, and the second Levels as a plain card.
+    visual.update(|window, _| {
+        assert!(window.try_find("grade-basic-on").is_some() && window.try_find("grade-levels-on").is_some());
+        assert!(window.try_find(ElementId::Name(format!("grade-fx:{}", extra.0).into())).is_some());
+    });
+
+    // Other color effects are the Color tab's too: Exposure from the Effects panel opens it there.
+    visual.update(|window, cx| window.click("tab:Properties:1", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    open_effect_category(visual, "Exposure");
+    visual.update(|window, cx| window.click(ElementId::Name("effect-apply:Exposure".into()), cx));
+    render(visual);
+    let exposure = visual.update(|_, cx| workspace.read(cx).state.effect_named(a_cam, "Exposure")).expect("Exposure was added");
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.tab(PanelId::Properties), 2, "it opens in the Color tab"));
+    visual.update(|window, _| assert!(window.try_find(ElementId::Name(format!("grade-fx:{}", exposure.0).into())).is_some()));
+}
+
+#[gpui_kit::test]
+fn effects_are_saved_as_a_preset_named_and_applied_to_another_clip(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let a_cam = Id(104);
+    // A-cam has a Gaussian Blur; give it a Gain too, so the preset holds two effects.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(a_cam, false);
+        ws.state.add_effect(a_cam, "Gain");
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("tab:Properties:1".into()), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("fx-save-preset", cx));
+    render(visual);
+    let presets = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.libraries.presets.clone());
+    let saved = presets(visual);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].effects.len(), 2);
+    let id = saved[0].id;
+    // It shows under My Presets, named after the layer and ready to rename: type a name.
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.left_panel, crate::workspace::LeftPanel::Effects));
+    visual.update(|window, cx| {
+        window.press("cmd-a", cx);
+        window.input("Dreamy", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    assert_eq!(presets(visual)[0].name, "Dreamy");
+
+    // On the title, its + adds what suits a title: the blur, not the sound effect.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.len());
+    visual.update(|window, cx| window.click(ElementId::Name(format!("preset-apply:{}", id.0).into()), cx));
+    render(visual);
+    let names = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.iter().map(|effect| effect.name.clone()).collect::<Vec<_>>());
+    assert_eq!(names.len(), before + 1);
+    assert_eq!(names.last().map(String::as_str), Some("Gaussian Blur"));
+    // Applying is one undo step.
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.len()), before);
+
+    // The trash deletes the preset.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("preset-delete:{}", id.0).into()), cx));
+    render(visual);
+    assert!(presets(visual).is_empty());
+    assert!(visual.update(|window, _| window.try_find("presets-category")).is_none(), "no presets, no category");
+}
+
+#[gpui_kit::test]
+fn corner_pin_corners_are_dragged_on_screen(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let a_cam = Id(104);
+    let pin = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(a_cam, false);
+        ws.state.add_effect(a_cam, "Corner Pin");
+        cx.notify();
+        ws.state.effect_named(a_cam, "Corner Pin").unwrap()
+    }));
+    render(visual);
+    // Four handles, the top left one on the clip's own top left corner.
+    for corner in 0..4_u64 {
+        assert!(visual.update(|window, _| window.try_find(ElementId::Name(format!("effect-point:{}:{corner}", pin.0).into()))).is_some(), "corner {corner}");
+    }
+    let handle = center_of(visual, ElementId::Name(format!("effect-point:{}:0", pin.0).into()));
+    let top_left = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        studio_core::transform::layer_corners(state.composition(), a_cam, state.current_frame as f64).unwrap()[0]
+    });
+    let corner = screen_point(&workspace, visual, top_left);
+    assert!((handle.x - corner.x).abs() < px(2.0) && (handle.y - corner.y).abs() < px(2.0), "{handle:?} {corner:?}");
+    // Dragged 300 right and 200 down (in composition pixels), the corner's offsets follow.
+    let target = screen_point(&workspace, visual, top_left + Vec2::new(300.0, 200.0));
+    visual.update(|window, cx| window.drag(handle, target, cx));
+    render(visual);
+    let value = |visual: &mut VisualTestContext, parameter| visual.update(|_, cx| workspace.read(cx).state.composition().layer(a_cam).unwrap().property(PropertyPath::Effect { effect: pin, parameter }, 0).unwrap().value.component(0));
+    assert!((value(visual, 0) - 300.0).abs() < 4.0 && (value(visual, 1) - 200.0).abs() < 4.0, "{} {}", value(visual, 0), value(visual, 1));
+    // The whole drag is one undo step.
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!((value(visual, 0), value(visual, 1)), (0.0, 0.0));
+}
+
+#[gpui_kit::test]
+fn the_timeline_transport_shares_the_tab_row_and_tracks_have_numbered_headers(cx: &mut TestAppContext) {
+    use crate::state::Switch;
+    let (workspace, visual) = open(cx);
+    // The composition's name and the transport sit beside the Timeline tab, above the panel.
+    let (tab, name, play) = (bounds_of(visual, dock_tab("Timeline")), bounds_of(visual, "timeline-comp-name"), bounds_of(visual, "tracks-play"));
+    assert!((name.center().y - tab.center().y).abs() < px(2.0) && (play.center().y - tab.center().y).abs() < px(2.0), "{tab:?} {name:?} {play:?}");
+    assert!(name.left() > tab.right() && play.bottom() <= dock_content(visual, "Timeline").top() + px(1.0));
+
+    // Every track has a header, numbered from 01 at the top, beside its row.
+    let tracks = visual.update(|_, cx| studio_core::tracks::tracks(workspace.read(cx).state.composition()));
+    assert!(tracks.len() >= 2);
+    let header = |track: i32| ElementId::Name(format!("track-header:{track}").into());
+    let tops: Vec<_> = tracks.iter().map(|track| bounds_of(visual, header(*track)).top()).collect();
+    assert!(tops.windows(2).all(|pair| pair[0] < pair[1]), "top to bottom: {tops:?}");
+    let first = bounds_of(visual, header(tracks[0]));
+    for track in &tracks {
+        let number = bounds_of(visual, ElementId::Name(format!("track-number:{track}").into()));
+        assert!(bounds_of(visual, header(*track)).contains(&number.center()), "track {track}'s number is in its header");
+    }
+    let time_column = visual.update(|_, cx| workspace.read(cx).ui.timeline.graph.get());
+    assert!(f32::from(first.right()) <= time_column.left, "left of the time column: {first:?} {time_column:?}");
+
+    // The eye hides every clip on the track, and shows them again; the speaker mutes them.
+    let a_cam = Id(104);
+    let track = visual.update(|_, cx| workspace.read(cx).state.composition().layer(a_cam).unwrap().track);
+    let switches = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(a_cam).unwrap().switches);
+    let click = |visual: &mut VisualTestContext, which: &str| {
+        visual.update(|window, cx| window.click(ElementId::Name(format!("{which}:{track}").into()), cx));
+        render(visual);
+    };
+    click(visual, "track-eye");
+    assert!(!switches(visual).visible);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.track_switch(Some(track), Switch::Visible), Some(false)));
+    click(visual, "track-eye");
+    assert!(switches(visual).visible);
+    let has_sound = visual.update(|_, cx| workspace.read(cx).state.track_switch(Some(track), Switch::Audio).is_some());
+    if has_sound {
+        click(visual, "track-mute");
+        assert!(!switches(visual).audio, "muted");
+    }
+    // Hiding is one undo step.
+    click(visual, "track-eye");
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert!(switches(visual).visible);
+
+    // The eye above the headers hides every track at once, and shows them all again.
+    let all_hidden = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.track_switch(None, Switch::Visible));
+    let eye_all = bounds_of(visual, "track-eye:all");
+    let ruler = visual.update(|_, cx| workspace.read(cx).ui.timeline.graph.get());
+    assert!((f32::from(eye_all.center().y) - (ruler.top + ruler.height / 2.0)).abs() < 8.0, "level with the ruler: {eye_all:?} {ruler:?}");
+    visual.update(|window, cx| window.click("track-eye:all", cx));
+    render(visual);
+    assert_eq!(all_hidden(visual), Some(false));
+    assert!(tracks.iter().all(|track| visual.update(|_, cx| workspace.read(cx).state.track_switch(Some(*track), Switch::Visible)) != Some(true)));
+    visual.update(|window, cx| window.click("track-eye:all", cx));
+    render(visual);
+    assert_eq!(all_hidden(visual), Some(true));
+}
+
+#[gpui_kit::test]
+fn command_return_searches_effects_and_applies_the_highlighted_one(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
+    let (workspace, visual) = open(cx);
+    let a_cam = Id(104);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(a_cam, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.press("cmd-enter", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("effect-search")).is_some(), "the search opens");
+    // Typing narrows the list; Return applies the best match.
+    visual.update(|window, cx| window.input("corner", cx));
+    render(visual);
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.effect_named(a_cam, "Corner Pin").is_some(), "Corner Pin went on the clip"));
+    assert!(visual.update(|window, _| window.try_find("effect-search")).is_none(), "and the search closed");
+
+    // Down moves to the next match; a color effect opens in the Color tab.
+    visual.update(|window, cx| window.press("cmd-enter", cx));
+    render(visual);
+    visual.update(|window, cx| window.input("exposure", cx));
+    render(visual);
+    visual.update(|window, cx| {
+        window.press("down", cx);
+        window.press("up", cx);
+        window.press("enter", cx);
+    });
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.state.effect_named(a_cam, "Exposure").is_some());
+        assert_eq!(ws.ui.tab(PanelId::Properties), 2);
+    });
+
+    // Escape closes it without applying anything.
+    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layer(a_cam).unwrap().effects.len());
+    visual.update(|window, cx| window.press("cmd-enter", cx));
+    render(visual);
+    visual.update(|window, cx| window.input("glow", cx));
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("effect-search")).is_none());
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(a_cam).unwrap().effects.len()), before);
 }
 
 #[gpui_kit::test]
@@ -712,7 +1026,7 @@ fn playback_rerenders_only_the_panels_that_show_time(cx: &mut TestAppContext) {
     }
     let after = visual.update(|_, cx| workspace.read(cx).panel_render_counts(cx));
     let rendered = |kind: PanelKind| after[kind as usize] - before[kind as usize];
-    for kind in [PanelKind::Toolbar, PanelKind::Project, PanelKind::Effects, PanelKind::Libraries, PanelKind::Align] {
+    for kind in [PanelKind::Toolbar, PanelKind::Side, PanelKind::Align] {
         assert_eq!(rendered(kind), 0, "{kind:?} should stay cached during playback");
     }
     for kind in [PanelKind::Viewer, PanelKind::Timeline, PanelKind::Properties] {
@@ -1822,16 +2136,18 @@ fn a_fade_in_and_out_are_eased_one_segment_at_a_time(cx: &mut TestAppContext) {
         cx.notify();
     }));
     render(visual);
-    assert!(visual.update(|window, _| window.try_find(("easing-segment", 2_usize)).is_some()), "each segment is offered");
+    assert!(visual.update(|window, _| window.try_find("easing-segment-menu").is_some()), "the segments are offered in one row");
     // To start, only the fade in is eased.
     visual.update(|window, cx| window.click(ElementId::Name("easing:Expo:Out".into()), cx));
     render(visual);
     let after = easings(visual);
     assert_eq!(after[0], Easing::Curve(expo[1]));
     assert_eq!(&after[1..3], &before[1..3], "the hold and the fade out are untouched");
-    // Picking the fade out eases just it.
-    visual.update(|window, cx| window.click(("easing-segment", 2_usize), cx));
-    render(visual);
+    // Stepping on to the fade out (past the hold) eases just it.
+    for _ in 0..2 {
+        visual.update(|window, cx| window.click("easing-segment-next", cx));
+        render(visual);
+    }
     visual.update(|window, cx| window.click(ElementId::Name("easing:Expo:In".into()), cx));
     render(visual);
     let after = easings(visual);
@@ -1842,6 +2158,53 @@ fn a_fade_in_and_out_are_eased_one_segment_at_a_time(cx: &mut TestAppContext) {
     visual.update(|window, cx| window.click(ElementId::Name("easing:Quad:Both".into()), cx));
     render(visual);
     assert!(easings(visual)[..3].iter().all(|easing| *easing == Easing::Curve(quad[2])), "{:?}", easings(visual));
+}
+
+#[gpui_kit::test]
+fn many_eased_segments_stay_one_row_and_any_can_be_jumped_to(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // Seventy-three rotation keyframes on the title, a frame apart, all selected.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let layer = ws.state.composition_mut_for_test().layer_mut(TITLE).unwrap();
+        let transform = layer.transform.as_mut().unwrap();
+        transform.rotation = studio_core::animation::Animated::keyframed((0..73).map(|index| studio_core::animation::Keyframe::linear(24 + index, index as f32 * 5.0)).collect());
+        ws.state.select_property_keyframes(TITLE, ROTATION, false);
+        crate::panels::graph_editor::show(ws);
+        cx.notify();
+    }));
+    render(visual);
+    let segments = visual.update(|_, cx| workspace.read(cx).state.eased_segments());
+    assert_eq!(segments.len(), 72);
+    // However many there are, the picker is one short row.
+    let menu = visual.update(|window, _| window.find("easing-segment-menu").bounds());
+    let all = visual.update(|window, _| window.find("easing-segment-all").bounds());
+    assert!((menu.origin.y - all.origin.y).abs() < px(4.0) && menu.size.height < px(40.0), "one row: {menu:?} {all:?}");
+    // The menu lists every segment; picking one far down edits just it.
+    visual.update(|window, cx| window.click("easing-segment-menu", cx));
+    render(visual);
+    let fps = visual.update(|_, cx| workspace.read(cx).state.composition().frame_rate.fps());
+    let label = format!("Rotation · {:.2}–{:.2} s", (24 + 60) as f64 / fps, (24 + 61) as f64 / fps);
+    // It is far down the list: scroll the menu with the wheel until it is in view.
+    // (The first segment's name is also on the menu button, so the second's marks the top.)
+    let first = format!("Rotation · {:.2}–{:.2} s", 25.0 / fps, 26.0 / fps);
+    let top = visual.update(|window, _| window.find_by_label(&first).bounds().center());
+    for _ in 0..60 {
+        if visual.update(|window, _| window.find_by_label(&label).bounds().center().y) < top.y + px(250.0) {
+            break;
+        }
+        visual.update(|window, cx| {
+            use gpui_kit::InputEvent as _;
+            let wheel = gpui_kit::ScrollEvent { position: top, delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(-120.0))), ..Default::default() };
+            window.dispatch_event(wheel.to_platform_input(), cx);
+        });
+        render(visual);
+    }
+    click_label(visual, &label);
+    render(visual);
+    let focused = visual.update(|_, cx| crate::panels::graph_editor::focused_segments(workspace.read(cx)));
+    assert_eq!(focused, vec![segments[60]]);
+    assert!(visual.update(|window, _| window.try_find_by_label(&label)).is_some(), "the menu button names the segment being edited");
 }
 
 #[gpui_kit::test]
@@ -1872,6 +2235,27 @@ fn dragging_an_effect_onto_a_clip_adds_it(cx: &mut TestAppContext) {
     render(visual);
     let effects = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.len());
     assert_eq!(effects, 1, "the blur was added to the title");
+}
+
+#[gpui_kit::test]
+fn dragging_a_preset_onto_a_clip_adds_its_effects(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // A preset made from a-cam's blur.
+    let id = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let id = ws.state.save_effect_preset(Id(104), "Soft").unwrap();
+        ws.ui.open_effect_categories.insert(crate::panels::effects::MY_PRESETS);
+        cx.notify();
+        id
+    }));
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    let from = center_of(visual, ElementId::Name(format!("preset:{}", id.0).into()));
+    let to = center_of(visual, ("clip", TITLE.0 as usize));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+    let names = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().effects.iter().map(|effect| effect.name.clone()).collect::<Vec<_>>());
+    assert_eq!(names, ["Gaussian Blur"], "the preset's blur went on the title");
 }
 
 /// Unfolds the Effects panel category that lists `effect` (categories start folded).
@@ -2720,19 +3104,6 @@ fn cmd_brackets_step_one_frame_and_five_with_shift(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn right_column_panels_collapse_to_their_headers(cx: &mut TestAppContext) {
-    let (workspace, visual) = open(cx);
-    let align_top = center_of(visual, "collapse:Align").y;
-    visual.update(|window, cx| window.click("collapse:Properties", cx));
-    render(visual);
-    visual.update(|_, cx| assert!(workspace.read(cx).ui.collapsed_panels.contains(&crate::workspace::PanelId::Properties)));
-    assert!(center_of(visual, "collapse:Align").y < align_top, "Align moved up into the space");
-    visual.update(|window, cx| window.click("collapse:Properties", cx));
-    render(visual);
-    assert_eq!(center_of(visual, "collapse:Align").y, align_top, "and back");
-}
-
-#[gpui_kit::test]
 fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-,", cx));
@@ -3273,15 +3644,18 @@ fn the_eyedropper_picks_a_color_from_the_viewer(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_folders_arrow_closes_and_opens_it_with_one_click(cx: &mut TestAppContext) {
+fn clicking_a_folder_closes_and_opens_it(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     let folder = visual.update(|_, cx| workspace.read(cx).state.project.items.iter().find(|item| item.kind == studio_core::model::ProjectItemKind::Folder).unwrap().id);
     let shown = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.folder_open(folder));
     assert!(shown(visual));
-    visual.update(|window, cx| window.click(("folder-twirl", folder.0 as usize), cx));
+    // Folders have no arrow; the row itself is the switch.
+    assert!(visual.update(|window, _| window.try_find(("folder-twirl", folder.0 as usize))).is_none());
+    visual.update(|window, cx| window.click(("project-item", folder.0 as usize), cx));
     render(visual);
     assert!(!shown(visual), "one click closes it");
-    visual.update(|window, cx| window.click(("folder-twirl", folder.0 as usize), cx));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.selected_item, Some(folder), "and selects it"));
+    visual.update(|window, cx| window.click(("project-item", folder.0 as usize), cx));
     render(visual);
     assert!(shown(visual), "and opens it again");
 }
@@ -3748,6 +4122,56 @@ fn the_viewers_right_click_menu_acts_on_the_layer_under_the_pointer(cx: &mut Tes
         assert!(state.composition().layers.iter().any(|layer| layer.name == "Title"), "the title is back: {:?}", state.composition().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>());
         assert!(state.project.item(inner).is_some(), "the composition stays in the Project panel");
     });
+}
+
+#[gpui_kit::test]
+fn an_svg_imports_as_a_composition_and_breaks_into_shapes_from_the_clip_menu(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let folder = scratch_folder("svg");
+    let file = folder.join("badge.svg");
+    std::fs::write(&file, r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200">
+        <rect id="plate" width="400" height="200" rx="20" fill="#1e293b"/>
+        <circle id="dot" cx="100" cy="100" r="50" fill="#f59e0b"/>
+        <path id="mark" fill="#fff" fill-rule="evenodd" d="M200 50 H350 V150 H200 Z M230 80 V120 H320 V80 Z"/>
+    </svg>"##).unwrap();
+    // Read and added as the import popup does; it comes in without opening.
+    let main = visual.update(|_, cx| workspace.read(cx).state.active_comp);
+    let svg = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let open = ws.state.composition();
+        let timing = (open.frame_rate.fps(), open.duration_frames as f64 / open.frame_rate.fps());
+        let read = crate::state::read_project_file(&file, &folder, timing).unwrap();
+        let imported = ws.state.add_read_project(&read).unwrap();
+        cx.notify();
+        imported.compositions[0]
+    }));
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.state.active_comp, main, "the SVG's composition doesn't open");
+        assert_eq!(ws.state.project.item(svg).unwrap().name, "badge.svg");
+        assert_eq!(ws.state.project.composition(svg).unwrap().layers.len(), 3);
+    });
+    // As one layer in the open composition…
+    let layer = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.add_layer_from_item(svg, 0, 0);
+        cx.notify();
+        ws.state.selected_layers[0]
+    }));
+    render(visual);
+    // …whose menu breaks it into its three shapes.
+    visual.update(|window, cx| window.right_click(("clip-body", layer.0 as usize), cx));
+    render(visual);
+    click_label(visual, "Break into Shapes");
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let names: Vec<&str> = state.composition().layers.iter().map(|layer| layer.name.as_str()).collect();
+        for shape in ["plate", "dot", "mark"] {
+            assert!(names.contains(&shape), "{shape} is a layer now: {names:?}");
+        }
+        assert!(state.composition().layer(layer).is_none());
+    });
+    std::fs::remove_dir_all(&folder).ok();
 }
 
 #[gpui_kit::test]
@@ -4374,6 +4798,14 @@ fn the_eyedropper_tool_keeps_a_current_color_to_apply_and_save(cx: &mut TestAppC
     visual.update(|_, cx| assert!(workspace.read(cx).state.colors.swatches.is_empty()));
 }
 
+/// Adds the correction titled `title` from the Color tab's + menu.
+fn add_correction(visual: &mut VisualTestContext, title: &str) {
+    visual.update(|window, cx| window.click("grade-add", cx));
+    render(visual);
+    click_label(visual, title);
+    render(visual);
+}
+
 #[gpui_kit::test]
 fn the_color_tab_grades_an_adjustment_layer_over_the_whole_video(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
@@ -4381,7 +4813,7 @@ fn the_color_tab_grades_an_adjustment_layer_over_the_whole_video(cx: &mut TestAp
     visual.update(|window, cx| window.click("tab:Properties:2", cx));
     render(visual);
     // With nothing selected there is nothing to grade, so no corrections are offered.
-    visual.update(|window, _| assert!(window.try_find("grade-add:grade-basic").is_none()));
+    visual.update(|window, _| assert!(window.try_find("grade-add").is_none()));
     // The whole video is graded by grading an adjustment layer over it.
     let grade = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         let grade = ws.state.add_adjustment_layer().unwrap();
@@ -4389,11 +4821,11 @@ fn the_color_tab_grades_an_adjustment_layer_over_the_whole_video(cx: &mut TestAp
         grade
     }));
     render(visual);
-    // Every correction is a card; one the layer doesn't have yet has a + to add it.
+    // Only the corrections the layer has are listed; the + at the top adds the others.
     visual.update(|_, cx| assert_eq!(workspace.read(cx).state.effect_named(grade, "Basic Correction"), None));
-    visual.update(|window, cx| window.click("grade-add:grade-basic", cx));
-    render(visual);
-    visual.update(|window, _| assert!(window.try_find("grade-add:grade-basic").is_none(), "added, so its + gives way to its own buttons"));
+    visual.update(|window, _| assert!(window.try_find("grade-basic-on").is_none(), "no card until it is added"));
+    add_correction(visual, "Basic Correction");
+    visual.update(|window, _| assert!(window.try_find("grade-basic-on").is_some(), "added: its card has its own buttons"));
     let basic = visual.update(|_, cx| workspace.read(cx).state.effect_named(grade, "Basic Correction").unwrap());
     // Its controls are the effect's parameters: typing a temperature sets it.
     let temperature = FieldTarget::Property { layer: grade, path: PropertyPath::Effect { effect: basic, parameter: 0 }, component: 0 };
@@ -4437,8 +4869,7 @@ fn the_color_tabs_lut_browser_shows_each_look_on_the_frame_and_picks_one(cx: &mu
         cx.notify();
     }));
     render(visual);
-    visual.update(|window, cx| window.click("grade-add:grade-lut", cx));
-    render(visual);
+    add_correction(visual, "Creative Look (LUT)");
     let effect = visual.update(|_, cx| workspace.read(cx).state.effect_named(A_CAM, "Apply LUT").unwrap());
     // A new LUT section opens its browser.
     visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.lut_browser, Some(effect)));
@@ -4463,18 +4894,14 @@ fn the_color_tabs_lut_browser_shows_each_look_on_the_frame_and_picks_one(cx: &mu
     visual.update(|window, cx| window.click(ElementId::Name(format!("lut-browse:{}", effect.0).into()), cx));
     render(visual);
     visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.lut_browser, None));
-    // The LUT card has its own buttons now; the corrections not added yet still offer a +.
-    visual.update(|window, _| {
-        assert!(window.try_find("grade-add:grade-lut").is_none());
-        assert!(window.try_find("grade-add:grade-basic").is_some());
-    });
-    // A correction not added yet starts folded, and unfolds like any card (to a note on how to add it).
-    let unfolded = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.toggled_sections.contains("grade-levels"));
-    assert!(!unfolded(visual));
-    visual.update(|window, cx| window.click("grade-levels-heading", cx));
+    // The + menu now offers only the corrections the clip doesn't have.
+    visual.update(|window, cx| window.click("grade-add", cx));
     render(visual);
-    assert!(unfolded(visual));
-    visual.update(|window, cx| window.click("grade-add:grade-levels", cx));
+    visual.update(|window, _| {
+        assert!(window.try_find_by_label("Creative Look (LUT)").is_none(), "already added");
+        assert!(window.try_find_by_label("Levels").is_some());
+    });
+    click_label(visual, "Levels");
     render(visual);
     visual.update(|_, cx| assert!(workspace.read(cx).state.effect_named(A_CAM, "Levels").is_some()));
 }
@@ -4489,8 +4916,7 @@ fn color_sliders_set_reset_and_undo_in_one_step(cx: &mut TestAppContext) {
         cx.notify();
     }));
     render(visual);
-    visual.update(|window, cx| window.click("grade-add:grade-basic", cx));
-    render(visual);
+    add_correction(visual, "Basic Correction");
     let basic = visual.update(|_, cx| workspace.read(cx).state.effect_named(A_CAM, "Basic Correction").unwrap());
     let temperature = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(A_CAM).unwrap().property(PropertyPath::Effect { effect: basic, parameter: 0 }, 0).unwrap().value.component(0));
     let track = ElementId::Name(format!("grade-slider:{}:0", basic.0).into());
@@ -4526,8 +4952,7 @@ fn dragging_a_color_wheel_tints_and_undoes_in_one_step(cx: &mut TestAppContext) 
         cx.notify();
     }));
     render(visual);
-    visual.update(|window, cx| window.click("grade-add:grade-wheels", cx));
-    render(visual);
+    add_correction(visual, "Color Wheels");
     let wheels = visual.update(|_, cx| workspace.read(cx).state.effect_named(A_CAM, "Color Wheels").unwrap());
     let amount = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(A_CAM).unwrap().property(PropertyPath::Effect { effect: wheels, parameter: 7 }, 0).unwrap().value.component(0));
     let hue = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(A_CAM).unwrap().property(PropertyPath::Effect { effect: wheels, parameter: 6 }, 0).unwrap().value.component(0));
@@ -4591,7 +5016,7 @@ fn hovering_a_lut_previews_it_in_the_viewer_without_changing_the_project(cx: &mu
 }
 
 #[gpui_kit::test]
-fn luts_go_on_clips_from_the_effects_panel_and_change_in_effect_controls(cx: &mut TestAppContext) {
+fn luts_go_on_clips_from_the_effects_panel_and_change_in_the_color_tab(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     tall_window(visual);
     visual.update(|window, cx| window.click("rail-effects", cx));
@@ -4608,15 +5033,18 @@ fn luts_go_on_clips_from_the_effects_panel_and_change_in_effect_controls(cx: &mu
     let lut = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.effect_lut(A_CAM, effect).cloned());
     assert_eq!(lut(visual), Some(studio_core::model::LutSource::Look(studio_core::grade::looks().next().unwrap().to_owned())));
 
-    // Effect Controls offers the LUT menu.
+    // The Effects tab shows it as part of the Color line; the Color tab offers the LUT menu.
     visual.update(|_, cx| workspace.update(cx, |ws, cx| {
         ws.ui.tabs.insert(crate::workspace::PanelId::Properties, 1);
         cx.notify();
     }));
     render(visual);
-    visual.update(|window, cx| window.click(ElementId::Name(format!("lut-menu:{}", effect.0).into()), cx));
+    visual.update(|window, cx| window.click("fx-open-color", cx));
     render(visual);
-    click_label(visual, "Moody Green");
+    visual.update(|window, cx| window.click(ElementId::Name(format!("lut-browse:{}", effect.0).into()), cx));
+    render(visual);
+    let moody = studio_core::grade::looks().position(|look| look == "Moody Green").expect("a built-in look");
+    visual.update(|window, cx| window.click(("lut-tile", moody), cx));
     render(visual);
     assert_eq!(lut(visual), Some(studio_core::model::LutSource::Look("Moody Green".into())));
 
@@ -5617,7 +6045,7 @@ fn stress_500_layers(cx: &mut TestAppContext) {
         draw_frame(visual);
     }
     let after = visual.update(|_, cx| workspace.read(cx).panel_render_times(cx));
-    let names = ["toolbar", "project", "viewer", "timeline", "properties", "effects", "libraries", "align", "templates", "captions", "elements", "mockups"];
+    let names = ["toolbar", "side", "viewer", "timeline", "properties", "align", "nodes"];
     for (index, name) in names.iter().enumerate() {
         let each = (after[index] - before[index]).as_secs_f64() * 100.0;
         if each > 0.05 {
@@ -6561,4 +6989,333 @@ fn the_start_screens_home_shows_a_welcome_and_a_strip_of_templates(cx: &mut Test
     render(visual);
     let tab = visual.update(|_, cx| workspace.read(cx).ui.start_screen.as_ref().map(|screen| screen.tab));
     assert_eq!(tab, Some(crate::panels::start_screen::StartTab::Templates));
+}
+
+/// Where a docked panel's content is drawn (below its tab bar).
+fn dock_content(visual: &mut VisualTestContext, panel: &str) -> gpui_kit::Bounds<Pixels> {
+    visual.update(|window, _| window.find(ElementId::Name(format!("dock-content:{panel}").into())).bounds())
+}
+
+fn dock_tab(panel: &str) -> ElementId {
+    ElementId::Name(format!("dock-tab:{panel}").into())
+}
+
+/// Drags panel `panel`'s tab to `to`.
+fn drag_tab(visual: &mut VisualTestContext, panel: &str, to: Point<Pixels>) {
+    let from = center_of(visual, dock_tab(panel));
+    visual.update(|window, cx| window.drag(from, to, cx));
+    render(visual);
+}
+
+#[gpui_kit::test]
+fn a_panels_tab_dropped_on_the_edge_of_another_panel_docks_it_beside_that_panel(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
+    let (workspace, visual) = open(cx);
+    // The closed Nodes panel has no tab; the rest all do. The side panel is one panel, not a
+    // tab for each of its choices.
+    assert!(visual.update(|window, _| window.try_find(dock_tab("Nodes"))).is_none());
+    for panel in ["Side", "Composition", "Timeline", "Properties", "Align"] {
+        assert!(visual.update(|window, _| window.try_find(dock_tab(panel))).is_some(), "{panel} has a tab");
+    }
+    for former in ["Project", "Libraries", "Effects", "Elements", "Templates", "Mockups", "Captions"] {
+        assert!(visual.update(|window, _| window.try_find(dock_tab(former))).is_none(), "no {former} tab of its own");
+    }
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).dock_group_of(PanelId::Side, cx), vec![PanelId::Side]));
+
+    // Align's tab dropped on the left part of the timeline: Align now sits to its left.
+    let timeline = dock_content(visual, "Timeline");
+    drag_tab(visual, "Align", point(timeline.origin.x + timeline.size.width * 0.1, timeline.center().y));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).dock_group_of(PanelId::Align, cx), vec![PanelId::Align], "a group of its own"));
+    let (align, timeline) = (dock_content(visual, "Align"), dock_content(visual, "Timeline"));
+    assert!(align.right() <= timeline.left() + px(1.0), "left of the timeline: {align:?} {timeline:?}");
+    // (The Timeline's tab row is taller, as it holds the transport, so compare the bottoms.)
+    assert!((align.bottom() - timeline.bottom()).abs() < px(2.0), "in the same row");
+    // Properties has the right column to itself now.
+    let properties = dock_content(visual, "Properties");
+    assert!(properties.bottom() > timeline.top(), "Properties reaches down past the top of the timeline");
+
+    // Properties dropped on the bottom of the viewer goes under it.
+    let viewer = dock_content(visual, "Composition");
+    drag_tab(visual, "Properties", point(viewer.center().x, viewer.origin.y + viewer.size.height * 0.9));
+    let (viewer, properties) = (dock_content(visual, "Composition"), dock_content(visual, "Properties"));
+    assert!(properties.top() >= viewer.bottom() - px(1.0), "below the viewer: {viewer:?} {properties:?}");
+    assert!((properties.center().x - viewer.center().x).abs() < px(2.0), "in the same column");
+}
+
+#[gpui_kit::test]
+fn the_side_panel_moves_as_one_and_shows_what_the_rail_picks(cx: &mut TestAppContext) {
+    use crate::workspace::{LeftPanel, PanelId};
+    let (workspace, visual) = open(cx);
+    let group = |visual: &mut VisualTestContext, panel| visual.update(|_, cx| workspace.read(cx).dock_group_of(panel, cx));
+    let showing = |visual: &mut VisualTestContext, panel| visual.update(|_, cx| workspace.read(cx).showing(panel));
+    let tab_title = |visual: &mut VisualTestContext| visual.update(|_, cx| PanelId::Side.title(workspace.read(cx)).to_string());
+
+    // The rail switches what the side panel shows, and its tab says so.
+    assert!(showing(visual, PanelId::Project));
+    visual.update(|window, cx| window.click("rail-libraries", cx));
+    render(visual);
+    assert!(showing(visual, PanelId::Libraries) && !showing(visual, PanelId::Project));
+    assert!(tab_title(visual).contains("Libraries"), "tab reads {:?}", tab_title(visual));
+
+    // Dragged onto Properties' tab, the whole side panel joins that group, in front.
+    let properties_tab = center_of(visual, dock_tab("Properties"));
+    drag_tab(visual, "Side", properties_tab);
+    assert_eq!(group(visual, PanelId::Properties), vec![PanelId::Side, PanelId::Properties]);
+    assert!(showing(visual, PanelId::Libraries), "still showing what the rail picked");
+
+    // With Properties in front, a rail button brings the side panel forward where it now
+    // lives, showing its pick, and doesn't move it back.
+    visual.update(|window, cx| window.click(dock_tab("Properties"), cx));
+    render(visual);
+    assert!(!showing(visual, PanelId::Libraries) && showing(visual, PanelId::Properties));
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.left_panel, LeftPanel::Effects));
+    assert!(showing(visual, PanelId::Effects) && !showing(visual, PanelId::Properties));
+    assert_eq!(group(visual, PanelId::Properties), vec![PanelId::Side, PanelId::Properties], "not moved back");
+    assert!(tab_title(visual).contains("Effects"));
+
+    // Dropped in the middle of the viewer, a panel becomes a tab beside it, in front; its tab
+    // brings the viewer back.
+    let viewer = dock_content(visual, "Composition");
+    drag_tab(visual, "Align", viewer.center());
+    assert_eq!(group(visual, PanelId::Composition), vec![PanelId::Composition, PanelId::Align]);
+    assert!(showing(visual, PanelId::Align) && !showing(visual, PanelId::Composition));
+    visual.update(|window, cx| window.click(dock_tab("Composition"), cx));
+    render(visual);
+    assert!(showing(visual, PanelId::Composition) && !showing(visual, PanelId::Align));
+}
+
+#[gpui_kit::test]
+fn the_panel_layout_is_saved_and_comes_back_on_the_next_launch(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
+    let (workspace, visual) = open(cx);
+    assert_eq!(crate::app_settings::load().workspace_layout, None, "the standard layout isn't saved");
+    let viewer = dock_content(visual, "Composition");
+    drag_tab(visual, "Align", viewer.center());
+    let saved = crate::app_settings::load().workspace_layout.expect("the move was saved");
+    let state: gpui_kit::component::dock::DockAreaState = serde_json::from_value(saved).unwrap();
+    // The same arrangement as on screen (sizes are measured again as it lays out).
+    fn arrangement(state: &gpui_kit::component::dock::PanelState) -> String {
+        let children: Vec<String> = state.children.iter().map(arrangement).collect();
+        format!("{}[{}]", state.panel_name, children.join(","))
+    }
+    let on_screen = visual.update(|_, cx| workspace.read(cx).dock_state(cx));
+    assert_eq!(arrangement(&state.center), arrangement(&on_screen.center), "as it is on screen");
+    // And the timeline split, with the side panel dragged to its left.
+    let timeline = dock_content(visual, "Timeline");
+    drag_tab(visual, "Side", point(timeline.origin.x + timeline.size.width * 0.1, timeline.center().y));
+    let before: Vec<_> = ["Side", "Align", "Timeline", "Properties"].into_iter().map(|panel| dock_content(visual, panel)).collect();
+
+    // A second window, as on the next launch, opens with Align beside the viewer.
+    let (again, visual) = open_window(cx, false);
+    let after: Vec<_> = ["Side", "Align", "Timeline", "Properties"].into_iter().map(|panel| dock_content(visual, panel)).collect();
+    assert_eq!(after, before, "every panel comes back at the same place and size");
+    visual.update(|_, cx| {
+        let ws = again.read(cx);
+        assert_eq!(ws.dock_group_of(PanelId::Composition, cx), vec![PanelId::Composition, PanelId::Align]);
+        assert_eq!(ws.dock_group_of(PanelId::Properties, cx), vec![PanelId::Properties]);
+        assert!(ws.showing(PanelId::Align), "with the same tab in front");
+    });
+}
+
+#[gpui_kit::test]
+fn reset_workspace_puts_every_panel_back_in_its_standard_place(cx: &mut TestAppContext) {
+    use crate::workspace::{PanelId, ResetWorkspace};
+    let (workspace, visual) = open(cx);
+    let panels = ["Side", "Composition", "Timeline", "Properties", "Align"];
+    let standard: Vec<_> = panels.into_iter().map(|panel| dock_content(visual, panel)).collect();
+    let timeline = dock_content(visual, "Timeline");
+    drag_tab(visual, "Align", point(timeline.origin.x + timeline.size.width * 0.1, timeline.center().y));
+    let viewer = dock_content(visual, "Composition");
+    drag_tab(visual, "Side", viewer.center());
+    assert!(crate::app_settings::load().workspace_layout.is_some());
+
+    visual.update(|window, cx| window.dispatch_action(Box::new(ResetWorkspace), cx));
+    render(visual);
+    let reset: Vec<_> = panels.into_iter().map(|panel| dock_content(visual, panel)).collect();
+    assert_eq!(reset, standard, "every panel is back where it started");
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.dock_group_of(PanelId::Align, cx), vec![PanelId::Align]);
+        assert_eq!(ws.dock_group_of(PanelId::Side, cx), vec![PanelId::Side]);
+        assert!(ws.showing(PanelId::Project) && ws.showing(PanelId::Composition));
+    });
+    assert_eq!(crate::app_settings::load().workspace_layout, None, "the saved arrangement is forgotten");
+    // It is in Window ▸ Workspace.
+    let window_menu = crate::workspace::menus().into_iter().find(|menu| menu.name == "Window").unwrap();
+    let gpui_kit::MenuItem::Submenu(workspaces) = window_menu.items.last().unwrap() else { panic!("Workspace submenu") };
+    assert!(workspaces.items.iter().any(|item| matches!(item, gpui_kit::MenuItem::Action { name, .. } if name == "Reset Workspace")));
+}
+
+#[gpui_kit::test]
+fn a_saved_layout_with_old_panel_names_or_from_another_version_still_shows_every_panel(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx);
+        crate::workspace::bind_keys(cx);
+    });
+    // Saved before the side panel was one panel (Project and Libraries as tabs of their own,
+    // Effects in another group), naming one panel this version doesn't have, and missing
+    // Properties, Align and Nodes: the viewer and the timeline side by side.
+    let tabs = |names: &[&str], active: usize| {
+        serde_json::json!({"panel_name": "TabPanel", "info": {"tabs": {"active_index": active}},
+            "children": names.iter().map(|name| serde_json::json!({"panel_name": name, "children": [], "info": {"panel": null}})).collect::<Vec<_>>()})
+    };
+    let layout = |version: usize| {
+        serde_json::json!({"version": version, "center": {"panel_name": "StackPanel", "info": {"stack": {"sizes": [800.0, 700.0], "axis": 0}},
+            "children": [tabs(&["Composition", "Project", "Libraries", "Storyboard"], 0), tabs(&["Timeline", "Effects"], 0)]}})
+    };
+    crate::app_settings::update(|settings| settings.workspace_layout = Some(layout(crate::panels::dock::LAYOUT_VERSION)));
+    let (workspace, visual) = open_window(cx, false);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        let viewer_group = ws.dock_group_of(PanelId::Composition, cx);
+        assert_eq!(viewer_group[..2], [PanelId::Composition, PanelId::Side], "the old side panels became the one side panel");
+        assert_eq!(viewer_group.iter().filter(|panel| **panel == PanelId::Side).count(), 1, "just once");
+        assert_eq!(ws.dock_group_of(PanelId::Timeline, cx), vec![PanelId::Timeline]);
+        for panel in crate::panels::dock::DOCKABLE {
+            assert!(!ws.dock_group_of(panel, cx).is_empty(), "{panel:?} has a place");
+        }
+        assert!(viewer_group.contains(&PanelId::Properties), "missing panels join the side panel's group");
+    });
+    let viewer = dock_content(visual, "Composition");
+    let timeline = dock_content(visual, "Timeline");
+    assert!(viewer.right() <= timeline.left() + px(1.0), "side by side as saved");
+
+    // A layout from another version is set aside for the standard one.
+    crate::app_settings::update(|settings| settings.workspace_layout = Some(layout(crate::panels::dock::LAYOUT_VERSION + 1)));
+    let (workspace, visual) = open_window(cx, false);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.dock_group_of(PanelId::Composition, cx), vec![PanelId::Composition]);
+        assert_eq!(ws.dock_group_of(PanelId::Side, cx), vec![PanelId::Side]);
+    });
+}
+
+/// The names in Window ▸ Workspace, with the checked one marked "✓".
+fn workspace_menu_names() -> Vec<String> {
+    let window_menu = crate::workspace::menus().into_iter().find(|menu| menu.name == "Window").unwrap();
+    let workspaces = window_menu
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            gpui_kit::MenuItem::Submenu(menu) if menu.name == "Workspace" => Some(menu),
+            _ => None,
+        })
+        .expect("Window ▸ Workspace");
+    workspaces
+        .items
+        .into_iter()
+        .map_while(|item| match item {
+            gpui_kit::MenuItem::Action { name, checked, .. } => Some(if checked { format!("✓{name}") } else { name.to_string() }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Window ▸ Workspace ▸ Save as New Workspace… with `name` typed in, then Save.
+fn save_workspace_as(visual: &mut VisualTestContext, name: &str) {
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::SaveWorkspaceAs), cx));
+    render(visual);
+    visual.update(|window, cx| window.click("workspace-name", cx));
+    visual.update(|window, cx| window.input(name, cx));
+    visual.update(|window, cx| window.click("workspace-save-ok", cx));
+    render(visual);
+    // Its message (saved, or why not) is cleared, so it doesn't cover the panels' tabs.
+    assert!(visual.update(|window, cx| !window.notifications(cx).is_empty()), "the outcome is said");
+    visual.update(|window, cx| window.clear_notifications(cx));
+    render(visual);
+}
+
+fn switch_workspace(visual: &mut VisualTestContext, name: Option<&str>) {
+    let action = crate::workspace::SwitchWorkspace { name: name.map(str::to_owned) };
+    visual.update(|window, cx| window.dispatch_action(Box::new(action), cx));
+    render(visual);
+}
+
+#[gpui_kit::test]
+fn named_workspaces_are_saved_switched_updated_and_deleted(cx: &mut TestAppContext) {
+    use crate::workspace::{DeleteWorkspace, PanelId, UpdateWorkspace};
+    let (workspace, visual) = open(cx);
+    let group = |visual: &mut VisualTestContext, panel| visual.update(|_, cx| workspace.read(cx).dock_group_of(panel, cx));
+    assert_eq!(workspace_menu_names()[0], "✓Standard", "Standard is built in and picked");
+
+    // Align beside the viewer, saved as "Color": it is listed, and picked.
+    let viewer = dock_content(visual, "Composition");
+    drag_tab(visual, "Align", viewer.center());
+    save_workspace_as(visual, "Color");
+    assert_eq!(workspace_menu_names(), vec!["Standard".to_owned(), "✓Color".to_owned()]);
+    assert_eq!(crate::app_settings::load().current_workspace.as_deref(), Some("Color"));
+    // A name already in use is refused, and the dialog stays open.
+    save_workspace_as(visual, "color");
+    assert!(visual.update(|window, cx| window.has_active_dialog(cx)), "still asking for a name");
+    assert_eq!(crate::app_settings::load().saved_workspaces.len(), 1);
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+
+    // Switching to Standard puts every panel back; switching to Color brings its layout back.
+    switch_workspace(visual, None);
+    assert_eq!(group(visual, PanelId::Align), vec![PanelId::Align]);
+    assert_eq!(workspace_menu_names()[0], "✓Standard");
+    switch_workspace(visual, Some("Color"));
+    assert_eq!(group(visual, PanelId::Composition), vec![PanelId::Composition, PanelId::Align]);
+
+    // Moving a panel and updating keeps the new layout in Color. Reset goes back to it.
+    let timeline = dock_content(visual, "Timeline");
+    drag_tab(visual, "Properties", point(timeline.origin.x + timeline.size.width * 0.1, timeline.center().y));
+    visual.update(|window, cx| window.dispatch_action(Box::new(UpdateWorkspace), cx));
+    render(visual);
+    let timeline = dock_content(visual, "Timeline");
+    drag_tab(visual, "Side", point(timeline.origin.x + timeline.size.width * 0.9, timeline.center().y));
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::ResetWorkspace), cx));
+    render(visual);
+    let (properties, timeline) = (dock_content(visual, "Properties"), dock_content(visual, "Timeline"));
+    assert!(properties.right() <= timeline.left() + px(1.0), "the updated Color has Properties left of the timeline");
+    assert_eq!(group(visual, PanelId::Composition), vec![PanelId::Composition, PanelId::Align]);
+    assert_eq!(group(visual, PanelId::Side), vec![PanelId::Side], "the move after updating was undone");
+
+    // Deleting asks first; then Color is gone, Standard is picked, and the panels stay put.
+    visual.update(|window, cx| window.dispatch_action(Box::new(DeleteWorkspace), cx));
+    render(visual);
+    assert_eq!(crate::app_settings::load().saved_workspaces.len(), 1, "nothing deleted before confirming");
+    click_label(visual, "Delete");
+    render(visual);
+    assert!(crate::app_settings::load().saved_workspaces.is_empty());
+    assert_eq!(workspace_menu_names(), vec!["✓Standard".to_owned()]);
+    assert_eq!(group(visual, PanelId::Composition), vec![PanelId::Composition, PanelId::Align], "panels stay where they are");
+    // Standard can't be updated or deleted: the menu items are off.
+    let window_menu = crate::workspace::menus().into_iter().find(|menu| menu.name == "Window").unwrap();
+    let gpui_kit::MenuItem::Submenu(workspaces) = window_menu.items.last().unwrap() else { panic!("Workspace submenu") };
+    for off in ["Update Current Workspace", "Delete Workspace…"] {
+        assert!(workspaces.items.iter().any(|item| matches!(item, gpui_kit::MenuItem::Action { name, disabled: true, .. } if name == off)), "{off} is off");
+    }
+}
+
+#[gpui_kit::test]
+fn named_workspaces_and_the_pick_last_between_launches_and_unreadable_ones_fall_back(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
+    let (_, visual) = open(cx);
+    let viewer = dock_content(visual, "Composition");
+    drag_tab(visual, "Align", viewer.center());
+    save_workspace_as(visual, "Color");
+
+    // The next launch remembers Color, picked, with its layout on screen.
+    let (again, visual) = open_window(cx, false);
+    assert_eq!(workspace_menu_names(), vec!["Standard".to_owned(), "✓Color".to_owned()]);
+    visual.update(|_, cx| assert_eq!(again.read(cx).dock_group_of(PanelId::Composition, cx), vec![PanelId::Composition, PanelId::Align]));
+
+    // A saved workspace from a newer Studio (or damaged) can't be read: switching to it shows
+    // Standard instead and says so; an entry that isn't a workspace at all is skipped.
+    crate::app_settings::update(|settings| {
+        settings.saved_workspaces.push(crate::app_settings::SavedWorkspace { name: "Future".into(), layout: serde_json::json!({"version": 99, "center": {}}) });
+    });
+    let mut file: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(crate::app_settings::folder().join("settings.json")).unwrap()).unwrap();
+    file["saved_workspaces"].as_array_mut().unwrap().push(serde_json::json!({"broken": true}));
+    std::fs::write(crate::app_settings::folder().join("settings.json"), file.to_string()).unwrap();
+    assert_eq!(crate::app_settings::load().saved_workspaces.len(), 2, "the broken entry is skipped, the rest kept");
+    switch_workspace(visual, Some("Future"));
+    visual.update(|_, cx| assert_eq!(again.read(cx).dock_group_of(PanelId::Align, cx), vec![PanelId::Align], "Standard shown"));
+    assert_eq!(crate::app_settings::load().current_workspace, None);
 }

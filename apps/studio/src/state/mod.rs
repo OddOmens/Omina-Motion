@@ -563,6 +563,46 @@ impl EditorState {
         }
     }
 
+    /// The layers on `track` (on any track, with `None`) that `switch` means something for: the
+    /// ones with a picture for Visible, the ones with sound for Audio, every one for the others.
+    fn track_layers_for(&self, track: Option<i32>, switch: Switch) -> Vec<Id> {
+        self.composition()
+            .layers
+            .iter()
+            .filter(|layer| track.is_none_or(|track| layer.track == track))
+            .filter(|layer| match switch {
+                Switch::Visible => layer.content.has_picture(),
+                Switch::Audio => studio_core::audio::layer_has_sound(&self.project, layer),
+                _ => true,
+            })
+            .map(|layer| layer.id)
+            .collect()
+    }
+
+    /// Whether `switch` is on for the whole of `track` (every layer it means something for has it
+    /// on), or `None` when it means nothing for any layer there (no sound on a title track, say).
+    /// With `None` for the track, the same over every track.
+    pub fn track_switch(&self, track: Option<i32>, switch: Switch) -> Option<bool> {
+        let layers = self.track_layers_for(track, switch);
+        let composition = self.composition();
+        let mut on = layers.iter().filter_map(|id| composition.layer(*id)).map(|layer| {
+            let mut switches = layer.switches;
+            *switch.slot(&mut switches)
+        });
+        let first = on.next()?;
+        Some(first && on.all(|value| value))
+    }
+
+    /// Turns `switch` on or off for every layer on `track` (on every track, with `None`) it means
+    /// something for: the track headers' eye and mute buttons.
+    pub fn set_track_switch(&mut self, track: Option<i32>, switch: Switch, on: bool) {
+        for id in self.track_layers_for(track, switch) {
+            if let Some(layer) = self.composition_mut().layer_mut(id) {
+                *switch.slot(&mut layer.switches) = on;
+            }
+        }
+    }
+
     pub fn set_blend_mode(&mut self, layer: Id, mode: BlendMode) {
         if let Some(layer) = self.composition_mut().layer_mut(layer) {
             layer.blend_mode = mode;
@@ -1227,7 +1267,9 @@ impl EditorState {
         let probe = |media: &std::path::Path| read.media.get(media).cloned();
         let imported = studio_core::import::build(&mut self.project, &read.scene, &read.name, &probe)?;
         if let Some(&main) = imported.compositions.first() {
-            self.open_composition(main);
+            if read.opens {
+                self.open_composition(main);
+            }
             self.selected_item = Some(main);
         }
         Ok(imported)
@@ -1348,18 +1390,26 @@ pub fn read_media_file(path: std::path::PathBuf) -> ReadFile {
 /// already probed, so adding it to the project is quick.
 pub struct ReadProject {
     name: String,
+    /// Whether its main composition opens once it is in (an SVG's doesn't: it is used as a
+    /// layer, and broken into shapes there).
+    opens: bool,
     scene: studio_core::import::Scene,
     /// What each media file the scene names turned out to be, by the path it names.
     media: std::collections::HashMap<std::path::PathBuf, studio_core::import::Probed>,
 }
 
-/// Reads an After Effects project (`.aep`) or a Lottie animation (`.json`) and probes the
-/// media it uses. Embedded Lottie images are written into `asset_folder`.
-pub fn read_project_file(path: &std::path::Path, asset_folder: &std::path::Path) -> Result<ReadProject, String> {
-    use studio_core::import::{SourceKind, aep, lottie};
+/// Reads an After Effects project (`.aep`), a Lottie animation (`.json`) or an SVG drawing and
+/// probes the media it uses. Embedded Lottie images are written into `asset_folder`; an SVG
+/// becomes a composition at `timing` (frames a second, and seconds long).
+pub fn read_project_file(path: &std::path::Path, asset_folder: &std::path::Path, timing: (f64, f64)) -> Result<ReadProject, String> {
+    use studio_core::import::{SourceKind, aep, lottie, svg};
     let bytes = std::fs::read(path).map_err(|error| format!("“{}” couldn't be read: {error}", path.display()))?;
+    let is_svg = is_extension(path, "svg");
     let scene = if is_extension(path, "aep") {
         aep::read(&bytes)?
+    } else if is_svg {
+        let text = String::from_utf8(bytes).map_err(|_| "This SVG file isn't text.".to_owned())?;
+        svg::read(&text, path, timing.0, timing.1)?
     } else {
         let text = String::from_utf8(bytes).map_err(|_| "This JSON file isn't a Lottie animation.".to_owned())?;
         lottie::read(&text, path, asset_folder)?
@@ -1375,7 +1425,7 @@ pub fn read_project_file(path: &std::path::Path, asset_folder: &std::path::Path)
             media.insert(named.clone(), probed);
         }
     }
-    Ok(ReadProject { name, scene, media })
+    Ok(ReadProject { name, opens: !is_svg, scene, media })
 }
 
 /// What a media file is: an image, a video (with or without sound) or sound alone.

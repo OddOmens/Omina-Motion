@@ -21,7 +21,7 @@ pub struct Biquad {
 }
 
 impl Biquad {
-    pub(crate) fn from_coefficients(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Self {
+    pub fn from_coefficients(b0: f64, b1: f64, b2: f64, a0: f64, a1: f64, a2: f64) -> Self {
         Self { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
     }
 
@@ -60,6 +60,33 @@ impl Biquad {
         let (cos, _, alpha) = Self::omega(frequency, rate, q);
         let a = 10f64.powf(f64::from(gain_db) / 40.0);
         Self::from_coefficients(1.0 + alpha * a, -2.0 * cos, 1.0 - alpha * a, 1.0 + alpha / a, -2.0 * cos, 1.0 - alpha / a)
+    }
+
+    /// Raises (or with a negative `gain_db`, lowers) everything below about `frequency`.
+    pub fn low_shelf(frequency: f32, rate: f32, q: f32, gain_db: f32) -> Self {
+        let (cos, sin, _) = Self::omega(frequency, rate, q);
+        let a = 10f64.powf(f64::from(gain_db) / 40.0);
+        let alpha = sin / (2.0 * f64::from(q));
+        let root = 2.0 * a.sqrt() * alpha;
+        Self::from_coefficients(
+            a * ((a + 1.0) - (a - 1.0) * cos + root),
+            2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
+            a * ((a + 1.0) - (a - 1.0) * cos - root),
+            (a + 1.0) + (a - 1.0) * cos + root,
+            -2.0 * ((a - 1.0) + (a + 1.0) * cos),
+            (a + 1.0) + (a - 1.0) * cos - root,
+        )
+    }
+
+    /// Takes on `other`'s shape but keeps this filter's memory, so a setting can change while
+    /// sound plays without a click.
+    pub fn retune(&mut self, other: Biquad) {
+        (self.b0, self.b1, self.b2, self.a1, self.a2) = (other.b0, other.b1, other.b2, other.a1, other.a2);
+    }
+
+    /// A filter that lets everything through unchanged.
+    pub fn pass() -> Self {
+        Self::from_coefficients(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     }
 
     /// Raises everything above about `frequency` by `gain_db`.
@@ -117,5 +144,8 @@ mod tests {
         let boosted = response(Biquad::peak(3000.0, rate, 1.0, 6.0), 3000.0);
         assert!((boosted - 2.0).abs() < 0.05, "+6 dB is twice the level: {boosted}");
         assert!((response(Biquad::high_shelf(5000.0, rate, 0.707, 6.0), 15_000.0) - 2.0).abs() < 0.1);
+        assert!((response(Biquad::low_shelf(200.0, rate, 0.707, 6.0), 50.0) - 2.0).abs() < 0.1);
+        assert!((response(Biquad::low_shelf(200.0, rate, 0.707, 6.0), 5000.0) - 1.0).abs() < 0.05);
+        assert!((response(Biquad::pass(), 1000.0) - 1.0).abs() < 0.01);
     }
 }

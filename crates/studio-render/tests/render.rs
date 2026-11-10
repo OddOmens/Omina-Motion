@@ -225,6 +225,32 @@ fn a_node_graph_decides_what_a_layer_shows() {
     assert_eq!(shown(empty), ([0, 0, 0], [0, 0, 0]));
 }
 
+#[test]
+fn the_transform_effect_moves_scales_turns_and_fades_the_picture() {
+    // A 20 × 20 red square in the middle of a black frame, with Transform set by `values`.
+    let moved = |values: &[(usize, f32)]| {
+        let mut layer = solid(2, 0xff0000, Vec2::new(20.0, 20.0), Vec2::new(50.0, 50.0));
+        let mut effect = effects::instantiate(effects::find("Transform").unwrap(), Id(9));
+        for &(index, value) in values {
+            effect.properties[index].value = Animated::constant(value);
+        }
+        layer.effects.push(effect);
+        render(&project(vec![layer]))
+    };
+    let plain = moved(&[]);
+    assert!(close(pixel(&plain, 50, 50), [255, 0, 0]) && close(pixel(&plain, 80, 50), [0, 0, 0]), "the defaults change nothing");
+    let right = moved(&[(0, 30.0)]);
+    assert!(close(pixel(&right, 80, 50), [255, 0, 0]) && close(pixel(&right, 50, 50), [0, 0, 0]), "Position X moves it right");
+    let down = moved(&[(1, 30.0)]);
+    assert!(close(pixel(&down, 50, 80), [255, 0, 0]), "Position Y moves it down");
+    let bigger = moved(&[(2, 300.0)]);
+    assert!(close(pixel(&bigger, 75, 50), [255, 0, 0]), "Scale grows it about the middle");
+    let turned = moved(&[(2, 300.0), (3, 45.0)]);
+    assert!(close(pixel(&turned, 50, 20), [255, 0, 0]) && close(pixel(&turned, 78, 22), [0, 0, 0]), "Rotation turns it: a corner points up");
+    let faded = pixel(&moved(&[(4, 50.0)]), 50, 50);
+    assert!(faded[0] > 100 && faded[0] < 230, "Opacity fades it: {faded:?}");
+}
+
 /// A full-frame solid of `color` with the catalog effect `name`, its parameters set to `values`
 /// (by index; the rest at their defaults), rendered; returns the middle pixel.
 fn graded(color: u32, name: &str, values: &[(usize, f32)]) -> [u8; 3] {
@@ -316,6 +342,123 @@ fn gaussian_blur_softens_edges() {
     let edge = |frame| pixel(frame, 30, 50)[0];
     assert!(edge(&sharp) > 250 || edge(&sharp) < 5, "sharp edge");
     assert!((40..230).contains(&edge(&blurred)), "the edge is soft after blurring: {}", edge(&blurred));
+}
+
+/// `layer` with the catalog effect `name` added, its parameters set to `values` (by index; the
+/// rest at their defaults).
+fn with_effect(mut layer: Layer, name: &str, values: &[(usize, f32)]) -> Layer {
+    let mut effect = effects::instantiate(effects::find(name).unwrap(), Id(9));
+    for &(index, value) in values {
+        effect.properties[index].value = Animated::constant(value);
+    }
+    layer.effects.push(effect);
+    layer
+}
+
+#[test]
+fn box_blur_softens_edges() {
+    let square = solid(2, 0xffffff, Vec2::new(40.0, 40.0), Vec2::new(50.0, 50.0));
+    let blurred = render(&project(vec![with_effect(square, "Box Blur", &[(1, 1.0)])]));
+    // One iteration of radius 10 averages 21 pixels: at the edge, half of them are white.
+    let edge = pixel(&blurred, 30, 50)[0];
+    assert!((150..235).contains(&edge), "the edge is soft: {edge}");
+    assert!(close(pixel(&blurred, 50, 50), [255, 255, 255]), "the middle stays white");
+}
+
+#[test]
+fn corner_pin_maps_the_layer_onto_its_moved_corners() {
+    // A red left half; the rest of the frame is clear over the black background.
+    let left_half = || solid(2, 0xff0000, Vec2::new(50.0, 100.0), Vec2::new(25.0, 50.0));
+    let unpinned = render(&project(vec![with_effect(left_half(), "Corner Pin", &[])]));
+    assert!(close(pixel(&unpinned, 40, 50), [255, 0, 0]) && close(pixel(&unpinned, 60, 50), [0, 0, 0]), "the defaults change nothing");
+    // The corners start at the layer's own corners: both right ones pulled 25 px left squeeze
+    // the red half into the left quarter.
+    let squeezed = render(&project(vec![with_effect(left_half(), "Corner Pin", &[(2, -25.0), (6, -25.0)])]));
+    assert!(close(pixel(&squeezed, 12, 50), [255, 0, 0]), "{:?}", pixel(&squeezed, 12, 50));
+    assert!(close(pixel(&squeezed, 37, 50), [0, 0, 0]) && close(pixel(&squeezed, 75, 50), [0, 0, 0]));
+    // The right corners pulled toward the middle vertically make a trapezoid: the picture
+    // narrows toward the right edge, and outside it is clear.
+    let full_red = full(2, 0xff0000);
+    let tapered = render(&project(vec![with_effect(full_red, "Corner Pin", &[(3, 40.0), (7, -40.0)])]));
+    assert!(close(pixel(&tapered, 5, 5), [255, 0, 0]), "the left edge keeps its full height");
+    assert!(close(pixel(&tapered, 95, 50), [255, 0, 0]) && close(pixel(&tapered, 95, 10), [0, 0, 0]), "the right edge is short");
+}
+
+#[test]
+fn the_channel_mixer_builds_each_channel_from_the_others() {
+    assert!(close(graded(0x3366cc, "Channel Mixer", &[]), [0x33, 0x66, 0xcc]), "the defaults change nothing");
+    // 100% of red into green turns red yellow.
+    assert!(close(graded(0xff0000, "Channel Mixer", &[(3, 100.0)]), [255, 255, 0]));
+    // Red from blue and blue from red swaps them.
+    let swapped = graded(0x3366cc, "Channel Mixer", &[(0, 0.0), (2, 100.0), (6, 100.0), (8, 0.0)]);
+    assert!(close(swapped, [0xcc, 0x66, 0x33]), "{swapped:?}");
+}
+
+#[test]
+fn the_simple_choker_moves_the_matte_edge_in_and_out() {
+    // A white 40 × 40 square spanning 30 to 70 in each direction.
+    let square = || solid(2, 0xffffff, Vec2::new(40.0, 40.0), Vec2::new(50.0, 50.0));
+    let choked = render(&project(vec![with_effect(square(), "Simple Choker", &[(0, 6.0)])]));
+    assert!(close(pixel(&choked, 33, 50), [0, 0, 0]), "the edge moved in past x = 33: {:?}", pixel(&choked, 33, 50));
+    assert!(close(pixel(&choked, 50, 50), [255, 255, 255]), "the middle stays solid");
+    let spread = render(&project(vec![with_effect(square(), "Simple Choker", &[(0, -6.0)])]));
+    assert!(close(pixel(&spread, 26, 50), [255, 255, 255]), "the edge moved out past x = 26: {:?}", pixel(&spread, 26, 50));
+    assert!(close(pixel(&spread, 20, 50), [0, 0, 0]), "but no further than the choke");
+}
+
+#[test]
+fn the_luma_key_removes_a_brightness() {
+    // A full layer of `color` keyed over a red one: where it is keyed out, red shows.
+    let keyed = |color: u32, values: &[(usize, f32)]| pixel(&render(&project(vec![with_effect(full(2, color), "Luma Key", values), full(3, 0xff0000)])), 50, 50);
+    assert!(close(keyed(0x000000, &[]), [255, 0, 0]), "black is removed by default");
+    assert!(close(keyed(0x808080, &[]), [128, 128, 128]), "mid gray stays");
+    assert!(close(keyed(0x000000, &[(3, 1.0)]), [0, 0, 0]), "inverted, black is what stays");
+    assert!(close(keyed(0x808080, &[(3, 1.0)]), [255, 0, 0]), "and gray goes");
+    assert!(close(keyed(0xffffff, &[(0, 100.0)]), [255, 0, 0]), "threshold 100 removes white");
+}
+
+#[test]
+fn grid_and_checkerboard_draw_their_pattern_from_the_middle() {
+    let black = || full(2, 0x000000);
+    let grid = render(&project(vec![with_effect(black(), "Grid", &[(0, 20.0), (1, 2.0)])]));
+    assert!(close(pixel(&grid, 50, 50), [255, 255, 255]), "lines cross at the middle");
+    assert!(close(pixel(&grid, 70, 55), [255, 255, 255]), "and every 20 px from it");
+    assert!(close(pixel(&grid, 60, 60), [0, 0, 0]), "the cells between show the layer");
+    let faint = render(&project(vec![with_effect(black(), "Grid", &[(0, 20.0), (5, 0.0)])]));
+    assert!(close(pixel(&faint, 50, 50), [0, 0, 0]), "0% opacity hides the grid");
+
+    let checks = render(&project(vec![with_effect(black(), "Checkerboard", &[(0, 20.0), (2, 0.0), (3, 0.0)])]));
+    assert!(close(pixel(&checks, 55, 55), [255, 0, 0]), "the square right of and below the middle takes the color");
+    assert!(close(pixel(&checks, 45, 55), [0, 0, 0]) && close(pixel(&checks, 55, 45), [0, 0, 0]), "its neighbours show the layer");
+    assert!(close(pixel(&checks, 45, 45), [255, 0, 0]) && close(pixel(&checks, 75, 55), [0, 0, 0]));
+}
+
+#[test]
+fn unsharp_mask_adds_contrast_at_edges_only() {
+    // An adjustment layer sharpening a dark left half beside a light right half.
+    let halves = |values: &[(usize, f32)]| {
+        let mut adjustment = full(2, 0x000000);
+        adjustment.content = LayerContent::Adjustment;
+        let dark = solid(3, 0x404040, Vec2::new(50.0, 100.0), Vec2::new(25.0, 50.0));
+        let light = solid(4, 0xc0c0c0, Vec2::new(50.0, 100.0), Vec2::new(75.0, 50.0));
+        render(&project(vec![with_effect(adjustment, "Unsharp Mask", values), dark, light]))
+    };
+    let sharpened = halves(&[(0, 100.0), (1, 3.0)]);
+    assert!(pixel(&sharpened, 51, 50)[0] > 0xc0 + 10, "the light side of the edge gets lighter: {:?}", pixel(&sharpened, 51, 50));
+    assert!(pixel(&sharpened, 48, 50)[0] < 0x40 - 10, "the dark side gets darker: {:?}", pixel(&sharpened, 48, 50));
+    assert!(close(pixel(&sharpened, 10, 50), [0x40, 0x40, 0x40]) && close(pixel(&sharpened, 90, 50), [0xc0, 0xc0, 0xc0]), "flat areas are untouched");
+    let held_back = halves(&[(0, 100.0), (1, 3.0), (2, 255.0)]);
+    assert!(close(pixel(&held_back, 51, 50), [0xc0, 0xc0, 0xc0]), "a threshold above the edge's contrast leaves it alone");
+}
+
+#[test]
+fn the_light_sweep_band_follows_its_position() {
+    // An upright band (angle 0) on a black layer, at the left edge and then the right.
+    let swept = |position: f32| render(&project(vec![with_effect(full(2, 0x000000), "Light Sweep", &[(0, position), (1, 0.0), (2, 20.0)])]));
+    let at_left = swept(0.0);
+    assert!(pixel(&at_left, 2, 50)[0] > 100 && close(pixel(&at_left, 90, 50), [0, 0, 0]), "{:?}", pixel(&at_left, 2, 50));
+    let at_right = swept(100.0);
+    assert!(pixel(&at_right, 97, 50)[0] > 100 && close(pixel(&at_right, 10, 50), [0, 0, 0]));
 }
 
 #[test]
@@ -774,7 +917,7 @@ fn gradient_stops_and_points_place_the_colors() {
     check(&styled_shape(style), "drawn shape");
     // The same paint on a drawn path (filled by tiny-skia) puts the colors in the same places.
     let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(x, y)| studio_core::path::PathPoint::corner(Vec2::new(x, y)));
-    let path = studio_core::path::ShapePath { points: corners.to_vec(), closed: true };
+    let path = studio_core::path::ShapePath { points: corners.to_vec(), closed: true, ..Default::default() };
     let mut layer = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
     layer.content = LayerContent::Shape { style: ShapeStyle { kind: ShapeKind::Path, ..style }, path: Some(path) };
     check(&render(&project(vec![layer])), "path");
@@ -868,6 +1011,9 @@ fn effect_sheet() {
     cells.push(("Iris Wipe 80%, feather 20".into(), "Iris Wipe", vec![(0, 80.0), (1, 20.0)]));
     cells.push(("Gradient Wipe 80%".into(), "Gradient Wipe", vec![(0, 80.0)]));
     cells.push(("Blinds 30%, 45°".into(), "Venetian Blinds", vec![(0, 30.0), (1, 45.0)]));
+    cells.push(("Corner Pin, two corners in".into(), "Corner Pin", vec![(0, 40.0), (1, 20.0), (6, -30.0), (7, -40.0)]));
+    cells.push(("Lens Distortion -60%".into(), "Lens Distortion", vec![(0, -60.0)]));
+    cells.push(("Simple Choker -6 px".into(), "Simple Choker", vec![(0, -6.0)]));
     let rows = (cells.len() as u32).div_ceil(columns);
     let mut sheet = vec![0u8; (cell * columns * cell * rows * 4) as usize];
     let mut renderer = Renderer::new().unwrap();
@@ -1062,7 +1208,7 @@ fn path_layer(id: u64, closed: bool, stroke: Option<Stroke>) -> Layer {
     let mut layer = solid(id, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
     let points = [(0.5, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(x, y)| PathPoint::corner(Vec2::new(x, y))).to_vec();
     let style = ShapeStyle { fill: Some(Paint::Solid(Rgba::hex(0xffffff))), stroke, ..ShapeStyle::new(ShapeKind::Path) };
-    layer.content = LayerContent::Shape { style, path: Some(ShapePath { points, closed }) };
+    layer.content = LayerContent::Shape { style, path: Some(ShapePath { points, closed, ..Default::default() }) };
     layer
 }
 
@@ -1190,7 +1336,7 @@ fn text_set_on_a_path_follows_it() {
         let mut path = solid(2, 0, Vec2::new(80.0, 80.0), Vec2::new(50.0, 50.0));
         path.switches.visible = false;
         let points = vec![PathPoint::corner(Vec2::new(from.0, from.1)), PathPoint::corner(Vec2::new(to.0, to.1))];
-        path.content = LayerContent::Shape { style: ShapeStyle::new(ShapeKind::Path), path: Some(ShapePath { points, closed: false }) };
+        path.content = LayerContent::Shape { style: ShapeStyle::new(ShapeKind::Path), path: Some(ShapePath { points, closed: false, ..Default::default() }) };
         let style = TextStyle { font_family: "Helvetica".into(), font_size: 20.0, line_height: 24.0, fill: Some(Rgba::hex(0xffffff)), ..TextStyle::default() };
         let mut text = solid(3, 0, Vec2::new(60.0, 24.0), Vec2::new(50.0, 50.0));
         text.content = LayerContent::Text { text: "HHHH".into(), style };
@@ -1665,6 +1811,7 @@ fn morph_sheet() {
             PathPoint::smooth(Vec2::new(1.0, 0.5), Vec2::new(0.15, -0.6)),
         ],
         closed: false,
+        ..Default::default()
     };
     let mut line = solid(31, 0, Vec2::new(160.0, 80.0), Vec2::new(100.0, row_center(2)));
     line.content = LayerContent::Shape {
@@ -1981,14 +2128,15 @@ fn key_view_frame(view: studio_core::key_view::KeyView) -> studio_render::Render
 }
 
 #[test]
-fn the_selection_view_shows_what_a_key_removes_gray_and_outlines_what_it_keeps() {
+fn the_selection_view_shows_what_a_key_removes_gray_and_what_it_keeps_in_color() {
     let frame = key_view_frame(studio_core::key_view::KeyView::Selection);
     assert!(close(pixel(&frame, 80, 50), [255, 0, 0]), "kept: full color, got {:?}", pixel(&frame, 80, 50));
     let removed = pixel(&frame, 20, 50);
     let spread = removed.iter().max().unwrap() - removed.iter().min().unwrap();
     assert!(spread <= 3 && (20..120).contains(&removed[0]), "removed: dim gray, got {removed:?}");
-    let edge = pixel(&frame, 49, 50);
-    assert!(edge.iter().all(|&channel| channel > 200), "a white line at the edge, got {edge:?}");
+    // No line is drawn around what is kept: just past the edge it is already dim gray.
+    let edge = pixel(&frame, 48, 50);
+    assert!(edge.iter().all(|&channel| channel < 150), "no white line at the edge, got {edge:?}");
 }
 
 #[test]
@@ -1996,4 +2144,26 @@ fn the_matte_view_shows_kept_white_and_removed_black() {
     let frame = key_view_frame(studio_core::key_view::KeyView::Matte);
     assert!(close(pixel(&frame, 80, 50), [255, 255, 255]), "kept, got {:?}", pixel(&frame, 80, 50));
     assert!(close(pixel(&frame, 20, 50), [0, 0, 0]), "removed, got {:?}", pixel(&frame, 20, 50));
+}
+
+#[test]
+fn a_compound_path_cuts_holes_where_its_outlines_overlap() {
+    use studio_core::path::{PathPoint, ShapePath};
+    // A square ring (an outer square with an inner one) filling the frame, drawn white on black.
+    let square = |from: f32, to: f32| ShapePath {
+        points: [(from, from), (to, from), (to, to), (from, to)].iter().map(|&(x, y)| PathPoint::corner(Vec2::new(x, y))).collect(),
+        closed: true,
+        ..Default::default()
+    };
+    let ring = |even_odd: bool| {
+        let mut layer = full(2, 0xffffff);
+        let style = ShapeStyle { fill: Some(Paint::Solid(Rgba::hex(0xffffff))), ..ShapeStyle::new(ShapeKind::Path) };
+        layer.content = LayerContent::Shape { style, path: Some(ShapePath { compound: vec![square(0.3, 0.7)], even_odd, ..square(0.0, 1.0) }) };
+        render(&project(vec![layer]))
+    };
+    let frame = ring(true);
+    assert!(close(pixel(&frame, 10, 50), [255, 255, 255]), "the ring is filled: {:?}", pixel(&frame, 10, 50));
+    assert!(close(pixel(&frame, 50, 50), [0, 0, 0]), "the middle is a hole: {:?}", pixel(&frame, 50, 50));
+    // With the non-zero rule, two squares wound the same way fill solid.
+    assert!(close(pixel(&ring(false), 50, 50), [255, 255, 255]));
 }

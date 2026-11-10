@@ -337,7 +337,7 @@ fn bezier_path(value: &Value) -> Option<ShapePath> {
         return None;
     }
     let points = vertices.iter().enumerate().map(|(i, &at)| PathPoint { at, handle_in: ins.get(i).copied().unwrap_or_default(), handle_out: outs.get(i).copied().unwrap_or_default() }).collect();
-    Some(ShapePath { points, closed: value.get("c").and_then(Value::as_bool).unwrap_or(false) })
+    Some(ShapePath { points, closed: value.get("c").and_then(Value::as_bool).unwrap_or(false), ..Default::default() })
 }
 
 /// A layer's transform (`ks`).

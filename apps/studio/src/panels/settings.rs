@@ -893,7 +893,7 @@ fn shortcuts(shown: &SharedShown, workspace: &WeakEntity<Workspace>, capture: &g
                 let id = command.id;
                 let own = keys.get(id).cloned().unwrap_or_default();
                 let waiting = recording == Some(id);
-                let chips = own.iter().map(|key| div().px_2().py_0p5().rounded(px(5.0)).border_1().border_color(hsla(color::HAIRLINE)).bg(hsla(color::INSET)).text_size(px(size::SMALL_TEXT)).text_color(hsla(color::VALUE)).font_family("Menlo").child(keymap::display(key)));
+                let chips = own.iter().map(|key| div().px_2().py_0p5().rounded(px(5.0)).border_1().border_color(hsla(color::HAIRLINE)).bg(hsla(color::INSET)).text_size(px(size::SMALL_TEXT)).text_color(hsla(color::VALUE)).font_family(crate::theme::MONO_FONT).child(keymap::display(key)));
                 let change_button = {
                     let (shown, capture) = (shown.clone(), capture.clone());
                     Button::new(gpui_kit::ElementId::Name(format!("shortcut-change:{id}").into()))

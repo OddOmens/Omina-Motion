@@ -3,33 +3,55 @@
 //! playback ticks bypass the workspace and refresh only the panels that show time.
 
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui_kit::component::dock::{BasePanel, PanelEvent};
 use gpui_kit::{
-    AnyElement, Context, Entity, EntityId, IntoElement, Render, Styled as _, WeakEntity, Window, div,
+    AnyElement, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Styled as _,
+    WeakEntity, Window, div,
 };
 
-use crate::workspace::Workspace;
+use crate::workspace::{LeftPanel, PanelId, Workspace};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelKind {
     Toolbar,
-    Project,
+    /// The panel beside the rail: Media, Effects, Libraries and so on, whichever the rail picked.
+    Side,
     Viewer,
     Timeline,
     Properties,
-    Effects,
-    Libraries,
     Align,
-    Templates,
-    Captions,
-    Elements,
-    Mockups,
     Nodes,
+}
+
+impl PanelKind {
+    /// The dockable panel this view draws; `None` for the toolbar, which stays fixed at the top.
+    pub fn dock_id(self) -> Option<PanelId> {
+        Some(match self {
+            PanelKind::Toolbar => return None,
+            PanelKind::Side => PanelId::Side,
+            PanelKind::Viewer => PanelId::Composition,
+            PanelKind::Timeline => PanelId::Timeline,
+            PanelKind::Properties => PanelId::Properties,
+            PanelKind::Align => PanelId::Align,
+            PanelKind::Nodes => PanelId::Nodes,
+        })
+    }
 }
 
 /// A panel view: renders one panel from the shared workspace state.
 pub struct PanelView {
     workspace: WeakEntity<Workspace>,
-    kind: PanelKind,
+    pub kind: PanelKind,
+    /// The editor's own focus. A panel picked in the dock hands focus back to it, so keyboard
+    /// shortcuts keep working wherever the panel has been moved.
+    focus: FocusHandle,
+    /// Whether the panel is on at the moment (one turned off in Settings ▸ Features, or the
+    /// Nodes panel while it is closed, is not). The workspace sets it before the dock draws, so
+    /// the dock can leave hidden panels out without reading the workspace mid-update.
+    pub shown: Rc<Cell<bool>>,
     /// How many times this panel has rendered, so tests can check that caching works.
     #[cfg(test)]
     pub renders: usize,
@@ -39,12 +61,14 @@ pub struct PanelView {
 }
 
 impl PanelView {
-    pub fn new(workspace: &Entity<Workspace>, kind: PanelKind, cx: &mut Context<Self>) -> Self {
+    pub fn new(workspace: &Entity<Workspace>, kind: PanelKind, focus: FocusHandle, cx: &mut Context<Self>) -> Self {
         // Any edit notifies the workspace; re-render this panel when that happens.
         cx.observe(workspace, |_, _, cx| cx.notify()).detach();
         Self {
             workspace: workspace.downgrade(),
             kind,
+            focus,
+            shown: Rc::new(Cell::new(true)),
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -67,17 +91,20 @@ impl Render for PanelView {
                 use super::*;
                 match kind {
                     PanelKind::Toolbar => toolbar::render(workspace, cx).into_any_element(),
-                    PanelKind::Project => project::render(workspace, cx).into_any_element(),
+                    // The side panel shows whichever panel the rail picked.
+                    PanelKind::Side => match workspace.ui.left_panel {
+                        LeftPanel::Media => project::render(workspace, cx).into_any_element(),
+                        LeftPanel::Effects => effects::render(workspace, cx).into_any_element(),
+                        LeftPanel::Libraries => libraries::render(workspace, cx).into_any_element(),
+                        LeftPanel::Templates => templates::render(workspace, cx).into_any_element(),
+                        LeftPanel::Captions => captions::render(workspace, cx).into_any_element(),
+                        LeftPanel::Elements => elements::render(workspace, cx).into_any_element(),
+                        LeftPanel::Mockups => mockups::render(workspace, cx).into_any_element(),
+                    },
                     PanelKind::Viewer => viewer::render(workspace, window, cx).into_any_element(),
                     PanelKind::Timeline => timeline::render(workspace, window, cx).into_any_element(),
                     PanelKind::Properties => properties::render(workspace, cx).into_any_element(),
-                    PanelKind::Effects => effects::render(workspace, cx).into_any_element(),
-                    PanelKind::Libraries => libraries::render(workspace, cx).into_any_element(),
                     PanelKind::Align => align::render(workspace, cx).into_any_element(),
-                    PanelKind::Templates => templates::render(workspace, cx).into_any_element(),
-                    PanelKind::Captions => captions::render(workspace, cx).into_any_element(),
-                    PanelKind::Elements => elements::render(workspace, cx).into_any_element(),
-                    PanelKind::Mockups => mockups::render(workspace, cx).into_any_element(),
                     PanelKind::Nodes => nodes::render(workspace, cx).into_any_element(),
                 }
             })
@@ -90,12 +117,40 @@ impl Render for PanelView {
     }
 }
 
+impl EventEmitter<PanelEvent> for PanelView {}
+
+impl Focusable for PanelView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+/// How the dock sees a panel. Panels are never closed (each always has a place in the layout),
+/// and are hidden instead while they are turned off.
+impl BasePanel for PanelView {
+    fn panel_name(&self) -> &'static str {
+        self.kind.dock_id().map_or("Toolbar", PanelId::name)
+    }
+
+    fn visible(&self, _: &App) -> bool {
+        self.shown.get()
+    }
+
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+
+    fn zoomable(&self, _: &App) -> bool {
+        false
+    }
+}
+
 /// Drives playback. It renders nothing; while playing it advances the playhead from the
 /// clock each frame and refreshes only the timed panels, leaving the rest cached.
 pub struct PlaybackClock {
     workspace: WeakEntity<Workspace>,
     timed: Vec<EntityId>,
-    /// The Project panel, refreshed while its preview plays.
+    /// The side panel, refreshed while the Project panel's preview plays in it.
     project: EntityId,
 }
 

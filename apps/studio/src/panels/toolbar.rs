@@ -25,7 +25,7 @@ use studio_core::model::ShapeKind;
 
 use crate::features::Feature;
 use crate::theme::{color, hsla, size};
-use crate::workspace::{LeftPanel, NewLayer, Tool, Workspace};
+use crate::workspace::{LeftPanel, NewLayer, PanelId, Tool, Workspace};
 
 /// Width of the left rail: room for an icon and its name.
 pub const RAIL_WIDTH: f32 = 56.0;
@@ -547,16 +547,19 @@ fn shape_menu(current: ShapeKind, cx: &mut Context<Workspace>) -> impl IntoEleme
 /// The rail down the left: the panels it shows beside it (Media, Effects and so on), and
 /// getting work in and out.
 pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
-    let side = workspace.ui.left_panel;
     let keys = &workspace.ui.settings.shortcuts;
     // Panels turned off in Settings ▸ Features are left out (Media is always there).
     let panel_on = |panel: LeftPanel| workspace.ui.settings.panel_on(panel);
+    // A button switches what the side panel shows, and brings the side panel to the front
+    // wherever it has been moved to. The button for what it shows is lit.
     let show = |panel: LeftPanel| {
         move |this: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| {
             this.ui.left_panel = panel;
+            this.reveal(PanelId::Side);
             cx.notify();
         }
     };
+    let lit = |panel: LeftPanel| workspace.ui.left_panel == panel;
     div()
         .w(px(RAIL_WIDTH))
         .flex_none()
@@ -568,13 +571,13 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .py_2()
         .bg(hsla(color::BACKGROUND))
         // At the top: the side panels.
-        .child(rail_button("rail-media", IconName::Folder, "Media", side == LeftPanel::Media, show(LeftPanel::Media), cx))
-        .when(panel_on(LeftPanel::Libraries), |rail| rail.child(rail_button("rail-libraries", IconName::Library, "Libraries", side == LeftPanel::Libraries, show(LeftPanel::Libraries), cx)))
-        .when(panel_on(LeftPanel::Effects), |rail| rail.child(rail_button("rail-effects", IconName::Sparkles, "Effects", side == LeftPanel::Effects, show(LeftPanel::Effects), cx)))
-        .when(panel_on(LeftPanel::Elements), |rail| rail.child(rail_button("rail-elements", IconName::Sticker, "Elements", side == LeftPanel::Elements, show(LeftPanel::Elements), cx)))
-        .when(panel_on(LeftPanel::Templates), |rail| rail.child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", side == LeftPanel::Templates, show(LeftPanel::Templates), cx)))
-        .when(panel_on(LeftPanel::Mockups), |rail| rail.child(rail_button("rail-mockups", IconName::TabletSmartphone, "Mockups", side == LeftPanel::Mockups, show(LeftPanel::Mockups), cx)))
-        .when(panel_on(LeftPanel::Captions), |rail| rail.child(rail_button("rail-captions", IconName::Captions, "Captions", side == LeftPanel::Captions, show(LeftPanel::Captions), cx)))
+        .child(rail_button("rail-media", IconName::Folder, "Media", lit(LeftPanel::Media), show(LeftPanel::Media), cx))
+        .when(panel_on(LeftPanel::Libraries), |rail| rail.child(rail_button("rail-libraries", IconName::Library, "Libraries", lit(LeftPanel::Libraries), show(LeftPanel::Libraries), cx)))
+        .when(panel_on(LeftPanel::Effects), |rail| rail.child(rail_button("rail-effects", IconName::Sparkles, "Effects", lit(LeftPanel::Effects), show(LeftPanel::Effects), cx)))
+        .when(panel_on(LeftPanel::Elements), |rail| rail.child(rail_button("rail-elements", IconName::Sticker, "Elements", lit(LeftPanel::Elements), show(LeftPanel::Elements), cx)))
+        .when(panel_on(LeftPanel::Templates), |rail| rail.child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", lit(LeftPanel::Templates), show(LeftPanel::Templates), cx)))
+        .when(panel_on(LeftPanel::Mockups), |rail| rail.child(rail_button("rail-mockups", IconName::TabletSmartphone, "Mockups", lit(LeftPanel::Mockups), show(LeftPanel::Mockups), cx)))
+        .when(panel_on(LeftPanel::Captions), |rail| rail.child(rail_button("rail-captions", IconName::Captions, "Captions", lit(LeftPanel::Captions), show(LeftPanel::Captions), cx)))
         // At the bottom: getting work in and out (new composition ⌘N, import ⌘I, export ⌘M),
         // and Settings last.
         .child(div().flex_1())

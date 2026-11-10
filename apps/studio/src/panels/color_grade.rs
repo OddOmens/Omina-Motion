@@ -51,6 +51,27 @@ const SECTIONS: [Section; 6] = [
     Section { effect: "Vignette", title: "Vignette", key: "grade-vignette", icon: IconName::Aperture, about: "Darken the edges of the frame" },
 ];
 
+/// Whether the Color tab owns the effect called `name`: every Color Correction effect, and its
+/// own corrections from other categories (the Vignette).
+pub(crate) fn is_color_effect(name: &str) -> bool {
+    studio_core::effects::category_of(name).is_some_and(|category| category.name == "Color Correction") || SECTIONS.iter().any(|section| section.effect == name)
+}
+
+/// The Properties tab that shows the effect called `name`: Color for color effects, else Effects.
+pub(crate) fn tab_for_effect(name: &str) -> usize {
+    if is_color_effect(name) { 2 } else { 1 }
+}
+
+/// The effects on `layer` that the Color tab shows and edits (every color effect, in the
+/// order they run), when the Color tab grades that layer.
+pub(crate) fn graded_effects(workspace: &Workspace, layer: Id) -> Vec<Id> {
+    if workspace.state.grade_layer() != Some(layer) {
+        return Vec::new();
+    }
+    let effects = workspace.state.composition().layer(layer).map(|layer| layer.effects.as_slice()).unwrap_or_default();
+    effects.iter().filter(|effect| is_color_effect(&effect.name)).map(|effect| effect.id).collect()
+}
+
 /// Each color wheel's title, and its hue, amount and brightness parameters in Color Wheels.
 const WHEELS: [(&str, usize, usize, usize); 3] = [("Shadows", 0, 1, 2), ("Midtones", 3, 4, 5), ("Highlights", 6, 7, 8)];
 /// The largest and smallest a color wheel is drawn; between them it fits the panel's width.
@@ -683,27 +704,80 @@ fn add_section(workspace: &mut Workspace, section: &Section, window: &mut Window
     cx.notify();
 }
 
-/// The card for a correction the clip doesn't have yet: folded at first (it holds only a note),
-/// with a + in its heading that adds it.
-fn missing_card(section: &'static Section, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    let key = section.key;
-    // Unlike a correction's own card, this one starts folded; unfolding it is remembered.
-    let open = workspace.ui.toggled_sections.contains(key);
-    let add = heading_button(ElementId::Name(format!("grade-add:{key}").into()), IconName::Plus, "Add", false, cx.listener(move |this, _, window, cx| {
-        add_section(this, section, window, cx);
-    }));
-    let heading = CardHeading {
-        id: ElementId::Name(format!("{key}-heading").into()),
-        icon: Some(section.icon),
-        title: section.title.into(),
-        info: Some(section.about.into()),
-        open,
-        muted: false,
-        trailing: vec![Some(add.into_any_element())],
+/// The line at the top of the tab, like the Effects tab's: which clip is graded and how many
+/// corrections it has, and a + menu of corrections to add: the Color tab's own ones the clip
+/// doesn't have yet, then every other color effect (those can be added more than once).
+fn grade_line(layer: Id, added: usize, missing: Vec<&'static Section>, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let name = workspace.state.composition().layer(layer).map_or_else(String::new, |layer| layer.name.clone());
+    let count = match added {
+        0 => "no corrections".to_owned(),
+        1 => "1 correction".to_owned(),
+        count => format!("{count} corrections"),
     };
-    let body = open.then(|| super::properties::add_note().into_any_element());
+    let others: Vec<&'static str> = studio_core::effects::CATEGORIES
+        .iter()
+        .filter(|category| category.name == "Color Correction")
+        .flat_map(|category| category.effects)
+        .map(|definition| definition.name)
+        .filter(|name| !SECTIONS.iter().any(|section| section.effect == *name) && studio_render::effects::is_rendered(name))
+        .collect();
+    let weak = cx.weak_entity();
+    let add = Button::new("grade-add").outline().small().icon(Icon::new(IconName::Plus)).tooltip("Add a correction").dropdown_menu(move |mut menu, _, _| {
+        menu = menu.scrollable(true).max_h(px(420.0));
+        for section in &missing {
+            let (weak, section) = (weak.clone(), *section);
+            menu = menu.item(PopupMenuItem::new(section.title).on_click(move |_, window, cx| {
+                weak.update(cx, |this, cx| add_section(this, section, window, cx)).ok();
+            }));
+        }
+        if !missing.is_empty() {
+            menu = menu.separator();
+        }
+        menu = menu.label("More corrections");
+        for name in &others {
+            let (weak, name) = (weak.clone(), *name);
+            menu = menu.item(PopupMenuItem::new(name).on_click(move |_, window, cx| {
+                weak.update(cx, |this, cx| {
+                    if this.state.add_grade_effect(name).is_none() {
+                        window.push_notification("This clip is locked, or can't take color grading.", cx);
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+        menu
+    });
+    list_row()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .text_size(px(size::SMALL_TEXT))
+        .text_color(hsla(color::TEXT))
+        .child(Icon::new(IconName::Layers).size(px(12.0)).text_color(hsla(color::MUTED)))
+        .child(div().flex_1().min_w_0().truncate().child(format!("{name} · {count}")))
+        .child(add)
+}
+
+/// A color effect without a section of its own here (Exposure, Hue/Saturation, a second copy
+/// of a correction), as a plain card with its settings, like the Effects tab draws it.
+fn effect_card(layer: Id, effect: &studio_core::model::Effect, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let effect_id = effect.id;
+    let key = format!("grade/{}/{}", layer.0, effect_id.0);
+    // Cards start open; folding one is remembered.
+    let open = !workspace.state.expanded_rows.contains(&key);
+    let heading = CardHeading {
+        id: ElementId::Name(format!("grade-fx:{}", effect_id.0).into()),
+        icon: Some(super::effect_controls::category_icon(&effect.name)),
+        title: effect.name.clone().into(),
+        info: None,
+        open,
+        muted: !effect.enabled,
+        trailing: effect_buttons(|part| format!("grade-fx-{part}:{}", effect_id.0), layer, effect_id, effect.enabled, cx),
+    };
+    let body = open.then(|| super::effect_controls::effect_body(layer, effect, workspace, cx));
     card(heading, cx.listener(move |this, _, _, cx| {
-        this.ui.toggle_section(key);
+        this.state.toggle_row(&key);
         cx.notify();
     }), body)
     .into_any_element()
@@ -715,19 +789,26 @@ pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         let hint = "Select a clip to grade it. To grade the whole video, select an adjustment layer over it.";
         return list.child(list_row().child(super::properties::status_line(hint))).into_any_element();
     };
-    // The corrections the clip has, in the order their effects apply, then the ones it hasn't.
+    // Every color effect the clip has, in the order they run: the Color tab's own corrections
+    // with their controls, the rest as plain cards. The + adds more.
     let effects = workspace.state.composition().layer(layer).map(|layer| layer.effects.as_slice()).unwrap_or_default();
-    let mut added: Vec<(usize, Id, &'static Section)> = Vec::new();
-    let mut missing: Vec<&'static Section> = Vec::new();
-    for section in &SECTIONS {
-        match workspace.state.effect_named(layer, section.effect) {
-            Some(effect) => added.push((effects.iter().position(|candidate| candidate.id == effect).unwrap_or(usize::MAX), effect, section)),
-            None => missing.push(section),
-        }
+    let missing: Vec<&'static Section> = SECTIONS.iter().filter(|section| workspace.state.effect_named(layer, section.effect).is_none()).collect();
+    let graded: Vec<&studio_core::model::Effect> = effects.iter().filter(|effect| is_color_effect(&effect.name)).collect();
+    let list = list.child(grade_line(layer, graded.len(), missing, workspace, cx));
+    if graded.is_empty() {
+        return list.child(list_row().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("No corrections yet. Press + to add one.")).into_any_element();
     }
-    added.sort_by_key(|&(order, ..)| order);
-    let mut cards: Vec<AnyElement> = added.into_iter().map(|(_, effect, section)| section_card(section, layer, effect, workspace, cx)).collect();
-    cards.extend(missing.into_iter().map(|section| missing_card(section, workspace, cx)));
+    let cards: Vec<AnyElement> = graded
+        .into_iter()
+        .map(|effect| {
+            // The first of each of the Color tab's own corrections gets its section's controls.
+            let section = SECTIONS.iter().find(|section| section.effect == effect.name && workspace.state.effect_named(layer, section.effect) == Some(effect.id));
+            match section {
+                Some(section) => section_card(section, layer, effect.id, workspace, cx),
+                None => effect_card(layer, effect, workspace, cx),
+            }
+        })
+        .collect();
     list.children(cards).into_any_element()
 }
 

@@ -93,6 +93,30 @@ pub struct AppSettings {
     pub package_in_progress: Option<PathBuf>,
     /// The eyedropper's current color, the colors it picked lately, and the saved swatches.
     pub colors: SavedColors,
+    /// Where the panels were moved to (the dock's saved layout; see `panels::dock`). `None` for
+    /// the standard arrangement. Kept as plain JSON so a layout this version can't read is
+    /// simply replaced by the standard one rather than spoiling the other settings.
+    pub workspace_layout: Option<serde_json::Value>,
+    /// Panel layouts saved under a name (Window ▸ Workspace), as in After Effects. The built-in
+    /// Standard workspace isn't stored here.
+    #[serde(deserialize_with = "read_saved_workspaces")]
+    pub saved_workspaces: Vec<SavedWorkspace>,
+    /// The workspace picked in Window ▸ Workspace, by name; `None` for Standard.
+    pub current_workspace: Option<String>,
+}
+
+/// A panel layout saved under a name.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedWorkspace {
+    pub name: String,
+    /// The dock's saved layout, kept as plain JSON for the same reason as `workspace_layout`.
+    pub layout: serde_json::Value,
+}
+
+/// Reads the saved workspaces, skipping any entry that can't be read rather than losing them all.
+fn read_saved_workspaces<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<SavedWorkspace>, D::Error> {
+    let entries = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(entries.into_iter().filter_map(|entry| serde_json::from_value(entry).ok()).collect())
 }
 
 /// What Studio shows when it starts.
@@ -316,6 +340,9 @@ impl Default for AppSettings {
             export_in_progress: None,
             package_in_progress: None,
             colors: SavedColors::default(),
+            workspace_layout: None,
+            saved_workspaces: Vec::new(),
+            current_workspace: None,
         }
     }
 }

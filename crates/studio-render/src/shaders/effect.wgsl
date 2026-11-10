@@ -653,6 +653,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // Offset: p0.x, p0.y shift (% of the frame). The picture wraps around, so what leaves one
         // edge comes back at the other.
         case 68u: { return textureSampleLevel(src, linear_sampler, fract(uv - u.p0.xy / 100.0), 0.0); }
+        // Transform: p0.xy move (output pixels), p0.z scale (%), p0.w rotation (deg, clockwise),
+        // p1.x opacity (%). Each output pixel looks up where it came from: undo the move, then
+        // the turn, then the scale, about the middle of the frame. Outside the picture is clear.
+        case 86u: {
+            let scale = max(u.p0.z / 100.0, 0.0001);
+            let turn = radians(u.p0.w);
+            let cos_t = cos(turn);
+            let sin_t = sin(turn);
+            let moved = pixel - center * size - u.p0.xy;
+            let unturned = vec2(cos_t * moved.x + sin_t * moved.y, -sin_t * moved.x + cos_t * moved.y);
+            let came_from = unturned / scale / size + center;
+            if (any(came_from < vec2(0.0)) || any(came_from > vec2(1.0))) {
+                return vec4(0.0);
+            }
+            return textureSampleLevel(src, linear_sampler, came_from, 0.0) * clamp(u.p1.x / 100.0, 0.0, 1.0);
+        }
         // Motion Tile: p0.x tiles across, p0.y tiles down, p0.z mirror edges (1 flips every other
         // tile so neighbours meet seamlessly). The middle tile stays centered.
         case 69u: {
@@ -835,6 +851,232 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let bent = select(0.5 + 0.5 * (c.a - level) / (1.0 - level), 0.5 * c.a / level, c.a < level);
             let a = clamp((bent - 0.5) / max(u.p0.y, 0.001) + 0.5, 0.0, 1.0);
             return vec4(a, a, a, a);
+        }
+        // Box Blur, one direction: p0.x radius (px), p0.yz direction. An even average of the
+        // pixels within the radius; wide blurs space their taps out (at most 129 each pass).
+        case 87u: {
+            let reach = floor(u.p0.x);
+            if (reach < 1.0) {
+                return c;
+            }
+            let direction = u.p0.yz / size;
+            let step = max(1.0, ceil(reach / 64.0));
+            var total = vec4(0.0);
+            var count = 0.0;
+            for (var offset = -reach; offset <= reach; offset += step) {
+                total += textureSampleLevel(src, linear_sampler, uv + direction * offset, 0.0);
+                count += 1.0;
+            }
+            return total / count;
+        }
+        // Corner Pin: p0.xyz, p1.xyz and p2.xyz are the rows of the mapping from an output pixel
+        // back to the pixel of the unpinned picture it shows (worked out on the CPU from the
+        // layer's box and its moved corners). Outside the pinned shape is clear.
+        case 88u: {
+            let at = vec3(pixel, 1.0);
+            let source = vec3(dot(u.p0.xyz, at), dot(u.p1.xyz, at), dot(u.p2.xyz, at));
+            // A point behind the "camera" (w not positive) belongs to no part of the picture.
+            if (source.z <= 0.0) {
+                return vec4(0.0);
+            }
+            return sample(source.xy / source.z / size);
+        }
+        // Lens Distortion: p0.x curvature (%). Each pixel reads from further out (positive, a
+        // barrel bulge) or further in (negative, a pincushion) the further it is from the middle.
+        case 89u: {
+            let half_size = size * 0.5;
+            let offset = pixel - half_size;
+            let r2 = dot(offset, offset) / max(dot(half_size, half_size), 1.0);
+            let k = clamp(u.p0.x, -100.0, 100.0) / 100.0 * 0.5;
+            return sample((half_size + offset * (1.0 + k * r2)) / size);
+        }
+        // Spherize: p0.x amount (%, -100 to 100), p0.y radius (% of half the shorter side). Inside
+        // the radius the picture is seen as if wrapped on a ball: arcsine spacing magnifies the
+        // middle (positive), sine spacing shrinks it (negative). The rim stays put.
+        case 90u: {
+            let offset = pixel - size * 0.5;
+            let radius = u.p0.y / 100.0 * 0.5 * min(size.x, size.y);
+            let distance = length(offset);
+            if (radius < 1.0 || distance >= radius || distance < 0.001) {
+                return c;
+            }
+            let t = distance / radius;
+            let amount = clamp(u.p0.x / 100.0, -1.0, 1.0);
+            let swollen = mix(t, asin(t) * 2.0 / PI, max(amount, 0.0));
+            let reached = mix(swollen, sin(t * PI * 0.5), max(-amount, 0.0));
+            return sample((size * 0.5 + offset * (reached / t)) / size);
+        }
+        // Unsharp Mask, combine: the picture plus (picture - blurred copy in aux) × p0.x amount,
+        // where their brightness differs by more than p0.y (0-1 of display brightness).
+        case 91u: {
+            let blurred = textureSampleLevel(aux, linear_sampler, uv, 0.0);
+            let contrast = abs(dot(to_display(c.rgb), LUMA) - dot(to_display(blurred.rgb), LUMA));
+            let gate = clamp((contrast - u.p0.y) * 255.0 + 1.0, 0.0, 1.0);
+            let sharpened = max(c + (c - blurred) * u.p0.x * gate, vec4(0.0));
+            return vec4(sharpened.rgb, min(sharpened.a, 1.0));
+        }
+        // Channel Mixer, on display values: p0.xyz red from red, green, blue (%); p0.w, p1.xy
+        // green from them; p1.zw, p2.x blue from them.
+        case 92u: {
+            let v = to_display(rgb);
+            let mixed = vec3(dot(v, u.p0.xyz), dot(v, vec3(u.p0.w, u.p1.x, u.p1.y)), dot(v, vec3(u.p1.z, u.p1.w, u.p2.x))) / 100.0;
+            return with_alpha(to_linear(mixed), c.a);
+        }
+        // Shadow/Highlight: p0.x shadow amount, p0.y highlight amount (%). Dark tones (strongest
+        // a third of the way up) are brightened and bright tones (two thirds up) darkened, by
+        // scaling the color so its hue and saturation hold. Black and white stay put.
+        case 93u: {
+            let v = to_display(rgb);
+            let y = clamp(dot(v, LUMA), 0.0, 1.0);
+            // 6.75 scales each bump so it peaks at 1; 0.35 is the most a slider can move a tone.
+            let lift = u.p0.x / 100.0 * 0.35 * 6.75 * y * (1.0 - y) * (1.0 - y);
+            let drop = u.p0.y / 100.0 * 0.35 * 6.75 * (1.0 - y) * y * y;
+            let ratio = select((y + lift - drop) / y, 1.0, y < 0.0001);
+            return with_alpha(to_linear(v * ratio), c.a);
+        }
+        // Tritone: p0.xyz highlights, p0.w p1.xy midtones, p1.zw p2.x shadows (0-255 display
+        // values), p2.y blend with original (%). Brightness runs from the shadow color through
+        // the midtone color to the highlight color.
+        case 94u: {
+            let v = to_display(rgb);
+            let y = clamp(dot(v, LUMA), 0.0, 1.0);
+            let highlights = u.p0.xyz / 255.0;
+            let midtones = vec3(u.p0.w, u.p1.x, u.p1.y) / 255.0;
+            let shadows = vec3(u.p1.z, u.p1.w, u.p2.x) / 255.0;
+            let toned = select(mix(midtones, highlights, y * 2.0 - 1.0), mix(shadows, midtones, y * 2.0), y < 0.5);
+            return with_alpha(to_linear(mix(toned, v, clamp(u.p2.y / 100.0, 0.0, 1.0))), c.a);
+        }
+        // Selective Color: saturation and lightness changes (-100 to 100) for reds, yellows,
+        // greens, cyans, blues and magentas, in that order, two to each pair of parameters. Each
+        // color family is 60° of hue wide and blends into its neighbours; the lightness change
+        // is scaled by how colorful the pixel is, so grays don't move.
+        case 95u: {
+            let v = clamp(to_display(rgb), vec3(0.0), vec3(1.0));
+            var hsl = rgb_to_hsl(v);
+            let chroma = max(v.r, max(v.g, v.b)) - min(v.r, min(v.g, v.b));
+            var settings = array<vec4<f32>, 3>(u.p0, u.p1, u.p2);
+            var saturation = 0.0;
+            var lightness = 0.0;
+            for (var family = 0u; family < 6u; family++) {
+                let hue_distance = abs(fract(hsl.x - f32(family) / 6.0 + 0.5) - 0.5) * 6.0;
+                let weight = max(1.0 - hue_distance, 0.0);
+                let pair = settings[family / 2u];
+                let change = select(pair.xy, pair.zw, family % 2u == 1u);
+                saturation += weight * change.x;
+                lightness += weight * change.y;
+            }
+            hsl.y = clamp(hsl.y * (1.0 + saturation / 100.0), 0.0, 1.0);
+            hsl.z = clamp(hsl.z + lightness / 100.0 * 0.5 * chroma, 0.0, 1.0);
+            return with_alpha(to_linear(hsl_to_rgb(hsl)), c.a);
+        }
+        // Simple Choker: p0.x choke (px). Positive keeps the smallest alpha found within the
+        // radius (the edge moves in); negative keeps the largest, with that sample's color (the
+        // edge moves out). Reads past the frame's edge clamp to it, so footage filling the frame
+        // isn't eaten from its borders.
+        case 96u: {
+            let reach = abs(u.p0.x);
+            if (reach < 0.25) {
+                return c;
+            }
+            let shrink = u.p0.x > 0.0;
+            if (shrink && c.a <= 0.0) {
+                return c;
+            }
+            var alpha = c.a;
+            var widest = c;
+            for (var ring = 1; ring <= 3; ring++) {
+                let radius = reach * f32(ring) / 3.0;
+                for (var i = 0; i < 16; i++) {
+                    let angle = (f32(i) + f32(ring) * 0.33) / 16.0 * 2.0 * PI;
+                    let at = clamp(uv + vec2(cos(angle), sin(angle)) * radius / size, vec2(0.0), vec2(1.0));
+                    let s = textureSampleLevel(src, linear_sampler, at, 0.0);
+                    alpha = min(alpha, s.a);
+                    if (s.a > widest.a) {
+                        widest = s;
+                    }
+                }
+            }
+            if (shrink) {
+                return c * (alpha / c.a);
+            }
+            return widest;
+        }
+        // Luma Key: p0.x threshold, p0.y tolerance, p0.z softness (% of display brightness),
+        // p0.w invert (1 keeps only the matching brightness). Brightness within the tolerance of
+        // the threshold turns clear, fading back in over the softness.
+        case 97u: {
+            let brightness = clamp(dot(to_display(rgb), LUMA), 0.0, 1.0) * 100.0;
+            let distance = abs(brightness - u.p0.x);
+            var keep = smoothstep(u.p0.y, u.p0.y + max(u.p0.z, 0.01), distance);
+            if (u.p0.w >= 0.5) {
+                keep = 1.0 - keep;
+            }
+            return c * keep;
+        }
+        // Grid: p0.x cell size (px), p0.y line width (px), p0.zw p1.x color (0-255 display
+        // values), p1.y opacity (%). Lines run through the frame's middle and every cell size
+        // from it, drawn over the layer's own color (its alpha is kept).
+        case 98u: {
+            let cell = max(u.p0.x, 1.0);
+            let from_line = abs(fract((pixel - size * 0.5) / cell + 0.5) - 0.5) * cell;
+            let width = max(u.p0.y, 0.0);
+            // Lines thinner than a pixel fade instead of breaking up.
+            let cover = clamp(width * 0.5 - min(from_line.x, from_line.y) + 0.5, 0.0, 1.0) * min(width, 1.0) * clamp(u.p1.y / 100.0, 0.0, 1.0);
+            let line_color = to_linear(vec3(u.p0.z, u.p0.w, u.p1.x) / 255.0);
+            return with_alpha(mix(rgb, line_color, cover), c.a);
+        }
+        // Checkerboard: p0.x square size (px), p0.yzw color (0-255 display values), p1.x opacity
+        // (%). Squares start at the frame's middle; every other one takes the color.
+        case 99u: {
+            let cell = floor((pixel - size * 0.5) / max(u.p0.x, 1.0));
+            let parity = cell.x + cell.y;
+            let odd = abs(parity - 2.0 * floor(parity * 0.5));
+            let cover = (1.0 - odd) * clamp(u.p1.x / 100.0, 0.0, 1.0);
+            return with_alpha(mix(rgb, to_linear(u.p0.yzw / 255.0), cover), c.a);
+        }
+        // 4-Color Gradient: top-left p0.xyz, top-right p0.w p1.xy, bottom-left p1.zw p2.x and
+        // bottom-right p2.yzw (0-255 display values), blended across the frame. The layer's
+        // alpha is kept.
+        case 100u: {
+            let top = mix(u.p0.xyz, vec3(u.p0.w, u.p1.x, u.p1.y), uv.x);
+            let bottom = mix(vec3(u.p1.z, u.p1.w, u.p2.x), u.p2.yzw, uv.x);
+            return with_alpha(to_linear(mix(top, bottom, uv.y) / 255.0), c.a);
+        }
+        // Light Sweep: p0.x position (% across the frame), p0.y angle (deg; 0 is an upright band
+        // moving left to right), p0.z width (px), p0.w softness (% of the width that fades),
+        // p1.x intensity (%). White light is added where the layer is (light, not coverage).
+        case 101u: {
+            let angle = radians(u.p0.y);
+            let across = vec2(cos(angle), sin(angle));
+            let extent = abs(across.x) * size.x + abs(across.y) * size.y;
+            let along = dot(pixel - size * 0.5, across) + extent * 0.5;
+            let distance = abs(along - u.p0.x / 100.0 * extent);
+            let half_width = max(u.p0.z, 1.0) * 0.5;
+            let solid = min(half_width * (1.0 - clamp(u.p0.w / 100.0, 0.0, 1.0)), half_width - 0.5);
+            let light = (1.0 - smoothstep(solid, half_width + 0.5, distance)) * u.p1.x / 100.0;
+            return vec4(c.rgb + vec3(light) * c.a, c.a);
+        }
+        // Lens Flare: p0.xy center (% of the frame), p0.z brightness (%). A hot core in a warm
+        // haze, a thin sideways streak, a faint ring, and colored discs ("ghosts") along the line
+        // from the center through the middle of the frame. Added as light where the layer is.
+        case 102u: {
+            let shorter = min(size.x, size.y);
+            let source = u.p0.xy / 100.0 * size;
+            let offset = (pixel - source) / shorter;
+            let distance = length(offset);
+            let core = exp(-distance * distance * 60.0) * 1.2;
+            let haze = exp(-distance * 10.0) * 0.3;
+            let streak = exp(-abs(offset.y) * 160.0) * exp(-abs(offset.x) * 3.0) * 0.5;
+            let ring = exp(-pow((distance - 0.2) * 40.0, 2.0)) * 0.1;
+            var light = vec3(core) + vec3(1.0, 0.8, 0.55) * haze + vec3(0.7, 0.85, 1.0) * streak + vec3(0.9, 0.95, 1.0) * ring;
+            let toward_middle = size * 0.5 - source;
+            for (var i = 0; i < 4; i++) {
+                let ghost_center = source + toward_middle * (0.6 + f32(i) * 0.5);
+                let ghost_radius = shorter * (0.02 + 0.02 * f32((i * 3) % 4));
+                let disc = 1.0 - smoothstep(ghost_radius * 0.6, ghost_radius, length(pixel - ghost_center));
+                light += hsl_to_rgb(vec3(fract(0.1 + f32(i) * 0.27), 0.8, 0.6)) * disc * 0.08;
+            }
+            return vec4(c.rgb + light * u.p0.z / 100.0 * c.a, c.a);
         }
         default: { return c; }
     }

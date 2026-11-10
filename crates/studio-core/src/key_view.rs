@@ -3,13 +3,13 @@
 //! viewer can show its result as usual, or one of these views, built here as a copy of the
 //! project that the ordinary renderer draws. Nothing here is written to the real project.
 
-use crate::model::{Composition, Id, Layer, Project};
+use crate::model::{Id, Layer, Project};
 
 /// How the viewer shows a keyed layer instead of its plain result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyView {
-    /// What is kept in full color with a white line around its edge, and what is removed still
-    /// visible, but gray and dark, so both the selection and its surroundings can be seen.
+    /// What is kept in full color, and what is removed still visible, but gray and dark, so
+    /// both the selection and its surroundings can be seen.
     Selection,
     /// The layer alone in black and white: white is kept, black is removed, gray is partly
     /// see-through. Shows holes and rough edges a busy picture hides.
@@ -68,18 +68,17 @@ pub fn preview(project: &Project, comp_id: Id, layer_id: Id, view: KeyView) -> O
     // The copy sits under the layer, where its matte (the layer above) would now be the layer
     // itself, so it uses none.
     whole.track_matte = crate::model::TrackMatte::None;
+    // Fresh ids for the copy's effects, with a node graph (if the layer has one) pointed at them.
+    crate::effect_graph::reassign_ids(&mut whole, || project.allocate_id());
     for effect in &mut whole.effects {
-        effect.id = project.allocate_id();
         if is_keying_effect(&effect.name) {
             effect.enabled = false;
         }
     }
-    let line = edge_line_width(project.composition(comp_id)?);
     match view {
         KeyView::Selection => {
             add(&mut project, &mut whole, "Black & White", &[(0, 100.0), (1, 0.0)]);
             add(&mut project, &mut whole, "Exposure", &[(0, REMOVED_EXPOSURE)]);
-            add(&mut project, &mut keyed, "Stroke", &[(0, line), (1, 100.0)]);
         }
         KeyView::Matte => {
             // Black wherever the picture is, white where the key keeps it.
@@ -98,12 +97,6 @@ pub fn preview(project: &Project, comp_id: Id, layer_id: Id, view: KeyView) -> O
     composition.layers[index] = keyed;
     composition.layers.insert(index + 1, whole);
     Some(project)
-}
-
-/// The width of the line drawn around what is kept, in composition pixels: about 3 pixels on a
-/// 1080p frame, and never under 1.5, so it shows at any size.
-fn edge_line_width(composition: &Composition) -> f32 {
-    (composition.width.max(composition.height) as f32 / 640.0).max(1.5)
 }
 
 /// Appends the catalog effect `name` to `layer`, with the parameters listed as (index, value)
@@ -160,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn the_selection_view_draws_the_whole_picture_dimmed_under_the_kept_part_outlined() {
+    fn the_selection_view_draws_the_whole_picture_dimmed_under_the_kept_part() {
         let (mut project, layer) = with_footage();
         crate::edit::add_effect(&mut project, ids::MAIN_COMP, layer, "Keyer").unwrap();
         crate::edit::add_effect(&mut project, ids::MAIN_COMP, layer, "Spill Suppressor").unwrap();
@@ -174,7 +167,7 @@ mod tests {
         let index = comp.layers.iter().position(|candidate| candidate.id == layer).unwrap();
         let (keyed, whole) = (&comp.layers[index], &comp.layers[index + 1]);
         assert!(keyed.cutout.is_some());
-        assert_eq!(effect_names(keyed), [("Keyer", true), ("Spill Suppressor", true), ("Gaussian Blur", true), ("Stroke", true)]);
+        assert_eq!(effect_names(keyed), [("Keyer", true), ("Spill Suppressor", true), ("Gaussian Blur", true)], "no line is drawn around the kept part");
         assert_ne!(whole.id, layer);
         assert!(whole.cutout.is_none(), "the copy underneath shows the whole picture");
         assert_eq!(effect_names(whole), [("Keyer", false), ("Spill Suppressor", false), ("Gaussian Blur", true), ("Black & White", true), ("Exposure", true)]);
@@ -186,6 +179,21 @@ mod tests {
         assert_eq!(ids.len(), total);
         // The real project is left alone.
         assert_eq!(project.composition(ids::MAIN_COMP).unwrap().layers.len(), count);
+
+        // On a layer wired as nodes, the copy's graph points at the copy's own effects.
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let wired = comp.layer_mut(layer).unwrap();
+        crate::effect_graph::connect(wired, crate::effect_graph::NodeId::Source, crate::effect_graph::NodeId::Output, crate::effect_graph::InputPort::Main).unwrap();
+        let blur = wired.effects[2].id;
+        crate::effect_graph::connect(wired, crate::effect_graph::NodeId::Effect(blur), crate::effect_graph::NodeId::Output, crate::effect_graph::InputPort::Main).unwrap();
+        let shown = preview(&project, ids::MAIN_COMP, layer, KeyView::Selection).unwrap();
+        let comp = shown.composition(ids::MAIN_COMP).unwrap();
+        let index = comp.layers.iter().position(|candidate| candidate.id == layer).unwrap();
+        let whole = &comp.layers[index + 1];
+        let copied_blur = crate::effect_graph::NodeId::Effect(whole.effects[2].id);
+        // The view's dimming goes in after it, just before the Output.
+        let dimming = crate::effect_graph::NodeId::Effect(whole.effects[3].id);
+        assert_eq!(crate::effect_graph::source_of(whole, dimming, crate::effect_graph::InputPort::Main), Some(copied_blur));
     }
 
     #[test]

@@ -19,8 +19,9 @@ use super::chrome::{EmptyDragView, MeasuredBounds, Rect, panel};
 use crate::theme::{color, hsla, size};
 use crate::workspace::{PanelId, Workspace};
 
-/// Heights of the bars above the tracks.
-const CONTROLS_BAND: f32 = 40.0;
+/// Heights of the bars above the tracks. The transport bar is drawn in the Timeline's tab row
+/// (see `panels::dock`), which takes its height.
+pub const CONTROLS_BAND: f32 = 40.0;
 const RULER_BAND: f32 = 28.0;
 /// How close, in screen pixels, a drag has to come to something before it snaps there.
 const SNAP_PIXELS: f64 = 8.0;
@@ -275,9 +276,10 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                         .left(relative(playhead))
                         .ml(px(-7.0))
                         .w(px(14.0))
-                        // A white pill head on a thin white line.
+                        // A pill head in the time color on a thin white line. (The line stays
+                        // white because it crosses the clips, and must read over any clip color.)
                         .child(div().absolute().top_0().bottom_0().left(px(6.5)).w(px(1.0)).bg(hsla(color::PLAYHEAD)))
-                        .child(div().absolute().bottom(px(2.0)).left_0().w(px(14.0)).h(px(18.0)).rounded(px(7.0)).bg(hsla(color::PLAYHEAD))),
+                        .child(div().absolute().bottom(px(2.0)).left_0().w(px(14.0)).h(px(18.0)).rounded(px(7.0)).bg(hsla(color::TIME))),
                 )),
         )
 }
@@ -335,7 +337,9 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
         .relative()
         .min_h_full()
         .flex()
-        .px(px(EDGE_GUTTER))
+        .pr(px(EDGE_GUTTER))
+        .child(tracks::headers(workspace, cx))
+        .child(div().w(px(EDGE_GUTTER)).flex_none())
         .child(ui.rows.probe())
         // Alt + scroll zooms around the pointer.
         .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
@@ -368,9 +372,23 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
             this.apply_timeline_drag(drag, f32::from(event.event.position.x), f32::from(event.event.position.y));
             cx.notify();
         }))
-        .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().child(tracks::toolbar(workspace, cx))))
-        .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().mx(px(EDGE_GUTTER)).child(navigator(workspace, cx))))
-        .child(band(RULER_BAND).child(div().flex_1().min_w_0().mx(px(EDGE_GUTTER)).child(ruler(workspace, cx))))
+        // The navigator and ruler leave room on the left for the track headers below them, so all
+        // three share the time column's x range.
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .child(tracks::headers_top(workspace, CONTROLS_BAND + RULER_BAND, RULER_BAND, cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(band(CONTROLS_BAND).child(div().flex_1().min_w_0().mx(px(EDGE_GUTTER)).child(navigator(workspace, cx))))
+                        .child(band(RULER_BAND).child(div().flex_1().min_w_0().mx(px(EDGE_GUTTER)).child(ruler(workspace, cx)))),
+                ),
+        )
         .child(div().relative().flex_1().min_h_0().child(ui.viewport.probe()).child(div().id("timeline-rows").size_full().overflow_y_scroll().child(rows_content)))
         .children(empty_hint(workspace));
 
@@ -388,6 +406,12 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
 
     // The composition's name is in the toolbar row, beside the transport.
     panel(PanelId::Timeline, &[], Some(footer.into_any_element()), body, workspace, cx)
+}
+
+/// The transport bar: composition name, playback controls and track view buttons. The dock
+/// draws it in the Timeline's tab row.
+pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    tracks::toolbar(workspace, cx)
 }
 
 /// A soft green band behind the ruler's numbers where frames have been rendered ahead (as in
@@ -417,10 +441,10 @@ fn empty_hint(workspace: &Workspace) -> Option<impl IntoElement + use<>> {
         div()
             .id("timeline-empty-hint")
             .absolute()
-            .left_0()
             .right_0()
             .bottom_0()
-            .top(px(CONTROLS_BAND * 2.0 + RULER_BAND))
+            .top(px(CONTROLS_BAND + RULER_BAND))
+            .left(px(tracks::HEADER_WIDTH))
             .flex()
             .flex_col()
             .items_center()

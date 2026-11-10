@@ -33,6 +33,41 @@ pub struct AudioClip {
     pub duck_db: f32,
     /// How strongly background sound is turned down between louder sound, 0 to 100.
     pub noise_gate: f32,
+    /// Effects on the sound, in the order they run: the layer's own, then those of the
+    /// composition layers it plays inside, innermost first.
+    pub effects: Vec<ClipEffect>,
+}
+
+/// A sound effect on a clip, with the clock its keyframes are read on: the layer's effect,
+/// where its composition's frame 0 falls on the played timeline, and that composition's frame
+/// rate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipEffect {
+    pub effect: crate::model::Effect,
+    pub shift_seconds: f64,
+    pub fps: f64,
+}
+
+impl ClipEffect {
+    /// The effect's settings at `seconds` of the played timeline, in catalog order.
+    pub fn settings_at(&self, seconds: f64) -> Vec<f32> {
+        let frame = (seconds - self.shift_seconds) * self.fps;
+        self.effect.properties.iter().map(|property| property.value.value_at(frame)).collect()
+    }
+}
+
+/// The sound effects of `layer` that are switched on, on a clock that starts `shift_seconds`
+/// into the played timeline at `fps`.
+fn sound_effects(layer: &crate::model::Layer, shift_seconds: f64, fps: f64) -> Vec<ClipEffect> {
+    if !layer.switches.effects_enabled {
+        return Vec::new();
+    }
+    layer
+        .effects
+        .iter()
+        .filter(|effect| effect.enabled && crate::effects::is_audio(&effect.name))
+        .map(|effect| ClipEffect { effect: effect.clone(), shift_seconds, fps })
+        .collect()
 }
 
 impl AudioClip {
@@ -52,6 +87,7 @@ impl AudioClip {
             duck_under: None,
             duck_db: 0.0,
             noise_gate: 0.0,
+            effects: Vec::new(),
         }
     }
 
@@ -97,7 +133,7 @@ const MAX_DEPTH: usize = 8;
 /// be played.
 pub fn composition_audio(project: &Project, composition: &Composition) -> Vec<AudioClip> {
     let mut clips = Vec::new();
-    let everything = Placement { shift: 0.0, window: (f64::NEG_INFINITY, f64::INFINITY), gain: 1.0, fades: Vec::new(), chain: Vec::new(), duck: None, noise_gate: 0.0 };
+    let everything = Placement { shift: 0.0, window: (f64::NEG_INFINITY, f64::INFINITY), gain: 1.0, fades: Vec::new(), chain: Vec::new(), duck: None, noise_gate: 0.0, effects: Vec::new() };
     collect(project, composition, &everything, &mut clips);
     clips
 }
@@ -144,6 +180,8 @@ struct Placement {
     duck: Option<(Id, f32)>,
     /// The strongest noise gate set on the composition layers.
     noise_gate: f32,
+    /// The sound effects of the composition layers, innermost first, on their own clocks.
+    effects: Vec<ClipEffect>,
 }
 
 impl Placement {
@@ -198,6 +236,9 @@ fn collect(project: &Project, composition: &Composition, placement: &Placement, 
                 let duck = placement.duck.or_else(|| ducks_under(composition, layer).map(|under| (placement.key(under), duck_db(layer))));
                 let mut chain = placement.chain.clone();
                 chain.push(layer.id);
+                // This composition layer's own sound effects run before those around it.
+                let mut effects = sound_effects(layer, placement.shift, fps);
+                effects.extend(placement.effects.iter().cloned());
                 let nested = Placement {
                     shift: starts,
                     window,
@@ -206,6 +247,7 @@ fn collect(project: &Project, composition: &Composition, placement: &Placement, 
                     chain,
                     duck,
                     noise_gate: placement.noise_gate.max(layer.audio.noise_gate.clamp(0.0, 100.0)),
+                    effects,
                 };
                 collect(project, inner, &nested, clips);
             }
@@ -244,6 +286,7 @@ fn own_clip(project: &Project, composition: &Composition, layer: &crate::model::
         duck_under: ducks_under(composition, layer),
         duck_db: duck_db(layer),
         noise_gate: layer.audio.noise_gate.clamp(0.0, 100.0),
+        effects: sound_effects(layer, 0.0, fps),
     })
 }
 
@@ -294,6 +337,12 @@ fn placed(mut clip: AudioClip, placement: &Placement) -> Option<AudioClip> {
         }
     }
     clip.noise_gate = clip.noise_gate.max(placement.noise_gate);
+    // The clip's own effects keep their keyframes in step as it moves; the composition
+    // layers' effects follow.
+    for effect in &mut clip.effects {
+        effect.shift_seconds += placement.shift;
+    }
+    clip.effects.extend(placement.effects.iter().cloned());
     Some(clip)
 }
 
@@ -440,6 +489,31 @@ mod tests {
         // The layer shows from 2 s and fades in over a second: half way up at 2.5 s.
         assert!((nested.level_at(2.5) - 0.5).abs() < 0.001, "level {}", nested.level_at(2.5));
         assert!((nested.level_at(3.5) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn sound_effects_run_inside_out_with_their_keyframes_on_their_own_clocks() {
+        let (mut project, outer, shown, inner, footage) = nested_sound();
+        // A Gain on the footage, rising from 0 dB at inner frame 30 (1 s) to -12 dB at frame 60.
+        edit::add_effect(&mut project, inner, footage, "Gain").unwrap();
+        edit::add_effect(&mut project, inner, footage, "Gaussian Blur").unwrap();
+        let gain = project.composition_mut(inner).unwrap().layer_mut(footage).unwrap();
+        gain.effects[0].properties[0].value = crate::animation::Animated::keyframed(vec![crate::animation::Keyframe::linear(30, 0.0), crate::animation::Keyframe::linear(60, -12.0)]);
+        // A Pan on the composition layer around it, and one that is switched off.
+        edit::add_effect(&mut project, outer, shown, "Pan").unwrap();
+        edit::add_effect(&mut project, outer, shown, "Echo").unwrap();
+        project.composition_mut(outer).unwrap().layer_mut(shown).unwrap().effects[1].enabled = false;
+
+        let clip = &sound_of(&project, outer)[0];
+        let names: Vec<&str> = clip.effects.iter().map(|effect| effect.effect.name.as_str()).collect();
+        assert_eq!(names, ["Gain", "Pan"], "picture effects and switched-off ones are left out; the inner layer's run first");
+        // The inner composition starts 2 s into the outer one, so its frame 45 (1.5 s) is at 3.5 s.
+        assert!((clip.effects[0].settings_at(3.5)[0] + 6.0).abs() < 1e-4, "{:?}", clip.effects[0].settings_at(3.5));
+
+        // With the layer's effects switch off, its sound effects are off too.
+        project.composition_mut(inner).unwrap().layer_mut(footage).unwrap().switches.effects_enabled = false;
+        let clip = &sound_of(&project, outer)[0];
+        assert_eq!(clip.effects.len(), 1);
     }
 
     #[test]

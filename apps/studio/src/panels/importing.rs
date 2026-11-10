@@ -35,7 +35,8 @@ pub struct ImportJob {
 type ProjectFile = (PathBuf, PathBuf);
 
 /// Imports `paths` (files and folders) in the background, then runs `then` with the new items.
-/// After Effects projects and Lottie animations come in as compositions of their own.
+/// After Effects projects, Lottie animations and SVG drawings come in as compositions of their
+/// own.
 pub fn start(workspace: &mut Workspace, paths: Vec<PathBuf>, then: Option<Then>, window: &mut Window, cx: &mut Context<Workspace>) {
     if workspace.ui.import_job.is_some() {
         window.push_notification("An import is already running. Wait for it, or cancel it.", cx);
@@ -44,7 +45,7 @@ pub fn start(workspace: &mut Workspace, paths: Vec<PathBuf>, then: Option<Then>,
     // Subtitle files become caption layers rather than project items; they are read on their own.
     let (subtitle_files, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| studio_core::subtitles::SubtitleFormat::from_path(path).is_some());
     super::subtitles::import(workspace, subtitle_files, window, cx);
-    let (projects, media): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| ["aep", "aepx", "json"].iter().any(|extension| crate::state::is_extension(path, extension)));
+    let (projects, media): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| ["aep", "aepx", "json", "svg"].iter().any(|extension| crate::state::is_extension(path, extension)));
     // XML projects can't be read; say so straight away rather than after the rest.
     let (xml, projects): (Vec<_>, Vec<_>) = projects.into_iter().partition(|path| crate::state::is_extension(path, "aepx"));
     for path in xml {
@@ -54,6 +55,10 @@ pub fn start(workspace: &mut Workspace, paths: Vec<PathBuf>, then: Option<Then>,
     if projects.is_empty() && media.is_empty() {
         return;
     }
+    // An SVG comes in at the open composition's frame rate and length, so it can be broken
+    // into shapes there.
+    let open = workspace.state.composition();
+    let timing = (open.frame_rate.fps(), open.duration_frames as f64 / open.frame_rate.fps());
     let projects: Vec<ProjectFile> = projects.into_iter().map(|path| {
         let assets = workspace.imported_assets_folder(&path);
         (path, assets)
@@ -86,7 +91,7 @@ pub fn start(workspace: &mut Workspace, paths: Vec<PathBuf>, then: Option<Then>,
                 return finish(&this, cx, None);
             }
             let reading = path.clone();
-            let read = background.spawn(async move { crate::state::read_project_file(&reading, &assets) }).await;
+            let read = background.spawn(async move { crate::state::read_project_file(&reading, &assets, timing) }).await;
             read_projects.push((path, read));
             still_going(&this, cx, None, true);
         }

@@ -14,7 +14,7 @@ use gpui_kit::{Context, RenderImage, Window};
 use studio_core::grade::Lut;
 use studio_core::model::{Id, LutSource, Project};
 
-use crate::workspace::{LeftPanel, PanelId, Workspace};
+use crate::workspace::{PanelId, Workspace};
 
 /// How wide the frame is drawn for the previews, in pixels (twice the largest tile, for sharp
 /// pictures on high-density screens).
@@ -105,7 +105,7 @@ pub fn sources(workspace: &Workspace) -> Vec<LutSource> {
 
 /// Whether a panel showing LUT previews is open.
 fn wanted(workspace: &Workspace) -> bool {
-    workspace.ui.left_panel == LeftPanel::Effects || chosen_effect(workspace).is_some()
+    workspace.showing(PanelId::Effects) || chosen_effect(workspace).is_some()
 }
 
 /// Makes the frame and a few missing LUT pictures, and asks for another redraw while any are

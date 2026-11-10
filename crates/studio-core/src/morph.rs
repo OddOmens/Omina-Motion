@@ -80,10 +80,7 @@ pub fn outline(style: &ShapeStyle, size: Vec2) -> Option<ShapePath> {
     let points = match style.kind {
         ShapeKind::Path => return None,
         ShapeKind::Ellipse => ellipse(half),
-        ShapeKind::Rectangle => {
-            let inner = Vec2::new(half.x - radius, half.y - radius);
-            rounded_polygon(&[Vec2::new(-inner.x, -inner.y), Vec2::new(inner.x, -inner.y), Vec2::new(inner.x, inner.y), Vec2::new(-inner.x, inner.y)], radius)
-        }
+        ShapeKind::Rectangle => rounded_rectangle(half, radius),
         ShapeKind::Triangle => {
             // Point up, base along the bottom; rounding shrinks it toward its incenter first.
             let corners = [Vec2::new(0.0, -half.y), Vec2::new(half.x, half.y), Vec2::new(-half.x, half.y)];
@@ -116,7 +113,53 @@ pub fn outline(style: &ShapeStyle, size: Vec2) -> Option<ShapePath> {
     let to_box = |v: Vec2| Vec2::new((v.x + half.x) / size.x.max(1e-4), (v.y + half.y) / size.y.max(1e-4));
     let to_box_offset = |v: Vec2| Vec2::new(v.x / size.x.max(1e-4), v.y / size.y.max(1e-4));
     let points = points.into_iter().map(|point| PathPoint { at: to_box(point.at), handle_in: to_box_offset(point.handle_in), handle_out: to_box_offset(point.handle_out) }).collect();
-    Some(ShapePath { points, closed: true })
+    Some(ShapePath { points, closed: true, ..Default::default() })
+}
+
+/// A rectangle with half size `half`, centered on the origin, its corners rounded by quarter
+/// circles of `radius` (at most half its shorter side). Built directly rather than by rounding a
+/// shrunk polygon, because a pill (radius half the height) or a circle shrinks to a line or a
+/// point, which has no corners left to round. Clockwise on screen from the top-left corner.
+fn rounded_rectangle(half: Vec2, radius: f32) -> Vec<PathPoint> {
+    let inner = Vec2::new(half.x - radius, half.y - radius);
+    let reach = radius * QUARTER_CIRCLE_HANDLE;
+    // Each corner's circle center, and the angle (y pointing down) its quarter arc starts at.
+    let corners = [
+        (Vec2::new(-inner.x, -inner.y), PI),
+        (Vec2::new(inner.x, -inner.y), PI * 1.5),
+        (Vec2::new(inner.x, inner.y), 0.0),
+        (Vec2::new(-inner.x, inner.y), FRAC_PI_2),
+    ];
+    let mut points: Vec<PathPoint> = Vec::new();
+    for (center, start) in corners {
+        let end = start + FRAC_PI_2;
+        let on_circle = |angle: f32| center + Vec2::new(angle.cos(), angle.sin()) * radius;
+        // Moving along the arc as the angle grows.
+        let tangent = |angle: f32| Vec2::new(-angle.sin(), angle.cos()) * reach;
+        points.push(PathPoint { at: on_circle(start), handle_in: Vec2::default(), handle_out: tangent(start) });
+        points.push(PathPoint { at: on_circle(end), handle_in: tangent(end) * -1.0, handle_out: Vec2::default() });
+    }
+    merge_touching_points(points)
+}
+
+/// Joins neighboring points of a closed outline that sit in the same place (where one arc ends
+/// and the next begins, with no straight side between them) into one point that keeps the
+/// incoming handle of the first and the outgoing handle of the second.
+fn merge_touching_points(points: Vec<PathPoint>) -> Vec<PathPoint> {
+    const SAME_PLACE: f32 = 1e-4;
+    let mut merged: Vec<PathPoint> = Vec::with_capacity(points.len());
+    for point in points {
+        match merged.last_mut() {
+            Some(last) if (last.at - point.at).length() < SAME_PLACE => last.handle_out = point.handle_out,
+            _ => merged.push(point),
+        }
+    }
+    // The outline is closed, so its last point may touch its first.
+    if merged.len() > 1 && (merged[merged.len() - 1].at - merged[0].at).length() < SAME_PLACE {
+        let last = merged.pop().expect("there are at least two points");
+        merged[0].handle_in = last.handle_in;
+    }
+    merged
 }
 
 /// The point `distance` from the center at `angle` clockwise from straight up (y pointing up).
@@ -319,13 +362,13 @@ pub fn resample(path: &ShapePath, count: usize) -> ShapePath {
         let last = path.points[path.points.len() - 1];
         points.push(PathPoint { at: last_piece[3], handle_in: last_piece[2] - last_piece[3], handle_out: last.handle_out });
     }
-    ShapePath { points, closed: path.closed }
+    ShapePath { points, closed: path.closed, ..Default::default() }
 }
 
 /// The same outline drawn the other way round.
 pub fn reversed(path: &ShapePath) -> ShapePath {
     let points = path.points.iter().rev().map(|point| PathPoint { at: point.at, handle_in: point.handle_out, handle_out: point.handle_in }).collect();
-    ShapePath { points, closed: path.closed }
+    ShapePath { points, closed: path.closed, ..Default::default() }
 }
 
 /// A closed outline as an open one that runs all the way round, ending where it starts; an
@@ -338,7 +381,7 @@ fn opened(path: &ShapePath) -> ShapePath {
     let first = points[0];
     points[0].handle_in = Vec2::default();
     points.push(PathPoint { at: first.at, handle_in: first.handle_in, handle_out: Vec2::default() });
-    ShapePath { points, closed: false }
+    ShapePath { points, closed: false, ..Default::default() }
 }
 
 /// How far apart two outlines with the same number of points are, point by point, with `to`
@@ -407,7 +450,7 @@ pub fn morph(from: &ShapePath, to: &ShapePath, t: f32) -> ShapePath {
         .zip(&end.points)
         .map(|(a, b)| PathPoint { at: a.at.lerp(b.at, t), handle_in: a.handle_in.lerp(b.handle_in, t), handle_out: a.handle_out.lerp(b.handle_out, t) })
         .collect();
-    ShapePath { points, closed: if t < 0.5 { from.closed } else { to.closed } }
+    ShapePath { points, closed: if t < 0.5 { from.closed } else { to.closed }, ..Default::default() }
 }
 
 impl Blend for ShapePath {
@@ -842,7 +885,7 @@ mod tests {
 
     fn square() -> ShapePath {
         let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)].map(|(x, y)| PathPoint::corner(Vec2::new(x, y)));
-        ShapePath { points: corners.to_vec(), closed: true }
+        ShapePath { points: corners.to_vec(), closed: true, ..Default::default() }
     }
 
     fn circle() -> ShapePath {
@@ -868,9 +911,9 @@ mod tests {
             let angle = index as f32 / MAX_PATH_POINTS as f32 * std::f32::consts::TAU;
             PathPoint { at: Vec2::new(angle.cos(), angle.sin()), handle_in: Vec2::default(), handle_out: Vec2::default() }
         });
-        let circle = ShapePath { points: points.collect(), closed: true };
+        let circle = ShapePath { points: points.collect(), closed: true, ..Default::default() };
         let corner = |at: Vec2| PathPoint { at, handle_in: Vec2::default(), handle_out: Vec2::default() };
-        let line = ShapePath { points: vec![corner(Vec2::new(0.0, 0.0)), corner(Vec2::new(1.0, 1.0))], closed: false };
+        let line = ShapePath { points: vec![corner(Vec2::new(0.0, 0.0)), corner(Vec2::new(1.0, 1.0))], closed: false, ..Default::default() };
         assert!(circle.is_sound() && line.is_sound());
         let halfway = morph(&circle, &line, 0.5);
         assert!(halfway.is_sound());
@@ -890,7 +933,7 @@ mod tests {
         let on_top: Vec<f32> = square_16.points.iter().filter(|point| point.at.y.abs() < 1e-5).map(|point| point.at.x).collect();
         assert_eq!(on_top.len(), 5, "the top edge's two corners and three new points");
         // An open path keeps its two ends.
-        let line = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.0)), PathPoint::corner(Vec2::new(10.0, 0.0))], closed: false };
+        let line = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.0)), PathPoint::corner(Vec2::new(10.0, 0.0))], closed: false, ..Default::default() };
         let line_5 = resample(&line, 5);
         // (Evenly spaced along the line, to within the precision lengths are measured to.)
         for (point, x) in line_5.points.iter().zip([0.0, 2.5, 5.0, 7.5, 10.0]) {
@@ -916,7 +959,7 @@ mod tests {
             assert!(close(x.at, y.at, 1e-5), "{:?} vs {:?}", x.at, y.at);
         }
         // An open line drawn backwards is turned round.
-        let line = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.0)), PathPoint::corner(Vec2::new(10.0, 0.0))], closed: false };
+        let line = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.0)), PathPoint::corner(Vec2::new(10.0, 0.0))], closed: false, ..Default::default() };
         let (a, b) = matched(&line, &reversed(&line));
         assert!(close(a.points[0].at, b.points[0].at, 1e-5));
     }
@@ -942,7 +985,7 @@ mod tests {
 
     #[test]
     fn closed_into_open_opens_halfway() {
-        let line = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.5)), PathPoint::corner(Vec2::new(1.0, 0.5))], closed: false };
+        let line = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.5)), PathPoint::corner(Vec2::new(1.0, 0.5))], closed: false, ..Default::default() };
         assert!(morph(&square(), &line, 0.25).closed);
         let late = morph(&square(), &line, 0.75);
         assert!(!late.closed && late.is_sound());
@@ -977,6 +1020,30 @@ mod tests {
         assert_eq!(sharp.points.len(), 4);
         assert!(close(sharp.points[0].at, Vec2::new(0.0, 0.0), 1e-6));
         assert!(outline(&ShapeStyle::new(ShapeKind::Path), size).is_none());
+    }
+
+    #[test]
+    fn a_pill_and_a_fully_rounded_square_keep_their_shape() {
+        // A pill: the corner radius is half the height, so the sides have no straight part left.
+        let size = Vec2::new(300.0, 100.0);
+        let style = ShapeStyle { corner_radius: 50.0, ..ShapeStyle::new(ShapeKind::Rectangle) };
+        let pill = outline(&style, size).unwrap();
+        assert!(pill.is_sound() && pill.closed);
+        let (min, max) = pill.bounds().unwrap();
+        assert!(close(min, Vec2::new(0.0, 0.0), 1e-3) && close(max, Vec2::new(1.0, 1.0), 1e-3), "fills its box, not a circle in the middle: {min:?} {max:?}");
+        let in_pixels = pill.mapped(|v| Vec2::new(v.x * size.x, v.y * size.y));
+        // Its ends are half circles around (50, 50) and (250, 50).
+        for point in trace(&in_pixels) {
+            let center = Vec2::new(point.x.clamp(50.0, 250.0), 50.0);
+            assert!(((point - center).length() - 50.0).abs() < 0.5, "{point:?} is on the pill's outline");
+        }
+        // Where two quarter arcs meet with no side between them they make one smooth point.
+        assert_eq!(pill.points.len(), 6);
+        // A square rounded all the way is a circle of four smooth points.
+        let square = Vec2::new(100.0, 100.0);
+        let round = outline(&style, square).unwrap();
+        assert_eq!(round.points.len(), 4);
+        assert!(same_outline(&round, &circle(), 0.01) && same_outline(&circle(), &round, 0.01));
     }
 
     #[test]
@@ -1098,7 +1165,7 @@ mod tests {
         // A keyframe outline with one point can't be drawn.
         let mut broken = project.clone();
         let morph = broken.composition_mut(comp).unwrap().layer_mut(square).unwrap().morph.as_mut().unwrap();
-        morph.path.set_at(20, ShapePath { points: vec![PathPoint::default()], closed: true });
+        morph.path.set_at(20, ShapePath { points: vec![PathPoint::default()], closed: true, ..Default::default() });
         assert!(crate::project_file::check(&broken).unwrap_err().contains("broken morph"));
         // Nor can a drawn box shape carry one.
         let mut misplaced = project.clone();

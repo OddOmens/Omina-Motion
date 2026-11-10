@@ -71,22 +71,29 @@ pub fn rasterize(path: &ShapePath, style: &ShapeStyle, size: Vec2, scale: f32, m
     let (width, height) = (side(covered.x), side(covered.y));
     let mut pixmap = Pixmap::new(width, height)?;
 
-    let mut builder = PathBuilder::new();
-    let first = pixels_path.points[0].at;
-    builder.move_to(first.x, first.y);
-    for [_, control_a, control_b, end] in pixels_path.segments() {
-        builder.cubic_to(control_a.x, control_a.y, control_b.x, control_b.y, end.x, end.y);
-    }
-    if path.closed {
-        builder.close();
-    }
-    let outline = builder.finish()?;
+    // Every outline goes into one shape (a compound path's too), so they fill together and an
+    // outline inside another can cut a hole. Only closed outlines are filled.
+    let build = |closed_only: bool| {
+        let mut builder = PathBuilder::new();
+        for outline in pixels_path.outlines().filter(|outline| outline.points.len() >= 2 && (!closed_only || outline.closed)) {
+            let first = outline.points[0].at;
+            builder.move_to(first.x, first.y);
+            for [_, control_a, control_b, end] in outline.segments() {
+                builder.cubic_to(control_a.x, control_a.y, control_b.x, control_b.y, end.x, end.y);
+            }
+            if outline.closed {
+                builder.close();
+            }
+        }
+        builder.finish()
+    };
+    let outline = build(false)?;
     // Layer pixels → raster pixels.
     let to_raster = Transform::from_row(scale, 0.0, 0.0, scale, -origin.x * scale, -origin.y * scale);
     let paint_with = |paint: Paint| tiny_skia::Paint { shader: shader(paint, size), anti_alias: true, ..Default::default() };
-    // Only a closed path has an inside to fill.
-    if let (Some(fill), true) = (style.fill, path.closed) {
-        pixmap.fill_path(&outline, &paint_with(fill), FillRule::Winding, to_raster, None);
+    let rule = if path.even_odd { FillRule::EvenOdd } else { FillRule::Winding };
+    if let (Some(fill), Some(filled)) = (style.fill, build(true)) {
+        pixmap.fill_path(&filled, &paint_with(fill), rule, to_raster, None);
     }
     if let Some(stroke) = style.stroke.filter(|stroke| stroke.width > 0.0) {
         let line = tiny_skia::Stroke { width: stroke.width, line_join: LineJoin::Miter, line_cap: if path.closed { LineCap::Butt } else { LineCap::Round }, ..Default::default() };

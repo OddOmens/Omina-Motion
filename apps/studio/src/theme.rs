@@ -1,6 +1,7 @@
 //! Studio's palettes and element sizes. The layout follows After Effects; the default colors
-//! are neutral near-blacks with a violet accent and brightly colored clips, as in modern
-//! motion tools.
+//! are near-blacks with a slight cool, inky cast, a violet accent for selection, and one lime
+//! "time" color for everything that marks a moment (the playhead's handle, the current
+//! timecode, the snap guide).
 //!
 //! Panels name colors by the constants in `color` (the Dark theme's values) and turn them into
 //! GPUI colors with `hsla`, which swaps in the active theme's color for each one. So a theme
@@ -15,32 +16,38 @@ use serde::{Deserialize, Serialize};
 
 /// Palette as 0xRRGGBB values.
 pub mod color {
+    // The Dark theme's surfaces are not pure greys: each leans slightly blue, which gives the
+    // app its own cast and lets the lime time color and the clip colors stand out.
     /// The window behind the panels, and the gaps between them.
-    pub const BACKGROUND: u32 = 0x070708;
-    pub const PANEL: u32 = 0x111112;
+    pub const BACKGROUND: u32 = 0x07080b;
+    pub const PANEL: u32 = 0x111318;
     /// Wells inside a panel (fields, lists, the timeline's rows).
-    pub const INSET: u32 = 0x0c0c0d;
+    pub const INSET: u32 = 0x0c0d11;
     /// Around the composition frame in the viewer.
-    pub const PASTEBOARD: u32 = 0x0a0a0b;
-    pub const BORDER: u32 = 0x040405;
-    pub const HAIRLINE: u32 = 0x1e1e21;
-    pub const HOVER: u32 = 0x1b1b1e;
+    pub const PASTEBOARD: u32 = 0x0a0b0e;
+    pub const BORDER: u32 = 0x040507;
+    pub const HAIRLINE: u32 = 0x1f222a;
+    pub const HOVER: u32 = 0x1b1e25;
     pub const ROW_SELECTED: u32 = 0x251f3a;
-    pub const TEXT: u32 = 0xededef;
-    pub const MUTED: u32 = 0x85858c;
+    pub const TEXT: u32 = 0xeceef2;
+    pub const MUTED: u32 = 0x838893;
     /// Selection, focus and active controls: a violet, as in the motion tools this is styled on.
     pub const ACCENT: u32 = 0x8b5cf6;
     pub const VALUE: u32 = 0xa78bfa;
+    /// Studio's signature lime, used only for things that mark a moment in time: the playhead's
+    /// handle, the current timecode and the snap guide. (One step off `HIGHLIGHT`, so a theme
+    /// can give it a darker shade where lime would not show.)
+    pub const TIME: u32 = 0xd4f25d;
     /// The guide line showing where a timeline drag snapped.
-    pub const SNAP: u32 = 0xd4f25c;
+    pub const SNAP: u32 = TIME;
     /// The bright lime used for the one call to action on screen (Export).
     pub const HIGHLIGHT: u32 = 0xd4f25c;
     pub const WORK_AREA: u32 = 0x3a3150;
-    pub const NAVIGATOR_THUMB: u32 = 0x2f2f35;
+    pub const NAVIGATOR_THUMB: u32 = 0x2e323c;
     /// Menus, dialogs and other surfaces that float above the panels.
-    pub const POPOVER: u32 = 0x161618;
+    pub const POPOVER: u32 = 0x16181e;
     /// Buttons and other raised controls at rest.
-    pub const RAISED: u32 = 0x18181b;
+    pub const RAISED: u32 = 0x181b21;
     /// The playhead: white, so it reads over any clip color. (One step off pure white, so the
     /// Light theme can tell it apart from white used for other things.)
     pub const PLAYHEAD: u32 = 0xfffffe;
@@ -55,9 +62,14 @@ pub mod size {
     pub const TEXT: f32 = 12.0;
     pub const SMALL_TEXT: f32 = 11.0;
     pub const GUTTER: f32 = 6.0;
-    /// Corner radius of panels: square, so panels meet the window and each other cleanly.
-    pub const PANEL_RADIUS: f32 = 0.0;
+    /// Corner radius of panels: gently rounded, so each reads as its own slab on the darker
+    /// window behind it.
+    pub const PANEL_RADIUS: f32 = 6.0;
 }
+
+/// The fixed-width font for timecodes, frame counts and property values, so digits keep their
+/// place while a value changes.
+pub const MONO_FONT: &str = "Menlo";
 
 /// The app's look: how light the surfaces are.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +135,7 @@ impl Accent {
 }
 
 /// The palette colors a theme sets, in this order.
-const KEYS: [u32; 17] = [
+const KEYS: [u32; 18] = [
     color::BACKGROUND,
     color::PANEL,
     color::INSET,
@@ -141,6 +153,7 @@ const KEYS: [u32; 17] = [
     color::POPOVER,
     color::RAISED,
     color::PLAYHEAD,
+    color::TIME,
 ];
 
 /// A theme's surfaces and text: background, panel, inset, pasteboard, border, hairline, hover,
@@ -166,7 +179,7 @@ fn mix(a: u32, b: u32, amount: f32) -> u32 {
 }
 
 /// The colors standing in for `KEYS` in a theme with an accent.
-fn palette(theme: ThemeName, accent: Accent) -> [u32; 17] {
+fn palette(theme: ThemeName, accent: Accent) -> [u32; 18] {
     let Surfaces([background, panel, inset, pasteboard, border, hairline, hover, text, muted, thumb, popover, raised, playhead]) = surfaces(theme);
     let accent = accent.value();
     let light = theme == ThemeName::Light;
@@ -175,12 +188,14 @@ fn palette(theme: ThemeName, accent: Accent) -> [u32; 17] {
     let selected = mix(panel, accent, if light { 0.18 } else { 0.16 });
     let value = if light { mix(accent, 0x000000, 0.2) } else { mix(accent, 0xffffff, 0.25) };
     let work_area = mix(panel, accent, if light { 0.35 } else { 0.28 });
-    [background, panel, inset, pasteboard, border, hairline, hover, selected, text, muted, accent, value, work_area, thumb, popover, raised, playhead]
+    // Lime disappears on light surfaces, so the Light theme uses a dark olive of the same hue.
+    let time = if light { 0x5a7a00 } else { color::TIME };
+    [background, panel, inset, pasteboard, border, hairline, hover, selected, text, muted, accent, value, work_area, thumb, popover, raised, playhead, time]
 }
 
 thread_local! {
     /// The active theme's colors for `KEYS`. The UI runs on one thread, so this is per thread.
-    static ACTIVE: RefCell<[u32; 17]> = const { RefCell::new(KEYS) };
+    static ACTIVE: RefCell<[u32; 18]> = const { RefCell::new(KEYS) };
 }
 
 /// A palette color (one of the `color` constants, or any 0xRRGGBB) as a GPUI color, in the
@@ -244,6 +259,9 @@ mod tests {
         let light = palette(ThemeName::Light, Accent::Blue);
         assert_eq!(light[10], 0x3b82f6);
         assert_ne!(light[1], color::PANEL, "light panels");
+        // The time color is lime on dark surfaces and a darker shade on light ones.
+        assert_eq!(dark[17], color::TIME);
+        assert!(light[17] < color::TIME, "a darker time color on light panels");
         // Text on panels stays readable: dark on light.
         assert!(light[8] < 0x404040 && dark[8] > 0xc0c0c0);
     }

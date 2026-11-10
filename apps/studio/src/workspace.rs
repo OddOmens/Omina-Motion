@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::component::resizable::{h_resizable, resizable_panel, v_resizable};
+use gpui_kit::component::dock::{DockArea, DockAreaState, DockEvent};
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, DragMoveEvent, Entity, FocusHandle, InteractiveElement, IntoElement,
@@ -69,6 +69,7 @@ actions!(studio, [
     OpenSettings,
     Precompose,
     UngroupComposition,
+    SearchEffects,
     MorphTo,
     FlipHorizontal,
     FlipVertical,
@@ -107,8 +108,19 @@ actions!(studio, [
     ZoomWindow,
     ToggleFullScreen,
     AboutStudio,
-    CheckForUpdates
+    CheckForUpdates,
+    ResetWorkspace,
+    SaveWorkspaceAs,
+    UpdateWorkspace,
+    DeleteWorkspace
 ]);
+
+/// Window ▸ Workspace: switches to the workspace named `name` (`None` for Standard).
+#[derive(Clone, PartialEq, gpui_kit::Action)]
+#[action(namespace = studio, no_json)]
+pub struct SwitchWorkspace {
+    pub name: Option<String>,
+}
 
 /// File ▸ Open Recent: opens the project at `path`.
 #[derive(Clone, PartialEq, gpui_kit::Action)]
@@ -249,8 +261,30 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::action("Zoom", ZoomWindow),
             MenuItem::separator(),
             MenuItem::action("Enter Full Screen", ToggleFullScreen),
+            MenuItem::separator(),
+            MenuItem::submenu(workspace_menu(&settings)),
         ]),
     ]
+}
+
+/// Window ▸ Workspace: the workspaces to switch between (the current one checked), then saving,
+/// updating, deleting and resetting them. Standard is built in, so it can't be updated or deleted.
+fn workspace_menu(settings: &crate::app_settings::AppSettings) -> gpui_kit::Menu {
+    use gpui_kit::{Menu, MenuItem};
+    let current = settings.current_workspace.as_deref();
+    let mut items = vec![MenuItem::action(panels::workspaces::STANDARD, SwitchWorkspace { name: None }).checked(current.is_none())];
+    items.extend(settings.saved_workspaces.iter().map(|saved| {
+        MenuItem::action(saved.name.clone(), SwitchWorkspace { name: Some(saved.name.clone()) }).checked(current == Some(saved.name.as_str()))
+    }));
+    items.extend([
+        MenuItem::separator(),
+        MenuItem::action("Save as New Workspace…", SaveWorkspaceAs),
+        MenuItem::action("Update Current Workspace", UpdateWorkspace).disabled(current.is_none()),
+        MenuItem::action("Delete Workspace…", DeleteWorkspace).disabled(current.is_none()),
+        MenuItem::separator(),
+        MenuItem::action("Reset Workspace", ResetWorkspace),
+    ]);
+    Menu::new("Workspace").items(items)
 }
 
 /// A menu's items without the ones left out (`None`), and without the separators that would
@@ -271,7 +305,7 @@ fn tidy_menu(items: impl IntoIterator<Item = Option<gpui_kit::MenuItem>>) -> Vec
     kept
 }
 
-/// What the panel beside the rail shows.
+/// What the side panel (the one beside the rail) shows, picked with the rail's buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeftPanel {
     /// The project's media and compositions.
@@ -308,6 +342,9 @@ pub enum PanelId {
     Mockups,
     /// The node graph of the selected layer's effects.
     Nodes,
+    /// The side panel beside the rail, as a whole: it shows one of Project, Effects, Libraries,
+    /// Templates, Captions, Elements or Mockups (see `UiState::left_panel`), and is moved as one.
+    Side,
 }
 
 /// The editing tools on the rail.
@@ -366,20 +403,32 @@ pub struct ProjectItemDrag {
 
 #[derive(Clone, Debug)]
 pub struct EffectDrag {
+    /// The catalog effect, or for a preset, its name (shown while dragging).
     pub name: String,
     /// For Apply LUT dragged from the panel's LUTs: the table it uses.
     pub lut: Option<studio_core::model::LutSource>,
+    /// For one of the user's presets (My Presets): which one.
+    pub preset: Option<studio_core::model::LinkId>,
 }
 
 impl EffectDrag {
-    /// Adds the dragged effect to `layer`.
+    /// Adds the dragged effect, or the preset's effects, to `layer`.
     pub fn apply(&self, state: &mut EditorState, layer: Id) {
-        match &self.lut {
-            Some(lut) => {
+        match (&self.preset, &self.lut) {
+            (Some(preset), _) => {
+                state.apply_effect_preset(*preset, &[layer]);
+            }
+            (None, Some(lut)) => {
                 state.add_lut(layer, lut.clone());
             }
-            None => state.add_effect(layer, &self.name),
+            (None, None) => state.add_effect(layer, &self.name),
         }
+    }
+
+    /// Whether dropping it on a layer showing `content` does anything. A preset goes on any
+    /// layer (what doesn't suit it is left out); an effect only on layers it suits.
+    pub fn suits(&self, content: &studio_core::model::LayerContent) -> bool {
+        self.preset.is_some() || studio_core::effects::suits_layer(&self.name, content)
     }
 }
 
@@ -489,8 +538,16 @@ pub struct EditingField {
 /// UI-only state that is not part of the project or the editing model.
 pub struct UiState {
     pub active_panel: PanelId,
-    /// What the panel beside the rail shows.
+    /// What the side panel shows, picked on the rail.
     pub left_panel: LeftPanel,
+    /// Panels to bring to the front of their tab group on the next draw (a rail button asks for
+    /// one, say). The dock needs the window to change, which only the draw has to hand.
+    pub reveal_panels: Vec<PanelId>,
+    /// The panels on screen as of this draw: each the front tab of its group, and turned on.
+    pub showing_panels: HashSet<PanelId>,
+    /// Set while the standard arrangement is being put back, so the dock's report of that
+    /// change doesn't save it as a custom arrangement (with sizes not yet measured).
+    pub layout_resetting: bool,
     pub tool: Tool,
     /// The shape the Shape tool draws, picked from the rail's shape menu.
     pub shape_kind: studio_core::model::ShapeKind,
@@ -515,8 +572,6 @@ pub struct UiState {
     /// Whether folders and sections start open instead. Only the UI tests turn this on, so they
     /// can reach controls without unfolding everything first.
     pub sections_start_open: bool,
-    /// Panels in the right column collapsed to their header.
-    pub collapsed_panels: HashSet<PanelId>,
     /// Library brands the user folded away (all are open to begin with).
     pub closed_brands: HashSet<studio_core::model::LinkId>,
     /// Effect categories the user unfolded (all are closed to begin with, so the panel opens
@@ -619,6 +674,8 @@ pub struct UiState {
     /// copy failed or was cancelled, which aren't tried again until their settings change.
     pub enhance_job: Option<panels::enhance::EnhanceJob>,
     pub enhance_skipped: Vec<(Id, studio_core::model::SpeechEnhance)>,
+    /// The quick effect search (⌘Return), while it is open.
+    pub effect_search: Option<panels::effect_search::EffectSearch>,
     /// The layer whose object matte is being painted: strokes in the viewer go to it.
     pub cutout_pick: Option<Id>,
     /// The stroke being painted in the viewer, if a press is under way.
@@ -730,42 +787,56 @@ pub struct Workspace {
     pub render: panels::viewer::ViewerRender,
     /// The composition's sound, kept in step with playback.
     sound: Sound,
-    focus: FocusHandle,
+    pub(crate) focus: FocusHandle,
     panels: Panels,
+    /// Where the panels sit: the dock that lets them be moved, and its saved arrangement.
+    dock: Entity<DockArea>,
+    _dock_events: Subscription,
 }
 
 /// The cached panel views and the playback clock (see `panels::views`).
 struct Panels {
     toolbar: Entity<PanelView>,
-    project: Entity<PanelView>,
+    /// The side panel, which shows the Project panel or another picked on the rail.
+    side: Entity<PanelView>,
     viewer: Entity<PanelView>,
     timeline: Entity<PanelView>,
     properties: Entity<PanelView>,
-    effects: Entity<PanelView>,
-    libraries: Entity<PanelView>,
     align: Entity<PanelView>,
-    templates: Entity<PanelView>,
-    captions: Entity<PanelView>,
-    elements: Entity<PanelView>,
-    mockups: Entity<PanelView>,
     nodes: Entity<PanelView>,
     clock: Entity<PlaybackClock>,
 }
 
 impl Panels {
-    fn new(cx: &mut Context<Workspace>) -> Self {
+    fn new(focus: &FocusHandle, cx: &mut Context<Workspace>) -> Self {
         let workspace = cx.entity();
-        let mut view = |kind| cx.new(|cx| PanelView::new(&workspace, kind, cx));
-        let (toolbar, project, viewer, timeline) =
-            (view(PanelKind::Toolbar), view(PanelKind::Project), view(PanelKind::Viewer), view(PanelKind::Timeline));
-        let (properties, effects, align) = (view(PanelKind::Properties), view(PanelKind::Effects), view(PanelKind::Align));
-        let libraries = view(PanelKind::Libraries);
-        let (templates, captions, elements) = (view(PanelKind::Templates), view(PanelKind::Captions), view(PanelKind::Elements));
-        let mockups = view(PanelKind::Mockups);
-        let nodes = view(PanelKind::Nodes);
+        let mut view = |kind| cx.new(|cx| PanelView::new(&workspace, kind, focus.clone(), cx));
+        let (toolbar, side, viewer, timeline) =
+            (view(PanelKind::Toolbar), view(PanelKind::Side), view(PanelKind::Viewer), view(PanelKind::Timeline));
+        let (properties, align, nodes) = (view(PanelKind::Properties), view(PanelKind::Align), view(PanelKind::Nodes));
         let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id()];
-        let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed, project.entity_id()));
-        Self { toolbar, project, viewer, timeline, properties, effects, libraries, align, templates, captions, elements, mockups, nodes, clock }
+        let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed, side.entity_id()));
+        Self { toolbar, side, viewer, timeline, properties, align, nodes, clock }
+    }
+
+    /// The view that draws dockable panel `id`.
+    fn view(&self, id: PanelId) -> &Entity<PanelView> {
+        match id {
+            PanelId::Composition => &self.viewer,
+            PanelId::Timeline => &self.timeline,
+            PanelId::Properties => &self.properties,
+            PanelId::Align => &self.align,
+            PanelId::Nodes => &self.nodes,
+            // The panels the side panel shows are all drawn by it.
+            PanelId::Side
+            | PanelId::Project
+            | PanelId::Effects
+            | PanelId::Libraries
+            | PanelId::Templates
+            | PanelId::Captions
+            | PanelId::Elements
+            | PanelId::Mockups => &self.side,
+        }
     }
 }
 
@@ -774,14 +845,45 @@ impl Workspace {
     /// How many times each panel has rendered, in `PanelKind` order: toolbar, project, viewer,
     /// timeline, properties, effects, libraries, align.
     /// How long each panel has spent rendering, in the same order.
-    pub fn panel_render_times(&self, cx: &App) -> [std::time::Duration; 12] {
+    pub fn panel_render_times(&self, cx: &App) -> [std::time::Duration; 7] {
         let p = &self.panels;
-        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions, &p.elements, &p.mockups].map(|view| view.read(cx).render_time)
+        [&p.toolbar, &p.side, &p.viewer, &p.timeline, &p.properties, &p.align, &p.nodes].map(|view| view.read(cx).render_time)
     }
 
-    pub fn panel_render_counts(&self, cx: &App) -> [usize; 12] {
+    pub fn panel_render_counts(&self, cx: &App) -> [usize; 7] {
         let p = &self.panels;
-        [&p.toolbar, &p.project, &p.viewer, &p.timeline, &p.properties, &p.effects, &p.libraries, &p.align, &p.templates, &p.captions, &p.elements, &p.mockups].map(|view| view.read(cx).renders)
+        [&p.toolbar, &p.side, &p.viewer, &p.timeline, &p.properties, &p.align, &p.nodes].map(|view| view.read(cx).renders)
+    }
+}
+
+#[cfg(test)]
+impl Workspace {
+    /// The dock entry for panel `id`.
+    fn dock_id(&self, id: PanelId) -> gpui_kit::component::dock::PanelId {
+        gpui_kit::component::dock::PanelId::from(self.panels.view(id).entity_id())
+    }
+
+    /// The panels sharing panel `id`'s tab group, in tab order (`id` among them).
+    pub fn dock_group_of(&self, id: PanelId, cx: &App) -> Vec<PanelId> {
+        let dock = self.dock.read(cx);
+        let Some(tree) = dock.layout(gpui_kit::component::dock::DockPlacement::Center) else { return Vec::new() };
+        let Some(node) = tree.find_panel_node(self.dock_id(id)).and_then(|node| tree.find_node(node)) else { return Vec::new() };
+        let gpui_kit::component::dock::PaneRef::Tabs { panels, .. } = node.kind() else { return Vec::new() };
+        panels.iter().filter_map(|panel| panels::dock::DOCKABLE.into_iter().find(|id| self.dock_id(*id) == *panel)).collect()
+    }
+
+    /// The dock's arrangement, as it would be saved.
+    pub fn dock_state(&self, cx: &App) -> DockAreaState {
+        self.dock.read(cx).dump(cx)
+    }
+
+    /// Moves panel `id` into `target`'s tab group, behind the panel showing there.
+    pub fn move_panel_behind(&mut self, id: PanelId, target: PanelId, window: &mut Window, cx: &mut Context<Self>) {
+        let (panel, target) = (self.dock_id(id), self.dock_id(target));
+        self.dock.update(cx, |dock, cx| {
+            let Some(node) = dock.layout(gpui_kit::component::dock::DockPlacement::Center).and_then(|tree| tree.find_panel_node(target)) else { return };
+            dock.move_panel(panel, gpui_kit::component::dock::InsertTarget::Tabs { node, ix: None, activate: false }, window, cx);
+        });
     }
 }
 
@@ -817,7 +919,8 @@ impl Workspace {
         });
         let render = panels::viewer::ViewerRender::new();
         let timeline_ui = panels::timeline::TimelineUi::default();
-        let panels = Panels::new(cx);
+        let panels = Panels::new(&focus, cx);
+        let (dock, dock_events) = Self::make_dock(&panels, window, cx);
         // Background decoders signal here when a frame is ready; redraw only the viewer.
         let (frame_ready, frames_ready) = async_channel::bounded::<()>(1);
         render.media.set_on_ready(move || {
@@ -825,7 +928,7 @@ impl Workspace {
             let _ = frame_ready.try_send(());
         });
         let viewer = panels.viewer.entity_id();
-        let project_panel = panels.project.entity_id();
+        let project_panel = panels.side.entity_id();
         // The loop ends when the frame server (which holds the sender) is dropped. The Project
         // panel's preview shows frames from it too.
         cx.spawn(async move |_, cx| {
@@ -847,7 +950,7 @@ impl Workspace {
             render.proxies.set_on_change(move || {
                 let _ = proxy_changed.try_send(());
             });
-            let project_panel = panels.project.entity_id();
+            let project_panel = panels.side.entity_id();
             cx.spawn(async move |_, cx| {
                 while proxies_changed.recv().await.is_ok() {
                     cx.update(|cx| {
@@ -893,7 +996,7 @@ impl Workspace {
             ui.media.peaks.set_on_ready(move || {
                 let _ = peaks_ready.try_send(());
             });
-            let (timeline, project_panel) = (panels.timeline.entity_id(), panels.project.entity_id());
+            let (timeline, project_panel) = (panels.timeline.entity_id(), panels.side.entity_id());
             // Waveforms show in the Project panel's preview too.
             cx.spawn(async move |_, cx| {
                 while media_arrived.recv().await.is_ok() {
@@ -959,6 +1062,9 @@ impl Workspace {
             ui: UiState {
                 active_panel: PanelId::Timeline,
                 left_panel: LeftPanel::Media,
+                reveal_panels: Vec::new(),
+                showing_panels: HashSet::new(),
+                layout_resetting: false,
                 tool: Tool::Selection,
                 shape_kind: studio_core::model::ShapeKind::Rectangle,
                 shape_menu: false,
@@ -973,7 +1079,6 @@ impl Workspace {
                 sections_start_open: cfg!(test),
                 open_effect_categories: HashSet::new(),
                 closed_brands: HashSet::new(),
-                collapsed_panels: HashSet::new(),
                 viewer_bounds: Default::default(),
                 frame_bounds: Default::default(),
                 viewer_anchor: None,
@@ -1024,6 +1129,7 @@ impl Workspace {
                 import_job: None,
                 track_pick: None,
                 cutout_pick: None,
+                effect_search: None,
                 matte_paint: None,
                 matte_brush: panels::viewer::DEFAULT_BRUSH,
                 matte_pointer: None,
@@ -1054,6 +1160,8 @@ impl Workspace {
             render,
             sound,
             panels,
+            dock,
+            _dock_events: dock_events,
         }
     }
 
@@ -1477,7 +1585,11 @@ impl Workspace {
                     }
                 }
                 let count = imported.compositions.len();
-                let heading = format!("Imported “{file}”: {count} composition{}.", if count == 1 { "" } else { "s" });
+                let heading = if crate::state::is_extension(path, "svg") {
+                    format!("Imported “{file}” as a composition of its shapes. Drag it into a composition; right-click it there and choose Break into Shapes to animate each one.")
+                } else {
+                    format!("Imported “{file}”: {count} composition{}.", if count == 1 { "" } else { "s" })
+                };
                 if imported.notes.is_empty() {
                     window.push_notification(heading.as_str(), cx);
                 } else {
@@ -1556,19 +1668,21 @@ impl Render for Workspace {
         }
         // The Templates panel's pictures are made here, a few per frame, as it needs them.
         // Both start screen pages show templates (Home a strip of them).
+        // First, bring the dock up to date: which panels are turned on, and any asked to the front.
+        self.sync_dock(window, cx);
         let start_templates = self.ui.start_screen.is_some();
-        if self.ui.left_panel == LeftPanel::Templates || self.ui.template_gallery || start_templates {
+        if self.showing(PanelId::Templates) || self.ui.template_gallery || start_templates {
             panels::templates::make_pictures(self, window, cx);
         }
-        if self.ui.left_panel == LeftPanel::Mockups {
+        if self.showing(PanelId::Mockups) {
             panels::mockups::keep_up(self, window, cx);
         }
-        if self.ui.left_panel == LeftPanel::Elements {
+        if self.showing(PanelId::Elements) {
             panels::elements::make_pictures(self, window, cx);
         }
         // A LUT preview ends when its row goes away (another panel opened) as well as when the
         // pointer leaves it.
-        if self.ui.left_panel != LeftPanel::Effects {
+        if !self.showing(PanelId::Effects) {
             self.ui.lut_hover = None;
         }
         // The LUT previews follow the current frame while the Effects panel or the Color
@@ -1599,45 +1713,8 @@ impl Render for Workspace {
         self.update_window_title(window);
         let panels = &self.panels;
         let gutter = px(crate::theme::size::GUTTER);
-        let workspace = h_resizable("workspace-root")
-            .child(
-                resizable_panel().child(
-                    v_resizable("workspace-main")
-                        .child(
-                            resizable_panel().size(px(520.0)).child(
-                                h_resizable("workspace-top")
-                                    .child(
-                                        resizable_panel()
-                                            .size(px(300.0))
-                                            .size_range(px(220.0)..px(700.0))
-                                            // Media or Effects, picked on the rail.
-                                            .child(match self.ui.left_panel {
-                                                LeftPanel::Media => cached(&panels.project),
-                                                LeftPanel::Effects => cached(&panels.effects),
-                                                LeftPanel::Libraries => cached(&panels.libraries),
-                                                LeftPanel::Templates => cached(&panels.templates),
-                                                LeftPanel::Captions => cached(&panels.captions),
-                                                LeftPanel::Elements => cached(&panels.elements),
-                                                LeftPanel::Mockups => cached(&panels.mockups),
-                                            }),
-                                    )
-                                    .child(resizable_panel().child(cached(&panels.viewer))),
-                            ),
-                        )
-                        // The Nodes panel, while open, shares the bottom row with the timeline.
-                        .child(resizable_panel().size_range(px(180.0)..px(2000.0)).child(if self.ui.nodes.open {
-                            h_resizable("workspace-bottom")
-                                .child(resizable_panel().child(cached(&panels.timeline)))
-                                .child(resizable_panel().size(px(560.0)).size_range(px(320.0)..px(1600.0)).child(cached(&panels.nodes)))
-                                .into_any_element()
-                        } else {
-                            cached(&panels.timeline).into_any_element()
-                        })),
-                ),
-            )
-            .child(
-                resizable_panel().size(px(430.0)).size_range(px(300.0)..px(800.0)).child(self.utility_column(window, cx)),
-            );
+        // Every panel sits in the dock, where it can be dragged to a new place.
+        let workspace = div().id("workspace-dock").size_full().child(self.dock.clone());
 
         div()
             .size_full()
@@ -1649,7 +1726,12 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .key_context(KEY_CONTEXT)
             // Escape closes the start screen or the template gallery.
-            .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
+                // Escape closes the effect search first.
+                if this.ui.effect_search.is_some() {
+                    panels::effect_search::close(this, window, cx);
+                    return;
+                }
                 // The welcome setup is left with its own buttons, so Escape can't skip it by accident.
                 if this.ui.onboarding.is_some() {
                     return;
@@ -1684,6 +1766,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &MinimizeWindow, window, _| window.minimize_window()))
             .on_action(cx.listener(|_, _: &ZoomWindow, window, _| window.zoom_window()))
             .on_action(cx.listener(|_, _: &ToggleFullScreen, window, _| window.toggle_fullscreen()))
+            .on_action(cx.listener(|this, _: &ResetWorkspace, window, cx| this.reset_workspace(window, cx)))
+            .on_action(cx.listener(|this, action: &SwitchWorkspace, window, cx| this.switch_workspace(action.name.clone(), window, cx)))
+            .on_action(cx.listener(|this, _: &SaveWorkspaceAs, window, cx| panels::workspaces::save_as_new(this, window, cx)))
+            .on_action(cx.listener(|this, _: &UpdateWorkspace, window, cx| panels::workspaces::update_current(this, window, cx)))
+            .on_action(cx.listener(|this, _: &DeleteWorkspace, window, cx| panels::workspaces::delete_current(this, window, cx)))
             .on_action(cx.listener(|this, _: &AboutStudio, window, cx| panels::settings::open_about(this, window, cx)))
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| crate::updates::check(this, true, window, cx)))
             .on_action(cx.listener(|this, _: &Open, window, cx| this.open(window, cx)))
@@ -1803,6 +1890,7 @@ impl Render for Workspace {
                 .on_action(cx.listener(|this, _: &Precompose, window, cx| panels::precompose::open(this, window, cx)))
                 .on_action(cx.listener(|this, _: &ExportQueue, window, cx| panels::export_queue::open(this, window, cx)))
                 .on_action(cx.listener(|this, _: &UngroupComposition, window, cx| this.ungroup_selected(window, cx)))
+                .on_action(cx.listener(|this, _: &SearchEffects, window, cx| panels::effect_search::open(this, window, cx)))
                 .on_action(cx.listener(|this, _: &MorphTo, window, cx| panels::morph::open(this, window, cx)))
                 .on_action(cx.listener(|this, _: &FlipHorizontal, _, cx| {
                     if this.state.flip_selection(true) {
@@ -1939,34 +2027,169 @@ impl Render for Workspace {
             .children(panels::start_screen::render(self, cx))
             .children(panels::onboarding::render(self, cx))
             .children(panels::importing::popup(self, cx))
+            .children(panels::effect_search::render(self, cx))
     }
 }
 
-/// Height of the Align panel when Properties is open above it.
-const ALIGN_HEIGHT: f32 = 230.0;
-
 impl Workspace {
-    /// The right column: Properties above Align. Either can be collapsed to its header (its
-    /// chevron); whichever is open fills the space the other leaves.
-    fn utility_column(&self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let collapsed = |id| self.ui.collapsed_panels.contains(&id);
-        let header_only = px(crate::theme::size::PANEL_HEADER_HEIGHT + 2.0);
-        let (properties, align) = (collapsed(PanelId::Properties), collapsed(PanelId::Align));
-        let properties_box = div().min_h_0().map(|panel| if properties { panel.flex_none().h(header_only) } else { panel.flex_1() });
-        let align_box = div().min_h_0().map(|panel| match (properties, align) {
-            (_, true) => panel.flex_none().h(header_only),
-            (true, false) => panel.flex_1(),
-            (false, false) => panel.flex_none().h(px(ALIGN_HEIGHT)),
+    /// Builds the dock with the arrangement saved last time (or the standard one), and listens
+    /// for changes to save them.
+    fn make_dock(panels: &Panels, window: &mut Window, cx: &mut Context<Self>) -> (Entity<DockArea>, Subscription) {
+        let skin = panels::dock::StudioSkin::new(cx.weak_entity());
+        let dock = cx.new(|cx| DockArea::new("studio-workspace", Some(panels::dock::LAYOUT_VERSION), window, cx).with_renderer(skin));
+        let view = |id| panels.view(id).clone();
+        let saved = crate::app_settings::load().workspace_layout.and_then(|saved| serde_json::from_value::<DockAreaState>(saved).ok());
+        let layout = saved.and_then(|saved| panels::dock::restore_layout(&saved, view)).unwrap_or_else(|| panels::dock::default_layout(view));
+        dock.update(cx, |dock, cx| dock.set_center(layout, window, cx));
+        let events = cx.subscribe(&dock, |this, dock, event: &DockEvent, cx| {
+            if let DockEvent::LayoutChanged = event {
+                if std::mem::take(&mut this.ui.layout_resetting) {
+                    crate::app_settings::update(|settings| settings.workspace_layout = None);
+                } else {
+                    match serde_json::to_value(dock.read(cx).dump(cx)) {
+                        Ok(layout) => crate::app_settings::update(|settings| settings.workspace_layout = Some(layout)),
+                        Err(error) => eprintln!("could not save the panel layout: {error}"),
+                    }
+                }
+                // The rail and other panels show which panels are in front.
+                this.refresh_showing(cx);
+                cx.notify();
+            }
         });
-        div()
-            .id("workspace-utilities")
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap(px(crate::theme::size::GUTTER))
-            .child(properties_box.child(cached(&self.panels.properties)))
-            .child(align_box.child(cached(&self.panels.align)))
+        (dock, events)
     }
+
+    /// Window ▸ Reset Workspace: the current workspace back as it was saved (every panel in
+    /// its standard place, for Standard), undoing any moves since.
+    pub fn reset_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = crate::app_settings::load().current_workspace;
+        self.switch_workspace(current, window, cx);
+    }
+
+    /// Switches to the workspace named `name` (`None` for Standard) and remembers the choice. A
+    /// saved workspace that can't be read (one written by a newer Studio, or damaged) is said
+    /// so, and Standard is used instead.
+    pub fn switch_workspace(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = name.as_ref().and_then(|name| crate::app_settings::load().saved_workspaces.into_iter().find(|saved| &saved.name == name));
+        let shown = match (&name, saved) {
+            (None, _) => None,
+            (Some(name), Some(saved)) if self.show_saved_layout(&saved.layout, window, cx) => Some(name.clone()),
+            (Some(name), _) => {
+                window.push_notification(format!("The “{name}” workspace couldn't be read, so Standard is shown instead.").as_str(), cx);
+                None
+            }
+        };
+        if shown.is_none() {
+            let layout = panels::dock::default_layout(|id| self.panels.view(id).clone());
+            self.ui.layout_resetting = true;
+            self.dock.update(cx, |dock, cx| dock.set_center(layout, window, cx));
+        }
+        crate::app_settings::update(|settings| settings.current_workspace = shown);
+        refresh_menus(cx);
+        cx.notify();
+    }
+
+    /// Puts a saved layout on screen. False if it can't be read, leaving the screen as it was.
+    fn show_saved_layout(&mut self, layout: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Ok(state) = serde_json::from_value::<DockAreaState>(layout.clone()) else { return false };
+        let Some(layout) = panels::dock::restore_layout(&state, |id| self.panels.view(id).clone()) else { return false };
+        self.dock.update(cx, |dock, cx| dock.set_center(layout, window, cx));
+        true
+    }
+
+    /// The panel layout on screen, in its saved form.
+    pub fn current_layout(&self, cx: &App) -> Option<serde_json::Value> {
+        serde_json::to_value(self.dock.read(cx).dump(cx)).inspect_err(|error| eprintln!("could not save the panel layout: {error}")).ok()
+    }
+
+    /// Asks for `panel` to be brought to the front of its tab group, wherever it has been
+    /// moved to. Done on the next draw. One of the side panel's own (Effects, say) is shown in
+    /// the side panel, which comes to the front.
+    pub fn reveal(&mut self, panel: PanelId) {
+        if let Some(side) = side_choice(panel) {
+            self.ui.left_panel = side;
+            self.ui.reveal_panels.push(PanelId::Side);
+        } else {
+            self.ui.reveal_panels.push(panel);
+        }
+    }
+
+    /// Whether `panel` is on screen: turned on, and the front tab of its group. One of the side
+    /// panel's own is on screen while the side panel is and shows it.
+    pub fn showing(&self, panel: PanelId) -> bool {
+        match side_choice(panel) {
+            Some(side) => self.ui.left_panel == side && self.ui.showing_panels.contains(&PanelId::Side),
+            None => self.ui.showing_panels.contains(&panel),
+        }
+    }
+
+    /// Whether panel `id` is turned on: the Nodes panel while it is open, every other panel
+    /// always.
+    fn panel_turned_on(&self, id: PanelId) -> bool {
+        id != PanelId::Nodes || self.ui.nodes.open
+    }
+
+    /// Before each draw: tells each panel view whether it is turned on (the dock hides those
+    /// that aren't), brings forward any panels asked for, and notes which are now on screen.
+    fn sync_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for id in panels::dock::DOCKABLE {
+            let on = self.panel_turned_on(id);
+            self.panels.view(id).read(cx).shown.set(on);
+        }
+        for id in std::mem::take(&mut self.ui.reveal_panels) {
+            let panel = gpui_kit::component::dock::PanelId::from(self.panels.view(id).entity_id());
+            self.dock.update(cx, |dock, cx| dock.select_panel(panel, window, cx));
+        }
+        self.refresh_showing(cx);
+    }
+
+    /// Notes which panels are on screen, from the dock's current arrangement.
+    fn refresh_showing(&mut self, cx: &App) {
+        let dock = self.dock.read(cx);
+        let front: HashSet<gpui_kit::component::dock::PanelId> = dock
+            .layout(gpui_kit::component::dock::DockPlacement::Center)
+            .map(|tree| {
+                let mut front = HashSet::new();
+                tree.root().walk(&mut |node| {
+                    if let gpui_kit::component::dock::PaneRef::Tabs { panels, active_ix } = node.kind() {
+                        // The front tab, or the first turned-on one if the front one is off.
+                        let shown = |index: &usize| panels.get(*index).is_some_and(|panel| self.dock_panel_on(*panel, cx));
+                        if let Some(index) = std::iter::once(active_ix).chain(0..panels.len()).find(shown) {
+                            front.insert(panels[index]);
+                        }
+                    }
+                });
+                front
+            })
+            .unwrap_or_default();
+        self.ui.showing_panels = panels::dock::DOCKABLE
+            .into_iter()
+            .filter(|id| front.contains(&gpui_kit::component::dock::PanelId::from(self.panels.view(*id).entity_id())))
+            .filter(|id| self.panel_turned_on(*id))
+            .collect();
+    }
+
+    /// Whether the dock entry `panel` is one of the panels turned on.
+    fn dock_panel_on(&self, panel: gpui_kit::component::dock::PanelId, cx: &App) -> bool {
+        panels::dock::DOCKABLE
+            .into_iter()
+            .find(|id| gpui_kit::component::dock::PanelId::from(self.panels.view(*id).entity_id()) == panel)
+            .is_some_and(|id| self.panels.view(id).read(cx).shown.get())
+    }
+}
+
+/// Which rail choice shows `panel` in the side panel, if it is one of the side panel's own.
+fn side_choice(panel: PanelId) -> Option<LeftPanel> {
+    Some(match panel {
+        PanelId::Project => LeftPanel::Media,
+        PanelId::Effects => LeftPanel::Effects,
+        PanelId::Libraries => LeftPanel::Libraries,
+        PanelId::Templates => LeftPanel::Templates,
+        PanelId::Captions => LeftPanel::Captions,
+        PanelId::Elements => LeftPanel::Elements,
+        PanelId::Mockups => LeftPanel::Mockups,
+        _ => return None,
+    })
 }
 
 /// "1 layer is" or "3 layers are", for messages.

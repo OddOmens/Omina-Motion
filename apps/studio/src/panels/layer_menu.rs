@@ -121,7 +121,10 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
             .when(precompose, |menu| menu.item(item("Pre-compose…", &layers, some, &weak, super::precompose::open)));
         if let Some(inner) = nested {
             let weak = weak.clone();
-            menu = menu.item(item("Ungroup Composition", &layers, true, &weak, |this, window, cx| this.ungroup_selected(window, cx))).item(PopupMenuItem::new("Open Composition").on_click(move |_, _, cx| {
+            // An SVG's composition breaks into its shapes; any composition ungroups the same way.
+            let is_svg = workspace.state.project.item(inner).is_some_and(|item| item.name.to_lowercase().ends_with(".svg"));
+            let label = if is_svg { "Break into Shapes" } else { "Ungroup Composition" };
+            menu = menu.item(item(label, &layers, true, &weak, |this, window, cx| this.ungroup_selected(window, cx))).item(PopupMenuItem::new("Open Composition").on_click(move |_, _, cx| {
                 weak.update(cx, |this, cx| {
                     this.state.open_composition(inner);
                     cx.notify();

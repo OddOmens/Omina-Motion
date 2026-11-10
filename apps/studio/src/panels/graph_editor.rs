@@ -3,13 +3,15 @@
 //! custom curve, and the easing list under it: Linear, Hold, the classic families (Quad to
 //! Back) and Elastic and Bounce, each with In / Out / Both. The selection's segments are the
 //! stretches between consecutive selected keyframes (see `eased_segments`). When it has more
-//! than one, say a fade in and a fade out, a row of small curves picks which one to edit (the
-//! first that changes value, to start) or All of them; choices apply only to that. The same
+//! than one, say a fade in and a fade out, a compact row picks which one to edit (the first
+//! that changes value, to start) or All of them; choices apply only to that. The same
 //! curve editor, smaller, eases a layer's In and Out animations in the Animate section
 //! (`CurveTarget::Motion`).
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _};
 use gpui_kit::{
     AnyElement, AppContext as _, Bounds, Context, Div, DragMoveEvent, ElementId, InteractiveElement, IntoElement, MouseButton,
     ParentElement, PathBuilder, Pixels, Point, StatefulInteractiveElement, Styled, TestSupportExt as _, canvas, div, point,
@@ -269,13 +271,13 @@ pub fn show(workspace: &mut Workspace) {
         return;
     }
     workspace.ui.tabs.insert(PanelId::Properties, super::motion::TAB);
-    workspace.ui.collapsed_panels.remove(&PanelId::Properties);
+    workspace.reveal(PanelId::Properties);
     workspace.ui.open_section("easing");
 }
 
-/// Whether the graph editor is in view: the Motion tab showing, and its panel unfolded.
+/// Whether the graph editor is in view: the Motion tab showing, and its panel in front.
 pub fn showing(workspace: &Workspace) -> bool {
-    workspace.ui.tab(PanelId::Properties) == super::motion::TAB && !workspace.ui.collapsed_panels.contains(&PanelId::Properties)
+    workspace.ui.tab(PanelId::Properties) == super::motion::TAB && workspace.showing(PanelId::Properties)
 }
 
 /// The timeline's Easings button: shows the graph editor in the Motion tab.
@@ -388,14 +390,16 @@ pub fn keyframes_section(workspace: &Workspace, cx: &mut Context<Workspace>) -> 
                 .gap_2()
                 .text_size(px(size::SMALL_TEXT))
                 .child(div().text_color(hsla(color::MUTED)).child(status))
-                .children(numbers.map(|text| div().font_family("Menlo").text_color(hsla(color::VALUE)).child(text))),
+                .children(numbers.map(|text| div().font_family(crate::theme::MONO_FONT).text_color(hsla(color::VALUE)).child(text))),
         )
         .child(list)
 }
 
-/// The row of segments to pick from when the selection has more than one: All, then each
-/// segment as a small curve with its property and when it runs. Segments that hold one value
-/// are dimmed, since easing them changes nothing. `None` with one segment or none.
+/// Picks which of the selection's segments to edit when it has more than one, in one compact
+/// row however many there are: All, the previous and next segment, a menu naming the segment
+/// being edited (and listing every one to jump to), and where it is in the run ("2 of 73").
+/// Segments that hold one value are marked, since easing them changes nothing. `None` with
+/// one segment or none.
 fn segment_picker(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<Div> {
     let segments = workspace.state.eased_segments();
     if segments.len() <= 1 {
@@ -403,60 +407,91 @@ fn segment_picker(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<
     }
     let focused = focused_segments(workspace);
     let all = focused.len() > 1;
+    let current = (!all).then(|| segments.iter().position(|key| focused.contains(key))).flatten();
     let composition = workspace.state.composition();
     let fps = composition.frame_rate.fps();
-    let seconds = |frame: i64| format!("{:.1}", frame as f64 / fps);
-    let pick = move |focus: SegmentFocus| {
-        move |this: &mut Workspace, _: &gpui_kit::ClickEvent, _: &mut gpui_kit::Window, cx: &mut Context<Workspace>| {
-            this.ui.segment_focus = Some((this.state.selected_keyframes.clone(), focus));
+    // Hundredths, so segments a frame apart still read differently.
+    let seconds = |frame: i64| format!("{:.2}", frame as f64 / fps);
+    // The layer's name joins the label only when the segments come from more than one layer.
+    let several_layers = segments.iter().any(|key| key.layer != segments[0].layer);
+    let labels: Vec<String> = segments
+        .iter()
+        .map(|&key| {
+            let Some(layer) = composition.layer(key.layer) else { return String::new() };
+            let name = layer.property(key.path, key.frame).map_or_else(String::new, |snapshot| snapshot.name);
+            let end = workspace.state.segment_end(key).unwrap_or(key.frame);
+            let holds = if workspace.state.segment_changes(key) { "" } else { " · holds" };
+            let owner = if several_layers { format!("{} · ", layer.name) } else { String::new() };
+            format!("{owner}{name} · {}–{} s{holds}", seconds(key.frame), seconds(end))
+        })
+        .collect();
+    let focus_on = move |this: &mut Workspace, focus: SegmentFocus| {
+        this.ui.segment_focus = Some((this.state.selected_keyframes.clone(), focus));
+    };
+    // Steps from the segment being edited (or, from All, from either end).
+    let step = |forward: bool| {
+        let count = segments.len();
+        let index = match current {
+            Some(index) if forward => (index + 1).min(count - 1),
+            Some(index) => index.saturating_sub(1),
+            None if forward => 0,
+            None => count - 1,
+        };
+        segments[index]
+    };
+    let (previous, next) = (step(false), step(true));
+    let arrow = |id: &'static str, icon: IconName, tip: &'static str, target: KeyframeRef, at_end: bool, cx: &mut Context<Workspace>| {
+        Button::new(id).ghost().small().icon(Icon::new(icon)).tooltip(tip).disabled(at_end).on_click(cx.listener(move |this, _, _, cx| {
+            focus_on(this, SegmentFocus::One(target));
             cx.notify();
-        }
+        }))
     };
-    let tile = |id: ElementId, on: bool| {
+    let weak = cx.weak_entity();
+    let menu_segments = segments.clone();
+    let menu_labels = labels.clone();
+    let menu = Button::new("easing-segment-menu")
+        .outline()
+        .small()
+        .w_full()
+        .label(current.map_or_else(|| "All segments".to_owned(), |index| labels[index].clone()))
+        .dropdown_caret(true)
+        .dropdown_menu(move |mut menu, _, _| {
+            menu = menu.scrollable(true).max_h(px(360.0));
+            for (index, (key, label)) in menu_segments.iter().zip(&menu_labels).enumerate() {
+                let (weak, key) = (weak.clone(), *key);
+                menu = menu.item(PopupMenuItem::new(label.clone()).checked(current == Some(index)).on_click(move |_, _, cx| {
+                    weak.update(cx, |this, cx| {
+                        focus_on(this, SegmentFocus::One(key));
+                        cx.notify();
+                    })
+                    .ok();
+                }));
+            }
+            menu
+        });
+    let count = segments.len();
+    let position = current.map_or_else(|| format!("{count} segments"), |index| format!("{} of {count}", index + 1));
+    Some(
         div()
-            .id(id)
-            .w(px(96.0))
-            .p_1()
             .flex()
-            .flex_col()
-            .gap_1()
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(hsla(if on { color::ACCENT } else { color::HAIRLINE }))
-            .hover(|style| style.bg(hsla(color::HOVER)))
-            .cursor_pointer()
-    };
-    let mut tiles = vec![
-        tile(ElementId::Name("easing-segment-all".into()), all)
-            .justify_center()
             .items_center()
-            .min_h(px(68.0))
-            .child(div().text_color(hsla(color::TEXT)).child("All"))
-            .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("{} segments", segments.len())))
-            .on_click(cx.listener(pick(SegmentFocus::All)))
-            .test_support()
-            .into_any_element(),
-    ];
-    for (index, key) in segments.iter().copied().enumerate() {
-        let Some(layer) = composition.layer(key.layer) else { continue };
-        let name = layer.property(key.path, key.frame).map_or_else(String::new, |snapshot| snapshot.name);
-        let end = workspace.state.segment_end(key).unwrap_or(key.frame);
-        let changes = workspace.state.segment_changes(key);
-        let easing = workspace.state.segments_easing(&[key]).unwrap_or(Easing::Linear);
-        let tip = format!("{} · {name}{}", layer.name, if changes { "" } else { " · holds one value, so easing it changes nothing" });
-        tiles.push(
-            tile(ElementId::from(("easing-segment", index)), !all && focused.contains(&key))
-                .when(!changes, |tile| tile.opacity(0.55))
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-                .child(div().h(px(36.0)).rounded(px(4.0)).bg(hsla(color::INSET)).child(canvas(|_, _, _| (), move |bounds, _, window, _| paint_easing(easing, bounds, window)).size_full()))
-                .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).truncate().child(name))
-                .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("{}–{} s", seconds(key.frame), seconds(end))))
-                .on_click(cx.listener(pick(SegmentFocus::One(key))))
-                .test_support()
-                .into_any_element(),
-        );
-    }
-    Some(div().flex().flex_wrap().gap_1().children(tiles))
+            .gap_1()
+            .child(
+                Button::new("easing-segment-all")
+                    .small()
+                    .label("All")
+                    .tooltip("Ease every segment at once")
+                    .map(|button| if all { button.primary() } else { button.outline() })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        focus_on(this, SegmentFocus::All);
+                        cx.notify();
+                    })),
+            )
+            .child(arrow("easing-segment-previous", IconName::ChevronLeft, "Previous segment", previous, current == Some(0), cx))
+            .child(div().flex_1().min_w_0().child(menu))
+            .child(arrow("easing-segment-next", IconName::ChevronRight, "Next segment", next, current == Some(count - 1), cx))
+            .child(div().flex_none().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(position)),
+    )
 }
 
 #[cfg(test)]

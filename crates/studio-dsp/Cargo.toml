@@ -1,0 +1,12 @@
+[package]
+name = "studio-dsp"
+description = "Sound processing building blocks for Studio: the biquad filters behind the EQ, and the audio effects (EQ, compressor, limiter, de-esser, hum remover, gain, pan, echo, reverb) that run while the mix plays. Pure Rust, no dependencies."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true

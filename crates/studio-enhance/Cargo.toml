@@ -9,6 +9,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The biquad filters behind the EQ, hum notches and de-esser, shared with the live mixer.
+studio-dsp.workspace = true
 # RNNoise (Xiph), in pure Rust, with its small model built in.
 nnnoiseless = { version = "0.5.2", default-features = false }
 # DeepFilterNet3 inference, vendored from upstream with the model built in (checked identical to

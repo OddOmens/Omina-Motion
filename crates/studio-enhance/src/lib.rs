@@ -19,7 +19,6 @@
 
 mod denoise;
 mod dynamics;
-mod filters;
 mod hum;
 mod loudness;
 mod wav;
@@ -138,10 +137,10 @@ pub fn enhance(channels: &[Vec<f32>], settings: Settings, progress: &(dyn Fn(f32
 fn voice_eq(channel: &mut [f32]) {
     let rate = RATE as f32;
     for mut filter in [
-        filters::Biquad::high_pass(80.0, rate, 0.707),
-        filters::Biquad::peak(300.0, rate, 1.0, -2.0),
-        filters::Biquad::peak(4_000.0, rate, 0.9, 2.5),
-        filters::Biquad::high_shelf(10_000.0, rate, 0.707, 1.5),
+        studio_dsp::Biquad::high_pass(80.0, rate, 0.707),
+        studio_dsp::Biquad::peak(300.0, rate, 1.0, -2.0),
+        studio_dsp::Biquad::peak(4_000.0, rate, 0.9, 2.5),
+        studio_dsp::Biquad::high_shelf(10_000.0, rate, 0.707, 1.5),
     ] {
         filter.run_all(channel);
     }

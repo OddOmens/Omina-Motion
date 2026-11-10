@@ -2,7 +2,7 @@
 //! lights put into recordings, with its harmonics. It is found by measuring, and removed with
 //! very narrow notches that leave the voice alone.
 
-use crate::filters::Biquad;
+use studio_dsp::Biquad;
 
 /// The hum's base frequency in `channel`, if there is clearly one: 50 or 60 Hz standing well
 /// above the frequencies next to it.

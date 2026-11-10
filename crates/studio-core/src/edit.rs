@@ -1525,7 +1525,7 @@ mod tests {
     /// A closed triangle drawn in composition pixels.
     fn triangle() -> crate::path::ShapePath {
         let corners = [(100.0, 100.0), (300.0, 100.0), (200.0, 260.0)];
-        crate::path::ShapePath { points: corners.map(|(x, y)| crate::path::PathPoint::corner(Vec2::new(x, y))).to_vec(), closed: true }
+        crate::path::ShapePath { points: corners.map(|(x, y)| crate::path::PathPoint::corner(Vec2::new(x, y))).to_vec(), closed: true, ..Default::default() }
     }
 
     #[test]

@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use crate::edit::CompositionSettings;
 use crate::effects;
 use crate::model::{Id, Project};
-use crate::property::PropertyInfo;
 use crate::time::FrameRange;
 
 /// The file name extension for project files.
@@ -400,13 +399,7 @@ fn repair_effect_graphs(project: &mut Project) {
 /// the effect catalog. Parameters the catalog does not know keep an unlimited range.
 fn restore_effect_info(project: &mut Project) {
     let effects = project.compositions.iter_mut().flat_map(|comp| &mut comp.layers).flat_map(|layer| &mut layer.effects);
-    for effect in effects {
-        let definition = effects::find(&effect.name);
-        for (index, property) in effect.properties.iter_mut().enumerate() {
-            let known = definition.and_then(|definition| definition.parameters.get(index)).map(|(info, _)| *info);
-            property.info = known.filter(|info| info.name == property.name).unwrap_or(PropertyInfo::unknown());
-        }
-    }
+    effects.for_each(effects::restore_info);
 }
 
 /// Points the project's media files at where they are on this machine. Paths saved relative to

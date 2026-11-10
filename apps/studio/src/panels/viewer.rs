@@ -474,6 +474,7 @@ enum ViewerDrag {
     Anchor,
     PathPoint,
     GradientPoint,
+    EffectPoint,
 }
 
 /// Screen points per composition pixel that fit the whole frame in the viewer.
@@ -624,32 +625,38 @@ fn matte_strokes_overlay(workspace: &Workspace) -> Option<AnyElement> {
                 )
             };
             let to_screen = f32::from(bounds.size.width) / comp_size.x;
-            for (points, radius, add) in &strokes {
-                // Each stroke is filled as round dabs along its path, all in one shape, so the
-                // translucent tint stays even where the dabs overlap.
-                let r = (radius * to_screen).max(1.0);
-                let tint = gpui_kit::rgba(if *add { (KEEP_COLOR << 8) | 0x80 } else { (LEAVE_OUT_COLOR << 8) | 0x80 });
-                let mut shape = gpui_kit::PathBuilder::fill();
-                let mut dab = |center: gpui_kit::Point<gpui_kit::Pixels>| {
-                    let r = px(r);
-                    shape.move_to(gpui_kit::point(center.x + r, center.y));
-                    shape.arc_to(gpui_kit::point(r, r), px(0.0), false, true, gpui_kit::point(center.x - r, center.y));
-                    shape.arc_to(gpui_kit::point(r, r), px(0.0), false, true, gpui_kit::point(center.x + r, center.y));
-                    shape.close();
-                };
-                let mut previous = place(points[0]);
-                dab(previous);
-                for at in &points[1..] {
-                    let next = place(*at);
-                    let (dx, dy) = (f32::from(next.x - previous.x), f32::from(next.y - previous.y));
-                    let steps = ((dx * dx + dy * dy).sqrt() / (r * 0.5)).ceil().max(1.0) as usize;
-                    for step in 1..=steps {
-                        let t = step as f32 / steps as f32;
-                        dab(gpui_kit::point(previous.x + px(dx * t), previous.y + px(dy * t)));
+            // All the strokes that add to the object are one solid shape, and all that take
+            // away another: each stroke is round dabs along its path, merged with the
+            // non-zero fill rule so overlaps fill in instead of cancelling out.
+            for add in [true, false] {
+                let fill = gpui_kit::FillOptions::default().with_fill_rule(gpui_kit::FillRule::NonZero);
+                let mut shape = gpui_kit::PathBuilder::fill().with_style(gpui_kit::PathStyle::Fill(fill));
+                let mut any = false;
+                for (points, radius, _) in strokes.iter().filter(|(_, _, stroke_add)| *stroke_add == add) {
+                    any = true;
+                    let r = (radius * to_screen).max(1.0);
+                    let mut dab = |center: gpui_kit::Point<gpui_kit::Pixels>| {
+                        let r = px(r);
+                        shape.move_to(gpui_kit::point(center.x + r, center.y));
+                        shape.arc_to(gpui_kit::point(r, r), px(0.0), false, true, gpui_kit::point(center.x - r, center.y));
+                        shape.arc_to(gpui_kit::point(r, r), px(0.0), false, true, gpui_kit::point(center.x + r, center.y));
+                        shape.close();
+                    };
+                    let mut previous = place(points[0]);
+                    dab(previous);
+                    for at in &points[1..] {
+                        let next = place(*at);
+                        let (dx, dy) = (f32::from(next.x - previous.x), f32::from(next.y - previous.y));
+                        let steps = ((dx * dx + dy * dy).sqrt() / (r * 0.5)).ceil().max(1.0) as usize;
+                        for step in 1..=steps {
+                            let t = step as f32 / steps as f32;
+                            dab(gpui_kit::point(previous.x + px(dx * t), previous.y + px(dy * t)));
+                        }
+                        previous = next;
                     }
-                    previous = next;
                 }
-                if let Ok(shape) = shape.build() {
+                let tint = gpui_kit::rgba(if add { (KEEP_COLOR << 8) | 0x66 } else { (LEAVE_OUT_COLOR << 8) | 0x66 });
+                if any && let Ok(shape) = shape.build() {
                     window.paint_path(shape, tint);
                 }
             }
@@ -954,6 +961,61 @@ fn gradient_overlay(workspace: &Workspace, layer: Id, cx: &mut Context<Workspace
     elements
 }
 
+/// Handles for the selected layer's effect points (a Corner Pin's corners, a Lens Flare's
+/// center): drag one to move it, which sets the effect's settings. A Corner Pin's corners are
+/// joined by a thin outline, so the shape they make is easy to see.
+fn effect_points_overlay(workspace: &Workspace, layer: Id, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
+    let handles = workspace.state.effect_handles(layer);
+    if handles.is_empty() {
+        return Vec::new();
+    }
+    let composition = workspace.state.composition();
+    let size = Vec2::new(composition.width as f32, composition.height as f32);
+    let mut elements = Vec::new();
+    // Each effect with four points (a Corner Pin) gets its outline, corner to corner around.
+    let mut effects: Vec<Id> = handles.iter().map(|handle| handle.effect).collect();
+    effects.dedup();
+    for effect in effects {
+        let corners: Vec<Vec2> = handles.iter().filter(|handle| handle.effect == effect).map(|handle| handle.at).collect();
+        if let [top_left, top_right, bottom_left, bottom_right] = corners[..] {
+            let around = [top_left, top_right, bottom_right, bottom_left, top_left];
+            let lines = around.windows(2).map(|pair| [pair[0], pair[0], pair[1], pair[1]]).collect();
+            elements.push(curve_canvas(lines, size, hsla(color::ACCENT)));
+        }
+    }
+    for handle in handles {
+        let (effect, point) = (handle.effect, handle.point);
+        let label = handle.label;
+        elements.push(
+            div()
+                .id(ElementId::Name(format!("effect-point:{}:{point}", effect.0).into()))
+                .absolute()
+                .left(relative(handle.at.x / size.x))
+                .top(relative(handle.at.y / size.y))
+                .ml(px(-9.0))
+                .mt(px(-9.0))
+                .size(px(18.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor(CursorStyle::Crosshair)
+                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx))
+                // A ring with a dot in it, like After Effects' effect control points.
+                .child(div().size(px(14.0)).rounded_full().border_2().border_color(hsla(color::ACCENT)).bg(gpui_kit::rgba(0x00000066)).flex().items_center().justify_center().child(div().size(px(4.0)).rounded_full().bg(hsla(color::ACCENT))))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.ui.viewer_anchor = Some((f32::from(event.position.x), f32::from(event.position.y)));
+                    this.state.begin_effect_point_drag(layer, effect, point);
+                    cx.notify();
+                }))
+                .on_drag(ViewerDrag::EffectPoint, |_, _, _, cx| cx.new(|_| EmptyDragView))
+                .test_support()
+                .into_any_element(),
+        );
+    }
+    elements
+}
+
 /// Converts a window position to composition pixels, using where the frame was drawn last frame.
 fn to_comp(workspace: &Workspace, x: f32, y: f32) -> Vec2 {
     let frame = workspace.ui.frame_bounds.get();
@@ -1220,11 +1282,11 @@ fn show_slot_under(workspace: &mut Workspace, over: bool, position: gpui_kit::Po
 
 /// The layer an effect dropped at `position` (window coordinates) would go on: the topmost one
 /// under the pointer that the effect suits.
-fn effect_target(workspace: &Workspace, effect: &str, position: gpui_kit::Point<gpui_kit::Pixels>) -> Option<Id> {
+fn effect_target(workspace: &Workspace, effect: &EffectDrag, position: gpui_kit::Point<gpui_kit::Pixels>) -> Option<Id> {
     let point = to_comp(workspace, f32::from(position.x), f32::from(position.y));
     let layer = workspace.state.layer_at(point)?;
     let content = &workspace.state.composition().layer(layer)?.content;
-    studio_core::effects::suits_layer(effect, content).then_some(layer)
+    effect.suits(content).then_some(layer)
 }
 
 /// The text layer being typed into in the viewer, if any.
@@ -1421,6 +1483,7 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
         elements.extend(path_points_overlay(workspace, id, cx));
         // A gradient's line and its two ends, to drag where it runs.
         elements.extend(gradient_overlay(workspace, id, cx));
+        elements.extend(effect_points_overlay(workspace, id, cx));
 
         // The anchor point, where the layer scales and rotates around, drawn over the scale
         // handles so it can be dragged off a corner. Drag it to move it; the layer stays put.
@@ -1627,7 +1690,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         // An effect dragged over the picture lights up the layer it would go on (one it suits).
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<EffectDrag>, _, cx| {
             let position = event.event.position;
-            let target = event.bounds.contains(&position).then(|| effect_target(this, &event.drag(cx).name, position)).flatten();
+            let target = event.bounds.contains(&position).then(|| effect_target(this, event.drag(cx), position)).flatten();
             if this.ui.effect_drop_layer != target {
                 this.ui.effect_drop_layer = target;
                 cx.notify();
@@ -1637,9 +1700,10 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         // the window's mouse-up handler, which runs before this.
         .on_drop(cx.listener(|this, drag: &EffectDrag, window, cx| {
             this.ui.effect_drop_layer = None;
-            if let Some(layer) = effect_target(this, &drag.name, window.mouse_position()) {
+            if let Some(layer) = effect_target(this, drag, window.mouse_position()) {
                 drag.apply(&mut this.state, layer);
-                this.ui.tabs.insert(PanelId::Properties, 1);
+                let tab = if drag.preset.is_some() { 1 } else { super::color_grade::tab_for_effect(&drag.name) };
+                this.ui.tabs.insert(PanelId::Properties, tab);
             }
             cx.notify();
         }))

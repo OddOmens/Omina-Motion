@@ -277,7 +277,7 @@ fn path_layer(project: &mut Project, comp: Id, path: &ShapePath, center: Vec2, s
 
 /// A closed outline through `corners` (0–1 box).
 fn polygon(corners: &[(f32, f32)]) -> ShapePath {
-    ShapePath { points: corners.iter().map(|&(x, y)| PathPoint::corner(Vec2::new(x, y))).collect(), closed: true }
+    ShapePath { points: corners.iter().map(|&(x, y)| PathPoint::corner(Vec2::new(x, y))).collect(), closed: true, ..Default::default() }
 }
 
 /// A heart, drawn with curves.
@@ -291,6 +291,7 @@ fn heart() -> ShapePath {
             point(0.05, 0.32, (0.0, 0.25), (0.0, -0.3)),
         ],
         closed: true,
+        ..Default::default()
     }
 }
 
@@ -305,6 +306,7 @@ fn curved_arrow() -> ShapePath {
             PathPoint::corner(Vec2::new(0.76, 0.34)),
         ],
         closed: false,
+        ..Default::default()
     }
 }
 

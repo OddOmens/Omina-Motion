@@ -481,7 +481,7 @@ fn path(shape: Chunk<'_>) -> Option<ShapePath> {
         let handle_in = previous_in.map_or(Vec2::default(), |handle| handle - point);
         out.push(PathPoint { at: point, handle_in: if corner == 0 && !closed { Vec2::default() } else { handle_in }, handle_out });
     }
-    Some(ShapePath { points: out, closed })
+    Some(ShapePath { points: out, closed, ..Default::default() })
 }
 
 /// A text layer's words and look, from its text document (After Effects' text engine data: a

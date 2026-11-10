@@ -340,6 +340,13 @@ fn opacity_at(layer: &Layer, at: f64) -> f32 {
     layer.transform.as_ref().map_or(1.0, |t| (t.opacity.value_at(at) / 100.0).clamp(0.0, 1.0))
 }
 
+/// `layer`'s own rectangle in output pixels, its corners clockwise from the top left: where
+/// effects tied to the layer's shape (Corner Pin) start from.
+fn layer_box(layer: &Layer, world: Affine, scale: f32) -> [Vec2; 4] {
+    let (width, height) = (layer.size.x, layer.size.y);
+    [Vec2::new(0.0, 0.0), Vec2::new(width, 0.0), Vec2::new(width, height), Vec2::new(0.0, height)].map(|corner| world.apply(corner) * scale)
+}
+
 fn max_scale(transform: Affine) -> f32 {
     (transform.a.hypot(transform.b)).max(transform.c.hypot(transform.d))
 }
@@ -797,6 +804,11 @@ impl Renderer {
                 self.blur(encoder, targets, sigma, slot::AUX_A, to, slot::AUX_B);
                 self.effect_pass(encoder, targets, 31, &[intensity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], time, from, slot::AUX_B, to);
             }
+            Pass::Unsharp { amount, sigma, threshold } => {
+                // Blur into AUX_B (using `to` in between), then combine it with the original.
+                self.blur(encoder, targets, sigma, from, to, slot::AUX_B);
+                self.effect_pass(encoder, targets, 91, &[amount, threshold], time, from, slot::AUX_B, to);
+            }
             Pass::Lut { intensity } => {
                 let loaded = effect.lut.as_ref().and_then(|source| self.luts.get(source)).and_then(|(_, lut)| lut.as_ref());
                 let Some(lut) = loaded.filter(|_| intensity > 0.0) else { return false };
@@ -822,8 +834,9 @@ impl Renderer {
         if layer.effect_graph.wired {
             return self.apply_graph(encoder, targets, layer, world, frame, time, scale, image, other);
         }
+        let layer_box = layer_box(layer, world, scale);
         for effect in layer.effects.iter().filter(|effect| effect.enabled) {
-            let Some(passes) = effects::passes(effect, frame, scale) else { continue };
+            let Some(passes) = effects::passes(effect, frame, scale, layer_box) else { continue };
             for pass in passes {
                 if self.run_pass(encoder, targets, effect, pass, time, image, other) {
                     std::mem::swap(&mut image, &mut other);
@@ -845,6 +858,7 @@ impl Renderer {
             return image; // Not expected: slots are made for every plan before drawing.
         }
         let register = |r: effect_graph::Register| if r == 0 { image } else { slot::COUNT + r - 1 };
+        let layer_box = layer_box(layer, world, scale);
         for step in &plan.steps {
             match *step {
                 effect_graph::Step::Clear { out } => self.clear(encoder, &targets.work[register(out)].view, [0.0; 4]),
@@ -854,7 +868,7 @@ impl Renderer {
                     let target = register(scratch.unwrap_or(out));
                     // Steps after the first ping-pong between the target and `other`.
                     let mut current = register(input);
-                    for pass in effects::passes(effect, frame, scale).unwrap_or_default() {
+                    for pass in effects::passes(effect, frame, scale, layer_box).unwrap_or_default() {
                         let next = if current == target { other } else { target };
                         if self.run_pass(encoder, targets, effect, pass, time, current, next) {
                             current = next;
@@ -1443,7 +1457,7 @@ impl Renderer {
             let Some(world) = world_transform(composition, layer.id, at) else { continue };
             let opacity = opacity_at(layer, at);
 
-            let has_effects = layer.switches.effects_enabled && (layer.effect_graph.wired || layer.effects.iter().any(|effect| effect.enabled));
+            let has_effects = layer.switches.effects_enabled && (layer.effect_graph.wired || effect_graph::picture_effects(layer).any(|effect| effect.enabled));
             let cut_out = layer.cutout.is_some() && self.cutouts.contains_key(&layer.id) && !effect_graph::uses_matte(layer);
             // A layer moving while the shutter is open is drawn several times and averaged, so
             // it can't join a batch; a still one (or one with its switch off) is drawn as usual.

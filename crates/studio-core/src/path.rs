@@ -42,7 +42,19 @@ pub struct ShapePath {
     /// Whether the last point joins back to the first. An open path is drawn with its stroke
     /// only; it is never filled.
     pub closed: bool,
+    /// More outlines that are part of the same shape, as in an SVG compound path: they are
+    /// filled together with this one, so an outline inside another (the inside of an "O")
+    /// cuts a hole. Each is closed or open on its own; their own `compound` is unused.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compound: Vec<ShapePath>,
+    /// How overlapping outlines fill: by the even-odd rule (each overlap flips between inside
+    /// and outside) rather than the non-zero rule (the default, as in SVG).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub even_odd: bool,
 }
+
+/// The most extra outlines one compound path can have.
+pub const MAX_COMPOUND_OUTLINES: usize = 1024;
 
 /// The most points a path can have, so a damaged or hostile file cannot ask for millions.
 pub const MAX_PATH_POINTS: usize = 4096;
@@ -53,8 +65,16 @@ pub type Segment = [Vec2; 4];
 impl ShapePath {
     /// Whether there is enough to draw: two points, every coordinate a real number.
     pub fn is_sound(&self) -> bool {
+        let finite = |path: &ShapePath| path.points.iter().all(|point| [point.at, point.handle_in, point.handle_out].iter().all(|v| v.x.is_finite() && v.y.is_finite()));
         (2..=MAX_PATH_POINTS).contains(&self.points.len())
-            && self.points.iter().all(|point| [point.at, point.handle_in, point.handle_out].iter().all(|v| v.x.is_finite() && v.y.is_finite()))
+            && finite(self)
+            && self.compound.len() <= MAX_COMPOUND_OUTLINES
+            && self.compound.iter().all(|outline| outline.points.len() <= MAX_PATH_POINTS && finite(outline))
+    }
+
+    /// This outline and its compound ones, in drawing order.
+    pub fn outlines(&self) -> impl Iterator<Item = &ShapePath> {
+        std::iter::once(self).chain(&self.compound)
     }
 
     /// The path's curves, each from one point to the next (and back to the first when closed).
@@ -71,7 +91,8 @@ impl ShapePath {
 
     /// The same path with every coordinate mapped by `f`.
     pub fn mapped(&self, f: impl Fn(Vec2) -> Vec2) -> Self {
-        Self { points: self.points.iter().map(|point| point.map(&f)).collect(), closed: self.closed }
+        let map_one = |path: &ShapePath| Self { points: path.points.iter().map(|point| point.map(&f)).collect(), closed: path.closed, compound: Vec::new(), even_odd: path.even_odd };
+        Self { compound: self.compound.iter().map(map_one).collect(), ..map_one(self) }
     }
 
     /// The smallest box holding the drawn curves (not the handles): its top-left and
@@ -83,12 +104,15 @@ impl ShapePath {
             min = Vec2::new(min.x.min(v.x), min.y.min(v.y));
             max = Vec2::new(max.x.max(v.x), max.y.max(v.y));
         };
-        for point in &self.points {
-            include(point.at);
-        }
-        for segment in self.segments() {
-            for t in curve_extremes(segment) {
-                include(point_on(segment, t));
+        // Every outline counts, the compound ones too.
+        for outline in self.outlines() {
+            for point in &outline.points {
+                include(point.at);
+            }
+            for segment in outline.segments() {
+                for t in curve_extremes(segment) {
+                    include(point_on(segment, t));
+                }
             }
         }
         Some((min, max))
@@ -209,7 +233,7 @@ mod tests {
     #[test]
     fn a_closed_path_joins_its_last_point_to_its_first() {
         let corners = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)].map(|(x, y)| PathPoint::corner(Vec2::new(x, y)));
-        let mut path = ShapePath { points: corners.to_vec(), closed: false };
+        let mut path = ShapePath { points: corners.to_vec(), closed: false, ..Default::default() };
         assert_eq!(path.segments().len(), 2);
         path.closed = true;
         assert_eq!(path.segments().len(), 3);
@@ -222,6 +246,7 @@ mod tests {
         let path = ShapePath {
             points: vec![PathPoint { handle_out: Vec2::new(0.0, -40.0), ..PathPoint::corner(Vec2::new(0.0, 0.0)) }, PathPoint { handle_in: Vec2::new(0.0, -40.0), ..PathPoint::corner(Vec2::new(100.0, 0.0)) }],
             closed: false,
+            ..Default::default()
         };
         let (min, max) = path.bounds().unwrap();
         assert!(close(min, Vec2::new(0.0, -30.0)), "{min:?}");
@@ -230,14 +255,14 @@ mod tests {
 
     #[test]
     fn fitting_maps_the_path_into_its_box() {
-        let path = ShapePath { points: vec![PathPoint::corner(Vec2::new(50.0, 20.0)), PathPoint::smooth(Vec2::new(150.0, 120.0), Vec2::new(10.0, 0.0))], closed: false };
+        let path = ShapePath { points: vec![PathPoint::corner(Vec2::new(50.0, 20.0)), PathPoint::smooth(Vec2::new(150.0, 120.0), Vec2::new(10.0, 0.0))], closed: false, ..Default::default() };
         let (origin, size, fitted) = fit_to_box(&path).unwrap();
         assert_eq!(origin, Vec2::new(50.0, 20.0));
         assert_eq!(size, Vec2::new(100.0, 100.0));
         assert!(close(fitted.points[1].at, Vec2::new(1.0, 1.0)));
         assert!(close(fitted.points[1].handle_out, Vec2::new(0.1, 0.0)), "handles scale with the box");
         // A straight horizontal line still gets a box one pixel tall.
-        let flat = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 5.0)), PathPoint::corner(Vec2::new(30.0, 5.0))], closed: false };
+        let flat = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 5.0)), PathPoint::corner(Vec2::new(30.0, 5.0))], closed: false, ..Default::default() };
         assert_eq!(fit_to_box(&flat).unwrap().1, Vec2::new(30.0, 1.0));
     }
 
@@ -245,7 +270,7 @@ mod tests {
     fn walking_a_path_finds_points_and_directions_along_it() {
         // An open L: 100 right, then 100 down.
         let corners = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)].map(|(x, y)| PathPoint::corner(Vec2::new(x, y)));
-        let path = ShapePath { points: corners.to_vec(), closed: false };
+        let path = ShapePath { points: corners.to_vec(), closed: false, ..Default::default() };
         let walk = Walk::new(&path, |v| v).unwrap();
         assert!((walk.length() - 200.0).abs() < 1e-3);
         let (point, angle) = walk.at(50.0).unwrap();
@@ -260,8 +285,8 @@ mod tests {
 
     #[test]
     fn unusable_paths_are_caught() {
-        assert!(!ShapePath { points: vec![PathPoint::default()], closed: false }.is_sound());
-        let broken = ShapePath { points: vec![PathPoint::default(), PathPoint::corner(Vec2::new(f32::NAN, 0.0))], closed: true };
+        assert!(!ShapePath { points: vec![PathPoint::default()], closed: false, ..Default::default() }.is_sound());
+        let broken = ShapePath { points: vec![PathPoint::default(), PathPoint::corner(Vec2::new(f32::NAN, 0.0))], closed: true, ..Default::default() };
         assert!(!broken.is_sound());
     }
 }

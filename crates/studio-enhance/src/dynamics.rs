@@ -2,7 +2,7 @@
 //! harsh "s" sounds, and a limiter that keeps peaks under the ceiling. All work on whole
 //! recordings at 48 kHz, so the limiter can look ahead freely.
 
-use crate::filters::Biquad;
+use studio_dsp::Biquad;
 
 const RATE: f32 = 48_000.0;
 

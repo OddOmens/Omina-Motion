@@ -17,6 +17,7 @@ authors = ["Odd Omens LLC"]
 
 [workspace.dependencies]
 studio-core = { path = "crates/studio-core" }
+studio-dsp = { path = "crates/studio-dsp" }
 # Pinned exactly: GPUI is pre-1.0, so upgrades are deliberate.
 gpui-kit = "=0.8.1"
 
