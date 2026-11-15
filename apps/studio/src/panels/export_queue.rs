@@ -33,6 +33,8 @@ pub struct QueuedExport {
     pub project: Project,
     pub request: ExportRequest,
     pub status: QueueStatus,
+    /// Whether Iris was asked for it in her conversation, where she then says how it ended.
+    pub from_assistant: bool,
 }
 
 /// The queue: its exports in order, and whether it is working through them.
@@ -42,12 +44,32 @@ pub struct ExportQueue {
     pub running: bool,
 }
 
+impl ExportQueue {
+    /// Whether one of the exports is running now.
+    fn exporting(&self) -> bool {
+        self.items.iter().any(|item| item.status == QueueStatus::Exporting)
+    }
+
+    /// Takes the finished exports (done, cancelled or failed) out of the list. Nothing is taken
+    /// out while one is running, because it reports back by its place in the list: moving it
+    /// would mark another export as the one that finished.
+    fn clear_finished(&mut self) {
+        if self.exporting() {
+            return;
+        }
+        self.items.retain(|item| item.status == QueueStatus::Waiting);
+    }
+}
+
 /// Adds an export of the open composition, with the Export dialog's settings, saving to `path`.
 pub fn add(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
+    // The queued export keeps the project as it is now, so recipes set to run before each
+    // export run as it is added.
+    super::export::before_export(workspace, window, cx);
     let request = super::export::request_for(workspace, path);
     let composition = workspace.state.composition().name.clone();
     let project = workspace.state.project.clone();
-    workspace.ui.export_queue.items.push(QueuedExport { composition, project, request, status: QueueStatus::Waiting });
+    workspace.ui.export_queue.items.push(QueuedExport { composition, project, request, status: QueueStatus::Waiting, from_assistant: false });
     let waiting = workspace.ui.export_queue.items.iter().filter(|item| item.status == QueueStatus::Waiting).count();
     window.push_notification(format!("Added to the export queue ({waiting} waiting). File ▸ Export Queue… starts it.").as_str(), cx);
     cx.notify();
@@ -85,6 +107,10 @@ fn start_next(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
 /// Called when queued export `index` ends: notes how, then starts the next. A cancelled one
 /// stops the queue (Cancel means stop), leaving the rest waiting.
 pub(crate) fn finished(workspace: &mut Workspace, index: usize, outcome: Result<Outcome, String>, window: &mut Window, cx: &mut Context<Workspace>) {
+    // An export Iris was asked for is reported where it was asked for.
+    if let Some(path) = workspace.ui.export_queue.items.get(index).filter(|item| item.from_assistant).map(|item| item.request.path.clone()) {
+        super::assistant::export_finished(workspace, &path, &outcome, window, cx);
+    }
     let status = match outcome {
         Ok(Outcome::Finished { .. }) => QueueStatus::Done,
         Ok(Outcome::Cancelled) => QueueStatus::Cancelled,
@@ -103,13 +129,13 @@ pub(crate) fn finished(workspace: &mut Workspace, index: usize, outcome: Result<
 /// Clear Finished, and Start Queue.
 pub fn open(_workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, _, cx| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, cx| {
         let Some(workspace) = target.upgrade() else { return dialog };
         let workspace = workspace.read(cx);
         let queue = &workspace.ui.export_queue;
         let rows: Vec<_> = queue.items.iter().enumerate().map(|(index, item)| row(index, item, &target)).collect();
         let waiting = queue.items.iter().any(|item| item.status == QueueStatus::Waiting);
-        let finished = queue.items.iter().any(|item| !matches!(item.status, QueueStatus::Waiting | QueueStatus::Exporting));
+        let finished = !queue.exporting() && queue.items.iter().any(|item| !matches!(item.status, QueueStatus::Waiting | QueueStatus::Exporting));
         let can_start = waiting && !queue.running && workspace.ui.export_job.is_none();
         let (start_target, clear_target) = (target.clone(), target.clone());
         dialog
@@ -135,7 +161,7 @@ pub fn open(_workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                     .child(Button::new("export-queue-clear").outline().small().label("Clear Finished").disabled(!finished).on_click(move |_, window, cx| {
                         clear_target
                             .update(cx, |this, cx| {
-                                this.ui.export_queue.items.retain(|item| matches!(item.status, QueueStatus::Waiting | QueueStatus::Exporting));
+                                this.ui.export_queue.clear_finished();
                                 cx.notify();
                             })
                             .ok();
@@ -185,9 +211,30 @@ fn row(index: usize, item: &QueuedExport, target: &WeakEntity<Workspace>) -> imp
 /// list the running export still reports to).
 fn remove_item(workspace: &mut Workspace, index: usize) {
     let queue = &mut workspace.ui.export_queue;
-    let running = queue.items.iter().any(|item| item.status == QueueStatus::Exporting);
-    if running || queue.items.get(index).is_none() {
+    if queue.exporting() || queue.items.get(index).is_none() {
         return;
     }
     queue.items.remove(index);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn queued(status: QueueStatus) -> QueuedExport {
+        let project = studio_core::sample::sample_project();
+        let request = ExportRequest::new(project.compositions[0].id, 0..10, studio_export::ExportFormat::Gif, PathBuf::from("out.gif"));
+        QueuedExport { composition: "Comp".to_owned(), project, request, status, from_assistant: false }
+    }
+
+    #[test]
+    fn clear_finished_waits_while_an_export_runs() {
+        // A finished, then the one running (which reports back as item 1), then one waiting.
+        let mut queue = ExportQueue { items: vec![queued(QueueStatus::Done), queued(QueueStatus::Exporting), queued(QueueStatus::Waiting)], running: true };
+        queue.clear_finished();
+        assert_eq!(queue.items.len(), 3, "the running export keeps its place in the list");
+        queue.items[1].status = QueueStatus::Done;
+        queue.clear_finished();
+        assert_eq!(queue.items.iter().map(|item| item.status.clone()).collect::<Vec<_>>(), vec![QueueStatus::Waiting]);
+    }
 }

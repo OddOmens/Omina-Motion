@@ -129,10 +129,18 @@ pub fn ripple_delete(project: &mut Project, comp_id: Id, layers: &[Id]) -> usize
             _ => merged.push((track, start, end)),
         }
     }
+    // Locked clips stay put, so a span with one of them between it and a clip doesn't pull
+    // that clip earlier: it would slide over the locked one.
+    let locked: Vec<(i32, i64)> = composition.layers.iter().filter(|l| l.switches.locked).map(|l| (l.track, l.in_frame)).collect();
+    let held_back = |track: i32, span_end: i64, clip_start: i64| locked.iter().any(|&(locked_track, start)| locked_track == track && start >= span_end && start < clip_start);
     // Close the gaps before deleting, so emptied tracks being renumbered can't mix them up.
     for layer in composition.layers.iter_mut().filter(|layer| !layer.switches.locked && !doomed.contains(&layer.id)) {
         // Every removed span on this layer's track that ends by its start pulls it earlier.
-        let shift: i64 = merged.iter().filter(|(track, _, end)| *track == layer.track && *end <= layer.in_frame).map(|(_, start, end)| end - start).sum();
+        let shift: i64 = merged
+            .iter()
+            .filter(|(track, _, end)| *track == layer.track && *end <= layer.in_frame && !held_back(*track, *end, layer.in_frame))
+            .map(|(_, start, end)| end - start)
+            .sum();
         if shift > 0 {
             layer.shift_in_time(-shift);
         }
@@ -299,6 +307,20 @@ mod tests {
         project.composition_mut(ids::MAIN_COMP).unwrap().layers[1].switches.locked = true;
         ripple_delete(&mut project, ids::MAIN_COMP, &[layers[0]]);
         assert_eq!(span(&project, layers[1]), (24, 48), "locked layers do not move");
+    }
+
+    #[test]
+    fn ripple_delete_never_slides_a_clip_over_a_locked_one() {
+        let (mut project, layers) = solids(&[(0, 24), (24, 48), (48, 72)]);
+        let composition = project.composition_mut(ids::MAIN_COMP).unwrap();
+        let track = composition.layer(layers[0]).unwrap().track;
+        for id in &layers {
+            composition.layer_mut(*id).unwrap().track = track;
+        }
+        composition.layer_mut(layers[1]).unwrap().switches.locked = true;
+        ripple_delete(&mut project, ids::MAIN_COMP, &[layers[0]]);
+        assert_eq!(span(&project, layers[1]), (24, 48), "locked");
+        assert_eq!(span(&project, layers[2]), (48, 72), "the clip after the locked one stays clear of it");
     }
 
     #[test]

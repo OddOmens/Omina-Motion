@@ -10,8 +10,7 @@ use crate::model::{Id, Paint, Rgba, ShapeKind, TextAlign};
 
 /// A round spot for a photo (a profile picture), filled like the other drop spots.
 fn round_photo(b: &mut Builder, diameter: f32, at: Vec2, from: f64, what: &str) -> Id {
-    let fill = Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0);
-    b.shape(ShapeKind::Ellipse, Vec2::new(diameter, diameter), at, Some(fill), Some((0x71717a, 2.0)), 0.0, from, &crate::slots::placeholder_name(what))
+    b.round_placeholder(diameter, at, None, from, what)
 }
 
 /// A drop spot for footage filling the whole frame.
@@ -71,7 +70,7 @@ pub(super) fn profile_intro(b: &mut Builder) {
     };
     let ring = b.shape(ShapeKind::Ellipse, Vec2::new(diameter + 36.0, diameter + 36.0), photo_at, None, Some((p.accent, 10.0)), 0.0, 0.2, "Ring");
     b.pop_in(ring, 0.2);
-    let photo = round_photo(b, diameter, photo_at, 0.3, "photo");
+    let photo = round_photo(b, diameter, photo_at, 0.3, "profile photo");
     b.pop_in(photo, 0.3);
     let hello = b.text(greeting, b.at(text_x, top), 48.0, p.muted, b.light().max(500), 0.8);
     b.slide_in(hello, Vec2::new(0.0, 30.0), 0.8, 0.6);

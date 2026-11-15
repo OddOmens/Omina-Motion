@@ -21,7 +21,7 @@ use crate::workspace::{PanelId, Workspace};
 
 /// Heights of the bars above the tracks. The transport bar is drawn in the Timeline's tab row
 /// (see `panels::dock`), which takes its height.
-pub const CONTROLS_BAND: f32 = 40.0;
+pub const CONTROLS_BAND: f32 = 32.0;
 const RULER_BAND: f32 = 28.0;
 /// How close, in screen pixels, a drag has to come to something before it snaps there.
 const SNAP_PIXELS: f64 = 8.0;
@@ -49,6 +49,9 @@ pub struct TimelineUi {
     track_drop: Option<(i32, i64)>,
     /// Clips opened to show their keyframe rows.
     pub(crate) expanded_clips: std::collections::HashSet<Id>,
+    /// Opened clips that show the keyframe row of one property only (the P, R and S keys),
+    /// and which property. An opened clip not listed here shows every animated property.
+    pub(crate) only_property: std::collections::HashMap<Id, studio_core::property::PropertyPath>,
     /// Bounds of the rows content (it scrolls, so its top moves with the scroll position).
     rows: MeasuredBounds,
     /// Bounds of the part of the rows that can be seen: rows far outside it aren't drawn.
@@ -145,6 +148,27 @@ pub(crate) fn animated_row_names(layer: &studio_core::model::Layer) -> Vec<Strin
     tracks::animated_properties(layer).into_iter().map(|(_, name, _)| name).collect()
 }
 
+/// Opens the keyframe rows of the selected clips (of every clip, with none selected) in the
+/// timeline, as After Effects' P, R, S and U keys do. `only` picks one property's row; `None`
+/// shows every animated property. Pressing the same key again closes the rows.
+pub fn show_keyframe_rows(workspace: &mut Workspace, only: Option<studio_core::property::PropertyPath>) {
+    let composition = workspace.state.composition();
+    let targets: Vec<Id> = if workspace.state.selected_layers.is_empty() { composition.layers.iter().map(|layer| layer.id).collect() } else { workspace.state.selected_layers.clone() };
+    let ui = &mut workspace.ui.timeline;
+    let already_showing = !targets.is_empty() && targets.iter().all(|id| ui.expanded_clips.contains(id) && ui.only_property.get(id).copied() == only);
+    for id in targets {
+        ui.only_property.remove(&id);
+        if already_showing {
+            ui.expanded_clips.remove(&id);
+            continue;
+        }
+        ui.expanded_clips.insert(id);
+        if let Some(path) = only {
+            ui.only_property.insert(id, path);
+        }
+    }
+}
+
 fn tick_label(frame: i64, base: i64) -> String {
     if frame % base == 0 { format!("{:02}s", frame / base) } else { format!("{}f", frame % base) }
 }
@@ -200,6 +224,19 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
         .filter(|at| (0.0..=1.0).contains(at))
         .map(|at| div().absolute().top(px(1.0)).left(relative(at)).ml(px(-3.0)).size(px(6.0)).rounded_full().bg(hsla(color::SNAP)))
         .collect();
+
+    // Where the Motion Assistant has something to say: a small mark in its area's color at the
+    // foot of the ruler, while the assistant is one of the tools in use.
+    let assistant_marks: Vec<_> = if workspace.has(crate::features::Feature::Assistant) {
+        super::assistant::open_suggestions(workspace)
+            .into_iter()
+            .map(|suggestion| (fraction(suggestion.frame as f64, view), super::assistant::area_color(suggestion.check.area())))
+            .filter(|(at, _)| (0.0..=1.0).contains(at))
+            .map(|(at, color)| div().absolute().bottom_0().left(relative(at)).ml(px(-1.5)).w(px(3.0)).h(px(5.0)).rounded(px(1.0)).bg(color))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let edge = |id: &'static str, drag: TimelineDrag, cx: &mut Context<Workspace>| {
         div()
@@ -265,7 +302,8 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                         .children(rendered_ahead(workspace))
                         .children(ticks)
                         // Markers (beats, say): small accent marks along the top of the ruler.
-                        .children(markers),
+                        .children(markers)
+                        .children(assistant_marks),
                 )
                 // The playhead's handle, while it is in view (the ruler isn't clipped).
                 .when((0.0..=1.0).contains(&playhead), |scrub| scrub.child(
@@ -276,10 +314,10 @@ fn ruler(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement
                         .left(relative(playhead))
                         .ml(px(-7.0))
                         .w(px(14.0))
-                        // A pill head in the time color on a thin white line. (The line stays
+                        // A pill head in the accent color on a thin white line. (The line stays
                         // white because it crosses the clips, and must read over any clip color.)
                         .child(div().absolute().top_0().bottom_0().left(px(6.5)).w(px(1.0)).bg(hsla(color::PLAYHEAD)))
-                        .child(div().absolute().bottom(px(2.0)).left_0().w(px(14.0)).h(px(18.0)).rounded(px(7.0)).bg(hsla(color::TIME))),
+                        .child(div().absolute().bottom(px(2.0)).left_0().w(px(14.0)).h(px(18.0)).rounded(px(7.0)).bg(hsla(color::ACCENT))),
                 )),
         )
 }
@@ -389,8 +427,7 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
                         .child(band(RULER_BAND).child(div().flex_1().min_w_0().mx(px(EDGE_GUTTER)).child(ruler(workspace, cx)))),
                 ),
         )
-        .child(div().relative().flex_1().min_h_0().child(ui.viewport.probe()).child(div().id("timeline-rows").size_full().overflow_y_scroll().child(rows_content)))
-        .children(empty_hint(workspace));
+        .child(div().relative().flex_1().min_h_0().child(ui.viewport.probe()).child(div().id("timeline-rows").size_full().overflow_y_scroll().child(rows_content)));
 
     let footer = div()
         .flex()
@@ -430,42 +467,32 @@ fn rendered_ahead(workspace: &Workspace) -> Vec<gpui_kit::Div> {
         .collect()
 }
 
-/// What to do in an empty composition, over its empty tracks (the tracks still take drops).
+/// What to do in an empty composition, written in its first track's row (which still takes
+/// drops). The track rows draw it under the playhead, so the playhead stays in front.
 fn empty_hint(workspace: &Workspace) -> Option<impl IntoElement + use<>> {
     if !workspace.state.composition().layers.is_empty() {
         return None;
     }
     let keys = &workspace.ui.settings.shortcuts;
     let key = |id: &str| crate::keymap::key_for(keys, id).map(|key| format!(" ({key})")).unwrap_or_default();
+    // One quiet line inside the first track's row, where the first clip would go.
     Some(
         div()
             .id("timeline-empty-hint")
             .absolute()
+            .top_0()
             .right_0()
-            .bottom_0()
-            .top(px(CONTROLS_BAND + RULER_BAND))
-            .left(px(tracks::HEADER_WIDTH))
+            .left_0()
+            .h(px(tracks::first_row_height(workspace)))
+            .px_3()
             .flex()
-            .flex_col()
             .items_center()
-            .justify_center()
-            .child(
-                // A card of its own, so the track rows' lines don't run through the text.
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_1()
-                    .px_4()
-                    .py_3()
-                    .rounded(px(6.0))
-                    .bg(hsla(color::PANEL))
-                    .border_1()
-                    .border_color(hsla(color::HAIRLINE))
-                    .text_color(hsla(color::MUTED))
-                    .child(div().text_color(hsla(color::TEXT)).child("This composition is empty"))
-                    .child(format!("Drag footage, pictures or sound here from the Project panel or the Finder, add text{} or a shape{}, or start from a template.", key("type-tool"), key("shape-tool"))),
-            )
+            .text_color(hsla(color::MUTED))
+            .child(div().min_w_0().truncate().child(format!(
+                "This composition is empty. Drag footage, pictures or sound here from the Project panel or the Finder, add text{} or a shape{}, or start from a template.",
+                key("type-tool"),
+                key("shape-tool")
+            )))
             .test_support(),
     )
 }

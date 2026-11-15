@@ -1,0 +1,18 @@
+[package]
+name = "iris"
+description = "Iris, the assistant shared by Studio, Canvas and Develop: its name and settings, its help knowledge and how questions find answers. No UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The help knowledge is written as TOML, which reads well for long answers.
+toml = "0.8"
+
+[lints]
+workspace = true

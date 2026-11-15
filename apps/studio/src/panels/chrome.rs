@@ -282,3 +282,34 @@ impl MeasuredBounds {
         .size_full()
     }
 }
+
+/// The look every floating surface shares, so popups read as part of the editor: a panel's
+/// own color, the hairline border panels are divided by, and slightly rounded corners.
+pub fn popup_surface<E: Styled>(surface: E) -> E {
+    surface.bg(hsla(color::PANEL)).border_1().border_color(hsla(color::HAIRLINE)).rounded(px(size::POPUP_RADIUS)).shadow_lg()
+}
+
+/// A dimmed layer over the whole window with `card` in its middle, for popups Studio draws
+/// itself (the quick search, the import progress). It takes every click, so nothing under it
+/// is edited by accident.
+pub fn popup_backdrop(id: impl Into<ElementId>, card: impl IntoElement) -> gpui_kit::Stateful<Div> {
+    div().id(id).absolute().inset_0().flex().items_center().justify_center().bg(gpui_kit::black().opacity(0.45)).occlude().child(card)
+}
+
+/// How every dialog appears and leaves: it fades in where it will sit, in the middle of the
+/// window, and fades out the same way. Nothing slides in from an edge.
+const POPUP_ENTRANCE: gpui_kit::component::dialog::DialogEntrance = gpui_kit::component::dialog::DialogEntrance::Fade;
+
+/// Opens a dialog in the middle of the window, looking like the rest of the editor. Every
+/// dialog goes through here (or `open_alert_dialog`), so they all sit and look the same.
+pub fn open_dialog(window: &mut Window, cx: &mut App, build: impl Fn(gpui_kit::component::dialog::Dialog, &mut Window, &mut App) -> gpui_kit::component::dialog::Dialog + 'static) {
+    use gpui_kit::component::WindowExt as _;
+    window.open_dialog(cx, move |dialog, window, cx| popup_surface(build(dialog, window, cx).centered().entrance(POPUP_ENTRANCE)));
+}
+
+/// Opens a short message or a yes-or-no question in the middle of the window, looking like
+/// the rest of the editor.
+pub fn open_alert_dialog(window: &mut Window, cx: &mut App, build: impl Fn(gpui_kit::component::dialog::AlertDialog, &mut Window, &mut App) -> gpui_kit::component::dialog::AlertDialog + 'static) {
+    use gpui_kit::component::WindowExt as _;
+    window.open_alert_dialog(cx, move |dialog, window, cx| popup_surface(build(dialog, window, cx).centered().entrance(POPUP_ENTRANCE)));
+}

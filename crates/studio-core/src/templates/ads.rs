@@ -385,7 +385,7 @@ pub(super) fn social_proof(b: &mut Builder) {
     for index in 0..5 {
         let x = b.at(0.5, 0.0).x + (index as f32 - 2.0) * 96.0 * unit;
         let at = 2.4 + index as f64 * 0.1;
-        let face = b.shape(ShapeKind::Ellipse, Vec2::new(124.0, 124.0), Vec2::new(x, face_y), Some(Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0)), Some((p.background, 8.0)), 0.0, at, "Drop a customer photo here");
+        let face = b.round_placeholder(124.0, Vec2::new(x, face_y), Some((p.background, 8.0)), at, "customer photo");
         b.pop_in(face, at);
     }
     button(b, cta, b.at(0.5, ys[5]), 3.0);

@@ -88,6 +88,12 @@ impl Sound {
         self.preview.as_ref().filter(|player| player.error().is_none()).map(AudioPlayer::heard)
     }
 
+    /// The loudest level of the composition's mix on the left and on the right since this was
+    /// last called, while it plays (see `AudioPlayer::take_peaks`). For the Mixer's meter.
+    pub fn take_levels(&mut self) -> Option<[f32; 2]> {
+        self.playing.as_ref().map(|playing| playing.player.take_peaks())
+    }
+
     /// Brings the sound in line with `state`. Call it whenever playback may have started,
     /// stopped or changed. While playing, returns how long the current playback has been
     /// heard: the playhead's clock.

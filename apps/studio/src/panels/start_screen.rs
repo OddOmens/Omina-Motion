@@ -4,6 +4,7 @@
 //! of the templates. Like After Effects' Home screen.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -35,6 +36,8 @@ pub struct StartScreen {
     /// The person was asked about unsaved changes on the way here and chose not to save, so
     /// opening or starting a project from here goes ahead without asking again.
     pub changes_declined: bool,
+    /// Whether Home lists every recent project, not just the latest few.
+    pub all_recent: bool,
     _filter_changes: Subscription,
 }
 
@@ -47,7 +50,7 @@ pub fn show(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
             cx.notify();
         }
     });
-    workspace.ui.start_screen = Some(StartScreen { tab: StartTab::Home, filter, changes_declined: false, _filter_changes: changes });
+    workspace.ui.start_screen = Some(StartScreen { tab: StartTab::Home, filter, changes_declined: false, all_recent: false, _filter_changes: changes });
     // The editor's own floating panels would draw over the start screen, so they close.
     workspace.ui.template_gallery = false;
     workspace.ui.color_picker = None;
@@ -220,12 +223,13 @@ pub fn shown_recent(recent: &[RecentProject], filter: &str) -> Vec<RecentProject
 /// The start screen over the whole window, while it is showing.
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let screen = workspace.ui.start_screen.as_ref()?;
+    // With Templates switched off in Settings ▸ Tools & Features, its page is gone too.
+    let templates_on = workspace.has(crate::features::Feature::Templates);
     let page = match screen.tab {
-        StartTab::Home => home_page(workspace, screen, cx).into_any_element(),
-        StartTab::Templates => templates_page(workspace, cx).into_any_element(),
+        StartTab::Templates if templates_on => templates_page(workspace, cx).into_any_element(),
+        StartTab::Home | StartTab::Templates => home_page(workspace, screen, cx).into_any_element(),
     };
-    let main = div().relative().flex_1().min_w_0().flex().flex_col().child(accent_glow(320.0)).child(page);
-    let body = div().flex_1().min_h_0().flex().child(sidebar(screen.tab, cx)).child(main);
+    let body = div().relative().flex_1().min_h_0().flex().flex_col().child(accent_glow(320.0)).child(page);
     let screen = div()
         .id("start-screen")
         .absolute()
@@ -255,17 +259,14 @@ pub(crate) fn accent_glow(height: f32) -> gpui_kit::Div {
     ))
 }
 
-/// Studio's mark: a clapperboard on an accent tile, `side` points square.
+/// The app icon's artwork, built into the app so the mark never has to be loaded from disk.
+static BRAND_MARK: std::sync::LazyLock<Arc<gpui_kit::Image>> = std::sync::LazyLock::new(|| {
+    Arc::new(gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, include_bytes!("../../../../assets/icon/mark.png").to_vec()))
+});
+
+/// Omina Motion's mark, the same artwork as the app icon, `side` points square.
 pub(crate) fn brand_mark(side: f32) -> gpui_kit::Div {
-    div()
-        .size(px(side))
-        .flex_none()
-        .rounded(px(side * 0.24))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(linear_gradient(135.0, linear_color_stop(hsla(color::ACCENT), 0.0), linear_color_stop(hsla(color::ACCENT).opacity(0.7), 1.0)))
-        .child(Icon::new(IconName::Clapperboard).size(px(side * 0.56)).text_color(gpui_kit::white()))
+    div().size(px(side)).flex_none().child(gpui_kit::img(BRAND_MARK.clone()).size_full())
 }
 
 /// Studio's name on the left, and a button to go to the editor on the right.
@@ -291,224 +292,346 @@ fn top_bar(cx: &mut Context<Workspace>) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .child(brand_mark(30.0))
-                .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Studio")),
+                .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Omina Motion")),
         )
         .child(close)
 }
 
-/// The left column: New Project and Open Project, then the pages.
-fn sidebar(tab: StartTab, cx: &mut Context<Workspace>) -> impl IntoElement {
-    use gpui_kit::component::button::{Button, ButtonVariants as _};
-    let new = Button::new("start-new").primary().icon(Icon::new(IconName::Plus)).label("New Project").on_click(cx.listener(|this, _, window, cx| new_project(this, window, cx)));
-    let open = Button::new("start-open").ghost().icon(Icon::new(IconName::FolderOpen)).label("Open Project…").on_click(cx.listener(|this, _, window, cx| this.open(window, cx)));
-    let page = |id: &'static str, label: &'static str, icon: IconName, which: StartTab| {
-        let active = tab == which;
+/// How many recent projects Home lists until "Show all" is pressed (a filter searches all).
+const RECENT_SHOWN: usize = 8;
+
+/// A section's title on the Home page.
+fn section_title(title: &'static str) -> gpui_kit::Div {
+    div().text_size(px(20.0)).font_weight(gpui_kit::FontWeight::BOLD).child(title)
+}
+
+/// The Home page, which scrolls as a whole: a welcome, the recent projects (first, for someone
+/// coming back to their work), a row of sample projects, and sizes to start a new project at.
+/// Before any project has been opened, the recent list is a note at the bottom instead.
+fn home_page(workspace: &Workspace, screen: &StartScreen, cx: &mut Context<Workspace>) -> impl IntoElement {
+    // The sample projects and the way to every template come and go with the Templates feature.
+    let templates_on = workspace.has(crate::features::Feature::Templates);
+    let filter = screen.filter.read(cx).value().to_string();
+    let recent = app_settings::load().recent_projects;
+    let on_disk = recent.iter().filter(|project| project.path.exists()).count();
+    let matching = shown_recent(&recent, &filter);
+    // The latest few, unless a filter is narrowing the list or all were asked for.
+    let limited = filter.trim().is_empty() && !screen.all_recent && matching.len() > RECENT_SHOWN;
+    let shown = if limited { &matching[..RECENT_SHOWN] } else { &matching[..] };
+    let now = app_settings::now_seconds();
+    let cards: Vec<AnyElement> = shown.iter().enumerate().map(|(index, project)| recent_row(index, project, now, cx).into_any_element()).collect();
+    // "View all", beside the heading, while only the latest few are showing.
+    let view_all = limited.then(|| {
         div()
-            .id(id)
-            .h(px(34.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .gap_2p5()
-            .rounded(px(6.0))
+            .id("start-recent-all")
+            .text_color(hsla(color::MUTED))
             .cursor_pointer()
-            .text_color(hsla(if active { color::TEXT } else { color::MUTED }))
-            .when(active, |row| row.bg(hsla(color::ROW_SELECTED)).font_weight(gpui_kit::FontWeight::SEMIBOLD))
-            .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .hover(|style| style.text_color(hsla(color::TEXT)))
+            .on_click(cx.listener(|this, _, _, cx| {
                 if let Some(screen) = this.ui.start_screen.as_mut() {
-                    screen.tab = which;
+                    screen.all_recent = true;
                 }
                 cx.notify();
             }))
-            .child(Icon::new(icon).size(px(16.0)))
-            .child(label)
+            .child(format!("View all {}", matching.len()))
             .test_support()
-    };
-    div()
-        .w(px(240.0))
-        .flex_none()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_5()
-        .bg(hsla(color::PANEL))
-        .border_r_1()
-        .border_color(hsla(color::HAIRLINE))
-        .child(div().flex().flex_col().gap_1p5().child(new).child(open))
-        .child(div().my_3().h(px(1.0)).bg(hsla(color::HAIRLINE)))
-        .child(page("start-home", "Home", IconName::House, StartTab::Home))
-        .child(page("start-templates", "Templates", IconName::LayoutTemplate, StartTab::Templates))
-}
-
-/// The Home page: a welcome, and the recent projects with a filter.
-fn home_page(workspace: &Workspace, screen: &StartScreen, cx: &mut Context<Workspace>) -> impl IntoElement {
-    let filter = screen.filter.read(cx).value().to_string();
-    let recent = app_settings::load().recent_projects;
-    let shown = shown_recent(&recent, &filter);
-    let now = app_settings::now_seconds();
-    let heading = |label: &'static str| div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(label);
-    let header = div()
-        .flex()
-        .items_center()
-        .h(px(30.0))
-        .px_3()
-        .border_b_1()
-        .border_color(hsla(color::HAIRLINE))
-        .child(div().flex_1().min_w_0().child(heading("NAME")))
-        .child(div().w(px(150.0)).child(heading("OPENED")))
-        .child(div().w(px(80.0)).flex().justify_end().child(heading("SIZE")));
-    let rows: Vec<AnyElement> = shown.iter().enumerate().map(|(index, project)| recent_row(index, project, now, cx).into_any_element()).collect();
-    let empty = if recent.iter().any(|project| project.path.exists()) {
-        "No recent projects match the filter."
-    } else {
-        "Projects you open or save will be listed here. Start a new one, or pick a template."
-    };
+    });
     let list = div()
         .id("start-recent")
+        .flex_none()
+        .flex()
+        .flex_wrap()
+        .gap_4()
+        .when(cards.is_empty(), |list| list.child(div().py_4().text_color(hsla(color::MUTED)).child("No recent projects match the filter.")))
+        .children(cards);
+    let recent_section = div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(section_title("Recent projects"))
+                .child(div().flex().items_center().gap_4().children(view_all).child(div().w(px(240.0)).child(Input::new(&screen.filter).prefix(Icon::new(IconName::Search).size(px(14.0)).text_color(hsla(color::MUTED))).cleanable(true)))),
+        )
+        .child(list);
+    // With nothing opened yet, a note says where projects will be listed.
+    let first_run_note = div()
+        .id("start-recent-empty")
+        .flex_none()
+        .p_5()
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(hsla(color::HAIRLINE))
+        .bg(hsla(color::PANEL))
+        .child(div().size(px(34.0)).flex_none().rounded_full().flex().items_center().justify_center().bg(hsla(color::ACCENT).opacity(0.15)).child(Icon::new(IconName::Film).size(px(16.0)).text_color(hsla(color::ACCENT))))
+        .child(div().text_color(hsla(color::MUTED)).child(if templates_on { "Projects you open or save will be listed here. Start a new one, or pick a template." } else { "Projects you open or save will be listed here. Start a new one to begin." }))
+        .test_support();
+    let new_project_section = div().flex().flex_col().gap_3().child(section_title("New project")).child(presets_row(cx));
+    let see_all = div()
+        .id("start-see-templates")
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_color(hsla(color::ACCENT))
+        .cursor_pointer()
+        .hover(|style| style.text_color(hsla(color::TEXT)))
+        .on_click(cx.listener(|this, _, _, cx| {
+            if let Some(screen) = this.ui.start_screen.as_mut() {
+                screen.tab = StartTab::Templates;
+            }
+            cx.notify();
+        }))
+        .child(format!("All {} templates", TEMPLATES.len()))
+        .child(Icon::new(IconName::ChevronRight).size(px(14.0)))
+        .test_support();
+    let samples_section = div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(
+            div()
+                .flex()
+                .items_end()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(section_title("Sample projects"))
+                        .child(div().text_color(hsla(color::MUTED)).child("Start from a sample project and make it your own. Every template is on the Templates page too.")),
+                )
+                .child(see_all),
+        )
+        .child(super::templates::start_screen_strip(workspace, cx));
+    div()
+        .id("start-home-page")
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
-        .child(header)
-        .when(rows.is_empty(), |list| {
-            list.child(
-                div()
-                    .id("start-recent-empty")
-                    .m_3()
-                    .p_5()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(hsla(color::HAIRLINE))
-                    .bg(hsla(color::PANEL))
-                    .child(div().size(px(34.0)).flex_none().rounded_full().flex().items_center().justify_center().bg(hsla(color::ACCENT).opacity(0.15)).child(Icon::new(IconName::Film).size(px(16.0)).text_color(hsla(color::ACCENT))))
-                    .child(div().text_color(hsla(color::MUTED)).child(empty))
-                    .test_support(),
-            )
-        })
-        .children(rows);
-    div()
-        .flex_1()
-        .min_h_0()
         .flex()
         .flex_col()
-        .gap_4()
+        .gap_6()
         .px(px(48.0))
         .pt(px(28.0))
-        .pb_6()
-        .child(hero(recent.iter().filter(|project| project.path.exists()).count()))
-        .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("New project"))
-        .child(presets_row(cx))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Start from a template"))
-                .child(
-                    div()
-                        .id("start-see-templates")
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_color(hsla(color::ACCENT))
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(hsla(color::TEXT)))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(screen) = this.ui.start_screen.as_mut() {
-                                screen.tab = StartTab::Templates;
-                            }
-                            cx.notify();
-                        }))
-                        .child(format!("All {} templates", TEMPLATES.len()))
-                        .child(Icon::new(IconName::ChevronRight).size(px(14.0)))
-                        .test_support(),
-                ),
-        )
-        .child(super::templates::start_screen_strip(workspace, HOME_TEMPLATES, cx))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Recent"))
-                .child(div().w(px(260.0)).child(Input::new(&screen.filter).prefix(Icon::new(IconName::Search).size(px(14.0)).text_color(hsla(color::MUTED))).cleanable(true))),
-        )
-        .child(list)
+        .pb_8()
+        .child(hero(on_disk, templates_on, cx))
+        .when(on_disk > 0, |page| page.child(recent_section))
+        .when(templates_on, |page| page.child(samples_section))
+        .child(new_project_section)
+        .when(on_disk == 0, |page| page.child(first_run_note))
 }
 
-/// How many templates the Home page shows in its strip.
-const HOME_TEMPLATES: usize = 16;
+/// The height of the Home page's hero, in points.
+const HERO_HEIGHT: f32 = 320.0;
 
-/// The banner across the top of Home: a welcome over a wash of the accent color.
-fn hero(recent: usize) -> impl IntoElement {
-    let (title, about) = if recent == 0 {
-        ("Welcome to Studio", "Start a project at the size you need, or from a ready-made template.".to_owned())
-    } else {
-        ("Welcome back", format!("Pick up one of your {recent} recent project{}, or start something new.", if recent == 1 { "" } else { "s" }))
-    };
+/// A faint grid behind the hero, like the ruled background of a design canvas: thin lines every
+/// 40 points, across more width than any window has (the hero clips what it doesn't need).
+fn hero_grid() -> gpui_kit::Div {
+    const STEP: f32 = 40.0;
+    let line = || div().absolute().bg(gpui_kit::white().opacity(0.035));
+    let uprights = (1..80).map(|index| line().top_0().bottom_0().left(px(index as f32 * STEP)).w(px(1.0)));
+    let levels = (1..(HERO_HEIGHT / STEP) as usize + 1).map(|index| line().left_0().right_0().top(px(index as f32 * STEP)).h(px(1.0)));
+    div().absolute().inset_0().children(uprights).children(levels)
+}
+
+/// The artwork at the hero's left edge: a selected layer (a shape inside a selection box with
+/// its four corner handles) and, under it, a property's keyframes along a line.
+fn hero_layer_art() -> gpui_kit::Div {
+    let accent = hsla(color::ACCENT);
+    let handle = || div().absolute().size(px(9.0)).rounded_full().bg(accent).border_1().border_color(hsla(color::BACKGROUND));
+    let selection = div()
+        .relative()
+        .w(px(178.0))
+        .h(px(122.0))
+        .border_1()
+        .border_color(accent)
+        // The layer itself: a soft block of color with a brighter disc on it.
+        .child(div().absolute().left(px(22.0)).top(px(20.0)).w(px(134.0)).h(px(82.0)).rounded(px(12.0)).bg(linear_gradient(135.0, linear_color_stop(hsla(color::VALUE).opacity(0.55), 0.0), linear_color_stop(accent.opacity(0.18), 1.0))))
+        .child(div().absolute().left(px(40.0)).top(px(34.0)).size(px(54.0)).rounded_full().bg(linear_gradient(135.0, linear_color_stop(accent.opacity(0.95), 0.0), linear_color_stop(hsla(color::VALUE).opacity(0.7), 1.0))))
+        .child(handle().left(px(-5.0)).top(px(-5.0)))
+        .child(handle().right(px(-5.0)).top(px(-5.0)))
+        .child(handle().left(px(-5.0)).bottom(px(-5.0)))
+        .child(handle().right(px(-5.0)).bottom(px(-5.0)));
+    let keyframe = |left: f32, lit: bool| div().absolute().left(px(left)).top(px(-6.0)).child(Icon::new(IconName::Diamond).size(px(13.0)).text_color(if lit { accent } else { gpui_kit::white().opacity(0.45) }));
+    let keyframes = div().relative().w(px(210.0)).h(px(1.0)).bg(gpui_kit::white().opacity(0.18)).child(keyframe(8.0, true)).child(keyframe(84.0, false)).child(keyframe(170.0, true));
+    div().absolute().left(px(44.0)).top(px(52.0)).flex().flex_col().gap(px(34.0)).child(selection).child(keyframes)
+}
+
+/// The artwork at the hero's right edge: a few tracks of clips with a playhead across them,
+/// and under them a color swatch and a type tile.
+fn hero_timeline_art() -> gpui_kit::Div {
+    let accent = hsla(color::ACCENT);
+    let clip = |left: f32, width: f32, fill: gpui_kit::Hsla| div().absolute().left(px(left)).top_0().bottom_0().w(px(width)).rounded(px(6.0)).bg(fill).border_1().border_color(gpui_kit::white().opacity(0.12));
+    let track = || div().relative().w(px(250.0)).h(px(26.0));
+    let tracks = div()
+        .relative()
+        .flex()
+        .flex_col()
+        .gap(px(7.0))
+        .child(track().child(clip(0.0, 150.0, hsla(color::VALUE).opacity(0.6))).child(clip(158.0, 92.0, hsla(color::VALUE).opacity(0.3))))
+        .child(track().child(clip(34.0, 96.0, accent.opacity(0.75))).child(clip(138.0, 78.0, accent.opacity(0.35))))
+        .child(track().child(clip(12.0, 206.0, gpui_kit::white().opacity(0.14))))
+        // The playhead: a line down through the tracks with its handle on top.
+        .child(div().absolute().left(px(112.0)).top(px(-10.0)).bottom(px(-8.0)).w(px(2.0)).rounded_full().bg(gpui_kit::white()))
+        .child(div().absolute().left(px(107.0)).top(px(-16.0)).w(px(12.0)).h(px(9.0)).rounded(px(3.0)).bg(gpui_kit::white()));
+    let tile = || div().size(px(54.0)).rounded(px(10.0)).flex().items_center().justify_center();
+    let tiles = div()
+        .flex()
+        .gap_2()
+        .child(tile().bg(linear_gradient(135.0, linear_color_stop(accent, 0.0), linear_color_stop(hsla(color::VALUE), 1.0))))
+        .child(tile().bg(gpui_kit::white().opacity(0.88)).text_color(hsla(color::BACKGROUND)).text_size(px(22.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Aa"));
+    div().absolute().right(px(40.0)).top(px(64.0)).flex().flex_col().items_end().gap(px(30.0)).child(tracks).child(tiles)
+}
+
+/// One of the hero's large actions: an icon over its name, on a dark tile that lights up in
+/// the accent color under the pointer.
+fn hero_action(id: &'static str, icon: IconName, label: &'static str, on_click: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(184.0))
+        .h(px(92.0))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .rounded(px(16.0))
+        .bg(hsla(color::BACKGROUND).opacity(0.72))
+        .border_1()
+        .border_color(gpui_kit::white().opacity(0.1))
+        .cursor_pointer()
+        .hover(|style| style.bg(hsla(color::ACCENT).opacity(0.28)).border_color(hsla(color::ACCENT)))
+        .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+        .child(Icon::new(icon).size(px(20.0)))
+        .child(div().text_size(px(14.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(label))
+        .test_support()
+}
+
+/// The hero across the top of Home: a welcome in large type over a ruled canvas with a glow of
+/// the accent color rising from its foot, the three ways to begin (a new project, opening one,
+/// the templates) on a tray under it, and artwork of the editor's own pieces at either side.
+fn hero(recent: usize, templates_on: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let accent = hsla(color::ACCENT);
+    let (title, about) = if recent == 0 { ("Welcome to Omina Motion", "Layers, keyframes and editing, all on one timeline.") } else { ("Welcome back", "Pick up where you left off, or start something new.") };
+    let tray = div()
+        .flex()
+        .gap_3()
+        .p_3()
+        .rounded(px(24.0))
+        .bg(accent.opacity(0.1))
+        .border_1()
+        .border_color(accent.opacity(0.4))
+        .child(hero_action("start-new", IconName::Plus, "New project", new_project, cx))
+        .child(hero_action("start-open", IconName::FolderOpen, "Open project…", |this, window, cx| this.open(window, cx), cx))
+        .when(templates_on, |tray| {
+            tray.child(hero_action("start-templates", IconName::LayoutTemplate, "Browse templates", |this, _, cx| {
+                if let Some(screen) = this.ui.start_screen.as_mut() {
+                    screen.tab = StartTab::Templates;
+                }
+                cx.notify();
+            }, cx))
+        });
     div()
         .id("start-hero")
         .relative()
         .flex_none()
-        .h(px(108.0))
-        .px_6()
-        .flex()
-        .items_center()
-        .gap_4()
-        .rounded(px(14.0))
+        .h(px(HERO_HEIGHT))
+        .rounded(px(18.0))
         .overflow_hidden()
         .border_1()
-        .border_color(hsla(color::ACCENT).opacity(0.35))
-        .bg(linear_gradient(100.0, linear_color_stop(hsla(color::ACCENT).opacity(0.42), 0.0), linear_color_stop(hsla(color::ACCENT).opacity(0.06), 1.0)))
-        .child(brand_mark(52.0))
-        .child(div().flex().flex_col().gap_1().child(div().text_size(px(24.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title)).child(div().text_color(hsla(color::TEXT)).opacity(0.75).child(about)))
+        .border_color(hsla(color::HAIRLINE))
+        .bg(hsla(color::PANEL))
+        .child(hero_grid())
+        // The glow, rounded at the foot like the hero so it doesn't square off its corners.
+        .child(div().absolute().left_0().right_0().bottom_0().h(px(HERO_HEIGHT * 0.8)).rounded_b(px(18.0)).bg(linear_gradient(0.0, linear_color_stop(accent.opacity(0.5), 0.0), linear_color_stop(accent.opacity(0.0), 1.0))))
+        .child(hero_layer_art())
+        .child(hero_timeline_art())
+        // The words and the tray, centered over everything else.
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(div().text_size(px(52.0)).line_height(px(60.0)).font_weight(gpui_kit::FontWeight::BOLD).child(title))
+                .child(div().text_size(px(16.0)).text_color(hsla(color::TEXT)).opacity(0.8).child(about))
+                .child(div().pt_5().child(tray)),
+        )
         .test_support()
 }
 
-/// One recent project: its name and folder, when it was opened, and its size. A click opens it;
-/// a right-click offers to show it in the Finder or take it off the list.
+/// A project file's size in words. Project files hold no media, so most are well under a
+/// megabyte: those are given in kilobytes rather than as "0 MB".
+fn file_size(bytes: u64) -> String {
+    if bytes < 1_000_000 { format!("{} KB", bytes.div_ceil(1000).max(1)) } else { super::settings::format_bytes(bytes) }
+}
+
+/// The size of a recent project's card picture, in points: 16:9.
+const RECENT_PICTURE: (f32, f32) = (232.0, 130.5);
+
+/// One recent project, as a card: its picture from the last save (a film icon until it has
+/// one), then its name, when it was opened and its size. Its folder shows in a tooltip. A
+/// click opens it; a right-click offers to show it in the Finder or take it off the list.
 fn recent_row(index: usize, project: &RecentProject, now: u64, cx: &mut Context<Workspace>) -> impl IntoElement {
     use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
     let path = project.path.clone();
     let bytes = std::fs::metadata(&path).map_or(0, |metadata| metadata.len());
     let target = cx.weak_entity();
     let menu_path = path.clone();
-    div()
-        .id(("start-recent-row", index))
-        .h(px(52.0))
-        .px_3()
+    let folder: gpui_kit::SharedString = display_folder(&path).into();
+    let picture = div()
+        .w(px(RECENT_PICTURE.0))
+        .h(px(RECENT_PICTURE.1))
+        .flex_none()
+        .rounded_t(px(11.0))
+        .overflow_hidden()
         .flex()
         .items_center()
-        .border_b_1()
+        .justify_center()
+        .bg(linear_gradient(135.0, linear_color_stop(hsla(color::INSET), 0.0), linear_color_stop(hsla(color::ACCENT).opacity(0.16), 1.0)))
+        .child(match crate::project_thumbnails::find(&path) {
+            Some(picture) => gpui_kit::StyledImage::object_fit(gpui_kit::img(picture).size_full(), gpui_kit::ObjectFit::Cover).into_any_element(),
+            None => Icon::new(IconName::Film).size(px(28.0)).text_color(hsla(color::MUTED)).into_any_element(),
+        });
+    div()
+        .id(("start-recent-row", index))
+        .w(px(RECENT_PICTURE.0))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .rounded(px(12.0))
+        .bg(hsla(color::PANEL))
+        .border_1()
         .border_color(hsla(color::HAIRLINE))
         .cursor_pointer()
-        .hover(|style| style.bg(hsla(color::HOVER)))
+        .hover(|style| style.border_color(hsla(color::ACCENT)).bg(hsla(color::HOVER)))
+        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(folder.clone()).build(window, cx))
         .on_click(cx.listener({
             let path = path.clone();
             move |this, _, window, cx| open_recent(this, path.clone(), window, cx)
         }))
+        .child(picture)
         .child(
             div()
-                .flex_1()
-                .min_w_0()
+                .px_3()
+                .py_2p5()
                 .flex()
-                .items_center()
-                .gap_3()
-                .child(Icon::new(IconName::Film).size(px(18.0)).text_color(hsla(color::MUTED)))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(div().truncate().child(display_name(&path)))
-                        .child(div().truncate().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(display_folder(&path))),
-                ),
+                .flex_col()
+                .gap_0p5()
+                .child(div().truncate().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(display_name(&path)))
+                .child(div().truncate().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("{} · {}", time_ago(project.opened, now), file_size(bytes)))),
         )
-        .child(div().w(px(150.0)).text_color(hsla(color::MUTED)).child(time_ago(project.opened, now)))
-        .child(div().w(px(80.0)).flex().justify_end().text_color(hsla(color::MUTED)).child(super::settings::format_bytes(bytes)))
         .test_support()
         .context_menu(move |menu, _, _| {
             let (reveal, forget, target) = (menu_path.clone(), menu_path.clone(), target.clone());
@@ -520,16 +643,25 @@ fn recent_row(index: usize, project: &RecentProject, now: u64, cx: &mut Context<
             }))
             .item(PopupMenuItem::new("Remove from Recent").on_click(move |_, _, cx| {
                 app_settings::forget_recent(&forget);
+                crate::project_thumbnails::forget(&forget);
                 crate::workspace::refresh_menus(cx);
                 target.update(cx, |_, cx| cx.notify()).ok();
             }))
         })
 }
 
-/// The Templates page: the template shapes and categories, and a card for each; a click starts
-/// a new project from it.
+/// The Templates page: a button back to Home, the template shapes and categories, and a card
+/// for each; a click starts a new project from it.
 fn templates_page(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
+    use gpui_kit::component::button::{Button, ButtonVariants as _};
     let cards = super::templates::start_screen_cards(workspace, cx);
+    // The way back to Home, which is where this page is reached from.
+    let back = Button::new("start-home").ghost().icon(Icon::new(IconName::ChevronLeft)).tooltip("Back to Home").on_click(cx.listener(|this, _, _, cx| {
+        if let Some(screen) = this.ui.start_screen.as_mut() {
+            screen.tab = StartTab::Home;
+        }
+        cx.notify();
+    }));
     div()
         .flex_1()
         .min_h_0()
@@ -542,8 +674,9 @@ fn templates_page(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl In
         .child(
             div()
                 .flex()
-                .items_baseline()
+                .items_center()
                 .gap_3()
+                .child(back)
                 .child(div().text_size(px(22.0)).child("Start from a template"))
                 .child(div().text_color(hsla(color::MUTED)).child(format!("{} templates · point at one to play it, + starts a new project with it", TEMPLATES.len()))),
         )
@@ -553,6 +686,13 @@ fn templates_page(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl In
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_project_files_are_sized_in_kilobytes() {
+        assert_eq!(file_size(0), "1 KB");
+        assert_eq!(file_size(41_200), "42 KB");
+        assert_eq!(file_size(3_400_000), "3 MB");
+    }
 
     #[test]
     fn times_read_like_after_effects() {

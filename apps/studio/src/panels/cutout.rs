@@ -361,11 +361,11 @@ pub fn make_masks(workspace: &mut Workspace, layer: Id, track: bool, window: &mu
     }
     let target = cx.weak_entity();
     let megabytes = studio_cutout::MODEL_BYTES / 1_000_000;
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| {
         let (target, request) = (target.clone(), request.clone());
         dialog
             .title("Download the object matte model?")
-            .description(format!("Objects are matted on this computer with the MobileSAM model. It is downloaded once from huggingface.co (about {megabytes} MB) and kept in Studio's settings folder. Your footage is never uploaded."))
+            .description(format!("Objects are matted on this computer with the MobileSAM model. It is downloaded once from huggingface.co (about {megabytes} MB) and kept in Omina Motion's settings folder. Your footage is never uploaded."))
             .ok_text("Download and Continue")
             .show_cancel(true)
             .on_ok(move |_, window, cx| {

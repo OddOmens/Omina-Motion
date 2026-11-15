@@ -11,7 +11,7 @@ use gpui_kit::component::button::Button;
 use gpui_kit::component::{Disableable as _, Sizable as _};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::{AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Styled, TestSupportExt as _, Window, black, deferred, div, px};
+use gpui_kit::{AnyElement, Context, InteractiveElement, IntoElement, ParentElement, Styled, TestSupportExt as _, Window, deferred, div, px};
 use studio_core::model::Id;
 
 use crate::state::{ReadFile, ReadProject};
@@ -34,18 +34,62 @@ pub struct ImportJob {
 /// A project file to read, and the folder its embedded images are written into.
 type ProjectFile = (PathBuf, PathBuf);
 
+/// How an SVG drawing comes in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SvgAs {
+    /// One picture, like a photo: everything in the file shows, but its pieces can't be
+    /// animated apart.
+    Layer,
+    /// A composition with a shape layer for each shape, so each can be animated on its own.
+    Composition,
+}
+
+/// An import waiting for the person to say how its SVG files should come in.
+pub struct SvgQuestion {
+    paths: Vec<PathBuf>,
+    then: Option<Then>,
+}
+
+fn is_svg(path: &std::path::Path) -> bool {
+    crate::state::is_extension(path, "svg")
+}
+
 /// Imports `paths` (files and folders) in the background, then runs `then` with the new items.
-/// After Effects projects, Lottie animations and SVG drawings come in as compositions of their
-/// own.
+/// After Effects projects and Lottie animations come in as compositions of their own. When
+/// there is an SVG among the files, a popup first asks whether SVGs come in as one layer or as
+/// a composition of shape layers, and the import starts once it is answered.
 pub fn start(workspace: &mut Workspace, paths: Vec<PathBuf>, then: Option<Then>, window: &mut Window, cx: &mut Context<Workspace>) {
-    if workspace.ui.import_job.is_some() {
+    if workspace.ui.import_job.is_some() || workspace.ui.svg_question.is_some() {
         window.push_notification("An import is already running. Wait for it, or cancel it.", cx);
         return;
     }
+    if paths.iter().any(|path| is_svg(path)) {
+        workspace.ui.svg_question = Some(SvgQuestion { paths, then });
+        cx.notify();
+        return;
+    }
+    start_with(workspace, paths, then, SvgAs::Composition, window, cx);
+}
+
+/// Answers the SVG question: the waiting import goes ahead with its SVGs brought in as
+/// `svg_as`, or is dropped when the answer is `None` (Cancel).
+pub fn answer_svg_question(workspace: &mut Workspace, svg_as: Option<SvgAs>, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(SvgQuestion { paths, then }) = workspace.ui.svg_question.take() else { return };
+    if let Some(svg_as) = svg_as {
+        start_with(workspace, paths, then, svg_as, window, cx);
+    }
+    cx.notify();
+}
+
+/// Imports `paths` in the background with any SVG files brought in as `svg_as`.
+fn start_with(workspace: &mut Workspace, paths: Vec<PathBuf>, then: Option<Then>, svg_as: SvgAs, window: &mut Window, cx: &mut Context<Workspace>) {
     // Subtitle files become caption layers rather than project items; they are read on their own.
     let (subtitle_files, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| studio_core::subtitles::SubtitleFormat::from_path(path).is_some());
     super::subtitles::import(workspace, subtitle_files, window, cx);
-    let (projects, media): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| ["aep", "aepx", "json", "svg"].iter().any(|extension| crate::state::is_extension(path, extension)));
+    // An SVG wanted as one layer is read like any picture; otherwise it is read as a project.
+    let (projects, media): (Vec<_>, Vec<_>) = paths.into_iter().partition(|path| {
+        ["aep", "aepx", "json"].iter().any(|extension| crate::state::is_extension(path, extension)) || (is_svg(path) && svg_as == SvgAs::Composition)
+    });
     // XML projects can't be read; say so straight away rather than after the rest.
     let (xml, projects): (Vec<_>, Vec<_>) = projects.into_iter().partition(|path| crate::state::is_extension(path, "aepx"));
     for path in xml {
@@ -118,13 +162,55 @@ fn finish(this: &gpui_kit::WeakEntity<Workspace>, cx: &mut gpui_kit::AsyncWindow
         if let (false, Some((projects, files, then))) = (cancelled, read) {
             this.state.settle_drags();
             let items = this.add_imported(projects, files, window, cx);
+            let imported = !items.is_empty();
             if let Some(then) = then {
                 then(this, items, window, cx);
+            }
+            // Iris's recipes set to run after each import.
+            if imported {
+                super::assistant_automation::at(this, iris::recipes::Trigger::AfterImport, window, cx);
             }
         }
         cx.notify();
     })
     .ok();
+}
+
+/// The popup that asks how the SVG files of a waiting import should come in: as one layer, or
+/// as a composition of shape layers. It covers the window until it is answered or cancelled.
+pub fn svg_popup(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    use gpui_kit::component::button::ButtonVariants as _;
+    let question = workspace.ui.svg_question.as_ref()?;
+    let names: Vec<String> = question.paths.iter().filter(|path| is_svg(path)).map(|path| file_name(path)).collect();
+    let heading = match names.as_slice() {
+        [name] => format!("Import “{name}” as"),
+        _ => format!("Import {} SVG files as", names.len()),
+    };
+    // One of the two answers: its name, what it means, and a button that starts the import.
+    let choice = |id: &'static str, label: &'static str, about: &'static str, svg_as: SvgAs, primary: bool| {
+        let button = Button::new(id).small().label(label).on_click(cx.listener(move |this, _, window, cx| answer_svg_question(this, Some(svg_as), window, cx)));
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().flex_1().min_w_0().text_color(hsla(color::MUTED)).child(about))
+            .child(div().flex_none().w(px(128.0)).flex().justify_end().child(if primary { button.primary() } else { button.outline() }))
+    };
+    let card = super::chrome::popup_surface(div().id("svg-import-popup"))
+        .w(px(440.0))
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .text_size(px(size::TEXT))
+        .text_color(hsla(color::TEXT))
+        .child(div().font_weight(gpui_kit::FontWeight::MEDIUM).truncate().child(heading))
+        .child(choice("svg-import-layer", "One Layer", "One picture layer. Everything in the file shows, photos and text included.", SvgAs::Layer, true))
+        .child(choice("svg-import-composition", "Composition", "A composition with a shape layer for each shape, to animate each on its own. Photos and text are left out.", SvgAs::Composition, false))
+        .child(div().flex().justify_end().child(Button::new("svg-import-cancel").ghost().small().label("Cancel").on_click(cx.listener(|this, _, window, cx| answer_svg_question(this, None, window, cx)))))
+        .test_support();
+    let backdrop = super::chrome::popup_backdrop("svg-import-backdrop", card);
+    Some(deferred(backdrop).with_priority(4).into_any_element())
 }
 
 fn file_name(path: &std::path::Path) -> String {
@@ -140,18 +226,12 @@ pub fn popup(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyEl
         _ => "Importing".to_owned(),
     };
     let percent = job.total.filter(|&total| total > 0).map_or(0.0, |total| job.done as f32 / total as f32 * 100.0);
-    let card = div()
-        .id("import-popup")
+    let card = super::chrome::popup_surface(div().id("import-popup"))
         .w(px(340.0))
         .p_4()
         .flex()
         .flex_col()
         .gap_3()
-        .rounded(px(12.0))
-        .bg(hsla(color::POPOVER))
-        .border_1()
-        .border_color(hsla(color::HAIRLINE))
-        .shadow_lg()
         .text_size(px(size::TEXT))
         .text_color(hsla(color::TEXT))
         .child(div().flex().items_center().gap_2().child(Spinner::new().small()).child(div().font_weight(gpui_kit::FontWeight::MEDIUM).child(heading)))
@@ -169,15 +249,6 @@ pub fn popup(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyEl
         )
         .test_support();
     // A dimmed backdrop that takes every click, with the card in the middle.
-    let backdrop = div()
-        .id("import-backdrop")
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(black().opacity(0.4))
-        .occlude()
-        .child(card);
+    let backdrop = super::chrome::popup_backdrop("import-backdrop", card);
     Some(deferred(backdrop).with_priority(4).into_any_element())
 }

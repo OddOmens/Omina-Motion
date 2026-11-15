@@ -1,17 +1,19 @@
-//! Ready-made, animated compositions for social media, ads and marketing: 61 templates, each
+//! Ready-made, animated compositions for social media, ads and marketing: 73 templates, each
 //! in three shapes (16:9, 4:5 and 9:16), about 10 to 15 seconds long.
 //!
-//! A template is a layout (one of `Layout`'s 61 animated designs, one template each) filled with
+//! A template is a layout (one of `Layout`'s 73 animated designs, one template each) filled with
 //! its own words, colors and font (see `catalog`). Any template can take another palette from
 //! `LOOKS` (`Template::recolored`) or a brand's colors and font (`Template::branded`). Making one builds an ordinary composition from text, shape
 //! and solid layers with keyframes and effects, so everything in it can be edited afterwards.
-//! Gray boxes named "Drop your … here" mark where footage or images go.
+//! Each has a decoration behind its words (`Decor`). Tinted boxes named "Drop your … here" mark where footage or images go.
 
 mod ads;
 mod catalog;
 mod editorial;
 mod fun;
 mod layouts;
+mod magazine;
+mod photos;
 mod social;
 
 use crate::animation::{Animated, CubicBezier, EaseMode, Easing, Keyframe, Vec2};
@@ -21,6 +23,7 @@ use crate::text_animation::{TextAnimator, TextEase, TextMotion, TextOrder, TextU
 use crate::time::FrameRate;
 
 pub use catalog::{LOOKS, TEMPLATES};
+pub use photos::{PhotoKind, SamplePhoto, fill_photo_spots};
 
 /// The shapes every template comes in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,6 +111,34 @@ pub struct Palette {
     pub muted: u32,
     /// Text on the accent color.
     pub on_accent: u32,
+}
+
+/// What is drawn behind a template's words, over its background color: a few large, simple
+/// shapes in the palette's own colors, slowly moving, so a frame never reads as a plain panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decor {
+    /// Nothing: the layout brings its own picture (a chat, a phone, a full-frame video).
+    None,
+    /// A soft glow wandering across, for dark, moody designs.
+    Glow,
+    /// Big soft-edged circles in two corners and a small bright one.
+    Blobs,
+    /// A scalloped badge shape turning behind the middle.
+    Burst,
+    /// Sun rays fanning out from the middle to the edges.
+    Rays,
+    /// Four-pointed sparkles twinkling near the corners.
+    Sparkles,
+    /// A thin line just inside the frame's edges, like a printed poster.
+    Frame,
+    /// Wide slanted bands across two corners.
+    Stripes,
+    /// A tall arch standing behind the middle.
+    Arch,
+    /// A circle, a triangle, a ring and a tilted square scattered around the edges.
+    Shapes,
+    /// Half circles peeking in from the sides.
+    HalfCircles,
 }
 
 /// The animated designs templates are built from. Each takes its words from the
@@ -237,6 +268,30 @@ pub enum Layout {
     PhotoTagline,
     /// Word, line: the word's full stop bounces in, then swells to fill the frame.
     BouncyPeriod,
+    /// Name, role: a portrait with the name echoed in outline across the frame behind it.
+    NameEcho,
+    /// Kicker, date, headline, name, role, badge: a talk promo with the speaker over a color block.
+    SpeakerPromo,
+    /// Headline, offer, button: a framed photo with beams of colored light fanning up behind it.
+    SaleSpotlight,
+    /// Title, line: a thin title, two large circles and a product, on paper.
+    MinimalProduct,
+    /// Tape word, title, what, when: a script title over a photo, with tape and a paper note.
+    TapeSale,
+    /// Title, three events each followed by its date, details: a lineup of sticker pills.
+    EventSchedule,
+    /// Top line, bottom line: two photo prints dropping onto a starry ground.
+    PrintStack,
+    /// Name, role: a portrait in an oval with sparkles around it.
+    ArchPortrait,
+    /// Offer, handle: enormous type running off the frame behind a black-and-white photo.
+    HugeTypePhoto,
+    /// Kicker, title, small print: a script title over a full-frame portrait.
+    ScriptBeauty,
+    /// Brand, three tips: a list between torn paper strips, with worn-film dust and scratches.
+    GrungeTips,
+    /// Caption, date: a photo in a gold frame, aged like an old print.
+    FramedMemory,
 }
 
 /// One template: its layout filled with words, colors and a font.
@@ -250,6 +305,8 @@ pub struct Template {
     /// Headline font and weight; other text uses the same family, lighter.
     pub font: (&'static str, u16),
     pub seconds: f64,
+    /// The shapes behind its words.
+    pub decor: Decor,
 }
 
 impl Template {
@@ -318,9 +375,23 @@ fn shade(hex: u32) -> u32 {
 
 /// Halfway between two colors, for quieter text.
 fn blend(a: u32, b: u32) -> u32 {
-    let (a, b) = (channels(a), channels(b));
-    from_channels([0, 1, 2].map(|index| a[index] * 0.6 + b[index] * 0.4))
+    mix(b, a, 0.6)
 }
+
+/// A color `amount` of the way (0 to 1) from `from` to `to`.
+fn mix(from: u32, to: u32, amount: f32) -> u32 {
+    let (from, to) = (channels(from), channels(to));
+    from_channels([0, 1, 2].map(|index| from[index] + (to[index] - from[index]) * amount))
+}
+
+/// How far apart two colors are, 0 (the same) to 1 (black and white).
+fn difference(a: u32, b: u32) -> f32 {
+    let (a, b) = (channels(a), channels(b));
+    [0, 1, 2].map(|index| (a[index] - b[index]).abs()).iter().sum::<f32>() / (3.0 * 255.0)
+}
+
+/// Layers of a template's decoration start with this, so the ending leaves them in place.
+const DECOR_PREFIX: &str = "Backdrop";
 
 /// Templates' frame rate.
 const FPS: u32 = 30;
@@ -409,11 +480,30 @@ impl Builder<'_> {
 
     #[allow(clippy::too_many_arguments)]
     fn text_aligned(&mut self, text: &str, at: Vec2, size: f32, color: u32, weight: u16, from: f64, align: TextAlign) -> Id {
-        // Words wider than the frame (long lines in the narrow shapes) are made smaller to fit.
+        let fit = self.fitted_scale(text, size);
+        self.text_unfitted(text, at, size * fit, color, weight, from, align)
+    }
+
+    /// How much `text` asked for at `size` units is scaled when drawn: words wider than the frame
+    /// (long lines in the narrow shapes) are made smaller to fit, and headlines in the tall
+    /// shapes larger (see `headline_boost`), never past the frame's width.
+    fn fitted_scale(&self, text: &str, size: f32) -> f32 {
         let room = self.width - 90.0 * self.unit();
         let wide = TextStyle { font_size: size * self.unit(), ..TextStyle::default() }.estimate_size(text).x;
-        let fit = if wide > room { room / wide } else { 1.0 };
-        self.text_unfitted(text, at, size * fit, color, weight, from, align)
+        if wide > room { room / wide } else { self.headline_boost(text, size).min(room / wide) }
+    }
+
+    /// How much larger a headline is drawn in the tall shapes, where there is height to spare:
+    /// big type that nearly fills the width is what makes a phone-sized design read at a glance.
+    /// Only lines of several words at headline size grow; single big numbers and words sit in
+    /// badges and boxes sized for them.
+    fn headline_boost(&self, text: &str, size: f32) -> f32 {
+        let headline = (96.0..=170.0).contains(&size) && text.split_whitespace().count() > 1;
+        match (headline, self.vertical(), self.tall()) {
+            (true, true, _) => 1.4,
+            (true, false, true) => 1.2,
+            _ => 1.0,
+        }
     }
 
     /// A text layer at exactly `size`, even if it runs past the frame (scrolling text).
@@ -472,14 +562,48 @@ impl Builder<'_> {
         self.shape(ShapeKind::Rectangle, size, at, Some(Paint::Solid(Self::color(color))), None, corner, from, name)
     }
 
-    /// A gray box marking where footage or a photo goes.
+    /// What fills a spot waiting for footage or a photo: a two-tone blend that looks like a
+    /// picture rather than an empty box. It is cool where the accent is warm (and the other way
+    /// round) so accent-colored words over it stay readable, unless that would hide it against
+    /// the background.
+    fn photo_fill(&self) -> Paint {
+        const WARM: (u32, u32) = (0xffb38a, 0xc2416b);
+        const COOL: (u32, u32) = (0x8ec5ff, 0x4a3aa8);
+        let palette = self.palette();
+        let [red, _, blue] = channels(palette.accent);
+        let (mut first, mut other) = if red >= blue { (COOL, WARM) } else { (WARM, COOL) };
+        let shows = |(light, dark): (u32, u32)| difference(mix(light, dark, 0.5), palette.background);
+        if shows(first) < 0.2 && shows(other) > shows(first) {
+            std::mem::swap(&mut first, &mut other);
+        }
+        Paint::linear(Self::color(first.0), Self::color(first.1), 60.0)
+    }
+
+    /// A box marking where footage or a photo goes.
     fn placeholder(&mut self, size: Vec2, at: Vec2, corner: f32, from: f64, what: &str) -> Id {
-        let fill = Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0);
-        self.shape(ShapeKind::Rectangle, size, at, Some(fill), Some((0x71717a, 2.0)), corner, from, &crate::slots::placeholder_name(what))
+        let fill = self.photo_fill();
+        self.shape(ShapeKind::Rectangle, size, at, Some(fill), None, corner, from, &crate::slots::placeholder_name(what))
+    }
+
+    /// A round spot for a photo (a profile picture), ringed in `ring` when given a color and width.
+    fn round_placeholder(&mut self, diameter: f32, at: Vec2, ring: Option<(u32, f32)>, from: f64, what: &str) -> Id {
+        let fill = self.photo_fill();
+        self.shape(ShapeKind::Ellipse, Vec2::new(diameter, diameter), at, Some(fill), ring, 0.0, from, &crate::slots::placeholder_name(what))
+    }
+
+    /// A star of `points` points whose inner corners sit `inner` of the way out (0 to 1).
+    #[allow(clippy::too_many_arguments)]
+    fn star(&mut self, points: u32, inner: f32, size: f32, at: Vec2, color: u32, from: f64, name: &str) -> Id {
+        let id = self.shape(ShapeKind::Star, Vec2::new(size, size), at, Some(Paint::Solid(Self::color(color))), None, 0.0, from, name);
+        if let crate::model::LayerContent::Shape { style, .. } = &mut self.layer(id).content {
+            style.points = points;
+            style.inner_radius = inner;
+        }
+        id
     }
 
     /// The whole-frame background: a gentle gradient between the palette's two background
-    /// colors, slowly drifting larger, with a soft glow wandering across it for life.
+    /// colors, slowly drifting larger, with the template's decoration over it.
     fn background(&mut self) -> Id {
         let palette = self.palette();
         let paint = Paint::linear(Self::color(palette.background), Self::color(palette.background_2), 120.0);
@@ -488,8 +612,103 @@ impl Builder<'_> {
         let id = self.shape(ShapeKind::Rectangle, size, center, Some(paint), None, 0.0, 0.0, "Background");
         let end = self.end();
         self.scale(id, 0.0, 100.0, end, 108.0, Easing::Linear);
-        self.ambient_glow();
+        self.decorate();
         id
+    }
+
+    /// Draws the template's decoration (see `Decor`) just above the background. Its shapes are
+    /// tones of the background nudged toward the accent, so words over them stay easy to read,
+    /// with one small piece in the accent itself.
+    fn decorate(&mut self) {
+        let p = self.palette();
+        let tone = mix(p.background, p.accent, 0.2);
+        let deep = mix(p.background_2, p.accent, 0.38);
+        let short = self.width.min(self.height) / self.unit();
+        let long = self.width.max(self.height) / self.unit();
+        let end = self.end();
+        let name = |what: &str| format!("{DECOR_PREFIX} {what}");
+        let solid = |color: u32| Some(Paint::Solid(Self::color(color)));
+        match self.template.decor {
+            Decor::None => {}
+            Decor::Glow => self.ambient_glow(),
+            Decor::Blobs => {
+                let spots = [(0.02, 0.06, short * 0.95, tone), (1.0, 0.96, short * 1.1, deep)];
+                for (index, (x, y, side, color)) in spots.into_iter().enumerate() {
+                    let at = self.at(x, y);
+                    let blob = self.shape(ShapeKind::Ellipse, Vec2::new(side, side), at, solid(color), None, 0.0, 0.0, &name("circle"));
+                    // Each drifts a little toward the middle and back out over the template.
+                    let toward = self.at(x + if index == 0 { 0.06 } else { -0.06 }, y);
+                    self.move_to(blob, 0.0, end, toward, EASE_IN_OUT);
+                }
+                let dot_at = self.at(0.86, 0.1);
+                let dot = self.shape(ShapeKind::Ellipse, Vec2::new(110.0, 110.0), dot_at, solid(p.accent), None, 0.0, 0.0, &name("dot"));
+                self.pulse(dot, 0.0, end, 4);
+            }
+            Decor::Burst => {
+                let at = self.at(0.5, 0.42);
+                let burst = self.star(22, 0.86, short * 0.98, at, tone, 0.0, &name("badge"));
+                self.spin(burst, 0.0, 60.0);
+            }
+            Decor::Rays => {
+                let at = self.at(0.5, 0.45);
+                let rays = self.star(14, 0.08, long * 2.4, at, tone, 0.0, &name("rays"));
+                self.spin(rays, 0.0, 40.0);
+            }
+            Decor::Sparkles => {
+                let spots = [(0.12, 0.1, 150.0, p.accent), (0.9, 0.2, 90.0, deep), (0.1, 0.9, 100.0, deep), (0.88, 0.88, 170.0, p.accent)];
+                for (index, (x, y, side, color)) in spots.into_iter().enumerate() {
+                    let at = self.at(x, y);
+                    let sparkle = self.star(4, 0.28, side, at, color, 0.0, &name("sparkle"));
+                    // Neighbors twinkle out of step.
+                    self.pulse(sparkle, index as f64 * 0.35, end, 5);
+                    self.spin(sparkle, 0.0, if index % 2 == 0 { 45.0 } else { -45.0 });
+                }
+            }
+            Decor::Frame => {
+                let size = Vec2::new(self.width, self.height) * (1.0 / self.unit()) - Vec2::new(88.0, 88.0);
+                let at = self.at(0.5, 0.5);
+                self.shape(ShapeKind::Rectangle, size, at, None, Some((p.text, 5.0)), 0.0, 0.0, &name("frame"));
+                let corner = self.at(0.5, 0.5) + Vec2::new(size.x, -size.y) * (0.5 * self.unit());
+                let dot = self.shape(ShapeKind::Ellipse, Vec2::new(64.0, 64.0), corner, solid(p.accent), None, 0.0, 0.0, &name("dot"));
+                self.pulse(dot, 0.0, end, 4);
+            }
+            Decor::Stripes => {
+                for (x, y, color) in [(0.0, 0.1, tone), (0.12, 0.0, deep), (1.0, 0.9, tone), (0.88, 1.0, deep)] {
+                    let at = self.at(x, y);
+                    let band = self.block(Vec2::new(long * 0.9, 120.0), at, color, 0.0, 0.0, &name("band"));
+                    self.transform(band).rotation.value = -38.0;
+                }
+            }
+            Decor::Arch => {
+                let size = Vec2::new(short * 0.8, long * 0.74);
+                let at = self.at(0.5, if self.tall() { 0.62 } else { 0.7 });
+                self.shape(ShapeKind::Rectangle, size, at, solid(tone), None, short * 0.4, 0.0, &name("arch"));
+                let sun_at = self.at(0.84, 0.12);
+                let sun = self.shape(ShapeKind::Ellipse, Vec2::new(130.0, 130.0), sun_at, solid(p.accent), None, 0.0, 0.0, &name("dot"));
+                self.pulse(sun, 0.0, end, 4);
+            }
+            Decor::Shapes => {
+                let circle_at = self.at(0.02, 0.1);
+                self.shape(ShapeKind::Ellipse, Vec2::new(360.0, 360.0), circle_at, solid(deep), None, 0.0, 0.0, &name("circle"));
+                let triangle_at = self.at(0.92, 0.9);
+                let triangle = self.shape(ShapeKind::Triangle, Vec2::new(260.0, 240.0), triangle_at, solid(p.accent), None, 0.0, 0.0, &name("triangle"));
+                self.spin(triangle, -12.0, 18.0);
+                let ring_at = self.at(0.9, 0.13);
+                self.shape(ShapeKind::Ellipse, Vec2::new(150.0, 150.0), ring_at, None, Some((p.text, 10.0)), 0.0, 0.0, &name("ring"));
+                let square_at = self.at(0.08, 0.88);
+                let square = self.block(Vec2::new(130.0, 130.0), square_at, tone, 14.0, 0.0, &name("square"));
+                self.spin(square, 20.0, 65.0);
+            }
+            Decor::HalfCircles => {
+                for (x, y, side, color) in [(0.0, 0.3, short * 0.62, deep), (1.0, 0.72, short * 0.74, tone)] {
+                    let at = self.at(x, y);
+                    let half = self.shape(ShapeKind::Ellipse, Vec2::new(side, side), at, solid(color), None, 0.0, 0.0, &name("half circle"));
+                    self.pulse(half, 0.0, end, 3);
+                }
+                let dot_at = self.at(0.14, 0.9);
+                self.shape(ShapeKind::Ellipse, Vec2::new(90.0, 90.0), dot_at, solid(p.accent), None, 0.0, 0.0, &name("dot"));
+            }
+        }
     }
 
     fn layer(&mut self, id: Id) -> &mut crate::model::Layer {
@@ -579,9 +798,10 @@ impl Builder<'_> {
         }
     }
 
-    /// The height, in pixels, `text` takes at `size` units (all its lines).
+    /// The height, in pixels, `text` takes when asked for at `size` units (all its lines), at
+    /// the size it is really drawn.
     fn text_height(&self, text: &str, size: f32) -> f32 {
-        text.lines().count().max(1) as f32 * size * 1.15 * self.unit()
+        text.lines().count().max(1) as f32 * size * self.fitted_scale(text, size) * 1.15 * self.unit()
     }
 
     /// Where to center something `height` units tall so it sits `gap` units below the text
@@ -665,6 +885,30 @@ impl Builder<'_> {
         }
     }
 
+    /// An effect over the whole frame, on an adjustment layer named `label` at the top, so it
+    /// can be changed or turned off in one place. `settings` are (position, value) pairs.
+    fn overlay(&mut self, effect: &str, label: &str, settings: &[(usize, f32)]) {
+        let Some(id) = edit::add_adjustment_layer(self.project, self.comp, 0) else { return };
+        self.layer(id).name = label.to_owned();
+        self.effect(id, effect, settings);
+    }
+
+    /// Film grain over the whole frame (see `overlay`), at `amount` percent.
+    fn grain(&mut self, amount: f32) {
+        self.overlay("Film Grain", "Grain", &[(0, amount)]);
+    }
+
+    /// Sets a text layer's font, for a second typeface beside the template's own: small
+    /// sans-serif details under a script title, say.
+    fn set_font(&mut self, id: Id, family: &str, weight: u16) {
+        let comp = self.comp;
+        let composition = self.project.composition_mut(comp).expect("the composition was just made");
+        crate::edit::edit_text(composition, id, |_, style| {
+            style.font_family = family.into();
+            style.font_weight = weight;
+        });
+    }
+
     /// Sends every layer still showing at the end off in a quick ripple: each fades while
     /// lifting a little, a beat after the one before, so the template ends with a clean exit
     /// rather than a flat fade. What fills the frame (the background, color panels, the spot for
@@ -674,7 +918,7 @@ impl Builder<'_> {
         const STAGGER: f64 = 0.03;
         let end = self.end();
         let (width, height) = (self.width, self.height);
-        let fills_frame = |layer: &crate::model::Layer| matches!(layer.name.as_str(), "Background" | "Glow" | "Panel") || (layer.size.x >= width * 0.99 && layer.size.y >= height * 0.99);
+        let fills_frame = |layer: &crate::model::Layer| matches!(layer.name.as_str(), "Background" | "Glow" | "Panel") || layer.name.starts_with(DECOR_PREFIX) || (layer.size.x >= width * 0.99 && layer.size.y >= height * 0.99);
         let lasting: Vec<Id> = self
             .project
             .composition(self.comp)
@@ -706,7 +950,7 @@ mod tests {
 
     #[test]
     fn every_template_has_words_for_its_layout() {
-        assert_eq!(TEMPLATES.len(), 61);
+        assert_eq!(TEMPLATES.len(), 73);
         let mut names = std::collections::HashSet::new();
         for template in &TEMPLATES {
             assert!(names.insert(template.name), "{} is named twice", template.name);

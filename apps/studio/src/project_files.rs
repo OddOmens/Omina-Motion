@@ -28,10 +28,10 @@ const MAX_PROJECT_BYTES: u64 = 256 * 1024 * 1024;
 fn read_project(path: &Path) -> Result<String, String> {
     let size = std::fs::metadata(path).map_err(|error| error.to_string())?.len();
     if size > MAX_PROJECT_BYTES {
-        return Err("This file is too large to be a Studio project.".into());
+        return Err("This file is too large to be an Omina Motion project.".into());
     }
     std::fs::read_to_string(path).map_err(|error| match error.kind() {
-        std::io::ErrorKind::InvalidData => "This is not a Studio project file.".to_owned(),
+        std::io::ErrorKind::InvalidData => "This is not an Omina Motion project file.".to_owned(),
         _ => error.to_string(),
     })
 }
@@ -56,6 +56,15 @@ impl Workspace {
     /// Restores the window's part of saved settings (the state restores its own on opening).
     fn apply_settings(&mut self, settings: &EditorSettings) {
         self.ui.timeline.expanded_clips = settings.open_clips.iter().copied().collect();
+        // Which single property a clip was opened to isn't saved: clips reopen to all of them.
+        self.ui.timeline.only_property.clear();
+        // Dismissed suggestions were about the project that was open before.
+        self.ui.assistant.dismissed.clear();
+        // An answer about the project that was open would be wrong about the new one.
+        self.ui.assistant.pending = None;
+        // So would "too much" or "it" about what Iris last changed there.
+        self.ui.assistant.last_change = None;
+        self.ui.assistant.last_layers.clear();
     }
 
     /// On launch: offers back unsaved work if Studio closed without saving it, otherwise
@@ -67,12 +76,14 @@ impl Workspace {
         let recovery = app_settings::recovery_path();
         if let Ok(text) = std::fs::read_to_string(&recovery) {
             let name = settings.recovery_of.as_deref().and_then(|path| path.file_stem()).map_or_else(|| "Untitled".to_owned(), |name| name.to_string_lossy().into_owned());
-            let message = format!("Studio closed with unsaved changes to “{name}”.");
+            let message = format!("Omina Motion closed with unsaved changes to “{name}”.");
             let buttons = [PromptButton::ok("Restore"), PromptButton::new("Discard")];
             let answer = window.prompt(PromptLevel::Warning, &message, Some("Restore them to keep working where you left off."), &buttons, cx);
+            self.ui.recovery_offered = true;
             cx.spawn_in(window, async move |this, cx| {
                 let restore = answer.await == Ok(0);
                 this.update_in(cx, |this, window, cx| {
+                    this.ui.recovery_offered = false;
                     if restore {
                         this.restore_recovery(&text, settings.recovery_of, window, cx);
                     } else {
@@ -163,9 +174,13 @@ impl Workspace {
             Err(error) => return show_error(window, cx, "That version couldn't be read", error.to_string()),
         };
         let file = self.state.file().map(Path::to_path_buf);
-        if let Ok(now) = self.state.project_text_with(&self.editor_settings()) {
-            self.keep_version(&now, file.as_deref());
+        // The work as it is now is kept even when Settings doesn't keep versions, since the
+        // restore replaces it; if it can't be kept, nothing is restored.
+        let kept = self.state.project_text_with(&self.editor_settings()).and_then(|now| crate::versions::keep(&now, file.as_deref(), self.ui.settings.versions.how_many as usize).map_err(|error| error.to_string()));
+        if let Err(error) = kept {
+            return show_error(window, cx, "That version wasn't restored", format!("Your work as it is now couldn't be kept as a version first, so it was left as it is. {error}"));
         }
+        self.ui.last_version_at = Some(std::time::Instant::now());
         let path = file.clone().unwrap_or_else(app_settings::recovery_path);
         match self.state.open_project(&text, path) {
             Ok((_, settings)) => {
@@ -178,15 +193,17 @@ impl Workspace {
         }
     }
 
-    /// Runs every `RECOVERY_INTERVAL`: keeps the recovery copy, saying once if it can't be kept
-    /// (a full or read-only disk), and tries again to save libraries that failed to save.
+    /// Runs every `RECOVERY_INTERVAL`: keeps a timed version when one is due, keeps the recovery
+    /// copy (unless Settings says never, or the last one is still being offered back), saying once if it can't be kept (a full or read-only
+    /// disk), and tries again to save libraries that failed to save.
     pub fn keep_work_safe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.keep_timed_version();
-        match self.keep_recovery_copy() {
+        let recovery = if self.ui.settings.recovery_seconds == 0 || self.ui.recovery_offered { Ok(()) } else { self.keep_recovery_copy() };
+        match recovery {
             Ok(()) => self.ui.recovery_failing = false,
             Err(error) if !self.ui.recovery_failing => {
                 self.ui.recovery_failing = true;
-                window.push_notification(format!("Unsaved work can't be kept safe in case Studio closes: {error}. Save your project to keep it.").as_str(), cx);
+                window.push_notification(format!("Unsaved work can't be kept safe in case Omina Motion closes: {error}. Save your project to keep it.").as_str(), cx);
             }
             Err(_) => {}
         }
@@ -272,8 +289,29 @@ impl Workspace {
         .detach();
     }
 
+    /// Keeps the picture in the viewer as the saved project's thumbnail for the start screen
+    /// (see `project_thumbnails`). It is scaled and written on a background thread; a picture
+    /// that can't be saved only leaves the project without one, so it is reported on the
+    /// terminal rather than interrupting the save.
+    fn save_thumbnail(&self, path: &Path) {
+        let Some(shown) = self.render.shown_image().cloned() else { return };
+        let (path, now) = (path.to_path_buf(), app_settings::now_seconds());
+        let spawned = std::thread::Builder::new().name("project thumbnail".into()).spawn(move || {
+            let size = shown.size(0);
+            let Some(bgra) = shown.as_bytes(0) else { return };
+            if let Err(error) = crate::project_thumbnails::write(&path, bgra, size.width.0.max(0) as u32, size.height.0.max(0) as u32, now) {
+                eprintln!("could not save the project's thumbnail: {error}");
+            }
+        });
+        if let Err(error) = spawned {
+            eprintln!("could not start saving the project's thumbnail: {error}");
+        }
+    }
+
     /// Writes the project to `path`. Shows what went wrong and returns false if it could not.
     fn write_project(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // Iris's recipes set to run before each save run first, so what they change is saved.
+        crate::panels::assistant_automation::at(self, iris::recipes::Trigger::BeforeSave, window, cx);
         let text = self.state.project_text_with(&self.editor_settings());
         let written = text.as_ref().map_err(Clone::clone).and_then(|text| write_atomically(path, text).map_err(|error| error.to_string()));
         match written {
@@ -286,6 +324,7 @@ impl Workspace {
                 // Saved: nothing left to recover, and this is the project to reopen next time.
                 app_settings::clear_recovery();
                 app_settings::note_project_used(path);
+                self.save_thumbnail(path);
                 crate::workspace::refresh_menus(cx);
                 cx.notify();
                 true
@@ -357,6 +396,8 @@ impl Workspace {
                     let message = format!("Media not found: {}. Put the files next to the project to relink them.", names.join(", "));
                     window.push_notification(message.as_str(), cx);
                 }
+                // Iris's recipes set to run whenever something is opened.
+                crate::panels::assistant_automation::at(self, iris::recipes::Trigger::OnOpen, window, cx);
                 cx.notify();
             }
             Err(error) => show_error(window, cx, "The project could not be opened", error),
@@ -405,7 +446,10 @@ impl Workspace {
     /// screen when the person already chose not to save on the way there.
     pub fn unless_cancelled(&mut self, window: &mut Window, cx: &mut Context<Self>, then: Then) {
         if !self.state.has_unsaved_changes() || crate::panels::start_screen::changes_declined(self) {
-            clear_stale_recovery();
+            // A recovery copy still being offered back is left for the next launch.
+            if !self.ui.recovery_offered {
+                clear_stale_recovery();
+            }
             then(self, window, cx);
             return;
         }
@@ -438,5 +482,5 @@ fn clear_stale_recovery() {
 }
 
 fn show_error(window: &mut Window, cx: &mut Context<Workspace>, title: &'static str, error: String) {
-    window.open_alert_dialog(cx, move |dialog, _, _| dialog.title(title).description(error.clone()));
+    crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| dialog.title(title).description(error.clone()));
 }

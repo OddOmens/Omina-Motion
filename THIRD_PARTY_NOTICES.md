@@ -11,6 +11,10 @@ the licenses named here are at https://spdx.org/licenses/.
   commit used for a release is written to `SOURCES.txt` beside the release.
 - **x264** (https://www.videolan.org/developers/x264.html): H.264 encoding. Built from commit
   `b35605ace3ddf7c1a5d67a2eb553f034aef41d55` of its stable branch: GPL-2.0-or-later.
+- **libvpx** (https://chromium.googlesource.com/webm/libvpx): VP9 encoding for WebM. Built from
+  the release tag written to `SOURCES.txt`: BSD-3-Clause.
+- **Opus** (https://opus-codec.org): sound for WebM. Built from the release written to
+  `SOURCES.txt`: BSD-3-Clause.
 - **Lucide icons** (https://lucide.dev), through gpui-kit-assets: ISC.
 - **RNNoise** (Xiph.Org), in its Rust port nnnoiseless, with its model: BSD-3-Clause.
 - **DeepFilterNet3** (Hendrik Schröter), through deep-filter-rt, with its model: MIT OR Apache-2.0.
@@ -22,7 +26,7 @@ the licenses named here are at https://spdx.org/licenses/.
 
 ## Source
 
-Studio's source, and the build script that fetches and builds FFmpeg and x264
+Studio's source, and the build script that fetches and builds FFmpeg, x264, libvpx and Opus
 (`scripts/release-macos.sh`), come with every release, as the GPL requires.
 
 ## Rust crates
@@ -959,6 +963,7 @@ Studio's source, and the build script that fetches and builds FFmpeg and x264
 | zip | 1.3.1 | MIT |
 | zlib-rs | 0.6.8 | Zlib |
 | zmij | 1.0.23 | MIT |
+| zopfli | 0.8.4 | Apache-2.0 |
 | zune-core | 0.4.12 | MIT OR Apache-2.0 OR Zlib |
 | zune-core | 0.5.3 | MIT OR Apache-2.0 OR Zlib |
 | zune-inflate | 0.2.54 | MIT OR Apache-2.0 OR Zlib |

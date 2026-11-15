@@ -1,4 +1,4 @@
-//! The Templates panel, opened from the rail: 61 animated templates for social media, ads and
+//! The Templates panel, opened from the rail: 73 animated templates for social media, ads and
 //! marketing (see `studio_core::templates`), one per design, browsed by shape (16:9, 4:5, 9:16)
 //! and by what they are for. The Colors menu makes them in another palette or a brand's look.
 //! Hovering over a card plays the template on it; its + button adds it to the project as a new
@@ -120,7 +120,9 @@ fn shown(workspace: &Workspace) -> Vec<usize> {
 /// frame while any are left. Called from the workspace's render while the panel is open.
 pub fn make_pictures(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let format = workspace.ui.template_format;
-    let missing: Vec<usize> = shown(workspace).into_iter().filter(|&index| !workspace.ui.template_pictures.contains_key(&(index, format))).collect();
+    // The start screen's sample projects need pictures whatever category is chosen.
+    let wanted: Vec<usize> = if workspace.ui.start_screen.is_some() { samples().into_iter().chain(shown(workspace)).collect() } else { shown(workspace) };
+    let missing: Vec<usize> = wanted.into_iter().filter(|&index| !workspace.ui.template_pictures.contains_key(&(index, format))).collect();
     keep_preview_playing(workspace, window, cx);
     if missing.is_empty() {
         return;
@@ -398,18 +400,12 @@ pub fn gallery(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<gpu
         })
         .collect();
     let list = div().id("gallery-list").flex_1().min_h_0().overflow_y_scroll().pr_2().flex().flex_col().gap_5().children(groups);
-    let sheet = div()
-        .id("template-gallery")
+    let sheet = super::chrome::popup_surface(div().id("template-gallery"))
         .size_full()
         .p_4()
         .flex()
         .flex_col()
         .gap_3()
-        .rounded(px(12.0))
-        .bg(hsla(color::POPOVER))
-        .border_1()
-        .border_color(hsla(color::HAIRLINE))
-        .shadow_lg()
         .text_size(px(size::TEXT))
         .text_color(hsla(color::TEXT))
         // Clicks inside stay inside; a click on the dimmed edge closes it.
@@ -448,18 +444,78 @@ pub fn start_screen_cards(workspace: &Workspace, cx: &mut Context<Workspace>) ->
         .child(div().id("start-template-list").flex_1().min_h_0().overflow_y_scroll().pr_2().child(div().flex().flex_wrap().gap_4().children(cards)))
 }
 
-/// The start screen's Home strip: one row of small template cards, each starting a new project
-/// from it like the Templates page's cards. Up to `count` are laid out, wrapping; the row is one
-/// card tall and clips the rest, so it fills whatever width there is with whole cards only.
-pub fn start_screen_strip(workspace: &Workspace, count: usize, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
-    let cards: Vec<_> = shown(workspace).into_iter().take(count).map(|index| card(workspace, index, STRIP_CARD_WIDTH, CardPlace::StartScreen, cx)).collect();
-    // The picture, plus room for the name and a two-line category under it.
-    let row_height = card_height(workspace.ui.template_format) * STRIP_CARD_WIDTH / CARD_WIDTH + 56.0;
-    div().id("start-template-strip").flex_none().h(px(row_height)).flex().flex_wrap().gap_x_3().gap_y_6().overflow_hidden().children(cards).test_support()
+/// The templates the start screen's Home page offers as sample projects, by name: one each of
+/// a launch, a sale, a vlog title and a product announcement, so the row shows the range.
+const SAMPLE_NAMES: [&str; 4] = ["Launch Day", "Half Off", "Vlog Intro", "New Feature"];
+
+/// Where the sample projects are in `TEMPLATES`.
+fn samples() -> Vec<usize> {
+    SAMPLE_NAMES.iter().filter_map(|name| TEMPLATES.iter().position(|template| template.name == *name)).collect()
 }
 
-/// Card width in the start screen's Home strip, in points.
-const STRIP_CARD_WIDTH: f32 = 96.0;
+/// Sizes of a sample project's tile on the start screen, in points: the tile's height, and
+/// the height of the template's picture standing inside it.
+const SAMPLE_TILE_HEIGHT: f32 = 300.0;
+const SAMPLE_PICTURE_HEIGHT: f32 = 252.0;
+
+/// One sample project on the start screen: the template's picture standing on a tile in its
+/// accent color, with its name underneath. Pointing at it plays the template; clicking it
+/// starts a new project from it.
+fn sample_card(workspace: &Workspace, index: usize, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let format = workspace.ui.template_format;
+    let template = branded(workspace, index);
+    let playing = workspace.ui.template_preview.as_ref().filter(|preview| preview.index == index && preview.format == format).and_then(|preview| preview.shown.as_ref()).map(|(_, picture)| picture.clone());
+    let picture = playing.or_else(|| workspace.ui.template_pictures.get(&(index, format)).cloned());
+    let (width, height) = format.size();
+    let picture_width = SAMPLE_PICTURE_HEIGHT * width as f32 / height as f32;
+    div()
+        .id(("start-template", index))
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .cursor_pointer()
+        .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            hover(this, index, *hovered);
+            cx.notify();
+        }))
+        .on_click(cx.listener(move |this, _, window, cx| add(this, index, CardPlace::StartScreen, window, cx)))
+        .child(
+            div()
+                .h(px(SAMPLE_TILE_HEIGHT))
+                .rounded(px(12.0))
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_kit::rgb(template.palette.accent))
+                .border_1()
+                .border_color(hsla(color::HAIRLINE))
+                .hover(|style| style.border_color(hsla(color::ACCENT)))
+                .child(
+                    div()
+                        .w(px(picture_width))
+                        .h(px(SAMPLE_PICTURE_HEIGHT))
+                        .max_w_full()
+                        .rounded(px(8.0))
+                        .overflow_hidden()
+                        .shadow_lg()
+                        .bg(gpui_kit::rgb(template.palette.background))
+                        .children(picture.map(|picture| img(ImageSource::Render(picture)).size_full())),
+                ),
+        )
+        .child(div().text_color(hsla(color::MUTED)).truncate().child(template.name))
+        .test_support()
+}
+
+/// The start screen's sample projects: a row of large tiles, one for each of `SAMPLE_NAMES`,
+/// sharing the page's width. Each starts a new project from its template, like the Templates
+/// page's cards.
+pub fn start_screen_strip(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    let cards: Vec<_> = samples().into_iter().map(|index| sample_card(workspace, index, cx)).collect();
+    div().id("start-template-strip").flex_none().flex().gap_4().children(cards).test_support()
+}
 
 pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let formats = format_chips(workspace, "template-format", cx);
@@ -508,5 +564,10 @@ mod tests {
         assert_eq!(preview_frame(0.5, 300), 14);
         assert_eq!(preview_frame(10.0, 300), 0, "a 10-second template starts over");
         assert_eq!(preview_frame(10.5, 300), 14);
+    }
+
+    #[test]
+    fn every_sample_project_is_a_real_template() {
+        assert_eq!(samples().len(), SAMPLE_NAMES.len());
     }
 }

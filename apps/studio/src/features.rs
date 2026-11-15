@@ -41,6 +41,10 @@ pub enum Feature {
     Elements,
     Templates,
     Mockups,
+    Stock,
+    Mixer,
+    History,
+    Assistant,
     // Editing.
     Precompose,
     PasteAttributes,
@@ -111,6 +115,10 @@ pub const GROUPS: &[(&str, &[FeatureInfo])] = &[
             info(Feature::Elements, "Elements", "Ready-made shapes, arrows, badges and stickers."),
             info(Feature::Templates, "Templates", "Ready-made animated compositions."),
             info(Feature::Mockups, "Mockups", "Phone, tablet and Mac device frames."),
+            info(Feature::Stock, "Stock", "Free video, pictures and sound to search online and add."),
+            info(Feature::Mixer, "Mixer", "The Mixer panel: a level meter for the mix, voiceover recording, and each clip's volume and pan side by side."),
+            info(Feature::History, "History", "Every change as a list, to click back to any step."),
+            info(Feature::Assistant, "Iris", "Your assistant: notices things worth fixing in motion, cuts, sound, text and pictures and fixes them in a click, animates designs, carries out instructions like \"start at 5s and fade in\", runs your recipes, and answers questions about Omina Motion and Omina Edit. Rules, not AI."),
         ],
     ),
     (
@@ -178,7 +186,7 @@ impl Focus {
 
     pub fn about(self) -> &'static str {
         match self {
-            Self::Everything => "Every tool and feature Studio has.",
+            Self::Everything => "Every tool and feature Omina Motion has.",
             Self::VideoEditing => "Cutting footage together: trims, speed, stabilizing and scene cuts.",
             Self::MotionDesign => "Animating shapes and text: the pen, morphs, the graph editor.",
             Self::Basics => "Cut, add text and effects, export. Fewer buttons to learn.",
@@ -255,6 +263,9 @@ impl Feature {
             LeftPanel::Elements => Self::Elements,
             LeftPanel::Templates => Self::Templates,
             LeftPanel::Mockups => Self::Mockups,
+            LeftPanel::Stock => Self::Stock,
+            LeftPanel::History => Self::History,
+            LeftPanel::Assistant => Self::Assistant,
             LeftPanel::Captions => Self::Captions,
         })
     }
@@ -282,7 +293,10 @@ impl Feature {
             "toggle-marker" => Self::Markers,
             "toggle-guides" => Self::Guides,
             "render-and-play" => Self::RenderAndPlay,
-            "export" => Self::Export,
+            "export" | "save-frame" | "copy-frame" => Self::Export,
+            "export-queue" => Self::ExportQueue,
+            // Voiceovers are recorded from the Mixer, so its shortcut goes with it.
+            "record-voiceover" => Self::Mixer,
             _ => return None,
         })
     }
@@ -351,7 +365,7 @@ mod tests {
         let unique: BTreeSet<Feature> = listed.iter().copied().collect();
         assert_eq!(listed.len(), unique.len(), "no feature is listed twice");
         // Adding a variant without listing it would leave it with no switch.
-        assert_eq!(unique.len(), 43);
+        assert_eq!(unique.len(), 47);
     }
 
     #[test]
@@ -374,6 +388,14 @@ mod tests {
 
         settings.set_feature(Feature::PenTool, true);
         assert!(settings.feature_on(Feature::PenTool));
+    }
+
+    #[test]
+    fn turning_the_mixer_off_takes_voiceover_recording_with_it() {
+        let mut settings = AppSettings::default();
+        assert!(settings.command_on("record-voiceover"));
+        settings.set_feature(Feature::Mixer, false);
+        assert!(!settings.command_on("record-voiceover"), "no shortcut or quick menu button records one");
     }
 
     #[test]

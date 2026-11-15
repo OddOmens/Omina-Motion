@@ -258,12 +258,13 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
 fn footer(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement {
     let layer_id = layer.id;
     let weak = cx.weak_entity();
-    let can_matte = studio_core::cutout::can_cut_out(layer) && !layer.effect_graph.matte_node;
+    // Object Matte runs an AI model, so it is left out while it is turned off in Settings.
+    let matte = workspace.ui.settings.ai.remove_background.then(|| studio_core::cutout::can_cut_out(layer) && !layer.effect_graph.matte_node);
     let names = suitable_effects(layer);
     let add = Button::new("nodes-add").ghost().small().icon(Icon::new(IconName::Plus)).tooltip("Add a node").dropdown_menu(move |menu, _, _| {
         // From the footer, new nodes go in the middle of the view.
         let weak = weak.clone();
-        add_node_items(menu, weak, layer_id, None, can_matte, &names)
+        add_node_items(menu, weak, layer_id, None, matte, &names)
     });
     div()
         .flex()
@@ -323,13 +324,14 @@ fn suitable_effects(layer: &Layer) -> Vec<(&'static str, Vec<&'static str>)> {
 }
 
 /// The items of an Add Node menu: Merge, Object Matte, then every suitable effect. New nodes go
-/// at `at` (canvas units), or in the middle of the view when `at` is `None`.
+/// at `at` (canvas units), or in the middle of the view when `at` is `None`. `matte` is whether
+/// an Object Matte can be added, or `None` to leave it out of the menu.
 fn add_node_items(
     mut menu: PopupMenu,
     weak: gpui_kit::WeakEntity<Workspace>,
     layer: Id,
     at: Option<Vec2>,
-    can_matte: bool,
+    matte: Option<bool>,
     effects: &[(&'static str, Vec<&'static str>)],
 ) -> PopupMenu {
     // Where a new node goes: the right-clicked spot from the context menu, else the middle,
@@ -356,19 +358,21 @@ fn add_node_items(
             .ok();
         }
     }));
-    menu = menu.item(PopupMenuItem::new("Object Matte").disabled(!can_matte).on_click({
-        let weak = weak.clone();
-        move |_, _, cx| {
-            weak.update(cx, |this, cx| {
-                let at = spot(this);
-                if this.state.add_matte_node(layer, at) {
-                    added(this, Some(NodeId::Matte));
-                }
-                cx.notify();
-            })
-            .ok();
-        }
-    }));
+    if let Some(can_matte) = matte {
+        menu = menu.item(PopupMenuItem::new("Object Matte").disabled(!can_matte).on_click({
+            let weak = weak.clone();
+            move |_, _, cx| {
+                weak.update(cx, |this, cx| {
+                    let at = spot(this);
+                    if this.state.add_matte_node(layer, at) {
+                        added(this, Some(NodeId::Matte));
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+    }
     for (category, names) in effects {
         menu = menu.separator().label(*category);
         for &name in names {
@@ -452,7 +456,8 @@ fn graph_canvas(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace
 
     let nodes: Vec<AnyElement> = spots.iter().map(|(node, at)| graph_node(layer, *node, *at, workspace, cx)).collect();
 
-    let can_matte = studio_core::cutout::can_cut_out(layer) && !layer.effect_graph.matte_node;
+    // Object Matte runs an AI model, so it is left out while it is turned off in Settings.
+    let matte = workspace.ui.settings.ai.remove_background.then(|| studio_core::cutout::can_cut_out(layer) && !layer.effect_graph.matte_node);
     let names = suitable_effects(layer);
     let weak = cx.weak_entity();
     div()
@@ -516,7 +521,7 @@ fn graph_canvas(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace
         .context_menu(move |menu, _, cx| {
             // New nodes go where the canvas was right-clicked.
             let at = weak.upgrade().map(|workspace| workspace.read(cx).ui.nodes.menu_at);
-            add_node_items(menu, weak.clone(), layer_id, at, can_matte, &names)
+            add_node_items(menu, weak.clone(), layer_id, at, matte, &names)
         })
         .into_any_element()
 }

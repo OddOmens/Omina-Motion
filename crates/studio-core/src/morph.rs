@@ -31,9 +31,10 @@ pub struct ShapeMorph {
     /// The outline at each keyframe, in fractions of the layer's box. Points may reach past
     /// the box: the outline being morphed into can be larger than the layer's own.
     pub path: Animated<ShapePath>,
-    /// The fill, stroke and corner settings at each keyframe. When animated, edits to the
-    /// shape's style apply across the whole morph (see `sync_style_edit`), and its static value
-    /// mirrors the layer's own style so those edits can be told apart.
+    /// The fill, stroke and corner settings at each keyframe. When animated, its static value
+    /// mirrors the layer's own style. The editor keyframes a style edit at the playhead (see
+    /// `edit_style_at`); an edit made through `edit::edit_shape` applies across the whole
+    /// morph instead (see `sync_style_edit`).
     pub style: Animated<ShapeStyle>,
 }
 
@@ -544,6 +545,11 @@ impl Lerp for ShapeStyle {
             corner_radius: self.corner_radius.lerp(other.corner_radius, t).max(0.0),
             points: (self.points as f32).lerp(other.points as f32, t).round().clamp(3.0, MAX_SHAPE_POINTS as f32) as u32,
             inner_radius: self.inner_radius.lerp(other.inner_radius, t).clamp(INNER_RADIUS_RANGE.0, INNER_RADIUS_RANGE.1),
+            trim: crate::model::Trim {
+                start: self.trim.start.lerp(other.trim.start, t),
+                end: self.trim.end.lerp(other.trim.end, t),
+                offset: self.trim.offset.lerp(other.trim.offset, t),
+            },
         }
     }
 }
@@ -574,6 +580,19 @@ impl Layer {
     pub fn is_morphing(&self) -> bool {
         self.morph.as_ref().is_some_and(|morph| morph.path.is_animated())
     }
+
+    /// The size a shape is drawn at `frame`, in layer pixels. While the outline is keyframed
+    /// this is the size of the outline there (which can differ from the layer's box, and is how
+    /// a shape's size is animated); otherwise it is the layer's own size.
+    pub fn shape_size_at(&self, frame: f64) -> Vec2 {
+        if !self.is_morphing() {
+            return self.size;
+        }
+        match self.shape_path_at(frame).and_then(|path| path.bounds()) {
+            Some((min, max)) => Vec2::new((max.x - min.x) * self.size.x, (max.y - min.y) * self.size.y),
+            None => self.size,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -598,6 +617,15 @@ pub fn convert_to_path(composition: &mut Composition, layer_id: Id) -> bool {
     *path = Some(converted);
     style.kind = ShapeKind::Path;
     style.corner_radius = 0.0;
+    // Style keyframes describe the same shape, so they become a path with square corners too
+    // (the rounding is now part of the outline).
+    if let Some(morph) = layer.morph.as_mut() {
+        morph.style.map_values(|mut keyed| {
+            keyed.kind = ShapeKind::Path;
+            keyed.corner_radius = 0.0;
+            keyed
+        });
+    }
     true
 }
 
@@ -611,6 +639,20 @@ fn tidy(layer: &mut Layer) {
     if layer.morph.as_ref().is_some_and(|morph| !morph.is_animated()) {
         layer.morph = None;
     }
+}
+
+/// Tidies a layer after outline keyframes were removed from outside this module (deleted in
+/// the timeline, say). If none are left, the outline that remained becomes the layer's own
+/// path and the morph is dropped once nothing else in it is keyframed. Call it only for a
+/// layer whose outline was keyframed just before. Returns whether the animation ended.
+pub fn settle_path_keyframes(layer: &mut Layer) -> bool {
+    let Some(morph) = layer.morph.as_ref().filter(|morph| !morph.path.is_animated()) else { return false };
+    let kept = morph.path.value.clone();
+    if let LayerContent::Shape { path: Some(path), .. } = &mut layer.content {
+        *path = kept;
+    }
+    tidy(layer);
+    true
 }
 
 /// The Path stopwatch. Turning it on makes the layer a pen path (if it was a drawn shape) with
@@ -672,6 +714,77 @@ pub fn stop_style_morph(composition: &mut Composition, layer_id: Id, frame: i64)
     true
 }
 
+/// The Fill & Stroke stopwatch. Turning it on keyframes the shape's style (fill, stroke and
+/// stroke width, with its corner settings) at `frame`; turning it off keeps the style it has at
+/// `frame` and drops the style keyframes. Returns whether anything changed.
+pub fn toggle_style_animation(composition: &mut Composition, layer_id: Id, frame: i64) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id).filter(|layer| !layer.switches.locked) else { return false };
+    if layer.morph.as_ref().is_some_and(|morph| morph.style.is_animated()) {
+        return stop_style_morph(composition, layer_id, frame);
+    }
+    let LayerContent::Shape { style, path } = &layer.content else { return false };
+    let (style, path) = (*style, path.clone().unwrap_or_default());
+    // A drawn box shape has no outline of its own; its morph's outline is never keyframed, so
+    // it is never drawn.
+    let morph = layer.morph.get_or_insert_with(|| still_morph(path, style));
+    morph.style = Animated::keyframed(vec![Keyframe::linear(frame, style)]);
+    true
+}
+
+/// Adds a style keyframe at `frame` holding the style there, or removes the one already there
+/// (the Fill & Stroke keyframe button). With no style keyframes yet this starts the stopwatch.
+/// Removing the last keyframe stops it and keeps that style. Returns whether anything changed.
+pub fn toggle_style_keyframe(composition: &mut Composition, layer_id: Id, frame: i64) -> bool {
+    if !composition.layer(layer_id).and_then(|layer| layer.morph.as_ref()).is_some_and(|morph| morph.style.is_animated()) {
+        return toggle_style_animation(composition, layer_id, frame);
+    }
+    let Some(layer) = composition.layer_mut(layer_id).filter(|layer| !layer.switches.locked) else { return false };
+    if let Some(morph) = layer.morph.as_mut() {
+        morph.style.toggle_keyframe(frame);
+    }
+    settle_style_keyframes(layer);
+    true
+}
+
+/// Tidies a layer after style keyframes were removed (here, or deleted in the timeline). If
+/// none are left, the style that remained becomes the layer's own and the morph is dropped
+/// once nothing else in it is keyframed. Returns whether the animation ended.
+pub fn settle_style_keyframes(layer: &mut Layer) -> bool {
+    let Some(morph) = layer.morph.as_ref().filter(|morph| !morph.style.is_animated()) else { return false };
+    let kept = morph.style.value;
+    if let LayerContent::Shape { style, .. } = &mut layer.content {
+        *style = kept;
+    }
+    tidy(layer);
+    true
+}
+
+/// Changes a shape layer's style with `edit`, as `edit::edit_shape` does. While the style is
+/// keyframed the edit starts from the style drawn at `frame` and is keyframed there, as any
+/// animated property is keyframed when it is changed; the other keyframes are untouched.
+/// Returns whether the layer is a shape.
+pub fn edit_style_at(composition: &mut Composition, layer_id: Id, frame: i64, edit: impl FnOnce(&mut ShapeStyle)) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    if !layer.morph.as_ref().is_some_and(|morph| morph.style.is_animated()) {
+        return crate::edit::edit_shape(composition, layer_id, edit);
+    }
+    let Some(drawn) = layer.shape_style_at(frame as f64) else { return false };
+    if let LayerContent::Shape { style, .. } = &mut layer.content {
+        *style = drawn;
+    }
+    if !crate::edit::edit_own_shape_style(layer, edit) {
+        return false;
+    }
+    let LayerContent::Shape { style, .. } = &layer.content else { return false };
+    let edited = *style;
+    if let Some(morph) = layer.morph.as_mut() {
+        morph.style.set_at(frame, edited);
+        // The static value mirrors the layer's own style (see `ShapeMorph::style`).
+        morph.style.value = edited;
+    }
+    true
+}
+
 /// Moves a point (or handle) of a keyframed outline at `frame` to `to`, in the layer's own
 /// pixels, keyframing the outline there as any animated property is keyframed when changed.
 /// The layer's box stays put (points may go past it), so the other keyframes are untouched.
@@ -692,6 +805,35 @@ pub fn move_morph_point(composition: &mut Composition, layer_id: Id, frame: i64,
     }
     let Some(morph) = layer.morph.as_mut() else { return false };
     morph.path.set_at(frame, path);
+    true
+}
+
+/// Sets the size of a keyframed outline at `frame`, in layer pixels, keyframing the outline
+/// there: this is how a shape's size is animated. The outline is stretched about its own
+/// middle, so the shape stays where it is. Sides are kept from 1 to `MAX_SHAPE_SIZE` pixels; a
+/// side the outline has no extent along (a perfectly flat line) is left alone. Returns whether
+/// it changed.
+pub fn set_morph_size(composition: &mut Composition, layer_id: Id, frame: i64, size: Vec2) -> bool {
+    let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    let layer_size = layer.size;
+    if layer.switches.locked || !layer.is_morphing() || layer_size.x <= 0.0 || layer_size.y <= 0.0 {
+        return false;
+    }
+    let Some(path) = layer.shape_path_at(frame as f64).map(Cow::into_owned) else { return false };
+    let Some((min, max)) = path.bounds() else { return false };
+    let middle = (min + max) * 0.5;
+    // How much to stretch one axis: the wanted side over the side it has now, both in pixels.
+    let factor = |wanted: f32, extent: f32, side: f32| {
+        let now = extent * side;
+        if !wanted.is_finite() || now < 1.0e-3 { 1.0 } else { wanted.clamp(1.0, crate::edit::MAX_SHAPE_SIZE) / now }
+    };
+    let (fx, fy) = (factor(size.x, max.x - min.x, layer_size.x), factor(size.y, max.y - min.y, layer_size.y));
+    if fx == 1.0 && fy == 1.0 {
+        return false;
+    }
+    let resized = path.mapped(|point| Vec2::new(middle.x + (point.x - middle.x) * fx, middle.y + (point.y - middle.y) * fy));
+    let Some(morph) = layer.morph.as_mut() else { return false };
+    morph.path.set_at(frame, resized);
     true
 }
 
@@ -1117,6 +1259,50 @@ mod tests {
         assert_eq!(morph_to(&mut composition, square, star, last, 10, default_easing()), Err(MorphError::NoRoom));
         composition.layer_mut(square).unwrap().switches.locked = true;
         assert_eq!(can_morph(&composition, square, star), Err(MorphError::Locked));
+    }
+
+    #[test]
+    fn the_layers_rectangle_follows_a_keyframed_outline_past_its_box() {
+        use crate::transform::{layer_box, layer_contains};
+        let (mut composition, square, _) = sample_with_shapes();
+        assert!(toggle_path_animation(&mut composition, square, 0));
+        // Pull a point well outside the box at a later keyframe.
+        assert!(move_morph_point(&mut composition, square, 20, 0, PathPart::Point, Vec2::new(-50.0, -30.0)));
+        let layer = composition.layer(square).unwrap();
+        assert_eq!(layer.size, Vec2::new(100.0, 100.0), "the layer's own box is untouched");
+        let (min, max) = layer_box(layer, 20.0);
+        assert!(min.x <= -50.0 + 1e-3 && min.y <= -30.0 + 1e-3, "the rectangle reaches the moved point: {min:?}");
+        assert!(close(max, Vec2::new(100.0, 100.0), 1e-3));
+        // At the first keyframe the outline, and so the rectangle, is as it was.
+        let (min, max) = layer_box(layer, 0.0);
+        assert!(close(min, Vec2::new(0.0, 0.0), 1e-3) && close(max, Vec2::new(100.0, 100.0), 1e-3));
+        // A click on the part past the box lands on the layer only where the outline reaches.
+        let world = crate::transform::world_transform(&composition, square, 20.0).unwrap();
+        let outside = world.apply(Vec2::new(-40.0, -25.0));
+        assert!(layer_contains(&composition, square, outside, 20.0));
+        assert!(!layer_contains(&composition, square, outside, 0.0));
+    }
+
+    #[test]
+    fn size_is_animated_by_resizing_the_outline_at_a_keyframe() {
+        let (mut composition, square, _) = sample_with_shapes();
+        // A shape that isn't animated has no outline keyframes to resize.
+        assert!(!set_morph_size(&mut composition, square, 20, Vec2::new(200.0, 50.0)));
+        assert!(toggle_path_animation(&mut composition, square, 0));
+        assert!(set_morph_size(&mut composition, square, 20, Vec2::new(200.0, 50.0)));
+        let layer = composition.layer(square).unwrap();
+        assert_eq!(layer.morph.as_ref().unwrap().path.keyframe_frames(), vec![0, 20]);
+        let size_at = |frame: f64| layer.shape_size_at(frame);
+        assert!(close(size_at(0.0), Vec2::new(100.0, 100.0), 1e-3), "the first keyframe keeps its size");
+        assert!(close(size_at(20.0), Vec2::new(200.0, 50.0), 1e-3));
+        assert!(close(size_at(10.0), Vec2::new(150.0, 75.0), 1e-3), "and the size blends between them");
+        // It grows about its own middle, so the shape stays where it is.
+        let (min, max) = layer.shape_path_at(20.0).unwrap().bounds().unwrap();
+        assert!(close((min + max) * 0.5, Vec2::new(0.5, 0.5), 1e-5));
+        assert_eq!(layer.size, Vec2::new(100.0, 100.0), "the layer's own box is untouched");
+        // The same size again changes nothing, and nonsense is refused.
+        assert!(!set_morph_size(&mut composition, square, 20, Vec2::new(200.0, 50.0)));
+        assert!(!set_morph_size(&mut composition, square, 20, Vec2::new(f32::NAN, f32::NAN)));
     }
 
     #[test]

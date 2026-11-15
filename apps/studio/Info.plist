@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Extra keys merged into Omina Motion.app's Info.plist when it is packaged. -->
+<plist version="1.0">
+<dict>
+    <!-- Shown by macOS the first time a voiceover is recorded. Without it, macOS closes the app
+         when it asks for the microphone. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Omina Motion records your microphone when you record a voiceover.</string>
+</dict>
+</plist>

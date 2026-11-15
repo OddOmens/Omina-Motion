@@ -4196,6 +4196,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
+name = "iris"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "is-docker"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7588,6 +7597,7 @@ dependencies = [
  "async-channel",
  "gpui-kit",
  "image",
+ "iris",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7617,6 +7627,7 @@ dependencies = [
 name = "studio-core"
 version = "0.1.0"
 dependencies = [
+ "iris",
  "serde",
  "serde_json",
  "usvg 0.45.1",
@@ -7681,6 +7692,7 @@ dependencies = [
  "half",
  "image",
  "pollster 0.4.0",
+ "resvg 0.45.1",
  "studio-core",
  "tiny-skia",
  "wgpu",

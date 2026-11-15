@@ -156,6 +156,76 @@ pub fn remove_silences(workspace: &mut Workspace, layer: Id, window: &mut Window
     );
 }
 
+/// How finely sound is compared when lining clips up (buckets a second: 10 ms each, well
+/// under a frame), and how far apart two recordings may have started and still be matched.
+const SYNC_BUCKETS_PER_SECOND: u32 = 100;
+const SYNC_MAX_SECONDS: usize = 120;
+
+/// Lines the selected clips up by their sound, for multicam: each is moved so that what it
+/// recorded plays at the same moment as in the first one selected, which stays where it is.
+/// Works on clips at normal speed that have sound; a clip whose sound doesn't match is left
+/// where it is and named.
+pub fn sync_by_sound(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let composition = workspace.state.composition();
+    let clips: Vec<(Id, String, PathBuf)> = workspace
+        .state
+        .selected_layers
+        .iter()
+        .filter_map(|&id| composition.layer(id))
+        .filter(|layer| !layer.switches.locked && layer.time.is_normal() && workspace.state.has_sound(layer.id))
+        .filter_map(|layer| media_path(workspace, layer.id).map(|path| (layer.id, layer.name.clone(), path)))
+        .collect();
+    if clips.len() < 2 {
+        window.push_notification("Select two or more clips with sound (at normal speed) to line them up.", cx);
+        return;
+    }
+    run(
+        workspace,
+        "Lining up by sound",
+        move |progress, cancelled| {
+            // Each clip's loudness over time, then how far each is from the first.
+            let mut loudness = Vec::with_capacity(clips.len());
+            for (index, (_, name, path)) in clips.iter().enumerate() {
+                if cancelled() {
+                    return Err("cancelled".to_owned());
+                }
+                let peaks = studio_media::audio_peaks(path, SYNC_BUCKETS_PER_SECOND).map_err(|error| format!("{name}: {error}"))?;
+                loudness.push(peaks.values);
+                progress((index + 1) as f32 / clips.len() as f32 * 0.6);
+            }
+            let max_lag = SYNC_MAX_SECONDS * SYNC_BUCKETS_PER_SECOND as usize;
+            let mut found = Vec::new();
+            for (index, other) in loudness.iter().enumerate().skip(1) {
+                if cancelled() {
+                    return Err("cancelled".to_owned());
+                }
+                let lag = studio_core::multicam::sync_lag(&loudness[0], other, max_lag).map(|(lag, _)| lag as f64 / f64::from(SYNC_BUCKETS_PER_SECOND));
+                found.push((clips[index].0, clips[index].1.clone(), lag));
+                progress(0.6 + index as f32 / clips.len() as f32 * 0.4);
+            }
+            Ok((clips[0].0, found))
+        },
+        move |this, (reference, found): (Id, Vec<(Id, String, Option<f64>)>), window, cx| {
+            let mut unmatched = Vec::new();
+            let mut moved = 0;
+            for (clip, name, lag) in found {
+                match lag {
+                    Some(seconds) if this.state.line_up_clip(reference, clip, seconds) => moved += 1,
+                    _ => unmatched.push(name),
+                }
+            }
+            let message = match (moved, unmatched.is_empty()) {
+                (0, _) => "None of the clips' sound matched the first one's, so nothing was moved.".to_owned(),
+                (_, true) => format!("Lined up {moved} with the first clip."),
+                (_, false) => format!("Lined up {moved} with the first clip. No match was found for: {}.", unmatched.join(", ")),
+            };
+            window.push_notification(message.as_str(), cx);
+        },
+        window,
+        cx,
+    );
+}
+
 /// Marks every beat of a clip's sound on the composition's timeline (replacing earlier beat
 /// markers), within the clip.
 pub fn mark_beats(workspace: &mut Workspace, layer: Id, window: &mut Window, cx: &mut Context<Workspace>) {
@@ -449,11 +519,11 @@ pub fn auto_reframe(workspace: &mut Workspace, layer: Id, format: Format, window
     }
     let target = cx.weak_entity();
     let start_reframe = std::rc::Rc::new(std::cell::RefCell::new(Some(start_reframe)));
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| {
         let (target, start_reframe) = (target.clone(), start_reframe.clone());
         dialog
             .title("Download the subject-finding model?")
-            .description(format!("Auto Reframe finds the subject with the MobileSAM model, the one background removal uses. It is downloaded once from huggingface.co (about {} MB) and kept in Studio's settings folder. Your footage is never uploaded.", studio_cutout::MODEL_BYTES / 1_000_000))
+            .description(format!("Auto Reframe finds the subject with the MobileSAM model, the one background removal uses. It is downloaded once from huggingface.co (about {} MB) and kept in Omina Motion's settings folder. Your footage is never uploaded.", studio_cutout::MODEL_BYTES / 1_000_000))
             .ok_text("Download and Reframe")
             .show_cancel(true)
             .on_ok(move |_, window, cx| {

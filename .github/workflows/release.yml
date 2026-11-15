@@ -1,0 +1,111 @@
+# Builds Omina Motion for macOS, Windows and Linux and, for a version tag (v1.2.3), attaches the
+# installers to that GitHub release under fixed names, so the website can always link to
+# releases/latest/download/<name>. Run it by hand from the Actions tab to test a build; the
+# installers are then kept as the run's artifacts instead.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, platform: macOS, file: Omina-Motion-macOS.dmg }
+          - { os: windows-latest, platform: Windows, file: Omina-Motion-Windows-Setup.exe }
+          - { os: ubuntu-24.04, platform: Linux, file: Omina-Motion-Linux.AppImage }
+    runs-on: ${{ matrix.os }}
+    env:
+      # AppImage tools run without FUSE, which GitHub's Linux machines don't have.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    defaults:
+      run:
+        shell: bash
+        working-directory: Omina Motion
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: Omina Motion
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Omina Motion
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked --version 0.11.8
+
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config clang libasound2-dev libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libvulkan-dev \
+            libssl-dev libzstd-dev
+
+      - name: Build and package (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config nasm && ./scripts/release-macos.sh
+
+      # On Windows and Linux, Motion links a shared FFmpeg 9.0 (the version the Mac release
+      # compiles in), a GPL build from BtbN/FFmpeg-Builds, and ships its libraries with the app.
+      - name: Download FFmpeg (Windows and Linux)
+        if: runner.os != 'macOS'
+        run: |
+          base=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
+          if [ "${{ runner.os }}" = Windows ]; then
+            curl -fsSL -o "$RUNNER_TEMP/ffmpeg.zip" "$base/ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip"
+            7z x -y "$RUNNER_TEMP/ffmpeg.zip" -o"$RUNNER_TEMP" > /dev/null
+            echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+          else
+            curl -fsSL "$base/ffmpeg-n9.0-latest-linux64-gpl-shared-9.0.tar.xz" | tar xJ -C "$RUNNER_TEMP"
+          fi
+          ffmpeg_dir="$(ls -d "$RUNNER_TEMP"/ffmpeg-n9.0-*/)"
+          if [ "${{ runner.os }}" = Windows ]; then ffmpeg_dir="$(cygpath -w "$ffmpeg_dir")"; fi
+          echo "FFMPEG_DIR=$ffmpeg_dir" >> "$GITHUB_ENV"
+          # The AppImage tool finds the libraries to bundle the same way the program does.
+          echo "LD_LIBRARY_PATH=${ffmpeg_dir}lib" >> "$GITHUB_ENV"
+
+      - name: Build (Windows and Linux)
+        if: runner.os != 'macOS'
+        run: cargo build --release -p studio
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: cargo packager --release -p studio --formats appimage
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          # The installer carries FFmpeg's DLLs beside studio.exe, so the packaging settings from
+          # Cargo.toml are written out with them added as resources.
+          dlls="$(cygpath -m "$FFMPEG_DIR")/bin/*.dll"
+          cargo metadata --no-deps --format-version 1 \
+            | jq --arg dlls "$dlls" '.packages[] | select(.name == "studio") | .metadata.packager
+                | .resources += [{"src": $dlls, "target": "."}]' > apps/studio/Packager.json
+          cargo packager -p studio -c apps/studio/Packager.json --formats nsis
+      - name: Collect the installer under its download name
+        run: |
+          mkdir -p dist
+          case "${{ runner.os }}" in
+            macOS) cp target/packages/*.dmg "dist/${{ matrix.file }}" ;;
+            Windows) cp target/packages/*-setup.exe "dist/${{ matrix.file }}" ;;
+            Linux) cp target/packages/*.AppImage "dist/${{ matrix.file }}" ;;
+          esac
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.file }}
+          path: Omina Motion/dist/${{ matrix.file }}
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Omina Motion/dist/${{ matrix.file }}

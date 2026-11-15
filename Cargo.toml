@@ -18,6 +18,7 @@ authors = ["Odd Omens LLC"]
 [workspace.dependencies]
 studio-core = { path = "crates/studio-core" }
 studio-dsp = { path = "crates/studio-dsp" }
+iris = { path = "crates/iris" }
 # Pinned exactly: GPUI is pre-1.0, so upgrades are deliberate.
 gpui-kit = "=0.8.1"
 
@@ -29,6 +30,11 @@ all = { level = "warn", priority = -1 }
 
 # Dependencies are optimized even in debug builds so the UI stays smooth while developing.
 [profile.dev.package."*"]
+opt-level = 2
+
+# The renderer works through every pixel of a frame, which is many times slower unoptimized:
+# a nested composition or a path being reshaped took a fifth to half a second a frame.
+[profile.dev.package.studio-render]
 opt-level = 2
 
 [profile.release]

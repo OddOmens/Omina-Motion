@@ -21,6 +21,15 @@ use crate::path::{PathPoint, ShapePath};
 /// The most shapes one file may bring in, against hostile files.
 const MAX_SHAPES: usize = 2_000;
 
+/// The size an SVG drawing states for itself, in pixels, or `None` when its text isn't an SVG
+/// or the size is impossible. Used to size the layer of an SVG brought in as one picture.
+pub fn size(text: &str) -> Option<Vec2> {
+    let tree = usvg::Tree::from_str(text, &usvg::Options::default()).ok()?;
+    let (width, height) = (tree.size().width(), tree.size().height());
+    let sound = |side: f32| side.is_finite() && (1.0..=30_000.0).contains(&side);
+    (sound(width) && sound(height)).then(|| Vec2::new(width, height))
+}
+
 /// Reads an SVG file's text into a scene: one composition the size of the drawing, at `fps`
 /// and `seconds` long (the open composition's, so it can be broken into shapes there), with a
 /// layer per shape (the last drawn on top), named by its `id` where it has one.
@@ -51,6 +60,7 @@ pub fn read(text: &str, file: &Path, fps: f64, seconds: f64) -> Result<Scene, St
     // Named with its extension, so it reads as the SVG it came from in the Project panel.
     let name = file.file_name().map_or_else(|| "SVG".to_owned(), |name| name.to_string_lossy().into_owned());
     let comp = SceneComp {
+        linear_blending: true,
         key: 1,
         name,
         folder: None,
@@ -137,12 +147,14 @@ impl Reader {
             in_point: 0.0,
             out_point: self.seconds,
             visible: true,
+            blend: crate::model::BlendMode::Normal,
             content: SceneContent::Vector(Box::new(SceneVector { path: outline, fill, stroke })),
             transform: SceneTransform {
                 position: Some(Track::fixed(center)),
                 opacity: (opacity < 1.0).then(|| Track::fixed((opacity * 100.0).clamp(0.0, 100.0))),
                 ..SceneTransform::default()
             },
+            effects: Vec::new(),
         });
     }
 
@@ -344,6 +356,13 @@ mod tests {
         let main = project.composition(ids::MAIN_COMP).unwrap();
         assert!(main.layer(layer).is_none(), "the composition layer gave way to its shapes");
         assert!(broken.layers.iter().all(|id| matches!(main.layer(*id).unwrap().content, LayerContent::Shape { .. })));
+    }
+
+    #[test]
+    fn an_svg_states_its_size() {
+        assert_eq!(size(r#"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"></svg>"#), Some(Vec2::new(400.0, 200.0)));
+        assert_eq!(size(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"></svg>"#), Some(Vec2::new(64.0, 32.0)));
+        assert_eq!(size("not svg"), None);
     }
 
     #[test]

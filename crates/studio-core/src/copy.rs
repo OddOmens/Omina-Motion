@@ -239,7 +239,7 @@ pub fn paste_attributes(project: &mut Project, comp_id: Id, source: &Layer, targ
             layer.blend_mode = source.blend_mode;
         }
         if attributes.audio && source.has_audio && layer.has_audio {
-            layer.audio.volume_db = source.audio.volume_db;
+            layer.audio.volume_db = source.audio.volume_db.clone();
             layer.audio.fade_in = source.audio.fade_in;
             layer.audio.fade_out = source.audio.fade_out;
         }

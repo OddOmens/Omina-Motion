@@ -61,6 +61,11 @@ actions!(studio, [
     SequenceLayers,
     StaggerLayers,
     ToggleGuides,
+    ToggleLayerControls,
+    ShowPositionKeyframes,
+    ShowRotationKeyframes,
+    ShowScaleKeyframes,
+    ShowAllKeyframes,
     Copy,
     Paste,
     PasteAttributes,
@@ -86,6 +91,7 @@ actions!(studio, [
     SaveAs,
     Open,
     Export,
+    SaveFrame,
     Package,
     ExportQueue,
     TrimInToPlayhead,
@@ -112,7 +118,20 @@ actions!(studio, [
     ResetWorkspace,
     SaveWorkspaceAs,
     UpdateWorkspace,
-    DeleteWorkspace
+    DeleteWorkspace,
+    CopyFrame,
+    SyncBySound,
+    ToggleMulticam,
+    ToggleVoiceover,
+    MulticamAngle1,
+    MulticamAngle2,
+    MulticamAngle3,
+    MulticamAngle4,
+    MulticamAngle5,
+    MulticamAngle6,
+    MulticamAngle7,
+    MulticamAngle8,
+    MulticamAngle9
 ]);
 
 /// Window ▸ Workspace: switches to the workspace named `name` (`None` for Standard).
@@ -175,8 +194,8 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
     let mut open_recent = Menu::new("Open Recent").items(recent);
     open_recent.items.extend([MenuItem::separator(), MenuItem::action("Clear Menu", ClearRecentProjects)]);
     vec![
-        Menu::new("Studio").items([
-            MenuItem::action("About Studio", AboutStudio),
+        Menu::new("Omina Motion").items([
+            MenuItem::action("About Omina Motion", AboutStudio),
             // Off in builds made without an update address (see `updates`).
             MenuItem::action("Check for Updates…", CheckForUpdates).disabled(crate::updates::FEED.is_none()),
             MenuItem::separator(),
@@ -184,11 +203,11 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide Studio", HideStudio),
+            MenuItem::action("Hide Omina Motion", HideStudio),
             MenuItem::action("Hide Others", HideOtherApps),
             MenuItem::action("Show All", ShowAllApps),
             MenuItem::separator(),
-            MenuItem::action("Quit Studio", Quit),
+            MenuItem::action("Quit Omina Motion", Quit),
         ]),
         Menu::new("File").items(tidy_menu([
             Some(MenuItem::action("New Project", NewProject)),
@@ -255,6 +274,7 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             Some(MenuItem::action("Zoom Out", ZoomViewerOut)),
             Some(MenuItem::separator()),
             gated(Feature::Guides, MenuItem::action("Show Guides", ToggleGuides)),
+            Some(MenuItem::action("Show or Hide Layer Outlines", ToggleLayerControls)),
         ])),
         Menu::new("Window").items([
             MenuItem::action("Minimize", MinimizeWindow),
@@ -267,20 +287,25 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
     ]
 }
 
-/// Window ▸ Workspace: the workspaces to switch between (the current one checked), then saving,
-/// updating, deleting and resetting them. Standard is built in, so it can't be updated or deleted.
+/// Window ▸ Workspace: the built-in workspaces and then the saved ones to switch between (the
+/// current one checked), then saving, updating, deleting and resetting them. Built-in ones
+/// can't be updated or deleted.
 fn workspace_menu(settings: &crate::app_settings::AppSettings) -> gpui_kit::Menu {
     use gpui_kit::{Menu, MenuItem};
     let current = settings.current_workspace.as_deref();
+    let is_saved = panels::workspaces::is_saved(current, &settings.saved_workspaces);
     let mut items = vec![MenuItem::action(panels::workspaces::STANDARD, SwitchWorkspace { name: None }).checked(current.is_none())];
+    items.extend(panels::workspaces::BuiltIn::ALL.map(|built_in| {
+        MenuItem::action(built_in.name(), SwitchWorkspace { name: Some(built_in.name().to_owned()) }).checked(current == Some(built_in.name()))
+    }));
     items.extend(settings.saved_workspaces.iter().map(|saved| {
         MenuItem::action(saved.name.clone(), SwitchWorkspace { name: Some(saved.name.clone()) }).checked(current == Some(saved.name.as_str()))
     }));
     items.extend([
         MenuItem::separator(),
         MenuItem::action("Save as New Workspace…", SaveWorkspaceAs),
-        MenuItem::action("Update Current Workspace", UpdateWorkspace).disabled(current.is_none()),
-        MenuItem::action("Delete Workspace…", DeleteWorkspace).disabled(current.is_none()),
+        MenuItem::action("Update Current Workspace", UpdateWorkspace).disabled(!is_saved),
+        MenuItem::action("Delete Workspace…", DeleteWorkspace).disabled(!is_saved),
         MenuItem::separator(),
         MenuItem::action("Reset Workspace", ResetWorkspace),
     ]);
@@ -322,6 +347,20 @@ pub enum LeftPanel {
     Elements,
     /// Device mockups: iPhone, iPhone Duo, iPad and Mac.
     Mockups,
+    /// Free stock video, pictures and sound, searched online.
+    Stock,
+    /// The undo history as a list of steps to click back to.
+    History,
+    /// The Motion Assistant: suggestions about the composition's keyframes, with fixes.
+    Assistant,
+}
+
+/// A voiceover being recorded: the microphone recording, the file it is written to, and the
+/// frame the playhead was on when it began (where the clip will go).
+pub struct Voiceover {
+    pub recording: studio_media::Recording,
+    pub path: std::path::PathBuf,
+    pub start_frame: i64,
 }
 
 /// Panels that can hold focus; the focused one gets a blue outline.
@@ -340,10 +379,14 @@ pub enum PanelId {
     Captions,
     Elements,
     Mockups,
+    Stock,
     /// The node graph of the selected layer's effects.
     Nodes,
+    /// The audio mixer: a level meter, voiceover recording, and each sounding clip's volume
+    /// and pan.
+    Mixer,
     /// The side panel beside the rail, as a whole: it shows one of Project, Effects, Libraries,
-    /// Templates, Captions, Elements or Mockups (see `UiState::left_panel`), and is moved as one.
+    /// Templates, Captions, Elements, Mockups or Stock (see `UiState::left_panel`), and is moved as one.
     Side,
 }
 
@@ -548,6 +591,12 @@ pub struct UiState {
     /// Set while the standard arrangement is being put back, so the dock's report of that
     /// change doesn't save it as a custom arrangement (with sizes not yet measured).
     pub layout_resetting: bool,
+    /// How many more draws until a changed panel arrangement is saved again (0 when none is
+    /// due). The dock only measures a newly made split when it is first drawn; saved sooner,
+    /// the split's panels would be recorded at a placeholder size.
+    pub layout_save_countdown: u8,
+    /// The menu opened from a panel tab's grip, while it is open.
+    pub panel_menu: Option<panels::dock::PanelMenu>,
     pub tool: Tool,
     /// The shape the Shape tool draws, picked from the rail's shape menu.
     pub shape_kind: studio_core::model::ShapeKind,
@@ -582,6 +631,29 @@ pub struct UiState {
     pub frame_bounds: panels::chrome::MeasuredBounds,
     /// Pointer position where the current viewer drag started.
     pub viewer_anchor: Option<(f32, f32)>,
+    /// The shape layer whose outline is being edited in the viewer: its points show and can be
+    /// dragged. Started by double-clicking the shape (or drawing it with the Pen); a click
+    /// elsewhere or Escape ends it. A shape that is only selected moves as a whole.
+    pub path_editing: Option<Id>,
+    /// The rail button the pointer is over, by its id, with the number of that hover (see
+    /// `rail_hovers`), and the button whose name is showing beside it: the hovered one, once
+    /// the pointer has rested on it for a moment.
+    pub rail_hover: Option<(&'static str, u64)>,
+    pub rail_label: Option<&'static str>,
+    /// Counts hovers over rail buttons, to tell one from the next on the same button.
+    pub rail_hovers: u64,
+    /// The voiceover being recorded from the microphone, if one is.
+    pub voiceover: Option<Voiceover>,
+    /// While cutting between camera angles (multicam): the angles, as the video file behind
+    /// each, in the order the number keys pick them. Empty when multicam is off.
+    pub multicam: Vec<Id>,
+    /// The Mixer panel's level meter for the mix being played.
+    pub meter: panels::mixer::Meter,
+    /// The Mixer panel's level meter for the microphone while a voiceover is recorded.
+    pub mic_meter: panels::mixer::Meter,
+    /// The words picked in a caption layer's transcript, to cut from the video: the layer, the
+    /// word clicked first and the word clicked last (shift-click picks a run of words).
+    pub transcript_selection: Option<(Id, usize, usize)>,
     /// The viewer's magnification (screen points per composition pixel); `None` fits the frame.
     pub viewer_zoom: Option<f32>,
     /// How far the frame is moved from the middle of the viewer, in screen points (Hand tool).
@@ -625,6 +697,9 @@ pub struct UiState {
     pub onboarding: Option<panels::onboarding::Step>,
     /// Whether the last recovery copy failed (said once, until it works again).
     pub recovery_failing: bool,
+    /// Whether the launch is still asking whether to restore the recovery copy. Until it is
+    /// answered, the copy is left alone, so quitting first doesn't lose it.
+    pub recovery_offered: bool,
     /// When the last version of the project was kept (see `versions`).
     pub last_version_at: Option<std::time::Instant>,
     /// Render & Play is rendering the work area, to play it once every frame is ready.
@@ -633,6 +708,8 @@ pub struct UiState {
     pub library_save_failed: Option<bool>,
     /// The Mockups panel's choices and its device pictures.
     pub mockups: panels::mockups::MockupsUi,
+    /// The Stock panel's search, results and downloads.
+    pub stock: panels::stock::StockUi,
     /// Pictures made of the Elements panel's elements, by index.
     pub element_pictures: HashMap<usize, Arc<gpui_kit::RenderImage>>,
     /// The Project panel's preview of the selected item.
@@ -648,6 +725,8 @@ pub struct UiState {
     pub window_title: String,
     /// The Export dialog's choices, and the export running now, if any.
     pub export_choice: panels::export::ExportChoice,
+    /// The Export dialog's field for naming a preset of its choices, made when it first opens.
+    pub export_preset_name: Option<Entity<gpui_kit::component::input::InputState>>,
     pub export_job: Option<panels::export::ExportJob>,
     /// Exports saved to run later, one after another (File ▸ Export Queue…).
     pub export_queue: panels::export_queue::ExportQueue,
@@ -666,6 +745,10 @@ pub struct UiState {
     pub analysis_job: Option<panels::analysis::AnalysisJob>,
     /// The import running in the background, shown in a popup.
     pub import_job: Option<panels::importing::ImportJob>,
+    /// An import waiting to be told how its SVG files come in, shown as a popup.
+    pub svg_question: Option<panels::importing::SvgQuestion>,
+    /// The Motion Assistant's dismissed suggestions and whether its settings are showing.
+    pub assistant: panels::assistant::AssistantUi,
     /// The layer waiting for a click on a video to track (Track Motion).
     pub track_pick: Option<Id>,
     /// Background removal running in the background, if any.
@@ -695,6 +778,9 @@ pub struct UiState {
     /// Whether the viewer shows its guides (') and which ones: the grid, title safe, or the
     /// social apps' safe zones.
     pub guides: bool,
+    /// Whether the viewer hides the outlines, handles and anchor points of selected layers
+    /// (Cmd+Shift+H), to see the picture without them. The selection itself is unchanged.
+    pub layer_controls_hidden: bool,
     pub guide_choice: panels::guides::GuideChoice,
     pub eyedropper_press: bool,
     /// The Basic Correction (layer, effect) waiting for a click on something gray in the viewer
@@ -711,6 +797,11 @@ pub struct UiState {
     pub grade_pressed: bool,
     /// Where the Color panel is drawn, so its color wheels can fit its width.
     pub grade_bounds: panels::chrome::MeasuredBounds,
+    /// Which video scope the Color tab shows.
+    pub scope_kind: crate::scopes::ScopeKind,
+    /// The scope as last drawn, with the viewer picture and kind it was drawn from, so an
+    /// unchanged frame isn't measured again. Filled in while the panel is drawn.
+    pub scope_cache: std::cell::RefCell<Option<(gpui_kit::ImageId, crate::scopes::ScopeKind, Arc<gpui_kit::RenderImage>)>>,
     /// The gradient stop picked in Properties (its shape, fill or stroke, and index), whose
     /// location and Delete button show under the gradient bar.
     pub gradient_stop: Option<(Id, crate::state::PaintSlot, usize)>,
@@ -804,6 +895,7 @@ struct Panels {
     properties: Entity<PanelView>,
     align: Entity<PanelView>,
     nodes: Entity<PanelView>,
+    mixer: Entity<PanelView>,
     clock: Entity<PlaybackClock>,
 }
 
@@ -813,10 +905,11 @@ impl Panels {
         let mut view = |kind| cx.new(|cx| PanelView::new(&workspace, kind, focus.clone(), cx));
         let (toolbar, side, viewer, timeline) =
             (view(PanelKind::Toolbar), view(PanelKind::Side), view(PanelKind::Viewer), view(PanelKind::Timeline));
-        let (properties, align, nodes) = (view(PanelKind::Properties), view(PanelKind::Align), view(PanelKind::Nodes));
-        let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id()];
+        let (properties, align, nodes, mixer) = (view(PanelKind::Properties), view(PanelKind::Align), view(PanelKind::Nodes), view(PanelKind::Mixer));
+        // The Mixer's meters move with the sound, so it is redrawn on every playing frame too.
+        let timed = vec![viewer.entity_id(), timeline.entity_id(), properties.entity_id(), mixer.entity_id()];
         let clock = cx.new(|_| PlaybackClock::new(workspace.downgrade(), timed, side.entity_id()));
-        Self { toolbar, side, viewer, timeline, properties, align, nodes, clock }
+        Self { toolbar, side, viewer, timeline, properties, align, nodes, mixer, clock }
     }
 
     /// The view that draws dockable panel `id`.
@@ -827,6 +920,7 @@ impl Panels {
             PanelId::Properties => &self.properties,
             PanelId::Align => &self.align,
             PanelId::Nodes => &self.nodes,
+            PanelId::Mixer => &self.mixer,
             // The panels the side panel shows are all drawn by it.
             PanelId::Side
             | PanelId::Project
@@ -835,7 +929,8 @@ impl Panels {
             | PanelId::Templates
             | PanelId::Captions
             | PanelId::Elements
-            | PanelId::Mockups => &self.side,
+            | PanelId::Mockups
+            | PanelId::Stock => &self.side,
         }
     }
 }
@@ -1008,6 +1103,8 @@ impl Workspace {
             })
             .detach();
         }
+        // Iris's recipes' shortcuts work from the start, before her chat is ever opened.
+        cx.defer_in(window, |this, _, cx| panels::assistant_automation::start(this, cx));
         // Pick up where the last session left off, and keep a recovery copy of unsaved work.
         // (Not in headless tests, which start fresh and must not touch real settings.)
         #[cfg(not(test))]
@@ -1020,6 +1117,45 @@ impl Workspace {
                     window.push_notification(notice.as_str(), cx);
                 }
             });
+            // Canvas shares the libraries file: what it changes shows up here within moments.
+            // (Not while the color picker is being dragged, which is changing them here.)
+            // Compositions Canvas sends (Bring to Motion) are imported as they arrive, once
+            // nothing else is being imported.
+            cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                    let alive = this.update_in(cx, |this, window, cx| {
+                        let picking = this.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
+                        if !picking && let Some(libraries) = crate::library_store::outside_changes(&this.state.libraries) {
+                            this.state.set_libraries(libraries);
+                            cx.notify();
+                        }
+                        if this.ui.import_job.is_none() && this.ui.svg_question.is_none() {
+                            let arrived = crate::canvas_inbox::take_ready(&crate::canvas_inbox::folder());
+                            if !arrived.is_empty() {
+                                panels::importing::start(this, arrived, None, window, cx);
+                            }
+                        }
+                        // What Iris's other apps hand over ("put this photo in Motion") comes in
+                        // the same way, onto the open composition.
+                        panels::assistant_automation::bring_in_handoffs(this, window, cx);
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            // The Motion Assistant's face blinks every few seconds while it is on screen.
+            cx.spawn_in(window, async move |this, cx| {
+                for pause in panels::assistant::BLINK_PAUSES.into_iter().cycle() {
+                    cx.background_executor().timer(pause).await;
+                    if this.update_in(cx, |this, window, cx| panels::assistant::blink(this, window, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
             cx.defer_in(window, |this, window, cx| this.restore_session(window, cx));
             // A crash last time is mentioned once, with its report.
             cx.defer_in(window, |_, window, cx| crate::crash_log::mention_last_crash(window, cx));
@@ -1028,12 +1164,10 @@ impl Workspace {
             cx.spawn_in(window, async move |this, cx| {
                 loop {
                     // As often as Settings says; checked again each time, so a change applies.
+                    // With the recovery copy off, timed versions and library retries still run.
                     let seconds = crate::app_settings::load().recovery_seconds;
                     let wait = if seconds == 0 { crate::project_files::RECOVERY_INTERVAL } else { std::time::Duration::from_secs(u64::from(seconds)) };
                     cx.background_executor().timer(wait).await;
-                    if seconds == 0 {
-                        continue;
-                    }
                     if this.update_in(cx, |this, window, cx| this.keep_work_safe(window, cx)).is_err() {
                         break;
                     }
@@ -1065,6 +1199,8 @@ impl Workspace {
                 reveal_panels: Vec::new(),
                 showing_panels: HashSet::new(),
                 layout_resetting: false,
+                layout_save_countdown: 0,
+                panel_menu: None,
                 tool: Tool::Selection,
                 shape_kind: studio_core::model::ShapeKind::Rectangle,
                 shape_menu: false,
@@ -1082,6 +1218,15 @@ impl Workspace {
                 viewer_bounds: Default::default(),
                 frame_bounds: Default::default(),
                 viewer_anchor: None,
+                path_editing: None,
+                rail_hover: None,
+                rail_label: None,
+                rail_hovers: 0,
+                multicam: Vec::new(),
+                voiceover: None,
+                meter: Default::default(),
+                mic_meter: Default::default(),
+                transcript_selection: None,
                 viewer_zoom: None,
                 viewer_pan: (0.0, 0.0),
                 pan_start: (0.0, 0.0),
@@ -1106,15 +1251,18 @@ impl Workspace {
                 start_screen: None,
                 onboarding: None,
                 recovery_failing: false,
+                recovery_offered: false,
                 last_version_at: None,
                 render_then_play: false,
                 library_save_failed: None,
                 mockups: Default::default(),
                 element_pictures: HashMap::new(),
+                stock: panels::stock::StockUi::default(),
                 preview_bounds: Default::default(),
                 timeline: timeline_ui,
                 window_title: String::new(),
                 export_choice: Default::default(),
+                export_preset_name: None,
                 export_job: None,
                 export_queue: Default::default(),
                 package_job: None,
@@ -1127,6 +1275,8 @@ impl Workspace {
                 enhance_skipped: Vec::new(),
                 analysis_job: None,
                 import_job: None,
+                svg_question: None,
+                assistant: panels::assistant::AssistantUi::default(),
                 track_pick: None,
                 cutout_pick: None,
                 effect_search: None,
@@ -1138,6 +1288,7 @@ impl Workspace {
                 slot_drop: None,
                 color_well: false,
                 guides: false,
+                layer_controls_hidden: false,
                 guide_choice: panels::guides::GuideChoice::default(),
                 eyedropper_press: false,
                 white_balance_pick: None,
@@ -1147,6 +1298,8 @@ impl Workspace {
                 grade_pressed: false,
                 slider_bounds: Default::default(),
                 grade_bounds: Default::default(),
+                scope_kind: Default::default(),
+                scope_cache: Default::default(),
                 gradient_stop: None,
                 gradient_stop_dragged: false,
                 gradient_bars: Default::default(),
@@ -1169,7 +1322,7 @@ impl Workspace {
     /// close button) while there are unsaved changes.
     fn update_window_title(&mut self, window: &mut Window) {
         let unsaved = self.state.has_unsaved_changes();
-        let title = format!("{}{} — Studio", self.state.document_name(), if unsaved { " •" } else { "" });
+        let title = format!("{}{} — Omina Motion", self.state.document_name(), if unsaved { " •" } else { "" });
         if title != self.ui.window_title {
             window.set_window_title(&title);
             window.set_window_edited(unsaved);
@@ -1304,6 +1457,109 @@ impl Workspace {
         self.ui.preview.playing = None;
     }
 
+    /// Starts recording a voiceover from the microphone at the playhead, playing the
+    /// composition so it can be spoken over, or stops the one being recorded and adds it to the
+    /// timeline as a clip where it began. Recordings are saved in a Voiceover folder beside the
+    /// project (or in Movies for a project not saved yet).
+    pub fn toggle_voiceover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(voiceover) = self.ui.voiceover.take() {
+            if self.state.is_playing() {
+                self.toggle_playback(cx);
+            }
+            match voiceover.recording.finish() {
+                Ok(seconds) if seconds > 0.0 => {
+                    // Import the recording, then put it on the timeline where it began.
+                    let start_frame = voiceover.start_frame;
+                    let place: panels::importing::Then = Box::new(move |this, items, window, cx| {
+                        let comp = this.state.active_comp;
+                        match items.first().and_then(|&item| studio_core::edit::add_layer_from_item(&mut this.state.project, comp, item, 0, start_frame)) {
+                            Some(clip) => {
+                                this.state.select_layer(clip, false);
+                                window.push_notification(format!("Recorded {seconds:.1} seconds of voiceover.").as_str(), cx);
+                            }
+                            None => window.push_notification("The voiceover was recorded but could not be added to the timeline. It is in the Project panel.", cx),
+                        }
+                        cx.notify();
+                    });
+                    self.import_paths(vec![voiceover.path], Some(place), window, cx);
+                }
+                Ok(_) => window.push_notification("Nothing was recorded.", cx),
+                Err(error) => window.push_notification(format!("The voiceover could not be saved: {error}").as_str(), cx),
+            }
+            cx.notify();
+            return;
+        }
+        let folder = match self.state.file().and_then(std::path::Path::parent) {
+            Some(folder) => folder.join("Voiceover"),
+            None => panels::export::starting_folder(None).join("Studio Voiceover"),
+        };
+        if let Err(error) = std::fs::create_dir_all(&folder) {
+            window.push_notification(format!("{} could not be created ({error}).", folder.display()).as_str(), cx);
+            return;
+        }
+        let path = panels::export::unused_path(&folder, "Voiceover", "wav");
+        match studio_media::Recording::start(&path) {
+            Ok(recording) => {
+                self.ui.voiceover = Some(Voiceover { recording, path, start_frame: self.state.current_frame });
+                if !self.state.is_playing() {
+                    self.toggle_playback(cx);
+                }
+                window.push_notification("Recording a voiceover. Use headphones, so the microphone doesn't pick up the playback.", cx);
+            }
+            Err(error) => window.push_notification(format!("Recording could not start: {error}. Check that Omina Motion may use the microphone in System Settings ▸ Privacy & Security.").as_str(), cx),
+        }
+        cx.notify();
+    }
+
+    /// Starts cutting between the selected clips as camera angles, or ends it. While it is on,
+    /// the number keys cut to an angle at the playhead (see `cut_to_angle`).
+    pub fn toggle_multicam(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ui.multicam.is_empty() {
+            self.ui.multicam.clear();
+            window.push_notification("Multicam ended. The cuts stay as ordinary clips.", cx);
+            cx.notify();
+            return;
+        }
+        let angles = studio_core::multicam::angles_of(self.state.composition(), &self.state.selected_layers);
+        if angles.len() < 2 {
+            window.push_notification("Select the video clips to cut between first: two or more, stacked on separate tracks.", cx);
+            return;
+        }
+        let count = angles.len().min(9);
+        self.ui.multicam = angles;
+        window.push_notification(format!("Multicam is on: press 1 to {count} to cut to an angle at the playhead, also while playing. The same command ends it.").as_str(), cx);
+        cx.notify();
+    }
+
+    /// Cuts to camera angle `angle` (0 for the first) at the playhead, while multicam is on.
+    /// The keys do nothing otherwise.
+    pub fn cut_to_angle(&mut self, angle: usize, cx: &mut Context<Self>) {
+        if self.ui.multicam.is_empty() {
+            return;
+        }
+        self.state.settle_drags();
+        let (comp, frame) = (self.state.active_comp, self.state.current_frame);
+        if studio_core::multicam::cut_to_angle(&mut self.state.project, comp, &self.ui.multicam, angle, frame) {
+            cx.notify();
+        }
+    }
+
+    /// Plays a sound file from its start, apart from the composition, for the Stock panel's
+    /// previews. The composition and the Project panel's preview stop first.
+    pub fn play_sound_file(&mut self, path: &std::path::Path, length: f64) {
+        if self.state.is_playing() {
+            self.state.toggle_playback(Instant::now());
+            self.sound.sync(&mut self.state);
+        }
+        self.stop_preview();
+        self.sound.play_preview(path, 0.0, length);
+    }
+
+    /// Stops a sound started with `play_sound_file`.
+    pub fn stop_sound_file(&mut self) {
+        self.sound.stop_preview();
+    }
+
     /// Moves the playing preview on to now: by the sound heard, or by the clock for video with
     /// no sound. Returns whether it is still playing.
     pub fn tick_preview(&mut self) -> bool {
@@ -1327,6 +1583,20 @@ impl Workspace {
         };
         if !playing {
             self.sound.sync(&mut self.state); // Reached the end: stop the sound too.
+        }
+        // The Mixer's meter follows the mix while it plays and rests when it stops.
+        match self.sound.take_levels().filter(|_| playing) {
+            Some(levels) => self.ui.meter.take(levels),
+            None => self.ui.meter.rest(),
+        }
+        // The microphone's meter likewise, while a voiceover is being recorded: it rises at
+        // once and falls back gradually, so it doesn't drop to nothing between blocks of sound.
+        match &self.ui.voiceover {
+            Some(voiceover) => {
+                let peak = voiceover.recording.take_peak();
+                self.ui.mic_meter.take([peak, peak]);
+            }
+            None => self.ui.mic_meter.rest(),
         }
         playing
     }
@@ -1528,6 +1798,13 @@ impl Workspace {
     /// Imports files (from the Import dialog, or dropped from the Finder) in the background,
     /// with a popup while it runs, then runs `then` with the new items. Media is linked where it
     /// is on disk, and proxies start building.
+    /// The P, R, S and U keys: shows one transform property's keyframe row (or, with `None`,
+    /// every animated property's) under the selected clips in the timeline.
+    fn show_keyframe_rows(&mut self, only: Option<studio_core::property::TransformProperty>, cx: &mut Context<Self>) {
+        panels::timeline::show_keyframe_rows(self, only.map(studio_core::property::PropertyPath::Transform));
+        cx.notify();
+    }
+
     pub fn import_paths(&mut self, paths: Vec<std::path::PathBuf>, then: Option<panels::importing::Then>, window: &mut Window, cx: &mut Context<Self>) {
         panels::importing::start(self, paths, then, window, cx);
     }
@@ -1594,7 +1871,7 @@ impl Workspace {
                     window.push_notification(heading.as_str(), cx);
                 } else {
                     let notes = imported.notes.join("\n\n");
-                    window.open_alert_dialog(cx, move |dialog, _, _| dialog.title(heading.clone()).description(notes.clone()));
+                    crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| dialog.title(heading.clone()).description(notes.clone()));
                 }
             }
             Err(message) => window.push_notification(format!("“{file}” couldn't be imported. {message}").as_str(), cx),
@@ -1631,7 +1908,7 @@ impl Workspace {
             details.push_str(&format!("{} layer{} using it will also be removed.", plan.layers, if plan.layers == 1 { "" } else { "s" }));
         }
         let workspace = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| {
             let (workspace, plan) = (workspace.clone(), plan.clone());
             dialog
                 .title(format!("Delete “{name}”?"))
@@ -1653,6 +1930,16 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A changed panel arrangement is saved again once a draw has measured it.
+        if self.ui.layout_save_countdown > 0 {
+            self.ui.layout_save_countdown -= 1;
+            if self.ui.layout_save_countdown > 0 {
+                // Draw once more, after this draw has measured the panels.
+                cx.notify();
+            } else if let Some(layout) = self.current_layout(cx) {
+                crate::app_settings::update(|settings| settings.workspace_layout = Some(layout));
+            }
+        }
         // Every edit redraws the workspace, so this is where edits become undo steps, and where
         // manual stops (moving the playhead) and changes such as muting a layer reach the sound.
         // A different item selected in the Project panel starts its preview from the beginning.
@@ -1670,6 +1957,10 @@ impl Render for Workspace {
         // Both start screen pages show templates (Home a strip of them).
         // First, bring the dock up to date: which panels are turned on, and any asked to the front.
         self.sync_dock(window, cx);
+        // Editing a shape's points ends once it is no longer the one selected layer.
+        if self.ui.path_editing.is_some_and(|layer| self.state.selected_layers != [layer]) {
+            self.ui.path_editing = None;
+        }
         let start_templates = self.ui.start_screen.is_some();
         if self.showing(PanelId::Templates) || self.ui.template_gallery || start_templates {
             panels::templates::make_pictures(self, window, cx);
@@ -1680,6 +1971,11 @@ impl Render for Workspace {
         if self.showing(PanelId::Elements) {
             panels::elements::make_pictures(self, window, cx);
         }
+        if self.showing(PanelId::Stock) {
+            panels::stock::keep_up(self, window, cx);
+        }
+        // Stock that finished downloading during another import goes in once that one ends.
+        panels::stock::import_downloaded(self, window, cx);
         // A LUT preview ends when its row goes away (another panel opened) as well as when the
         // pointer leaves it.
         if !self.showing(PanelId::Effects) {
@@ -1688,6 +1984,7 @@ impl Render for Workspace {
         // The LUT previews follow the current frame while the Effects panel or the Color
         // panel's LUT is showing.
         panels::lut_previews::keep_up(self, window, cx);
+        panels::assistant::keep_up(self, window, cx);
         // Layers set to Enhance Speech get their cleaned copies made, one at a time.
         panels::enhance::keep_going(self, window, cx);
         let picking = self.ui.color_picker.as_ref().is_some_and(|picker| picker.pressed);
@@ -1732,6 +2029,11 @@ impl Render for Workspace {
                     panels::effect_search::close(this, window, cx);
                     return;
                 }
+                // Escape on the SVG question cancels the import it is holding.
+                if this.ui.svg_question.is_some() {
+                    panels::importing::answer_svg_question(this, None, window, cx);
+                    return;
+                }
                 // The welcome setup is left with its own buttons, so Escape can't skip it by accident.
                 if this.ui.onboarding.is_some() {
                     return;
@@ -1743,6 +2045,10 @@ impl Render for Workspace {
                 }
                 if this.ui.template_gallery {
                     this.ui.template_gallery = false;
+                    cx.notify();
+                }
+                // Escape also stops editing a shape's points; the shape stays selected.
+                if this.ui.path_editing.take().is_some() {
                     cx.notify();
                 }
                 // Escape also gives up picking a white balance or key color and closes the color menu.
@@ -1782,6 +2088,8 @@ impl Render for Workspace {
             .when(self.ui.start_screen.is_none() && self.ui.onboarding.is_none(), |root| {
                 root
                 .on_action(cx.listener(|this, _: &TogglePlayback, _, cx| this.toggle_playback(cx)))
+                // A shortcut given to one of Iris's recipes runs it, with what it did in her chat.
+                .on_action(cx.listener(|this, action: &crate::keymap::RunRecipe, window, cx| panels::assistant_automation::run_from_key(this, &action.name, window, cx)))
                 .on_action(cx.listener(|this, _: &RenderAndPlay, window, cx| this.render_and_play(window, cx)))
                 .on_action(cx.listener(|this, _: &NextFrame, _, cx| this.step(1, cx)))
                 .on_action(cx.listener(|this, _: &PreviousFrame, _, cx| this.step(-1, cx)))
@@ -1880,10 +2188,21 @@ impl Render for Workspace {
                     this.ui.guides = !this.ui.guides;
                     cx.notify();
                 }))
+                .on_action(cx.listener(|this, _: &ShowPositionKeyframes, _, cx| this.show_keyframe_rows(Some(studio_core::property::TransformProperty::Position), cx)))
+                .on_action(cx.listener(|this, _: &ShowRotationKeyframes, _, cx| this.show_keyframe_rows(Some(studio_core::property::TransformProperty::Rotation), cx)))
+                .on_action(cx.listener(|this, _: &ShowScaleKeyframes, _, cx| this.show_keyframe_rows(Some(studio_core::property::TransformProperty::Scale), cx)))
+                .on_action(cx.listener(|this, _: &ShowAllKeyframes, _, cx| this.show_keyframe_rows(None, cx)))
+                .on_action(cx.listener(|this, _: &ToggleLayerControls, _, cx| {
+                    this.ui.layer_controls_hidden = !this.ui.layer_controls_hidden;
+                    cx.notify();
+                }))
                 // Enter ends a pen path as an open line (a path closes by clicking its first point).
                 .on_action(cx.listener(|this, _: &FinishPath, _, cx| {
-                    if this.state.finish_pen(false).is_some() {
+                    let finished = this.state.finish_pen(false);
+                    if finished.is_some() {
                         this.ui.tabs.insert(PanelId::Properties, 0);
+                        // A path just drawn keeps its points up, to adjust them straight away.
+                        this.ui.path_editing = finished;
                     }
                     cx.notify();
                 }))
@@ -1948,6 +2267,20 @@ impl Render for Workspace {
                 .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
                 .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_as(window, cx)))
                 .on_action(cx.listener(|this, _: &Export, window, cx| panels::export_dialog::open(this, window, cx)))
+                .on_action(cx.listener(|this, _: &SaveFrame, window, cx| panels::export::save_frame(this, window, cx)))
+                .on_action(cx.listener(|this, _: &CopyFrame, window, cx| panels::export::copy_frame(this, window, cx)))
+                .on_action(cx.listener(|this, _: &SyncBySound, window, cx| panels::analysis::sync_by_sound(this, window, cx)))
+                .on_action(cx.listener(|this, _: &ToggleMulticam, window, cx| this.toggle_multicam(window, cx)))
+                .on_action(cx.listener(|this, _: &ToggleVoiceover, window, cx| this.toggle_voiceover(window, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle1, _, cx| this.cut_to_angle(0, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle2, _, cx| this.cut_to_angle(1, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle3, _, cx| this.cut_to_angle(2, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle4, _, cx| this.cut_to_angle(3, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle5, _, cx| this.cut_to_angle(4, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle6, _, cx| this.cut_to_angle(5, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle7, _, cx| this.cut_to_angle(6, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle8, _, cx| this.cut_to_angle(7, cx)))
+                .on_action(cx.listener(|this, _: &MulticamAngle9, _, cx| this.cut_to_angle(8, cx)))
                 // Greyed out in the File menu while a package is being made (the top bar shows its progress).
                 .when(self.ui.package_job.is_none(), |root| root.on_action(cx.listener(|this, _: &Package, window, cx| panels::package::open(this, window, cx))))
                 .on_action(cx.listener(|this, _: &SplitLayer, window, cx| this.split_layer(window, cx)))
@@ -2023,10 +2356,12 @@ impl Render for Workspace {
                     .child(div().flex_1().min_w_0().pr(gutter).pb(gutter).child(workspace)),
             )
             .children(panels::color_picker::popover(self, cx))
+            .children(panels::dock::panel_menu(self))
             .children(panels::templates::gallery(self, cx))
             .children(panels::start_screen::render(self, cx))
             .children(panels::onboarding::render(self, cx))
             .children(panels::importing::popup(self, cx))
+            .children(panels::importing::svg_popup(self, cx))
             .children(panels::effect_search::render(self, cx))
     }
 }
@@ -2038,14 +2373,21 @@ impl Workspace {
         let skin = panels::dock::StudioSkin::new(cx.weak_entity());
         let dock = cx.new(|cx| DockArea::new("studio-workspace", Some(panels::dock::LAYOUT_VERSION), window, cx).with_renderer(skin));
         let view = |id| panels.view(id).clone();
-        let saved = crate::app_settings::load().workspace_layout.and_then(|saved| serde_json::from_value::<DockAreaState>(saved).ok());
-        let layout = saved.and_then(|saved| panels::dock::restore_layout(&saved, view)).unwrap_or_else(|| panels::dock::default_layout(view));
+        let settings = crate::app_settings::load();
+        let saved = settings.workspace_layout.and_then(|saved| serde_json::from_value::<DockAreaState>(saved).ok());
+        // With no arrangement of the user's own saved, the current workspace's built-in one.
+        let built_in = settings.current_workspace.as_deref().and_then(panels::workspaces::BuiltIn::named);
+        let layout = saved.and_then(|saved| panels::dock::restore_layout(&saved, view)).unwrap_or_else(|| panels::dock::built_in_layout(built_in, view));
         dock.update(cx, |dock, cx| dock.set_center(layout, window, cx));
         let events = cx.subscribe(&dock, |this, dock, event: &DockEvent, cx| {
             if let DockEvent::LayoutChanged = event {
                 if std::mem::take(&mut this.ui.layout_resetting) {
+                    this.ui.layout_save_countdown = 0;
                     crate::app_settings::update(|settings| settings.workspace_layout = None);
                 } else {
+                    // Saved now, and again once it has been drawn, with the sizes as measured:
+                    // the first draw from here measures the new arrangement, the second saves it.
+                    this.ui.layout_save_countdown = 2;
                     match serde_json::to_value(dock.read(cx).dump(cx)) {
                         Ok(layout) => crate::app_settings::update(|settings| settings.workspace_layout = Some(layout)),
                         Err(error) => eprintln!("could not save the panel layout: {error}"),
@@ -2066,13 +2408,18 @@ impl Workspace {
         self.switch_workspace(current, window, cx);
     }
 
-    /// Switches to the workspace named `name` (`None` for Standard) and remembers the choice. A
-    /// saved workspace that can't be read (one written by a newer Studio, or damaged) is said
-    /// so, and Standard is used instead.
+    /// Switches to the workspace named `name` (`None` for Standard) and remembers the choice: a
+    /// built-in one by its name, or else a saved one. A saved workspace that can't be read (one
+    /// written by a newer Studio, or damaged) is said so, and Standard is used instead.
     pub fn switch_workspace(&mut self, name: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let saved = name.as_ref().and_then(|name| crate::app_settings::load().saved_workspaces.into_iter().find(|saved| &saved.name == name));
+        let built_in = name.as_deref().and_then(panels::workspaces::BuiltIn::named);
         let shown = match (&name, saved) {
             (None, _) => None,
+            (Some(name), None) if built_in.is_some() => {
+                self.show_built_in(built_in, window, cx);
+                Some(name.clone())
+            }
             (Some(name), Some(saved)) if self.show_saved_layout(&saved.layout, window, cx) => Some(name.clone()),
             (Some(name), _) => {
                 window.push_notification(format!("The “{name}” workspace couldn't be read, so Standard is shown instead.").as_str(), cx);
@@ -2080,13 +2427,23 @@ impl Workspace {
             }
         };
         if shown.is_none() {
-            let layout = panels::dock::default_layout(|id| self.panels.view(id).clone());
-            self.ui.layout_resetting = true;
-            self.dock.update(cx, |dock, cx| dock.set_center(layout, window, cx));
+            self.show_built_in(None, window, cx);
         }
         crate::app_settings::update(|settings| settings.current_workspace = shown);
         refresh_menus(cx);
         cx.notify();
+    }
+
+    /// Puts a built-in arrangement on screen (`None` for Standard). It isn't saved as a custom
+    /// arrangement: the next launch builds it afresh from the workspace's name.
+    fn show_built_in(&mut self, built_in: Option<panels::workspaces::BuiltIn>, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = panels::dock::built_in_layout(built_in, |id| self.panels.view(id).clone());
+        if built_in == Some(panels::workspaces::BuiltIn::ColorCorrection) {
+            // Properties opens on its Color tab, which is what this workspace is for.
+            self.ui.tabs.insert(PanelId::Properties, 2);
+        }
+        self.ui.layout_resetting = true;
+        self.dock.update(cx, |dock, cx| dock.set_center(layout, window, cx));
     }
 
     /// Puts a saved layout on screen. False if it can't be read, leaving the screen as it was.
@@ -2123,10 +2480,14 @@ impl Workspace {
         }
     }
 
-    /// Whether panel `id` is turned on: the Nodes panel while it is open, every other panel
-    /// always.
+    /// Whether panel `id` is turned on: the Nodes panel while it is open, the Mixer unless it
+    /// is turned off in Settings ▸ Tools & Features, every other panel always.
     fn panel_turned_on(&self, id: PanelId) -> bool {
-        id != PanelId::Nodes || self.ui.nodes.open
+        match id {
+            PanelId::Nodes => self.ui.nodes.open,
+            PanelId::Mixer => self.has(crate::features::Feature::Mixer),
+            _ => true,
+        }
     }
 
     /// Before each draw: tells each panel view whether it is turned on (the dock hides those
@@ -2188,6 +2549,7 @@ fn side_choice(panel: PanelId) -> Option<LeftPanel> {
         PanelId::Captions => LeftPanel::Captions,
         PanelId::Elements => LeftPanel::Elements,
         PanelId::Mockups => LeftPanel::Mockups,
+        PanelId::Stock => LeftPanel::Stock,
         _ => return None,
     })
 }

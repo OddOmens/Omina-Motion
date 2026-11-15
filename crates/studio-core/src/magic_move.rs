@@ -94,7 +94,11 @@ pub fn magic_move(project: &mut Project, from: Id, to: Id, frames: i64, easing: 
         return Err(MagicMoveError::TooLong);
     }
     let settings = CompositionSettings { name: format!("{} → {}", first.name, second.name), width: first.width, height: first.height, frame_rate: first.frame_rate, duration_frames: duration, background: first.background };
+    let linear = first.linear_blending;
     let comp_id = crate::edit::new_composition(project, &settings).map_err(|_| MagicMoveError::Mismatched)?;
+    if let Some(made) = project.composition_mut(comp_id) {
+        made.linear_blending = linear;
+    }
 
     // Copies of both compositions' layers, the second's moved to start after the transition.
     // Layers starting after the first composition ends (left there when it was shortened) never

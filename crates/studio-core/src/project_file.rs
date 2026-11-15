@@ -108,13 +108,13 @@ pub fn from_text(text: &str) -> Result<(Project, EditorView), String> {
 pub fn from_text_with(text: &str) -> Result<(Project, EditorView, EditorSettings), String> {
     let header: Header = serde_json::from_str(text).map_err(|error| {
         // A file cut short (an interrupted copy, a full disk) is a damaged project, not some other file.
-        if error.is_eof() { "The project file is damaged: it ends too early.".to_owned() } else { "This is not a Studio project file.".to_owned() }
+        if error.is_eof() { "The project file is damaged: it ends too early.".to_owned() } else { "This is not an Omina Motion project file.".to_owned() }
     })?;
     if header.format != FORMAT {
-        return Err("This is not a Studio project file.".into());
+        return Err("This is not an Omina Motion project file.".into());
     }
     if header.version > FORMAT_VERSION {
-        return Err("This project was saved by a newer version of Studio. Update Studio to open it.".into());
+        return Err("This project was saved by a newer version of Omina Motion. Update Omina Motion to open it.".into());
     }
     let value: serde_json::Value = serde_json::from_str(text).map_err(|error| format!("The project file is damaged: {error}"))?;
     if has_oversized_number(&value) {
@@ -502,8 +502,8 @@ mod tests {
 
     #[test]
     fn other_files_and_newer_versions_are_refused_clearly() {
-        assert_eq!(from_text("hello").unwrap_err(), "This is not a Studio project file.");
-        assert_eq!(from_text(r#"{"format": "something-else", "version": 1}"#).unwrap_err(), "This is not a Studio project file.");
+        assert_eq!(from_text("hello").unwrap_err(), "This is not an Omina Motion project file.");
+        assert_eq!(from_text(r#"{"format": "something-else", "version": 1}"#).unwrap_err(), "This is not an Omina Motion project file.");
         let newer = to_text(&sample_project(), view()).unwrap().replacen("\"version\": 1", "\"version\": 99", 1);
         assert!(from_text(&newer).unwrap_err().contains("newer version"));
     }
@@ -704,7 +704,7 @@ mod tests {
 
         // Sound settings on a clip.
         let layer = project.composition_mut(ids::MAIN_COMP).unwrap().layers.iter_mut().find(|layer| layer.has_audio).unwrap();
-        layer.audio.volume_db = -6.5;
+        layer.audio.volume_db = crate::animation::Animated::constant(-6.5);
         layer.audio.noise_gate = 0.3;
         layer.audio.fade_in = 0.25;
         layer.switches.audio = false;

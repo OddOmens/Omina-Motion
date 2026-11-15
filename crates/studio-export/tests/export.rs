@@ -298,3 +298,18 @@ fn a_video_taller_than_the_gpu_limit_exports() {
     export(&project, &ExportRequest::new(comp, 0..4, MovieFormat::H264, path.clone()), &mut |_| {}, &|| false).unwrap();
     assert!(path.exists());
 }
+
+#[test]
+fn saves_one_frame_as_a_full_size_picture() {
+    let (project, comp) = project();
+    let path = scratch("frame.png");
+    // Frame 30 is 1.25 seconds in, where the color clip shows blue.
+    studio_export::save_frame(&project, comp, 30, &path).unwrap();
+    let picture = image::open(&path).unwrap().to_rgba8();
+    assert_eq!(picture.dimensions(), (64, 36));
+    let middle = picture.get_pixel(32, 18);
+    assert!(middle[2] > 160 && middle[0] < 100 && middle[1] < 100, "expected blue, got {middle:?}");
+    let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().contains("frame.png")).count();
+    assert_eq!(leftovers, 1, "no temporary file is left beside the picture");
+    assert!(studio_export::save_frame(&project, Id(9999), 0, &scratch("missing.png")).is_err());
+}

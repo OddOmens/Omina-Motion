@@ -36,6 +36,7 @@ pub fn resize_composition(project: &mut Project, comp: Id, width: u32, height: u
         background: source.background,
     };
     let new_comp = crate::edit::new_composition(project, &settings).ok()?;
+    project.composition_mut(new_comp)?.linear_blending = source.linear_blending;
     let (old, new) = (Vec2::new(source.width as f32, source.height as f32), Vec2::new(width as f32, height as f32));
     // How the frame's size changed overall, and how much a full-frame layer must grow to cover it.
     let area = ((new.x * new.y) / (old.x * old.y)).sqrt().clamp(0.25, 4.0);

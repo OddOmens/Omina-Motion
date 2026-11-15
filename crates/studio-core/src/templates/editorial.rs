@@ -13,11 +13,13 @@ use crate::model::{Id, Paint, Rgba, ShapeKind, TextAlign};
 /// A very quick start that lands crisply: for type stretching and blocks snapping into place.
 const SNAP: Easing = Easing::Curve(CubicBezier::new(0.2, 0.9, 0.1, 1.0));
 
-/// One flat color over the whole frame, named "Background" so the ending leaves it in place.
-fn flat_background(b: &mut Builder, color: u32) -> Id {
+/// One flat color over the whole frame with the template's decoration on it, named "Background" so the ending leaves it in place.
+pub(super) fn flat_background(b: &mut Builder, color: u32) -> Id {
     let size = Vec2::new(b.width, b.height) * (1.0 / b.unit());
     let center = b.at(0.5, 0.5);
-    b.block(size, center, color, 0.0, 0.0, "Background")
+    let id = b.block(size, center, color, 0.0, 0.0, "Background");
+    b.decorate();
+    id
 }
 
 /// The frame's margins, as fractions: left and right, top, and the lowest a line may sit. The
@@ -34,7 +36,7 @@ fn margins(b: &Builder) -> (f32, f32, f32) {
 /// A text layer whose anchor is the point (`fx`, `fy`) of its box (0 to 1 each way, from the top
 /// left), placed so that point sits at `at`. A bottom anchor lets type stretch up from its baseline.
 #[allow(clippy::too_many_arguments)]
-fn anchored_text(b: &mut Builder, words: &str, at: Vec2, size: f32, color: u32, weight: u16, from: f64, align: TextAlign, (fx, fy): (f32, f32)) -> Id {
+pub(super) fn anchored_text(b: &mut Builder, words: &str, at: Vec2, size: f32, color: u32, weight: u16, from: f64, align: TextAlign, (fx, fy): (f32, f32)) -> Id {
     let id = b.text_aligned(words, at, size, color, weight, from, align);
     let box_size = b.layer(id).size;
     let comp = b.comp;

@@ -16,10 +16,15 @@ use gpui_kit::component::dock::{
     TabGroupContext, TabGroupRenderer,
 };
 use gpui_kit::{
-    AnyElement, AnyView, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    TestSupportExt as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, AnyView, App, AppContext as _, Context, DismissEvent, ElementId, Entity, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point, Render, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, TestSupportExt as _, WeakEntity, Window, anchored,
+    deferred, div, prelude::FluentBuilder as _, px,
 };
+
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, IconName};
 
 use crate::panels::views::PanelView;
 use crate::theme::{color, hsla, size};
@@ -30,13 +35,14 @@ use crate::workspace::{LeftPanel, PanelId, Workspace};
 pub const LAYOUT_VERSION: usize = 1;
 
 /// Every panel that can be moved, in the order the standard layout lists them.
-pub const DOCKABLE: [PanelId; 6] = [
+pub const DOCKABLE: [PanelId; 7] = [
     PanelId::Side,
     PanelId::Composition,
     PanelId::Timeline,
     PanelId::Nodes,
     PanelId::Properties,
     PanelId::Align,
+    PanelId::Mixer,
 ];
 
 /// The panels the side panel shows, which layouts saved before it became one panel list as
@@ -71,7 +77,9 @@ impl PanelId {
             PanelId::Captions => "Captions",
             PanelId::Elements => "Elements",
             PanelId::Mockups => "Mockups",
+            PanelId::Stock => "Stock",
             PanelId::Nodes => "Nodes",
+            PanelId::Mixer => "Mixer",
         }
     }
 
@@ -97,6 +105,10 @@ impl PanelId {
                 LeftPanel::Captions => "Captions",
                 LeftPanel::Elements => "Elements",
                 LeftPanel::Mockups => "Mockups",
+                LeftPanel::Stock => "Stock",
+                LeftPanel::History => "History",
+                // Her tab carries the name she's been given, as the rail button does.
+                LeftPanel::Assistant => return super::assistant::name(&workspace.ui.settings).into(),
             }
             .into(),
             other => other.name().into(),
@@ -105,19 +117,54 @@ impl PanelId {
 }
 
 /// The standard arrangement, the one Studio starts with: the side panel beside the viewer, the timeline (with the Nodes panel, while it is open) under them, and Properties
-/// above Align down the right.
+/// (with the Mixer as a tab behind it) above Align down the right.
 pub fn default_layout(view: impl Fn(PanelId) -> Entity<PanelView>) -> DockLayout {
     let tabs = |ids: &[PanelId]| ids.iter().fold(DockLayout::tabs(), |tabs, id| tabs.panel(view(*id)));
     let top = DockLayout::h_split().child(tabs(&[PanelId::Side]), Some(px(300.0))).child(tabs(&[PanelId::Composition]), None);
     let bottom = DockLayout::h_split().child(tabs(&[PanelId::Timeline]), None).child(tabs(&[PanelId::Nodes]), Some(px(560.0)));
     let main = DockLayout::v_split().child(top, Some(px(520.0))).child(bottom, None);
-    let right = DockLayout::v_split().child(tabs(&[PanelId::Properties]), None).child(tabs(&[PanelId::Align]), Some(px(ALIGN_HEIGHT)));
+    let right = DockLayout::v_split().child(tabs(&[PanelId::Properties, PanelId::Mixer]), None).child(tabs(&[PanelId::Align]), Some(px(ALIGN_HEIGHT)));
     DockLayout::h_split().child(main, None).child(right, Some(px(430.0)))
+}
+
+/// The Color Correction arrangement: a large viewer with a wide Properties panel beside it for
+/// the color controls, and a short timeline (with the Nodes panel, while it is open) under the
+/// viewer. Align shares Properties' tabs.
+fn color_layout(view: impl Fn(PanelId) -> Entity<PanelView>) -> DockLayout {
+    let tabs = |ids: &[PanelId]| ids.iter().fold(DockLayout::tabs(), |tabs, id| tabs.panel(view(*id)));
+    let bottom = DockLayout::h_split().child(tabs(&[PanelId::Timeline]), None).child(tabs(&[PanelId::Nodes]), Some(px(520.0)));
+    let middle = DockLayout::v_split().child(tabs(&[PanelId::Composition]), None).child(bottom, Some(px(260.0)));
+    DockLayout::h_split()
+        .child(tabs(&[PanelId::Side]), Some(px(240.0)))
+        .child(middle, None)
+        .child(tabs(&[PanelId::Properties, PanelId::Align, PanelId::Mixer]), Some(px(480.0)))
+}
+
+/// The Audio Editing arrangement: the timeline takes most of the window, for tall tracks and
+/// their waveforms, with a small viewer between the side panel and Properties above it.
+fn audio_layout(view: impl Fn(PanelId) -> Entity<PanelView>) -> DockLayout {
+    let tabs = |ids: &[PanelId]| ids.iter().fold(DockLayout::tabs(), |tabs, id| tabs.panel(view(*id)));
+    let top = DockLayout::h_split()
+        .child(tabs(&[PanelId::Side]), Some(px(300.0)))
+        .child(tabs(&[PanelId::Composition]), None)
+        .child(tabs(&[PanelId::Properties, PanelId::Mixer, PanelId::Align]), Some(px(420.0)));
+    let bottom = DockLayout::h_split().child(tabs(&[PanelId::Timeline]), None).child(tabs(&[PanelId::Nodes]), Some(px(520.0)));
+    DockLayout::v_split().child(top, Some(px(300.0))).child(bottom, None)
+}
+
+/// The arrangement of a built-in workspace (`None` for Standard).
+pub fn built_in_layout(built_in: Option<crate::panels::workspaces::BuiltIn>, view: impl Fn(PanelId) -> Entity<PanelView>) -> DockLayout {
+    use crate::panels::workspaces::BuiltIn;
+    match built_in {
+        None => default_layout(view),
+        Some(BuiltIn::ColorCorrection) => color_layout(view),
+        Some(BuiltIn::AudioEditing) => audio_layout(view),
+    }
 }
 
 /// Rebuilds a saved layout with Studio's own panel views. Panels the saved layout doesn't
 /// mention (ones added in a later version, say) join the side panel's group, so none is ever
-/// lost; names this version doesn't know are skipped. In a layout saved when the side panel's
+/// lost; the Mixer, which belongs on the right, joins Properties' group instead when there is one; names this version doesn't know are skipped. In a layout saved when the side panel's
 /// choices were panels of their own, the first of them becomes the side panel. `None` when the saved layout
 /// is from another version or holds no panels at all, so the standard one is used instead.
 pub fn restore_layout(saved: &DockAreaState, view: impl Fn(PanelId) -> Entity<PanelView>) -> Option<DockLayout> {
@@ -130,8 +177,11 @@ pub fn restore_layout(saved: &DockAreaState, view: impl Fn(PanelId) -> Entity<Pa
     if placed.is_empty() {
         return None;
     }
-    let missing: Vec<PanelId> = DOCKABLE.into_iter().filter(|id| !placed.contains(id)).collect();
-    if !missing.is_empty() && !add_to_side_group(&mut center, &missing) {
+    let mut missing: Vec<PanelId> = DOCKABLE.into_iter().filter(|id| !placed.contains(id)).collect();
+    if missing.contains(&PanelId::Mixer) && add_to_group_of(&mut center, PanelId::Properties, &[PanelId::Mixer]) {
+        missing.retain(|id| *id != PanelId::Mixer);
+    }
+    if !missing.is_empty() && !add_to_group_of(&mut center, PanelId::Side, &missing) {
         add_to_first_group(&mut center, &missing);
     }
     let mut used = HashSet::new();
@@ -148,14 +198,14 @@ fn collect_panels(state: &PanelState, placed: &mut HashSet<PanelId>) {
     }
 }
 
-/// Appends `missing` to the first tab group holding the side panel. False if there is none.
-fn add_to_side_group(state: &mut PanelState, missing: &[PanelId]) -> bool {
-    let holds_side_panel = state.children.iter().any(|child| PanelId::from_name(&child.panel_name) == Some(PanelId::Side));
-    if matches!(state.info, PanelInfo::Tabs { .. }) && holds_side_panel {
+/// Appends `missing` to the first tab group holding panel `beside`. False if there is none.
+fn add_to_group_of(state: &mut PanelState, beside: PanelId, missing: &[PanelId]) -> bool {
+    let holds_it = state.children.iter().any(|child| PanelId::from_name(&child.panel_name) == Some(beside));
+    if matches!(state.info, PanelInfo::Tabs { .. }) && holds_it {
         state.children.extend(missing.iter().map(|id| PanelState::new(id.name())));
         return true;
     }
-    state.children.iter_mut().any(|child| add_to_side_group(child, missing))
+    state.children.iter_mut().any(|child| add_to_group_of(child, beside, missing))
 }
 
 /// Appends `missing` to the first tab group of all. False if there is none.
@@ -173,12 +223,17 @@ fn build(state: &PanelState, view: &impl Fn(PanelId) -> Entity<PanelView>, used:
     match &state.info {
         PanelInfo::Stack { sizes, .. } => {
             let axis = state.info.axis()?;
+            // A split saved before the dock had measured it records every slot at the dock's
+            // placeholder size. Taken literally, the first panels would be that narrow and the
+            // last would get all the rest, so such a split is left unsized: its panels share
+            // the space equally, as they did on screen when it was saved.
+            let unmeasured = sizes.len() > 1 && sizes.iter().all(|size| *size == gpui_kit::base::PANEL_MIN_SIZE);
             let children: Vec<(DockLayout, Option<Pixels>)> = state
                 .children
                 .iter()
                 .enumerate()
                 .filter_map(|(index, child)| {
-                    let size = sizes.get(index).copied().filter(|size| *size > px(0.0));
+                    let size = sizes.get(index).copied().filter(|size| *size > px(0.0) && !unmeasured);
                     build(child, view, used).map(|layout| (layout, size))
                 })
                 .collect();
@@ -215,8 +270,16 @@ fn studio_panel(panel: &Arc<dyn BasePanelView>, cx: &App) -> Option<PanelId> {
     panel.as_any().downcast_ref::<Entity<PanelView>>().and_then(|view| view.read(cx).kind.dock_id())
 }
 
-/// Studio's look for the dock: a tab bar on every panel group, Studio's panel colors, and an
-/// accent wash over the spot a dragged panel would land in.
+/// Half the gap between two neighboring panels: each panel group is inset by this much, so
+/// a thin line of the window's darker background shows between them.
+const PANEL_INSET: f32 = 1.0;
+
+/// Height of the chip holding a tab's grip and name.
+const TAB_CHIP_HEIGHT: f32 = 22.0;
+
+/// Studio's look for the dock: every panel group is a block of its own with a gap around it,
+/// each tab has a grip that opens the panel's menu, and an accent wash covers the spot a
+/// dragged panel would land in.
 pub struct StudioSkin {
     workspace: WeakEntity<Workspace>,
 }
@@ -228,6 +291,12 @@ impl StudioSkin {
 }
 
 impl DockAreaRenderer for StudioSkin {
+    /// No line between panels: the gap between them is the divider. (The dock still handles
+    /// the dragging there.)
+    fn render_split_handle(&self, _: &gpui_kit::base::ResizeHandleContext, _: &mut Window, _: &mut App) -> Option<AnyElement> {
+        Some(div().into_any_element())
+    }
+
     fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
         Rc::new(StudioTabs { workspace: self.workspace.clone() })
     }
@@ -240,10 +309,9 @@ struct StudioTabs {
 
 impl TabGroupRenderer for StudioTabs {
     fn frame(&self, group: &TabGroupContext, _: &mut Window, _: &mut App) -> gpui_kit::Stateful<gpui_kit::Div> {
-        div()
-            .id(("dock-group", group.node().as_u64()))
-            .bg(hsla(color::PANEL))
-            .rounded(px(size::PANEL_RADIUS))
+        // The group's own box is only the gap; the tab bar and the panel under it draw the
+        // panel's surface.
+        div().id(("dock-group", group.node().as_u64())).p(px(PANEL_INSET))
     }
 
     fn render_tab_bar(&self, group: &TabGroupContext, _: &mut Window, cx: &mut App) -> AnyElement {
@@ -266,12 +334,10 @@ impl TabGroupRenderer for StudioTabs {
                 .h_full()
                 .min_w(px(36.0))
                 .flex_shrink(1.0)
-                .px_1p5()
                 .flex()
                 .items_center()
                 .cursor_grab()
                 .text_color(hsla(if selected { color::TEXT } else { color::MUTED }))
-                .when(selected, |tab| tab.border_b_2().border_color(hsla(color::TEXT)))
                 .hover(|style| style.text_color(hsla(color::TEXT)))
                 .on_click(move |_, window, cx| select.select_tab(index, window, cx))
                 // Dragging the tab carries the panel; dropping it on another panel docks it there.
@@ -288,7 +354,21 @@ impl TabGroupRenderer for StudioTabs {
                 // Dropped on a tab, a panel joins the group just before it.
                 .on_drop(move |drag: &DragPanel, window, cx| drop_before.drop_panel(drag.clone(), Some(index), true, window, cx))
                 .drag_over::<DragPanel>(|style, _, _, _| style.bg(hsla(color::HOVER)))
-                .child(div().min_w_0().truncate().child(title))
+                // The grip and the label share a chip, filled for the tab that is showing.
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .h(px(TAB_CHIP_HEIGHT))
+                        .pl_0p5()
+                        .pr_1p5()
+                        .rounded(px(4.0))
+                        .when(selected, |chip| chip.bg(hsla(color::HOVER)))
+                        .child(tab_grip(id, group.clone(), self.workspace.clone(), cx))
+                        .child(div().min_w_0().truncate().child(title)),
+                )
                 .test_support()
         }).collect::<Vec<_>>();
         let append = group.clone();
@@ -308,10 +388,12 @@ impl TabGroupRenderer for StudioTabs {
             .flex()
             .items_center()
             .gap_1()
-            .px_1()
+            // The first tab's chip sits as far from the panel's left edge as from its top.
+            .pl(px((height - TAB_CHIP_HEIGHT) / 2.0))
+            .pr_1()
             .overflow_hidden()
-            .border_b_1()
-            .border_color(hsla(color::HAIRLINE))
+            .bg(hsla(color::PANEL))
+            .rounded_t(px(size::PANEL_RADIUS))
             .children(tabs)
             // Dropped on the empty end of the bar, a panel joins the group as its last tab.
             .child(
@@ -336,6 +418,8 @@ impl TabGroupRenderer for StudioTabs {
             .flex_1()
             .min_h_0()
             .relative()
+            .bg(hsla(color::PANEL))
+            .rounded_b(px(size::PANEL_RADIUS))
             .child(panel.cached(StyleRefinement::default().absolute().size_full()))
             .test_support()
             .into_any_element()
@@ -358,6 +442,86 @@ impl TabGroupRenderer for StudioTabs {
                 .into_any_element(),
         )
     }
+}
+
+/// The menu opened from the grip on a panel's tab, while it is open.
+pub struct PanelMenu {
+    /// The panel whose grip opened it, which stays lit meanwhile.
+    pub panel: PanelId,
+    pub menu: Entity<PopupMenu>,
+    /// Where it was opened: the pointer's place at the click.
+    pub at: Point<Pixels>,
+}
+
+/// The grip at the start of a panel's tab: three short lines. Dragging it carries the panel,
+/// like the rest of the tab; a plain click opens the panel's menu. It is a plain element and
+/// not a button or a menu trigger, because those keep the press to themselves and the tab
+/// under them could then not be dragged by its grip.
+fn tab_grip(id: PanelId, group: TabGroupContext, workspace: WeakEntity<Workspace>, cx: &App) -> impl IntoElement {
+    let open = workspace.upgrade().is_some_and(|workspace| workspace.read(cx).ui.panel_menu.as_ref().is_some_and(|menu| menu.panel == id));
+    div()
+        .id(ElementId::Name(format!("dock-tab-menu:{}", id.name()).into()))
+        .flex_none()
+        .size(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.0))
+        .text_color(hsla(if open { color::TEXT } else { color::MUTED }))
+        .when(open, |grip| grip.bg(hsla(color::HAIRLINE)))
+        .hover(|style| style.bg(hsla(color::HAIRLINE)).text_color(hsla(color::TEXT)))
+        .tooltip(|window, cx| Tooltip::new("Drag to move this panel, or click for its menu").build(window, cx))
+        .on_click(move |_, window, cx| open_panel_menu(id, group.clone(), workspace.clone(), window, cx))
+        .child(Icon::new(IconName::Menu).size(px(12.0)))
+        .test_support()
+}
+
+/// Opens the menu for panel `id` at the pointer: filling the window with the panel (or
+/// putting it back), and saving or resetting the arrangement. It closes itself when an item
+/// is picked, on Escape, or on a click elsewhere.
+fn open_panel_menu(id: PanelId, group: TabGroupContext, workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) {
+    let zoomed = group.is_zoomed();
+    let (save, reset) = (workspace.clone(), workspace.clone());
+    let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+        let (group, save, reset) = (group.clone(), save.clone(), reset.clone());
+        menu.item(PopupMenuItem::new(if zoomed { "Restore Panel Size" } else { "Maximize Panel" }).on_click(move |_, window, cx| group.toggle_zoom(window, cx)))
+            .separator()
+            .item(PopupMenuItem::new("Save as New Workspace…").on_click(move |_, window, cx| {
+                save.update(cx, |workspace, cx| crate::panels::workspaces::save_as_new(workspace, window, cx)).ok();
+            }))
+            .item(PopupMenuItem::new("Reset Workspace").on_click(move |_, window, cx| {
+                reset.update(cx, |workspace, cx| workspace.reset_workspace(window, cx)).ok();
+            }))
+    });
+    // The menu takes the keyboard, so Escape and the arrow keys reach it.
+    window.focus(&menu.focus_handle(cx), cx);
+    let closing = workspace.clone();
+    cx.subscribe(&menu, move |_, _: &DismissEvent, cx| {
+        closing
+            .update(cx, |workspace, cx| {
+                workspace.ui.panel_menu = None;
+                cx.notify();
+            })
+            .ok();
+    })
+    .detach();
+    let at = window.mouse_position();
+    workspace
+        .update(cx, |workspace, cx| {
+            workspace.ui.panel_menu = Some(PanelMenu { panel: id, menu, at });
+            cx.notify();
+        })
+        .ok();
+}
+
+/// The open panel menu, drawn above everything else at the place it was opened.
+pub fn panel_menu(workspace: &Workspace) -> Option<AnyElement> {
+    let open = workspace.ui.panel_menu.as_ref()?;
+    Some(
+        deferred(anchored().position(open.at).snap_to_window_with_margin(px(8.0)).child(open.menu.clone()))
+            .with_priority(gpui_kit::base::POPUP_PRIORITY)
+            .into_any_element(),
+    )
 }
 
 /// The label that follows the pointer while a panel is dragged.

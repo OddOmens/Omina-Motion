@@ -106,7 +106,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
     let input = cx.new(|cx| InputState::new(window, cx).default_value(state.document_name()));
     let folder = Rc::new(RefCell::new(default_folder(state.file())));
     let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, _| {
         let choose = {
             let folder = folder.clone();
             Button::new("package-choose").outline().small().label("Choose…").on_click(move |_, window, cx| choose_folder(folder.clone(), window, cx))
@@ -167,7 +167,7 @@ fn choose_folder(folder: Rc<RefCell<PathBuf>>, window: &mut Window, cx: &mut App
 fn start(workspace: &mut Workspace, name: String, folder: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
     if !folder.is_dir() {
         let message = format!("“{}” isn't a folder that can be saved in. Choose another folder.", folder.display());
-        window.open_alert_dialog(cx, move |dialog, _, _| dialog.title("The package couldn't be made").description(message.clone()));
+        crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| dialog.title("The package couldn't be made").description(message.clone()));
         return;
     }
     let target = folder.join(format!("{name}.zip"));
@@ -245,7 +245,7 @@ fn run(workspace: &mut Workspace, name: String, target: PathBuf, window: &mut Wi
                 match outcome {
                     Ok(Outcome::Finished { missing }) => announce(&target, &missing, window, cx),
                     Ok(Outcome::Cancelled) => window.push_notification("Packaging cancelled.", cx),
-                    Err(error) => window.open_alert_dialog(cx, move |dialog, _, _| dialog.title("The package couldn't be made").description(error.clone())),
+                    Err(error) => crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| dialog.title("The package couldn't be made").description(error.clone())),
                 }
                 false
             });

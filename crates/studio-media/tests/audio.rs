@@ -127,6 +127,26 @@ fn clips_add_up_and_follow_their_gain() {
 }
 
 #[test]
+fn panning_turns_down_the_other_side_only() {
+    // The tone starts a second in, so mix from 1.5 s.
+    let side_levels = |pan: f32| {
+        let clip = AudioClip { pan, ..tone_clip(1, 0.0) };
+        let mut mixer = Mixer::new(RATE, MixRange { start: 0, end: 96_000, looping: false }, 72_000);
+        let mut block = vec![0.0; 4800 * CHANNELS];
+        mixer.mix(&[clip], &mut block);
+        let side = |offset: usize| (block.iter().skip(offset).step_by(CHANNELS).map(|sample| sample * sample).sum::<f32>() / 4800.0).sqrt();
+        (side(0), side(1))
+    };
+    let (left, right) = side_levels(0.0);
+    assert!(left > 0.05 && (left - right).abs() < 1e-6, "centered sound is equal on both sides");
+    let (panned_left, panned_right) = side_levels(-1.0);
+    assert!((panned_left - left).abs() < 1e-6, "the side panned toward keeps its level");
+    assert_eq!(panned_right, 0.0, "the other side is silent");
+    let (half_left, half_right) = side_levels(0.5);
+    assert!((half_right - right).abs() < 1e-6 && (half_left - left * 0.5).abs() < 1e-4);
+}
+
+#[test]
 fn fades_rise_from_silence_and_fall_back_to_it() {
     // Half a second of fade at each end of the two-second tone.
     let faded = AudioClip { fade_in: 0.5, fade_out: 0.5, ..tone_clip(1, 0.0) };

@@ -1,0 +1,245 @@
+# Iris's help about Omina Edit (`canvas` in `apps`). See `shared.toml` for how topics are
+# written. Command ids are Edit's own.
+
+[[topic]]
+title = "What I look for in a design"
+body = "Text: off the page or crowding its edge, too small to read, or too close in color to what's under it. Layout: layers a few pixels from lining up, and gaps that are almost equal. Pictures shown larger than their own pixels. Tidying: empty, hidden and off-page layers, exact copies stacked up, and stray points in paths. The gear at the top of my panel chooses which."
+keywords = "you rules suggest suggestions notice check assistant help what design"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Line layers up"
+body = "Select the layers and use the Align panel. With one layer selected it lines up with the page; with several, with each other. Distribute needs three or more. I also point out layers that are a few pixels off."
+keywords = "align center centre middle distribute spacing even straight"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Put a picture in a shape"
+body = "Select a shape and a picture and choose Layer ▸ Make Frame: the shape becomes a frame the picture fills. With only a picture selected, it goes in a frame its own size. Drop another picture on the frame to swap it."
+keywords = "frame crop mask clip placeholder photo inside fill"
+apps = ["canvas"]
+command = "make-frame"
+tip = true
+
+[[topic]]
+title = "Bring a picture or SVG into a design"
+body = "Choose File ▸ Place ({key:place}), or drag files from the Finder onto the canvas. SVG files come in as shapes you can edit."
+keywords = "import place add open photo picture svg vector file drag"
+apps = ["canvas"]
+command = "place"
+tip = true
+
+[[topic]]
+title = "Change the page size"
+body = "Image ▸ Image Size ({key:image-size}) scales everything to the new size. Image ▸ Canvas Size ({key:canvas-size}) adds or trims room around the edges and leaves everything else its size."
+keywords = "resize size dimensions bigger smaller scale page canvas width height"
+apps = ["canvas"]
+command = "image-size"
+tip = true
+
+[[topic]]
+title = "Set up a design for print"
+body = "Start from File ▸ New Document ({key:new-document}) with a print size; those are 300 ppi, which is what print usually wants. Keep text an eighth of an inch inside the edge and pictures at 150 ppi or more; I mention both when they're off."
+keywords = "print dpi ppi resolution paper inches bleed margin"
+apps = ["canvas"]
+command = "new-document"
+tip = true
+
+[[topic]]
+title = "Export a design"
+body = "File ▸ Export As ({key:export}) saves PNG, JPEG, WebP, TIFF, BMP, SVG or PDF, at a choice of sizes, or with a preset (Instagram post, Instagram story, Print, Web, or one you saved with Save as Preset). A PDF is a vector PDF unless you choose Image: text stays text in its own fonts (it can be searched and copied) and shapes stay shapes, on paper of the design's printed size; pictures, gradients and layer styles are drawn as pictures where they are. An image PDF is the whole page as one picture. Quick Export ({key:quick-export}) saves a PNG at once."
+keywords = "export save png jpeg jpg webp svg tiff pdf vector image print output share preset"
+apps = ["canvas"]
+command = "export"
+tip = true
+
+[[topic]]
+title = "Combine shapes"
+body = "Select two or more shapes and pick an operation in Object ▸ Pathfinder or under the Align panel: unite them, cut one from another, or keep only where they overlap."
+keywords = "pathfinder unite merge subtract intersect exclude boolean combine"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Keep text easy to read"
+body = "Give it room from the edge, keep it at least 6 pt in print (larger on screens), and make sure it stands out from what is under it. A stroke or drop shadow in the Properties panel's Effects tab helps text over busy pictures."
+keywords = "readable legible contrast small text font size"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Start from a template"
+body = "Omina Edit's Home lists every template by category, and so does the Templates panel on the rail: finished designs (social posts, print pieces, and Omina Motion's designs in three shapes) to start from, with blank sizes below them in the panel."
+keywords = "template start begin layout instagram poster flyer"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Show work on a device"
+body = "Select a layer and pick a device in the Mockups panel on the rail: the layer goes on its screen."
+keywords = "mockup device phone iphone ipad mac screen present"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "See Omina Edit's keyboard shortcuts"
+body = "Settings ({key:settings}) ▸ Keyboard Shortcuts lists every command with its key, starting as Photoshop and Illustrator have them. Change gives a command the next key you press (a key another command had moves over, and the page says so), the arrow puts back its usual key, and Reset All puts back every one. Keys Omina Edit keeps for itself, and keys a recipe runs from, are refused. My answers and the menus always show the keys as they are now."
+keywords = "shortcut key keys hotkey keyboard change customize custom record rebind reset"
+apps = ["canvas"]
+command = "settings"
+tip = true
+
+[[topic]]
+title = "Rename me in Omina Edit"
+body = "Settings ({key:settings}) ▸ Design Assistant has a field for my name, and switches for my blinking and for waiting on the canvas. You can also type /name and the new name in my chat. My name and blinking are shared: Omina Motion and Omina Develop follow within moments."
+keywords = "rename name call assistant blink face shared every app"
+apps = ["canvas"]
+command = "settings"
+tip = true
+
+[[topic]]
+title = "Ask me to make something"
+body = "Tell me what to add and I'll make it: \"add a blue gradient background\", \"put a red star at the top right\", \"add a title that says Summer Sale\" or \"add a fire emoji\". Shapes, arrows, badges and emoji come from the Elements panel. It lands selected, and Undo takes it away. /add on its own lists what I can make."
+keywords = "add make create put draw insert background shape star circle element emoji sticker title text generate"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Tell me what to change in a design"
+body = "Select a layer, or name it, and say what you want: \"make it bold\", \"center it\", \"hide the logo layer\", \"add a drop shadow\", \"resize the page to 1080 x 1350\". A layer is named as the Layers panel names it (\"the logo layer\", or its name in quotes), by what its text says, or as \"the title\", \"the photo\" or \"the background\" when there is only one. With nothing selected, \"it\" is the layer I last made or changed. Locked layers are left alone, and I say so. /help lists everything I understand."
+keywords = "change edit ask tell request it select name layer modify what can you do instructions"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Tidy an Omina Edit design's layers by asking me"
+body = "\"Hide the logo layer\", \"show it\", \"lock all text layers\", \"duplicate it\", \"delete it\", \"rename it to Hero\", \"bring it to the front\", \"send it backward\" and \"select all shapes\" do what they say. Selecting changes nothing in the design; the rest are one Undo each. When two layers share a name, hiding, showing, locking and selecting take both; for anything else I select them and ask which you mean."
+keywords = "housekeeping hide show unhide lock unlock duplicate copy delete remove rename front back forward backward order stack select layers kind text shapes pictures"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Place, recolor and resize a layer by asking me"
+body = "\"Center it\", \"put it in the top right corner\" and \"move it to the bottom\" place a layer inside the page's margin; several selected layers move together. \"Make it red\" or \"make it #ff8800\" sets a text's color, a shape's or fill layer's fill, and a flat background; a photo has no one color to change. \"A bit bigger\", \"half the size\", \"scale it to 150%\", \"rotate it 15 degrees\", \"move it 20 px left\", \"flip it\" and \"50% opacity\" do the rest. Text grows by its font size, so it stays sharp."
+keywords = "place position corner center middle top bottom left right move nudge color recolor fill bigger smaller size scale rotate turn tilt flip mirror opacity transparent background"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Change text by asking me"
+body = "With a text layer selected or named: \"make it bold\", \"italic\", \"underline it\", \"uppercase\", \"font size 48\" (or \"36 pt\"), \"change the font to Georgia\", \"align the text center\", \"line spacing 1.4\", \"letter spacing 50\", and \"change the text to \"Winter Sale\"\". Several can go in one message. A font has to be installed on this Mac; if it isn't, nothing changes and I offer the nearest names. \"All text layers\" changes every one."
+keywords = "text font typeface bold italic underline uppercase lowercase capitals caps size points align alignment left center right line spacing leading letter tracking words wording rewrite say"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Find and replace across a design"
+body = "\"Replace \"Summer\" with \"Winter\"\" changes those words in every text layer, whatever capitals they are in. \"Change every blue to red\" recolors every fill, stroke, gradient stop and text of that color family (\"swap #ff0000 for #00aa55\" matches one exact color). \"Change every font to Georgia\" or \"replace Helvetica with Georgia\" swaps fonts. I say how many layers changed, locked layers are skipped, and pictures' pixels aren't touched."
+keywords = "find replace swap every all words text color colour font across whole design rebrand palette change everywhere"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Resize the page by asking me"
+body = "\"Resize the page to 1080 x 1350\" (or \"8.5 x 11 inches\"), \"make it an Instagram story\", \"make it A4\", \"make the page square\" and \"make the page landscape\" change the page around the layers, which keep their size and stay about the middle; a plain-color background is stretched to cover it. \"Scale the design to 540 x 540\" resizes everything with it, as Image ▸ Image Size ({key:image-size}) does. \"Set the resolution to 300 dpi\" changes how large it prints, not the pixels. \"Fit the page to the artwork\" trims empty edges."
+keywords = "page canvas size resize dimensions instagram story post a4 letter square portrait landscape resolution dpi ppi print fit trim artwork crop preset"
+apps = ["canvas"]
+command = "image-size"
+tip = true
+
+[[topic]]
+title = "Line up and space several layers by asking me"
+body = "Select two or more layers (or say \"select all shapes\" first), then: \"align them left\", \"align their centers\", \"distribute them evenly\", \"space them 20 px apart\", \"stack them in a column\", \"put them in a row 16 px apart\", \"make them the same width\", \"group them\" or \"ungroup\". The first layer you picked is the one the others are sized to. Shapes take the exact size; pictures, text and groups keep their proportions."
+keywords = "align line up distribute space spacing gap apart evenly stack column row same width height size match group ungroup several layers arrange layout"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Add a shadow, outline or rounded corners by asking me"
+body = "\"Add a drop shadow\", \"add a glow\", \"add a 4 px white stroke\", \"round the corners 12 px\" and \"set the blend mode to multiply\" style the selected or named layer; \"remove the shadow\" and \"no outline\" take them off. A shape gets a stroke of its own and anything else the Stroke layer style, both in the Properties panel afterwards. Only rectangles have corners I can round."
+keywords = "style effect drop shadow inner glow stroke outline border corner corners radius round rounded blend mode multiply screen overlay remove"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Export by asking me"
+body = "\"Export as PNG\" (or JPEG, WebP, TIFF, BMP, SVG or PDF; \"an image PDF\" for the page as one picture) writes the file straight away and tells you where: into the folder Export last used, or an Exports folder beside the saved project. A name already taken gets a number, so nothing is overwritten. Say several formats (\"export as PNG and PDF\"), a size (\"at 2x\", \"at 300 dpi\"), \"export all\" for every document in the project, or \"export the selection\" for just the selected layers, trimmed. \"Export now\" writes a PNG. \"Export\" on its own opens Export As ({key:export}), as the menu does, and so does a project that has never been saved or exported, since there is no folder to assume. Recipes set to run before each export run first."
+keywords = "export save as png jpeg jpg webp tiff bmp svg pdf format file out now all every document selection 2x dpi folder where finder batch"
+apps = ["canvas"]
+command = "export"
+
+[[topic]]
+title = "Check a design is ready to print or export"
+body = "Ask \"is this ready to print?\" or type /ready. In one answer I check the resolution, text that is cut off, too small or hard to see, pictures stretched past their own pixels, and hidden, empty or off-page layers, mark each as fine, worth a look or to fix first, and give a verdict, with buttons for the fixes I can make and for exporting it: a PDF for print, a PNG otherwise."
+keywords = "ready preflight final check print export publish finished verdict resolution before"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Ask for several steps at once in Omina Edit"
+body = "Put \"then\" or \"and\" between requests, or each on a line of its own: \"add a red star, then make it bigger, then center it\", \"make the title uppercase and red\", \"hide the logo and lock the title\". A step that names no layer means the one the step before it named or changed, whatever is selected. Everything one message changes is a single Undo. If a step can't be done I stop there and name the ones not run. Afterwards \"again\" repeats it, \"more\" goes further, \"too much\" takes it back and goes half as far, \"undo that\" and \"redo\" do as they say, and \"same for the logo\" does the last request to another layer. Words to show that have \"and\" in them go in quotes when more follows."
+keywords = "several steps then and script many once again repeat more less too much undo redo same for another layer follow up refer back it"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Teach me a recipe in Omina Edit"
+body = "A recipe is a name for things you ask me often: \"teach brand it: make the title bold, then center it\", and from then on just say \"brand it\". A recipe can take a value: \"teach badge {text}: add a sale seal, then add a caption saying {text}\", then \"badge 20% off\". \"What would brand it do?\" shows its steps without running them. /recipes lists them and \"forget brand it\" drops one. I come with four: \"tidy up\", \"social post\", \"print check\" and \"caption …\" (\"caption Shop now\" adds it at the bottom)."
+keywords = "recipe recipes teach learn macro automate save that as forget list tidy up social post print check custom command"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Run an Omina Edit command by its name"
+body = "Type a menu command's name and I run it and tell you its key: \"open settings\", \"merge down\", \"fit on screen\", \"image size\", \"gaussian blur\". \"Pen tool\" picks a tool and \"show the History panel\" brings a hidden panel back. When several fit I offer them rather than choose. Commands of features turned off in Settings ▸ Tools & Features aren't offered, and I leave quitting and closing the project to you."
+keywords = "command menu run name shortcut key do it open launch tool panel"
+apps = ["canvas"]
+
+[[topic]]
+title = "Ask without saying how much"
+body = "When a request has no amount I take a moderate step, say exactly what it came to, and \"more\" and \"less\" go on from there. \"Make it stand out\" (or \"make the title pop\") is size, weight and contrast: text goes bold, 15% bigger and black or white where it was hard to see; anything else gets 15% bigger and a drop shadow. \"More subtle\" lowers the opacity by a fifth. \"Move it up a bit\" or \"nudge it left\" is 10 px (5 for \"a bit\", 20 for \"a lot\"). \"More space\" and \"tighter\" change the gaps between several selected layers, or a text layer's line spacing. \"Rounder corners\", \"a softer shadow\" and \"a stronger shadow\" go by a step too. \"Make the text more readable\" makes my text fixes: size, contrast and margin. \"Make it look better\" makes the safe fixes and lists what is left. \"Make the page bigger\" can't be judged from the words, so I ask, with likely sizes to pick."
+keywords = "vague stand out pop prominent subtle subtler readable legible better nicer improve polish nudge bit little lot more space room tighter looser rounder softer stronger shadow bigger page default amount"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Run a recipe from a key, a button or by itself"
+body = "\"Give tidy up the shortcut ⌘⌥T\" runs it from that key anywhere in the editor, even with my panel closed (a key Omina Edit already uses is refused). \"Put tidy up on the toolbar\" gives it a button at the top of my chat. \"Run print check before export\" runs it before each export (if one of its steps fails, the export still goes ahead and I say what failed); it can also run when a project is opened, before each save, or after pictures are placed or brought in from another app. What a recipe changes this way is one Undo, and its answers show in my chat. \"Forget\" takes these off a recipe that comes with the app."
+keywords = "recipe shortcut key button toolbar trigger before export save open import automatic run by itself"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Edit, share and back up recipes"
+body = "Settings ({key:settings}) ▸ Recipes lists every recipe with its steps, shortcut, button and moments. Edit a taught one's name, steps (one a line) and shortcut, move it up or down, switch its button and moments, or delete it (Undo brings it back). Export… writes them all to a .json file and Import… reads one, saying what was added; recipes taught in my chat and on that page are the same ones."
+keywords = "recipes settings edit export import share file json backup delete reorder"
+apps = ["canvas"]
+command = "settings"
+
+[[topic]]
+title = "Type less to me"
+body = "As you type, the slash commands and recipes it could become show above the field; click one, or press Tab for the first. With the field empty, the Up and Down arrows go back through what you typed before. The conversation is kept when Omina Edit closes and is there the next time, below a quiet \"Earlier\" line; /clear empties it for good."
+keywords = "type complete completion suggestions tab arrow up down history earlier conversation kept clear"
+apps = ["canvas"]
+tip = true
+
+[[topic]]
+title = "Save and use export presets"
+body = "\"Export for Instagram post\", \"export for Instagram story\" (both a 1080-pixel-wide PNG on white), \"export for Print\" (a vector PDF at 300 ppi) and \"export for Web\" (a JPEG at quality 80, full size) export straight away with those choices. After any export, \"save these export settings as Proof\" keeps them as a preset of your own; \"list export presets\" and \"forget the Proof export preset\" do as they say. Export As ({key:export}) has the same presets, and Save as Preset."
+keywords = "export preset presets instagram story post print web save settings list forget"
+apps = ["canvas"]
+command = "export"
+
+[[topic]]
+title = "Send a picture to Omina Develop or Motion"
+body = "\"Develop this picture\" (or \"send this to Develop\") sends the selected picture layer, or the whole page when no picture is selected, to Omina Develop as a lossless PNG and opens it there. \"Send this frame to Motion\" sends the page as a picture to Omina Motion; File ▸ Bring to Motion ({key:bring-to-motion}) sends it as layers to animate instead. Pictures Develop and Motion send to Omina Edit open as a new document, and I offer to place one in the document you had open instead."
+keywords = "send develop motion hand off handoff photo picture frame open in another app receive"
+apps = ["canvas"]
+
+[[topic]]
+title = "Check for updates to Omina Edit"
+body = "Omina Edit ▸ Check for Updates… asks whether a newer version is out and offers to download it; it also checks quietly once a day when it starts. It never installs anything itself. In a build made without an update address the item is turned off. If Omina Edit ever closes unexpectedly, it says so next time and offers to show the crash report, which stays on this Mac."
+keywords = "update updates version new download crash report closed unexpectedly bug"
+apps = ["canvas"]

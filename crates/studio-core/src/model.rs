@@ -396,6 +396,26 @@ impl BlendMode {
             Self::Difference => "Difference",
         }
     }
+
+    /// The mode's number in a Lottie file (a layer's `bm`).
+    pub const fn lottie_number(self) -> u64 {
+        match self {
+            Self::Normal => 0,
+            Self::Multiply => 1,
+            Self::Screen => 2,
+            Self::Overlay => 3,
+            Self::HardLight => 8,
+            Self::SoftLight => 9,
+            Self::Difference => 10,
+            Self::Add => 16,
+        }
+    }
+
+    /// The mode a Lottie file's `bm` number stands for, or `None` for one Studio doesn't have
+    /// (darken, color dodge, hue and the like).
+    pub fn from_lottie(number: u64) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.lottie_number() == number)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -534,7 +554,8 @@ impl TextStyle {
                 glyphs * self.font_size * 0.58 + (glyphs - 1.0).max(0.0) * tracking_px
             })
             .fold(0.0_f32, f32::max);
-        Vec2::new(widest.max(self.font_size * 0.5), lines.len() as f32 * self.line_height)
+        // Kept within the largest layer a project may hold, so very long text can still be saved.
+        Vec2::new(widest.max(self.font_size * 0.5).min(MAX_LAYER_SIDE), (lines.len() as f32 * self.line_height).min(MAX_LAYER_SIDE))
     }
 }
 
@@ -610,6 +631,53 @@ pub struct ShapeStyle {
     /// A star's inner radius as a fraction of its outer radius (After Effects' Inner Radius).
     #[serde(default = "default_inner_radius")]
     pub inner_radius: f32,
+    /// How much of the stroke is drawn (see `Trim`). The fill is always drawn whole.
+    #[serde(default)]
+    pub trim: Trim,
+}
+
+/// Which part of a shape's stroke is drawn, as in After Effects' Trim Paths: the stretch of the
+/// outline from `start` to `end`, slid along it by `offset`. All three are percentages of the
+/// outline's length; animating them draws a line on, wipes it off or runs a dash around a shape.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Trim {
+    pub start: f32,
+    pub end: f32,
+    /// Slides the drawn part along the outline. It wraps: 100 is once all the way around.
+    pub offset: f32,
+}
+
+impl Default for Trim {
+    /// The whole stroke.
+    fn default() -> Self {
+        Self { start: 0.0, end: 100.0, offset: 0.0 }
+    }
+}
+
+impl Trim {
+    /// Whether the whole stroke is drawn, so nothing needs trimming.
+    pub fn is_whole(self) -> bool {
+        self.start <= 0.0 && self.end >= 100.0
+    }
+
+    /// The same trim with its start and end kept between 0 and 100 and the offset finite.
+    pub fn sanitized(self) -> Self {
+        let percent = |value: f32| if value.is_finite() { value.clamp(0.0, 100.0) } else { 0.0 };
+        Self { start: percent(self.start), end: if self.end.is_finite() { self.end.clamp(0.0, 100.0) } else { 100.0 }, offset: if self.offset.is_finite() { self.offset } else { 0.0 } }
+    }
+
+    /// The stretch drawn on an outline `length` long: how far along it starts, and how long it
+    /// is. `None` when nothing is drawn. The start may be anywhere from 0 up to `length`; the
+    /// stretch wraps around past the outline's end.
+    pub fn stretch(self, length: f32) -> Option<(f32, f32)> {
+        let trim = self.sanitized();
+        let drawn = (trim.end - trim.start) / 100.0 * length;
+        if drawn <= 0.0 || length <= 0.0 {
+            return None;
+        }
+        let begins = ((trim.start + trim.offset) / 100.0).rem_euclid(1.0) * length;
+        Some((begins, drawn.min(length)))
+    }
 }
 
 fn default_inner_radius() -> f32 {
@@ -626,7 +694,7 @@ impl ShapeStyle {
     /// A shape of `kind` in the default fill, with square corners.
     pub fn new(kind: ShapeKind) -> Self {
         let points = if kind == ShapeKind::Star { 5 } else { 6 };
-        Self { kind, fill: Some(Paint::Solid(Rgba::hex(0x8b5cf6))), stroke: None, corner_radius: 0.0, points, inner_radius: default_inner_radius() }
+        Self { kind, fill: Some(Paint::Solid(Rgba::hex(0x8b5cf6))), stroke: None, corner_radius: 0.0, points, inner_radius: default_inner_radius(), trim: Trim::default() }
     }
 
     /// The largest corner radius that makes sense in a box of `size`: half its shorter side.
@@ -997,8 +1065,10 @@ impl Cutout {
 /// A layer's sound settings.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayerAudio {
-    /// Volume in decibels: 0 leaves it as it is; -6 is about half as loud.
-    pub volume_db: f32,
+    /// Volume in decibels: 0 leaves it as it is; -6 is about half as loud. It can be
+    /// keyframed, to ride the level over time.
+    #[serde(deserialize_with = "crate::animation::number_or_animated")]
+    pub volume_db: Animated<f32>,
     /// Seconds over which the sound rises from silence at the layer's in point.
     pub fade_in: f32,
     /// Seconds over which it falls to silence before the out point.
@@ -1013,6 +1083,10 @@ pub struct LayerAudio {
     /// louder sound, 0 (off) to 100.
     #[serde(default)]
     pub noise_gate: f32,
+    /// Where the sound sits between the left and right speakers: -100 is all left, 0 the
+    /// middle (as recorded), 100 all right. It can be keyframed, to move the sound across.
+    #[serde(default = "LayerAudio::centered", deserialize_with = "crate::animation::number_or_animated")]
+    pub pan: Animated<f32>,
     /// Enhance Speech: cleaning up a voice recording (see `SpeechEnhance`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enhance: Option<SpeechEnhance>,
@@ -1020,7 +1094,7 @@ pub struct LayerAudio {
 
 impl Default for LayerAudio {
     fn default() -> Self {
-        Self { volume_db: 0.0, fade_in: 0.0, fade_out: 0.0, duck_under: None, duck_db: Self::default_duck_db(), noise_gate: 0.0, enhance: None }
+        Self { volume_db: Animated::constant(0.0), fade_in: 0.0, fade_out: 0.0, duck_under: None, duck_db: Self::default_duck_db(), noise_gate: 0.0, pan: Self::centered(), enhance: None }
     }
 }
 
@@ -1082,10 +1156,30 @@ impl LayerAudio {
         14.0
     }
 
-    /// The volume as a factor to multiply samples by.
-    pub fn gain(&self) -> f32 {
-        let db = if self.volume_db.is_finite() { self.volume_db.clamp(Self::VOLUME_RANGE.0, Self::VOLUME_RANGE.1) } else { 0.0 };
+    /// A pan in the middle, not keyframed.
+    fn centered() -> Animated<f32> {
+        Animated::constant(0.0)
+    }
+
+    /// A pan setting (-100 to 100) as the mixer takes it: from -1 (all left) to 1 (all right).
+    pub fn balance_of(pan: f32) -> f32 {
+        if pan.is_finite() { (pan / 100.0).clamp(-1.0, 1.0) } else { 0.0 }
+    }
+
+    /// A volume in decibels as a factor to multiply samples by. The bottom of the range is silence.
+    pub fn gain_of(db: f32) -> f32 {
+        let db = if db.is_finite() { db.clamp(Self::VOLUME_RANGE.0, Self::VOLUME_RANGE.1) } else { 0.0 };
         if db <= Self::VOLUME_RANGE.0 { 0.0 } else { 10f32.powf(db / 20.0) }
+    }
+
+    /// The volume at composition frame `frame`, as a factor to multiply samples by.
+    pub fn gain_at(&self, frame: f64) -> f32 {
+        Self::gain_of(self.volume_db.value_at(frame))
+    }
+
+    /// The volume as a factor, for sound whose volume isn't keyframed.
+    pub fn gain(&self) -> f32 {
+        Self::gain_of(self.volume_db.value)
     }
 }
 
@@ -1148,6 +1242,22 @@ pub struct Composition {
     /// blur, and compositions still at the defaults, leave it out.
     #[serde(default, skip_serializing_if = "crate::motion_blur::MotionBlur::is_default")]
     pub motion_blur: crate::motion_blur::MotionBlur,
+    /// Whether layers mix with what is below them in linear light (the default: soft edges,
+    /// glows and fades behave like real light) or in display colors, as Photoshop, Figma,
+    /// Canvas, Lottie players and After Effects' default do, where a half-transparent layer
+    /// looks darker. Compositions brought in from those keep their look with it off.
+    #[serde(default = "crate::model::linear_by_default", skip_serializing_if = "crate::model::is_linear")]
+    pub linear_blending: bool,
+}
+
+/// Compositions blend in linear light unless they say otherwise (see `Composition::linear_blending`).
+pub fn linear_by_default() -> bool {
+    true
+}
+
+/// Whether a composition blends in linear light, the default, which files leave out.
+pub fn is_linear(linear: &bool) -> bool {
+    *linear
 }
 
 /// A point marked on a composition's timeline. Moves and trims snap to markers.
@@ -1202,6 +1312,10 @@ pub struct ProjectItem {
     pub name: String,
     pub kind: ProjectItemKind,
     pub label: LabelColor,
+    /// Whether the label color was picked by hand. If not, the item takes the color of
+    /// whichever folder it is put in. (Absent in files saved before this was recorded.)
+    #[serde(default)]
+    pub label_picked: bool,
     pub parent: Option<Id>,
     /// Pixel size for items with a picture.
     pub size: Option<Vec2>,

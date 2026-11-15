@@ -5,6 +5,7 @@
 pub mod effects;
 mod path;
 mod renderer;
+mod svg;
 pub mod text;
 
 pub use renderer::{RenderError, RenderedFrame, Renderer, read_cube};

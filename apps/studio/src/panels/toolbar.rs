@@ -27,11 +27,13 @@ use crate::features::Feature;
 use crate::theme::{color, hsla, size};
 use crate::workspace::{LeftPanel, NewLayer, PanelId, Tool, Workspace};
 
-/// Width of the left rail: room for an icon and its name.
-pub const RAIL_WIDTH: f32 = 56.0;
+/// Width of the left rail: room for one icon button with a margin either side.
+pub const RAIL_WIDTH: f32 = 52.0;
+/// The side of a rail button, a rounded square around its icon.
+const RAIL_BUTTON: f32 = 36.0;
 /// Width and height of a tool button in the top bar.
-const TOOL_WIDTH: f32 = 30.0;
-const TOOL_HEIGHT: f32 = 28.0;
+const TOOL_WIDTH: f32 = 36.0;
+const TOOL_HEIGHT: f32 = 34.0;
 /// How far below a tool button's top its menu opens.
 const MENU_DROP: f32 = TOOL_HEIGHT + 6.0;
 
@@ -73,20 +75,23 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         .children(super::package::status(workspace, cx))
 }
 
-/// Studio's name, which goes to the start screen when clicked (offering to save first).
+/// Studio's mark in the window's top left corner, above the rail, which goes to the start
+/// screen when clicked (offering to save first).
 fn home_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     div()
         .id("studio-home")
         .flex_none()
-        .min_w(px(RAIL_WIDTH - 12.0))
-        .px_1()
-        .rounded(px(6.0))
-        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-        .text_color(hsla(color::TEXT))
-        .hover(|style| style.bg(hsla(color::HOVER)))
+        // As wide as the rail's buttons, so the mark sits centered over them.
+        .w(px(RAIL_BUTTON))
+        .flex()
+        .justify_center()
+        .rounded(px(8.0))
+        .hover(|style| style.opacity(0.85))
+        .cursor_pointer()
         .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Start Screen: new, recent and saved projects").build(window, cx))
         .on_click(cx.listener(|this, _, window, cx| crate::panels::start_screen::go_to(this, window, cx)))
-        .child("Studio")
+        // The same size as the rail's buttons below it.
+        .child(crate::panels::start_screen::brand_mark(RAIL_BUTTON))
         .test_support()
 }
 
@@ -161,7 +166,7 @@ fn new_layer_button(shortcuts: &crate::keymap::Shortcuts, cx: &mut Context<Works
 /// A short line between groups of rail buttons. The panel hairline is too faint against the
 /// rail's darker background, so it uses the muted text color, softened.
 fn separator() -> gpui_kit::Div {
-    div().flex_none().h(px(1.0)).w(px(32.0)).my_1p5().bg(hsla(color::MUTED).opacity(0.45))
+    div().flex_none().h(px(1.0)).w(px(28.0)).my_2().bg(hsla(color::MUTED).opacity(0.35))
 }
 
 /// How long the Shape button must be held to open the shape menu.
@@ -311,33 +316,111 @@ pub fn shape_icon(kind: ShapeKind) -> IconName {
     }
 }
 
-/// A rail button: an icon with its name underneath, as in CapCut's side bar.
+/// A rail button: an icon in a rounded square. Its name shows in a label beside it while the
+/// pointer is over it (at once, without a tooltip's wait), so the rail stays a quiet column of
+/// icons. `label` is that name; for a command it also carries the shortcut.
 fn rail_button(
     id: &'static str,
     icon: IconName,
-    label: &'static str,
+    label: impl Into<gpui_kit::SharedString>,
     active: bool,
     on_click: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    workspace: &Workspace,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    rail_button_look(id, icon, label, active).on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))).test_support()
+    rail_button_showing(id, Icon::new(icon).size(px(19.0)).into_any_element(), label, active, on_click, workspace, cx)
 }
 
-/// A rail button for a command with a shortcut: like `rail_button`, with a tooltip naming the
-/// command and its current key (it follows custom shortcuts).
-fn rail_command(
+/// A rail button that shows `picture` in place of an icon; otherwise the same as `rail_button`.
+fn rail_button_showing(
     id: &'static str,
-    icon: IconName,
-    label: &'static str,
-    tooltip: String,
+    picture: gpui_kit::AnyElement,
+    label: impl Into<gpui_kit::SharedString>,
+    active: bool,
     on_click: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    workspace: &Workspace,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
-    let tooltip: gpui_kit::SharedString = tooltip.into();
-    rail_button_look(id, icon, label, false)
-        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
+    let label: gpui_kit::SharedString = label.into();
+    let named = workspace.ui.rail_label == Some(id);
+    div()
+        .id(id)
+        .relative()
+        .size(px(RAIL_BUTTON))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(10.0))
+        .text_color(hsla(if active { color::TEXT } else { color::MUTED }))
+        .when(active, |button| button.bg(hsla(color::HOVER)))
+        .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
+        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+            if !*hovered {
+                // Leaving one button for the next can arrive after "entered the next", so a
+                // button only clears the hover if it is still the one under the pointer.
+                if this.ui.rail_hover.is_some_and(|(over, _)| over == id) {
+                    this.ui.rail_hover = None;
+                    this.ui.rail_label = None;
+                    cx.notify();
+                }
+                return;
+            }
+            // The name shows once the pointer has rested on the button for a moment. Each
+            // hover gets a number, so a wait that outlives its hover does nothing.
+            this.ui.rail_hovers += 1;
+            let hover = (id, this.ui.rail_hovers);
+            this.ui.rail_hover = Some(hover);
+            if this.ui.rail_label.take().is_some() {
+                cx.notify();
+            }
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(RAIL_LABEL_WAIT).await;
+                this.update(cx, |this, cx| {
+                    if this.ui.rail_hover == Some(hover) {
+                        this.ui.rail_label = Some(id);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }))
         .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+        .child(picture)
+        // The label is drawn after everything else, so it sits over the panel beside the rail.
+        .when(named, |button| button.child(gpui_kit::deferred(rail_label(id, label)).with_priority(1)))
         .test_support()
+}
+
+/// How long the pointer rests on a rail button before its name shows.
+const RAIL_LABEL_WAIT: Duration = Duration::from_millis(500);
+
+/// The name beside a rail button the pointer has rested on: a small grey bubble to the
+/// button's right, centered on it. It pops in: it fades up while sliding a few points out
+/// from the button and settling.
+fn rail_label(id: &'static str, label: gpui_kit::SharedString) -> impl IntoElement {
+    use gpui_kit::{Animation, AnimationExt as _};
+    let rest = RAIL_BUTTON + 8.0;
+    let pill = div()
+        .px_2p5()
+        .py_1p5()
+        .rounded(px(8.0))
+        .bg(hsla(color::NAVIGATOR_THUMB))
+        .shadow_md()
+        .text_size(px(size::TEXT))
+        .text_color(hsla(color::TEXT))
+        .whitespace_nowrap()
+        .child(label);
+    div().absolute().top_0().h(px(RAIL_BUTTON)).flex().items_center().child(pill).with_animation(
+        gpui_kit::ElementId::Name(format!("rail-label:{id}").into()),
+        // Eases out past its resting place and back (a "back out" curve), for a small bounce.
+        Animation::new(Duration::from_millis(280)).with_easing(|time: f32| {
+            let (overshoot, back) = (1.70158, time - 1.0);
+            1.0 + (overshoot + 1.0) * back.powi(3) + overshoot * back.powi(2)
+        }),
+        move |label, progress| label.left(px(rest - 10.0 * (1.0 - progress))).opacity(progress.clamp(0.0, 1.0)),
+    )
 }
 
 /// A tool button in the top bar: its icon, named in a tooltip.
@@ -367,7 +450,7 @@ fn tool_button_look(id: &'static str, icon: IconName, tip: String, active: bool)
         .when(active, |button| button.bg(hsla(color::ROW_SELECTED)))
         .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
-        .child(Icon::new(icon).size(px(16.0)))
+        .child(Icon::new(icon).size(px(19.0)))
 }
 
 /// The small mark in a tool button's corner that says holding it opens a menu: a tiny L.
@@ -380,25 +463,6 @@ fn menu_mark() -> impl IntoElement {
         .border_r_1()
         .border_b_1()
         .border_color(hsla(color::MUTED))
-}
-
-/// A rail button's appearance, without its behaviour.
-fn rail_button_look(id: &'static str, icon: IconName, label: &'static str, active: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
-    div()
-        .id(id)
-        .w(px(RAIL_WIDTH - 12.0))
-        .py_1()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap_1()
-        .rounded(px(6.0))
-        .text_size(px(8.0))
-        .text_color(hsla(if active { color::TEXT } else { color::MUTED }))
-        .when(active, |button| button.bg(hsla(color::ROW_SELECTED)))
-        .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))
-        .child(Icon::new(icon).size(px(16.0)))
-        .child(label)
 }
 
 /// The Shape button: a click picks the Shape tool; a double-click adds a background that fills
@@ -567,23 +631,30 @@ pub fn rail(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElem
         .flex()
         .flex_col()
         .items_center()
-        .gap_1()
+        .gap_1p5()
         .py_2()
         .bg(hsla(color::BACKGROUND))
         // At the top: the side panels.
-        .child(rail_button("rail-media", IconName::Folder, "Media", lit(LeftPanel::Media), show(LeftPanel::Media), cx))
-        .when(panel_on(LeftPanel::Libraries), |rail| rail.child(rail_button("rail-libraries", IconName::Library, "Libraries", lit(LeftPanel::Libraries), show(LeftPanel::Libraries), cx)))
-        .when(panel_on(LeftPanel::Effects), |rail| rail.child(rail_button("rail-effects", IconName::Sparkles, "Effects", lit(LeftPanel::Effects), show(LeftPanel::Effects), cx)))
-        .when(panel_on(LeftPanel::Elements), |rail| rail.child(rail_button("rail-elements", IconName::Sticker, "Elements", lit(LeftPanel::Elements), show(LeftPanel::Elements), cx)))
-        .when(panel_on(LeftPanel::Templates), |rail| rail.child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", lit(LeftPanel::Templates), show(LeftPanel::Templates), cx)))
-        .when(panel_on(LeftPanel::Mockups), |rail| rail.child(rail_button("rail-mockups", IconName::TabletSmartphone, "Mockups", lit(LeftPanel::Mockups), show(LeftPanel::Mockups), cx)))
-        .when(panel_on(LeftPanel::Captions), |rail| rail.child(rail_button("rail-captions", IconName::Captions, "Captions", lit(LeftPanel::Captions), show(LeftPanel::Captions), cx)))
+        .child(rail_button("rail-media", IconName::Folder, "Media", lit(LeftPanel::Media), show(LeftPanel::Media), workspace, cx))
+        .when(panel_on(LeftPanel::Libraries), |rail| rail.child(rail_button("rail-libraries", IconName::Library, "Libraries", lit(LeftPanel::Libraries), show(LeftPanel::Libraries), workspace, cx)))
+        .when(panel_on(LeftPanel::Effects), |rail| rail.child(rail_button("rail-effects", IconName::Sparkles, "Effects", lit(LeftPanel::Effects), show(LeftPanel::Effects), workspace, cx)))
+        .when(panel_on(LeftPanel::Elements), |rail| rail.child(rail_button("rail-elements", IconName::Shapes, "Elements", lit(LeftPanel::Elements), show(LeftPanel::Elements), workspace, cx)))
+        .when(panel_on(LeftPanel::Templates), |rail| rail.child(rail_button("rail-templates", IconName::LayoutTemplate, "Templates", lit(LeftPanel::Templates), show(LeftPanel::Templates), workspace, cx)))
+        .when(panel_on(LeftPanel::Mockups), |rail| rail.child(rail_button("rail-mockups", IconName::TabletSmartphone, "Mockups", lit(LeftPanel::Mockups), show(LeftPanel::Mockups), workspace, cx)))
+        .when(panel_on(LeftPanel::Stock), |rail| rail.child(rail_button("rail-stock", IconName::Images, "Stock", lit(LeftPanel::Stock), show(LeftPanel::Stock), workspace, cx)))
+        .when(panel_on(LeftPanel::Captions), |rail| rail.child(rail_button("rail-captions", IconName::Captions, "Captions", lit(LeftPanel::Captions), show(LeftPanel::Captions), workspace, cx)))
+        .when(panel_on(LeftPanel::History), |rail| rail.child(rail_button("rail-history", IconName::RotateCcw, "History", lit(LeftPanel::History), show(LeftPanel::History), workspace, cx)))
         // At the bottom: getting work in and out (new composition ⌘N, import ⌘I, export ⌘M),
-        // and Settings last.
+        // each named with its current shortcut, and Settings last.
         .child(div().flex_1())
-        .child(rail_command("rail-new-comp", IconName::Clapperboard, "New Comp", crate::keymap::with_key(keys, "New Composition", "new-composition"), |this, window, cx| super::composition_settings::open(this, true, window, cx), cx))
-        .child(rail_command("rail-import", IconName::FileInput, "Import", crate::keymap::with_key(keys, "Import Images, Video and Sound", "import"), |this, window, cx| this.import(window, cx), cx))
-        .when(workspace.ui.settings.feature_on(Feature::Export), |rail| rail.child(rail_command("rail-export", IconName::Download, "Export", crate::keymap::with_key(keys, "Export", "export"), super::export_dialog::open, cx)))
+        .child(rail_button("rail-new-comp", IconName::Clapperboard, crate::keymap::with_key(keys, "New Composition", "new-composition"), false, |this, window, cx| super::composition_settings::open(this, true, window, cx), workspace, cx))
+        .child(rail_button("rail-import", IconName::FileInput, crate::keymap::with_key(keys, "Import Images, Video and Sound", "import"), false, |this, window, cx| this.import(window, cx), workspace, cx))
+        .when(workspace.ui.settings.feature_on(Feature::Export), |rail| rail.child(rail_button("rail-export", IconName::Download, crate::keymap::with_key(keys, "Export", "export"), false, super::export_dialog::open, workspace, cx)))
         .child(separator())
-        .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, cx))
+        // The Motion Assistant, shown as its own blinking face, sits apart from the panels above.
+        .when(panel_on(LeftPanel::Assistant), |rail| {
+            let face = super::assistant::face("rail", 22.0, super::assistant::current_look(workspace)).into_any_element();
+            rail.child(rail_button_showing("rail-assistant", face, super::assistant::name(&workspace.ui.settings), lit(LeftPanel::Assistant), show(LeftPanel::Assistant), workspace, cx))
+        })
+        .child(rail_button("rail-settings", IconName::Settings, "Settings", false, super::settings::open, workspace, cx))
 }

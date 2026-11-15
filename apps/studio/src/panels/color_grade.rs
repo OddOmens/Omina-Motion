@@ -783,11 +783,62 @@ fn effect_card(layer: Id, effect: &studio_core::model::Effect, workspace: &Works
     .into_any_element()
 }
 
+/// What the Scopes card is for, shown by the info button on its heading.
+const SCOPES_INFO: &str = "Measures the frame in the viewer, to judge exposure and color by numbers. The waveform and histogram show brightness (watch for flat lines at the top or bottom: clipped whites or crushed blacks); the vectorscope shows how saturated the colors are and which way they lean.";
+
+/// The scope picture for the frame the viewer is showing, drawn again only when that frame or
+/// the kind of scope has changed.
+fn scope_picture(workspace: &Workspace) -> Option<Arc<RenderImage>> {
+    let shown = workspace.render.shown_image()?;
+    let kind = workspace.ui.scope_kind;
+    let mut cache = workspace.ui.scope_cache.borrow_mut();
+    if let Some((of, drawn_kind, picture)) = cache.as_ref()
+        && *of == shown.id
+        && *drawn_kind == kind
+    {
+        return Some(picture.clone());
+    }
+    let size = shown.size(0);
+    let scope = crate::scopes::draw(kind, shown.as_bytes(0)?, size.width.0.max(0) as usize, size.height.0.max(0) as usize);
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(scope.width, scope.height, scope.bgra)?;
+    let picture = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+    *cache = Some((shown.id, kind, picture.clone()));
+    Some(picture)
+}
+
+/// The Scopes card: a choice of waveform, histogram or vectorscope, and its picture of the
+/// frame in the viewer.
+fn scopes_card(workspace: &Workspace, cx: &mut Context<Workspace>) -> gpui_kit::Div {
+    use crate::scopes::ScopeKind;
+    super::properties::fold("scopes", "Scopes", Some(SCOPES_INFO), [None, None], workspace, cx, |cx| {
+        let kind = workspace.ui.scope_kind;
+        let choices = div().flex().gap_1().children(ScopeKind::ALL.map(|choice| {
+            Button::new(ElementId::Name(format!("scope-{}", choice.name().to_lowercase()).into()))
+                .small()
+                .label(choice.name())
+                .tooltip(choice.about())
+                .when(choice == kind, |button| button.primary())
+                .when(choice != kind, |button| button.outline())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.ui.scope_kind = choice;
+                    cx.notify();
+                }))
+        }));
+        // The vectorscope is square; the others are stretched to the card's width.
+        let picture = match scope_picture(workspace) {
+            Some(picture) if kind == ScopeKind::Vectorscope => div().flex().justify_center().child(img(gpui_kit::ImageSource::Render(picture)).size(px(180.0))).into_any_element(),
+            Some(picture) => gpui_kit::StyledImage::object_fit(img(gpui_kit::ImageSource::Render(picture)).w_full().h(px(140.0)), gpui_kit::ObjectFit::Fill).into_any_element(),
+            None => super::properties::plain_status_line("Nothing is showing in the viewer yet.").into_any_element(),
+        };
+        div().flex().flex_col().gap_2().pb_1().child(choices).child(div().rounded(px(4.0)).overflow_hidden().child(picture))
+    })
+}
+
 pub fn body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    let list = card_list("color-grade").child(workspace.ui.grade_bounds.probe());
+    let list = card_list("color-grade").child(workspace.ui.grade_bounds.probe()).child(scopes_card(workspace, cx));
     let Some(layer) = workspace.state.grade_layer() else {
         let hint = "Select a clip to grade it. To grade the whole video, select an adjustment layer over it.";
-        return list.child(list_row().child(super::properties::status_line(hint))).into_any_element();
+        return list.child(list_row().child(super::properties::plain_status_line(hint))).into_any_element();
     };
     // Every color effect the clip has, in the order they run: the Color tab's own corrections
     // with their controls, the rest as plain cards. The + adds more.

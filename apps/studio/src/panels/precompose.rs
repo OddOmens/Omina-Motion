@@ -27,7 +27,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
     let trim = Rc::new(Cell::new(false));
     let open_after = Rc::new(Cell::new(false));
     let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, _| {
         let trim_box = {
             let trim = trim.clone();
             Checkbox::new("precompose-trim").checked(trim.get()).label("Adjust composition duration to the time span of the selected layers").on_click(move |checked: &bool, window, _| {

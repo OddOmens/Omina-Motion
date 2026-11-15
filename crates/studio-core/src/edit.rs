@@ -141,11 +141,12 @@ pub fn set_layer_audio(composition: &mut Composition, layer_id: Id, edit: impl F
     edit(&mut layer.audio);
     let audio = &mut layer.audio;
     let finite = |value: f32| if value.is_finite() { value } else { 0.0 };
-    audio.volume_db = finite(audio.volume_db).clamp(crate::model::LayerAudio::VOLUME_RANGE.0, crate::model::LayerAudio::VOLUME_RANGE.1);
+    audio.volume_db.value = finite(audio.volume_db.value).clamp(crate::model::LayerAudio::VOLUME_RANGE.0, crate::model::LayerAudio::VOLUME_RANGE.1);
     audio.fade_in = finite(audio.fade_in).clamp(0.0, length);
     audio.fade_out = finite(audio.fade_out).clamp(0.0, length);
     audio.duck_db = finite(audio.duck_db).clamp(crate::model::LayerAudio::DUCK_RANGE.0, crate::model::LayerAudio::DUCK_RANGE.1);
     audio.noise_gate = finite(audio.noise_gate).clamp(0.0, 100.0);
+    audio.pan.value = finite(audio.pan.value).clamp(-100.0, 100.0);
     if audio.duck_under == Some(layer_id) {
         audio.duck_under = None;
     }
@@ -194,7 +195,10 @@ pub fn precompose(project: &mut Project, comp_id: Id, ids: &[Id], name: &str, tr
         duration_frames,
         background: Rgba::TRANSPARENT,
     };
+    let linear = parent.linear_blending;
     let inner_id = new_composition(project, &settings).ok()?;
+    // The layers keep mixing as they did.
+    project.composition_mut(inner_id)?.linear_blending = linear;
     let parent = project.composition_mut(comp_id)?;
     let (mut moved, kept): (Vec<Layer>, Vec<Layer>) = std::mem::take(&mut parent.layers).into_iter().partition(|layer| moving.contains(&layer.id));
     parent.layers = kept;
@@ -516,10 +520,13 @@ impl CompositionSettings {
     }
 }
 
-/// Creates a composition and its Project panel item. Returns its id.
+/// Creates a composition and its Project panel item, in the project's Exports folder (and in
+/// that folder's label color) when it has one. Returns its id.
 pub fn new_composition(project: &mut Project, settings: &CompositionSettings) -> Result<Id, String> {
     settings.validate()?;
     let id = project.allocate_id();
+    let folder = crate::folders::top_folder(project, crate::folders::EXPORTS_FOLDER);
+    let label = crate::folders::folder_label(project, folder);
     project.compositions.push(Composition {
         id,
         name: settings.name.trim().to_owned(),
@@ -531,13 +538,15 @@ pub fn new_composition(project: &mut Project, settings: &CompositionSettings) ->
         layers: Vec::new(),
         markers: Vec::new(),
         motion_blur: Default::default(),
+        linear_blending: true,
     });
     project.items.push(ProjectItem {
         id,
         name: settings.name.trim().to_owned(),
         kind: ProjectItemKind::Composition,
-        label: crate::model::LabelColor::None,
-        parent: None,
+        label,
+        label_picked: false,
+        parent: folder,
         size: Some(Vec2::new(settings.width as f32, settings.height as f32)),
         duration_seconds: Some(settings.duration_frames as f64 / settings.frame_rate.fps()),
         frame_rate: Some(settings.frame_rate),
@@ -563,10 +572,20 @@ pub fn rename_item(project: &mut Project, id: Id, name: &str) -> bool {
     true
 }
 
-/// Sets a project item's label color. Returns whether the item exists.
+/// Sets a project item's label color, as picked by hand: the item keeps it from then on,
+/// whichever folder it is moved to. For a folder, the items directly in it take the new color
+/// too, except ones given a color of their own. Returns whether the item exists.
 pub fn set_item_label(project: &mut Project, id: Id, label: LabelColor) -> bool {
     let Some(item) = project.items.iter_mut().find(|item| item.id == id) else { return false };
     item.label = label;
+    if item.kind == ProjectItemKind::Folder {
+        let inside = project.items.iter_mut().filter(|item| item.parent == Some(id) && item.kind != ProjectItemKind::Folder);
+        for item in inside.filter(|item| !item.label_picked) {
+            item.label = label;
+        }
+    } else {
+        item.label_picked = true;
+    }
     true
 }
 
@@ -817,6 +836,17 @@ fn add_top_layer(project: &mut Project, comp_id: Id, name: String, content: Laye
 /// and a drawn shape cannot become one. Returns whether the layer is a shape.
 pub fn edit_shape(composition: &mut Composition, layer_id: Id, edit: impl FnOnce(&mut ShapeStyle)) -> bool {
     let Some(layer) = composition.layer_mut(layer_id) else { return false };
+    if !edit_own_shape_style(layer, edit) {
+        return false;
+    }
+    // A morphing shape's style keyframes follow the edit (see `morph::sync_style_edit`).
+    crate::morph::sync_style_edit(layer);
+    true
+}
+
+/// The edit behind `edit_shape`: changes the layer's own style and keeps it in range, without
+/// touching any style keyframes. Returns whether the layer is a shape.
+pub(crate) fn edit_own_shape_style(layer: &mut Layer, edit: impl FnOnce(&mut ShapeStyle)) -> bool {
     let size = layer.size;
     let LayerContent::Shape { style, path } = &mut layer.content else { return false };
     let kind_before = style.kind;
@@ -833,13 +863,12 @@ pub fn edit_shape(composition: &mut Composition, layer_id: Id, edit: impl FnOnce
     if let Some(stroke) = style.stroke.as_mut() {
         stroke.width = finite_or(stroke.width, 1.0).clamp(0.0, MAX_STROKE_WIDTH);
     }
+    style.trim = style.trim.sanitized();
     for paint in style.fill.iter_mut().chain(style.stroke.as_mut().map(|stroke| &mut stroke.paint)) {
         if let Some(gradient) = paint.gradient() {
             *paint = paint.with_gradient(gradient.sanitized());
         }
     }
-    // A morphing shape's style keyframes follow the edit (see `morph::sync_style_edit`).
-    crate::morph::sync_style_edit(layer);
     true
 }
 
@@ -852,6 +881,7 @@ pub fn import_image(project: &mut Project, path: std::path::PathBuf, size: Vec2)
         name,
         kind: ProjectItemKind::Image,
         label: crate::model::LabelColor::Peach,
+        label_picked: false,
         parent: None,
         size: Some(size),
         duration_seconds: None,
@@ -881,6 +911,7 @@ pub fn import_footage(project: &mut Project, path: std::path::PathBuf, info: &Fo
         name,
         kind: ProjectItemKind::Footage,
         label: crate::model::LabelColor::Aqua,
+        label_picked: false,
         parent: None,
         size: Some(info.size),
         duration_seconds: Some(info.duration_seconds),
@@ -901,6 +932,7 @@ pub fn import_audio(project: &mut Project, path: std::path::PathBuf, duration_se
         name,
         kind: ProjectItemKind::Audio,
         label: crate::model::LabelColor::Green,
+        label_picked: false,
         parent: None,
         size: None,
         duration_seconds: Some(duration_seconds),
@@ -936,6 +968,8 @@ pub fn move_anchor(composition: &mut Composition, layer_id: Id, anchor: Vec2, fr
 /// Sets a text layer's box to its measured size, keeping the anchor point in the same relative spot.
 /// Returns whether anything changed.
 pub fn set_text_box(composition: &mut Composition, layer_id: Id, size: Vec2) -> bool {
+    // A box larger than a project may hold would make the project impossible to save.
+    let size = Vec2::new(size.x.min(crate::model::MAX_LAYER_SIDE), size.y.min(crate::model::MAX_LAYER_SIDE));
     let Some(layer) = composition.layer_mut(layer_id) else { return false };
     if !matches!(layer.content, LayerContent::Text { .. }) || (layer.size - size).x.abs() + (layer.size - size).y.abs() < 0.01 {
         return false;
@@ -1267,6 +1301,23 @@ mod tests {
     }
 
     #[test]
+    fn precomposing_keeps_how_the_layers_mix_and_files_keep_the_setting() {
+        let mut project = sample::sample_project();
+        project.composition_mut(ids::MAIN_COMP).unwrap().linear_blending = false;
+        let title = project.composition(ids::MAIN_COMP).unwrap().layers[0].id;
+        let layer = precompose(&mut project, ids::MAIN_COMP, &[title], "Card", false).unwrap();
+        let LayerContent::Composition { composition } = project.composition(ids::MAIN_COMP).unwrap().layer(layer).unwrap().content else { panic!() };
+        assert!(!project.composition(composition).unwrap().linear_blending);
+        // Saved and opened again, the setting stays; compositions at the default leave it out.
+        let view = crate::project_file::EditorView { active_composition: ids::MAIN_COMP, current_frame: 0, work_area: crate::time::FrameRange::new(0.0, 10.0) };
+        let text = crate::project_file::to_text(&project, view).unwrap();
+        assert_eq!(text.matches("linear_blending").count(), 2, "only the two that mix in display colors say so");
+        let (reopened, _) = crate::project_file::from_text(&text).unwrap();
+        assert!(!reopened.composition(ids::MAIN_COMP).unwrap().linear_blending);
+        assert!(reopened.compositions.iter().filter(|comp| comp.linear_blending).count() == project.compositions.len() - 2);
+    }
+
+    #[test]
     fn precomposing_moves_layers_into_a_new_composition_in_their_place() {
         let mut project = sample::sample_project();
         let comp = project.composition(ids::MAIN_COMP).unwrap();
@@ -1283,6 +1334,7 @@ mod tests {
         let moved = inner.layer(title).unwrap();
         assert_eq!((moved.in_frame, moved.out_frame), (in_frame, out_frame), "with their timing");
         assert!(project.item(composition).is_some(), "it is in the Project panel");
+        assert!(inner.linear_blending, "it mixes colors as the composition it came from");
         // And it can't be put inside itself.
         assert!(add_layer_from_item(&mut project, composition, ids::MAIN_COMP, 0, 0).is_none());
         assert!(add_layer_from_item(&mut project, composition, composition, 0, 0).is_none());
@@ -1488,6 +1540,21 @@ mod tests {
         assert!(layer.size.x > narrow);
         assert_eq!(layer.transform.as_ref().unwrap().anchor_point.value, layer.size * 0.5, "anchor stays centered");
         assert_eq!(layer.name, "Hi there, everyone");
+    }
+
+    #[test]
+    fn a_very_long_text_still_saves() {
+        let mut project = sample::sample_project();
+        let id = add_text_layer(&mut project, ids::MAIN_COMP, "Hi", Vec2::new(960.0, 540.0), 0).unwrap();
+        let comp = project.composition_mut(ids::MAIN_COMP).unwrap();
+        // A pasted paragraph with no line breaks, wider than any layer may be.
+        edit_text(comp, id, |text, _| *text = "word ".repeat(400));
+        assert!(comp.layer(id).unwrap().size.x <= crate::model::MAX_LAYER_SIDE);
+        // The renderer's measured size is kept within the limit too.
+        set_text_box(comp, id, Vec2::new(250_000.0, 140.0));
+        assert!(comp.layer(id).unwrap().size.x <= crate::model::MAX_LAYER_SIDE);
+        let view = crate::project_file::EditorView { active_composition: ids::MAIN_COMP, current_frame: 0, work_area: crate::time::FrameRange::new(0.0, 24.0) };
+        crate::project_file::to_text(&project, view).expect("the project can be saved");
     }
 
     #[test]

@@ -18,15 +18,37 @@ impl TransformProperty {
     pub const ALL: [Self; 5] = [Self::AnchorPoint, Self::Position, Self::Scale, Self::Rotation, Self::Opacity];
 }
 
+/// The sound settings of a layer that can be keyframed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AudioProperty {
+    Volume,
+    Pan,
+}
+
+impl AudioProperty {
+    pub const ALL: [Self; 2] = [Self::Volume, Self::Pan];
+}
+
 /// Which property of a layer: one of its transform properties or a parameter of one of its effects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PropertyPath {
     Transform(TransformProperty),
     Effect { effect: Id, parameter: usize },
+    /// The volume or pan of a footage or sound clip.
+    Audio(AudioProperty),
     /// A footage clip's speed, as a percentage. Keyframing it remaps time (After Effects' Time
     /// Remapping, Premiere's speed keyframes): the clip keeps its length and plays its source
     /// faster or slower through it.
     Speed,
+    /// A shape layer's outline while it is keyframed (see `morph`). It has no number to show
+    /// or type: its keyframes hold whole outlines, edited by dragging the shape's points or
+    /// changing its size. It is listed so those keyframes can be seen, moved, eased and deleted
+    /// in the timeline like any others.
+    ShapePath,
+    /// A shape layer's fill, stroke and stroke width while they are keyframed together (see
+    /// `morph::toggle_style_animation`). Like `ShapePath` it has no single number: it is listed
+    /// so its keyframes show in the timeline.
+    ShapeStyle,
 }
 
 /// A property's value at one moment. Two-dimensional values edit each component separately.
@@ -103,10 +125,28 @@ pub const fn transform_info(property: TransformProperty) -> PropertyInfo {
     }
 }
 
+/// How a clip's volume and pan are shown and edited.
+pub const fn audio_info(property: AudioProperty) -> PropertyInfo {
+    match property {
+        AudioProperty::Volume => PropertyInfo { name: "Volume", unit: "dB", step: 0.1, min: crate::model::LayerAudio::VOLUME_RANGE.0, max: crate::model::LayerAudio::VOLUME_RANGE.1, decimals: 1 },
+        AudioProperty::Pan => PropertyInfo { name: "Pan", unit: "", step: 1.0, min: -100.0, max: 100.0, decimals: 0 },
+    }
+}
+
+/// How a keyframed shape outline is named. It has no value to edit, so the range is unused.
+pub const SHAPE_PATH_INFO: PropertyInfo = PropertyInfo { name: "Path", unit: "", step: 1.0, min: 0.0, max: 0.0, decimals: 0 };
+
+/// How a shape's keyframed fill and stroke are named. No value to edit, so the range is unused.
+pub const SHAPE_STYLE_INFO: PropertyInfo = PropertyInfo { name: "Fill & Stroke", unit: "", step: 1.0, min: 0.0, max: 0.0, decimals: 0 };
+
 /// Mutable access to one property, whatever its value type, for keyframe operations.
 pub enum AnimatedMut<'a> {
     Scalar(&'a mut Animated<f32>),
     Pair(&'a mut Animated<Vec2>),
+    /// A shape's keyframed outline.
+    Path(&'a mut Animated<crate::path::ShapePath>),
+    /// A shape's keyframed fill and stroke.
+    Style(&'a mut Animated<crate::model::ShapeStyle>),
 }
 
 /// Runs the same expression on either kind of animated value.
@@ -115,6 +155,8 @@ macro_rules! on_animated {
         match $target {
             AnimatedMut::Scalar($animated) => $body,
             AnimatedMut::Pair($animated) => $body,
+            AnimatedMut::Path($animated) => $body,
+            AnimatedMut::Style($animated) => $body,
         }
     };
 }
@@ -155,6 +197,19 @@ impl Layer {
         crate::speed::has_speed(&self.content) && self.time.hold.is_none()
     }
 
+    /// Whether the layer plays sound of its own whose volume and pan can be keyframed: footage
+    /// with sound, and sound clips. (A nested composition's volume is one setting for all of it.)
+    fn has_keyable_sound(&self) -> bool {
+        self.has_audio && matches!(self.content, crate::model::LayerContent::Footage { .. } | crate::model::LayerContent::Audio { .. })
+    }
+
+    fn audio_setting(&self, property: AudioProperty) -> &Animated<f32> {
+        match property {
+            AudioProperty::Volume => &self.audio.volume_db,
+            AudioProperty::Pan => &self.audio.pan,
+        }
+    }
+
     fn effect_parameter(&self, effect: Id, parameter: usize) -> Option<&crate::model::EffectProperty> {
         self.effects.iter().find(|candidate| candidate.id == effect)?.properties.get(parameter)
     }
@@ -190,12 +245,29 @@ impl Layer {
                 let value = PropertyValue::Scalar(property.value.value_at(at));
                 (property.name.clone(), property.info, value, property.value.keyframe_frames())
             }
+            PropertyPath::Audio(property) => {
+                if !self.has_keyable_sound() {
+                    return None;
+                }
+                let (info, setting) = (audio_info(property), self.audio_setting(property));
+                (info.name.to_owned(), info, PropertyValue::Scalar(setting.value_at(at)), setting.keyframe_frames())
+            }
             PropertyPath::Speed => {
                 if !self.has_animatable_speed() {
                     return None;
                 }
                 let speed = &self.time.speed;
                 (SPEED_INFO.name.to_owned(), SPEED_INFO, PropertyValue::Scalar(speed.value_at(at)), speed.keyframe_frames())
+            }
+            PropertyPath::ShapePath => {
+                let morph = self.morph.as_ref().filter(|morph| morph.path.is_animated())?;
+                // An outline isn't a number; the value is a stand-in that is never shown.
+                (SHAPE_PATH_INFO.name.to_owned(), SHAPE_PATH_INFO, PropertyValue::Scalar(0.0), morph.path.keyframe_frames())
+            }
+            PropertyPath::ShapeStyle => {
+                let morph = self.morph.as_ref().filter(|morph| morph.style.is_animated())?;
+                // A style isn't a number either; the value is a stand-in that is never shown.
+                (SHAPE_STYLE_INFO.name.to_owned(), SHAPE_STYLE_INFO, PropertyValue::Scalar(0.0), morph.style.keyframe_frames())
             }
         };
         Some(PropertySnapshot { path, name, info, value, keyframes })
@@ -218,7 +290,13 @@ impl Layer {
                 let effect = self.effects.iter_mut().find(|candidate| candidate.id == effect)?;
                 Some(AnimatedMut::Scalar(&mut effect.properties.get_mut(parameter)?.value))
             }
+            PropertyPath::Audio(property) => self.has_keyable_sound().then_some(AnimatedMut::Scalar(match property {
+                AudioProperty::Volume => &mut self.audio.volume_db,
+                AudioProperty::Pan => &mut self.audio.pan,
+            })),
             PropertyPath::Speed => self.has_animatable_speed().then_some(AnimatedMut::Scalar(&mut self.time.speed)),
+            PropertyPath::ShapePath => self.morph.as_mut().filter(|morph| morph.path.is_animated()).map(|morph| AnimatedMut::Path(&mut morph.path)),
+            PropertyPath::ShapeStyle => self.morph.as_mut().filter(|morph| morph.style.is_animated()).map(|morph| AnimatedMut::Style(&mut morph.style)),
         }
     }
 
@@ -253,8 +331,12 @@ impl Layer {
             PropertyPath::Effect { effect, parameter } => self
                 .effect_parameter(effect, parameter)
                 .map_or_else(Vec::new, |property| property.value.keyframe_easings()),
+            PropertyPath::Audio(property) if self.has_keyable_sound() => self.audio_setting(property).keyframe_easings(),
+            PropertyPath::Audio(_) => Vec::new(),
             PropertyPath::Speed if self.has_animatable_speed() => self.time.speed.keyframe_easings(),
             PropertyPath::Speed => Vec::new(),
+            PropertyPath::ShapePath => self.morph.as_ref().filter(|morph| morph.path.is_animated()).map_or_else(Vec::new, |morph| morph.path.keyframe_easings()),
+            PropertyPath::ShapeStyle => self.morph.as_ref().filter(|morph| morph.style.is_animated()).map_or_else(Vec::new, |morph| morph.style.keyframe_easings()),
         }
     }
 
@@ -263,8 +345,10 @@ impl Layer {
         self.in_frame += delta;
         self.out_frame += delta;
         self.start_frame += delta;
-        // Speed ramp keyframes are in composition frames too.
+        // Speed ramp keyframes are in composition frames too, as are volume and pan keyframes.
         self.time.speed.shift(delta);
+        self.audio.volume_db.shift(delta);
+        self.audio.pan.shift(delta);
         if let Some(transform) = self.transform.as_mut() {
             transform.anchor_point.shift(delta);
             transform.position.shift(delta);
@@ -290,6 +374,15 @@ impl Layer {
         }
         if self.has_animatable_speed() {
             paths.push(PropertyPath::Speed);
+        }
+        if self.has_keyable_sound() {
+            paths.extend(AudioProperty::ALL.map(PropertyPath::Audio));
+        }
+        if self.is_morphing() {
+            paths.push(PropertyPath::ShapePath);
+        }
+        if self.morph.as_ref().is_some_and(|morph| morph.style.is_animated()) {
+            paths.push(PropertyPath::ShapeStyle);
         }
         for effect in &self.effects {
             paths.extend((0..effect.properties.len()).map(|parameter| PropertyPath::Effect { effect: effect.id, parameter }));

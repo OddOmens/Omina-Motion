@@ -1,0 +1,25 @@
+# Iris's ready-written help, shared by every app. Each topic says which apps it is about
+# (`apps`): in those apps Iris may offer a button that does it (`command`, the app's own command
+# id); asked anywhere else, she answers with "In <app>: …" and no button. `tip = true` puts it
+# among the tips she gives when her face is clicked in those apps.
+#
+# `{key:command-id}` in a body is replaced with that command's current shortcut, so answers
+# stay right after keys are changed.
+#
+# Write only what is true of the apps today. Each app has a file of its own beside this one
+# (`studio.toml`, `canvas.toml`, `develop.toml`); this file holds the topics about more than
+# one app. Every app reads all four, so each can answer for the others.
+
+[[topic]]
+title = "Animate an Omina Edit design"
+body = "In Omina Edit, choose File ▸ Bring to Motion ({key:bring-to-motion}). The design opens in Omina Motion as a composition, ready to animate: text as text layers, shapes as shape layers with their gradients, strokes and drop shadows, plain colors as solids, and the layers inside plain groups one by one. Photos come as pictures, and so do layers with a mask, clipped layers, and glows or other styles Omina Motion has no match for, so they still look the same. Omina Motion is started for you if it isn't open."
+keywords = "canvas omina edit design send move open motion animate studio bring transfer"
+apps = ["canvas"]
+command = "bring-to-motion"
+
+[[topic]]
+title = "Use the same colors and text styles in every app"
+body = "Libraries are shared: a brand's colors and text styles saved in Omina Edit show up in Omina Motion's Libraries within moments, and the other way round."
+keywords = "library libraries share shared colors swatch palette text style brand canvas studio omina edit motion both"
+apps = ["canvas", "studio"]
+

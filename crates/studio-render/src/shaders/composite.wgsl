@@ -4,7 +4,8 @@
 // adjustment's effects applied, and the matte holds the adjustment layer's shape.
 
 struct CompositeUniform {
-    // x: blend mode, y: matte mode, z: kind (0 layer, 1 adjustment), w: unused.
+    // x: blend mode, y: matte mode, z: kind (0 layer, 1 adjustment), w: 1 to mix in display
+    // colors rather than linear light.
     modes: vec4<u32>,
     // x: opacity 0-1.
     values: vec4<f32>,
@@ -73,12 +74,45 @@ fn matte_amount(mode: u32, matte: vec4<f32>) -> f32 {
     }
 }
 
+// One channel between linear light and display (sRGB) values. Values past 1 (bright light)
+// follow the same curve, so nothing is clipped on the way through.
+fn encode(v: f32) -> f32 {
+    return select(1.055 * pow(v, 1.0 / 2.4) - 0.055, v * 12.92, v <= 0.0031308);
+}
+
+fn decode(v: f32) -> f32 {
+    return select(pow((v + 0.055) / 1.055, 2.4), v / 12.92, v <= 0.04045);
+}
+
+// A premultiplied color moved between linear light and display values. Pure light (color with
+// no coverage) is converted as it is, since it has no straight color.
+fn to_display(c: vec4<f32>) -> vec4<f32> {
+    let straight = select(c.rgb / c.a, c.rgb, c.a <= 0.0001);
+    let shown = vec3(encode(max(straight.r, 0.0)), encode(max(straight.g, 0.0)), encode(max(straight.b, 0.0)));
+    return vec4(select(shown * c.a, shown, c.a <= 0.0001), c.a);
+}
+
+fn to_linear(c: vec4<f32>) -> vec4<f32> {
+    let straight = select(c.rgb / c.a, c.rgb, c.a <= 0.0001);
+    let light = vec3(decode(max(straight.r, 0.0)), decode(max(straight.g, 0.0)), decode(max(straight.b, 0.0)));
+    return vec4(select(light * c.a, light, c.a <= 0.0001), c.a);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.position.xy);
-    let b = textureLoad(backdrop_tex, pixel, 0);
-    let layer = textureLoad(layer_tex, pixel, 0);
     let matte = textureLoad(matte_tex, pixel, 0);
+    if (u.modes.w == 1u) {
+        // Mixed in display colors, as most design tools do, then turned back into light.
+        let b = to_display(textureLoad(backdrop_tex, pixel, 0));
+        let layer = to_display(textureLoad(layer_tex, pixel, 0));
+        return to_linear(composite(b, layer, matte));
+    }
+    return composite(textureLoad(backdrop_tex, pixel, 0), textureLoad(layer_tex, pixel, 0), matte);
+}
+
+// The layer over the backdrop, with the layer's opacity, blend mode and matte.
+fn composite(b: vec4<f32>, layer: vec4<f32>, matte: vec4<f32>) -> vec4<f32> {
     let opacity = u.values.x;
 
     if (u.modes.z == 1u) {

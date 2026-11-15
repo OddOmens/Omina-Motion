@@ -28,7 +28,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
     let source_name = comp.name.clone();
     let target = cx.weak_entity();
 
-    window.open_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, _| {
         let mut list = div().flex().flex_col().gap_2().text_size(px(size::TEXT + 1.0));
         for (index, &(name, width, height)) in SIZES.iter().enumerate() {
             let same = (width, height) == current;

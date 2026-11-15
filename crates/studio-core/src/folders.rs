@@ -3,14 +3,88 @@
 
 use crate::model::{Id, LabelColor, Project, ProjectItem, ProjectItemKind};
 
-/// Adds a folder named `name` inside `parent` (`None` for the top level). Returns its id.
+/// The label colors folders are given, in the order they are handed out, so each folder
+/// (and with it the things kept in it) can be told apart at a glance.
+const FOLDER_LABELS: [LabelColor; 11] = [
+    LabelColor::Blue,
+    LabelColor::Seafoam,
+    LabelColor::Orange,
+    LabelColor::Pink,
+    LabelColor::Aqua,
+    LabelColor::Yellow,
+    LabelColor::Lavender,
+    LabelColor::Peach,
+    LabelColor::Green,
+    LabelColor::Purple,
+    LabelColor::Red,
+];
+
+/// The label color for a new folder: the first one no folder has yet, or once every color is
+/// taken, the next one in turn.
+fn next_folder_label(project: &Project) -> LabelColor {
+    let folders = || project.items.iter().filter(|item| item.kind == ProjectItemKind::Folder);
+    FOLDER_LABELS.into_iter().find(|label| folders().all(|folder| folder.label != *label)).unwrap_or(FOLDER_LABELS[folders().count() % FOLDER_LABELS.len()])
+}
+
+/// The label color of `folder`, which the items put in it take. The top level (`None`) has none.
+pub fn folder_label(project: &Project, folder: Option<Id>) -> LabelColor {
+    folder.and_then(|folder| project.item(folder)).map_or(LabelColor::None, |folder| folder.label)
+}
+
+/// Gives `item` the label color of the folder `to` it is going into (none, at the top level).
+/// An item whose color was picked by hand keeps it, and so does a folder, which has a color
+/// of its own.
+fn take_folder_label(project: &mut Project, item: Id, to: Option<Id>) {
+    let entering = folder_label(project, to);
+    if let Some(item) = project.items.iter_mut().find(|candidate| candidate.id == item)
+        && item.kind != ProjectItemKind::Folder
+        && !item.label_picked
+    {
+        item.label = entering;
+    }
+}
+
+/// Colors the folders of a project saved before folders had colors, when it is opened: each
+/// folder gets a color of its own, and the items directly in it take that color. An item
+/// keeps a color that looks picked by hand (one that is neither blank nor the color its kind
+/// was imported with). Does nothing once any folder has a color, so a folder later set back
+/// to no color stays that way. Returns whether anything changed.
+pub fn color_older_project(project: &mut Project) -> bool {
+    let folders: Vec<Id> = project.items.iter().filter(|item| item.kind == ProjectItemKind::Folder).map(|item| item.id).collect();
+    if folders.is_empty() || folders.iter().any(|folder| folder_label(project, Some(*folder)) != LabelColor::None) {
+        return false;
+    }
+    // The label each kind of item is given on import.
+    let imported_with = |kind: ProjectItemKind| match kind {
+        ProjectItemKind::Image => LabelColor::Peach,
+        ProjectItemKind::Footage => LabelColor::Aqua,
+        ProjectItemKind::Audio => LabelColor::Green,
+        ProjectItemKind::Folder | ProjectItemKind::Composition | ProjectItemKind::Solid => LabelColor::None,
+    };
+    for folder in folders {
+        let label = next_folder_label(project);
+        for item in project.items.iter_mut() {
+            let inside = item.parent == Some(folder) && item.kind != ProjectItemKind::Folder;
+            let untouched = !item.label_picked && (item.label == LabelColor::None || item.label == imported_with(item.kind));
+            if item.id == folder || (inside && untouched) {
+                item.label = label;
+            }
+        }
+    }
+    true
+}
+
+/// Adds a folder named `name` inside `parent` (`None` for the top level), with a label color
+/// no other folder has. Returns its id.
 pub fn add_folder(project: &mut Project, name: &str, parent: Option<Id>) -> Id {
     let id = project.allocate_id();
+    let label = next_folder_label(project);
     project.items.push(ProjectItem {
         id,
         name: name.to_owned(),
         kind: ProjectItemKind::Folder,
-        label: LabelColor::None,
+        label,
+        label_picked: false,
         parent,
         size: None,
         duration_seconds: None,
@@ -42,7 +116,8 @@ pub fn add_default_folders(project: &mut Project, names: &[String]) {
 }
 
 /// Puts `item` in the top-level folder named `folder`, making the folder if the project has none
-/// by that name yet. A blank name leaves the item where it is.
+/// by that name yet. A blank name leaves the item where it is. The item takes the folder's
+/// label color unless its own was picked by hand.
 pub fn file_into(project: &mut Project, item: Id, folder: &str) {
     let folder = folder.trim();
     if folder.is_empty() {
@@ -52,6 +127,7 @@ pub fn file_into(project: &mut Project, item: Id, folder: &str) {
     if let Some(item) = project.items.iter_mut().find(|candidate| candidate.id == item) {
         item.parent = Some(folder);
     }
+    take_folder_label(project, item, Some(folder));
 }
 
 /// Whether `item` is `folder` or somewhere inside it.
@@ -67,7 +143,8 @@ fn is_within(project: &Project, item: Id, folder: Id) -> bool {
 }
 
 /// Moves `item` into folder `parent`, or to the top level with `None`. A folder can't go inside
-/// itself or one of its own folders. Returns whether it moved.
+/// itself or one of its own folders. The item takes its new folder's label color unless its
+/// own was picked by hand. Returns whether it moved.
 pub fn move_to(project: &mut Project, item: Id, parent: Option<Id>) -> bool {
     if let Some(folder) = parent {
         let is_folder = project.item(folder).is_some_and(|folder| folder.kind == ProjectItemKind::Folder);
@@ -76,12 +153,11 @@ pub fn move_to(project: &mut Project, item: Id, parent: Option<Id>) -> bool {
         }
     }
     match project.items.iter_mut().find(|candidate| candidate.id == item) {
-        Some(found) if found.parent != parent => {
-            found.parent = parent;
-            true
-        }
-        _ => false,
+        Some(found) if found.parent != parent => found.parent = parent,
+        _ => return false,
     }
+    take_folder_label(project, item, parent);
+    true
 }
 
 /// Puts folder `folder` just before (or with `after`, just after) folder `beside`, in the same
@@ -157,5 +233,96 @@ mod tests {
         assert!(place_folder(&mut project, b, inside, false));
         assert_eq!(project.item(b).unwrap().parent, Some(a));
         assert!(!place_folder(&mut project, a, inside, true), "a folder can't go inside itself");
+    }
+
+    #[test]
+    fn folders_get_colors_of_their_own_and_items_take_the_color_of_the_folder_they_are_in() {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        add_default_folders(&mut project, &["Footage".to_owned(), "Music".to_owned()]);
+        let (footage, music) = (top_folder(&project, "Footage").unwrap(), top_folder(&project, "Music").unwrap());
+        let label = |project: &Project, id: Id| project.item(id).unwrap().label;
+        let mut labels: Vec<LabelColor> = [footage, music, top_folder(&project, EXPORTS_FOLDER).unwrap()].map(|folder| label(&project, folder)).to_vec();
+        assert!(!labels.contains(&LabelColor::None), "every folder has a color");
+        labels.dedup();
+        assert_eq!(labels.len(), 3, "each a different one");
+
+        // A picture filed into Footage wears Footage's color, and Music's once moved there.
+        let picture = crate::edit::import_image(&mut project, "/media/still.png".into(), Vec2::new(64.0, 36.0));
+        file_into(&mut project, picture, "Footage");
+        assert_eq!(label(&project, picture), label(&project, footage));
+        assert!(move_to(&mut project, picture, Some(music)));
+        assert_eq!(label(&project, picture), label(&project, music));
+
+        // A color picked by hand stays through a move.
+        crate::edit::set_item_label(&mut project, picture, LabelColor::Red);
+        assert!(move_to(&mut project, picture, Some(footage)));
+        assert_eq!(label(&project, picture), LabelColor::Red);
+
+        // A folder moved into another keeps its own color.
+        let music_color = label(&project, music);
+        assert!(move_to(&mut project, music, Some(footage)));
+        assert_eq!(label(&project, music), music_color);
+    }
+
+    #[test]
+    fn recoloring_a_folder_recolors_the_items_that_wore_its_color() {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        let folder = add_folder(&mut project, "Footage", None);
+        let follows = crate::edit::import_image(&mut project, "/media/a.png".into(), Vec2::new(64.0, 36.0));
+        let picked = crate::edit::import_image(&mut project, "/media/b.png".into(), Vec2::new(64.0, 36.0));
+        move_to(&mut project, follows, Some(folder));
+        move_to(&mut project, picked, Some(folder));
+        crate::edit::set_item_label(&mut project, picked, LabelColor::Red);
+        crate::edit::set_item_label(&mut project, folder, LabelColor::Green);
+        assert_eq!(project.item(follows).unwrap().label, LabelColor::Green);
+        assert_eq!(project.item(picked).unwrap().label, LabelColor::Red, "a color picked by hand stays");
+    }
+
+    #[test]
+    fn new_compositions_go_into_the_exports_folder_in_its_color() {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        add_default_folders(&mut project, &[]);
+        let exports = top_folder(&project, EXPORTS_FOLDER).unwrap();
+        let settings = crate::edit::CompositionSettings {
+            name: "Comp".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: crate::time::FrameRate::new(30, 1),
+            duration_frames: 300,
+            background: crate::model::Rgba::hex(0x000000),
+        };
+        let comp = crate::edit::new_composition(&mut project, &settings).unwrap();
+        let item = project.item(comp).unwrap();
+        assert_eq!((item.parent, item.label), (Some(exports), project.item(exports).unwrap().label));
+    }
+
+    #[test]
+    fn an_older_project_gets_folder_colors_once_and_keeps_colors_picked_by_hand() {
+        let mut project = Project::new(Vec::new(), Vec::new());
+        let footage = add_folder(&mut project, "Footage", None);
+        let music = add_folder(&mut project, "Music", None);
+        let plain = crate::edit::import_image(&mut project, "/media/a.png".into(), Vec2::new(64.0, 36.0));
+        let picked = crate::edit::import_image(&mut project, "/media/b.png".into(), Vec2::new(64.0, 36.0));
+        // As a file saved before folders had colors: no folder color, items where they were
+        // put with the colors they had (one still as imported, one changed by hand).
+        for item in project.items.iter_mut() {
+            match item.id {
+                id if id == footage || id == music => item.label = LabelColor::None,
+                id if id == plain => item.parent = Some(footage),
+                id if id == picked => (item.parent, item.label) = (Some(footage), LabelColor::Purple),
+                _ => {}
+            }
+        }
+        assert!(color_older_project(&mut project));
+        let label = |project: &Project, id: Id| project.item(id).unwrap().label;
+        assert_ne!(label(&project, footage), LabelColor::None);
+        assert_ne!(label(&project, footage), label(&project, music), "each folder its own color");
+        assert_eq!(label(&project, plain), label(&project, footage), "an item as imported takes its folder's color");
+        assert_eq!(label(&project, picked), LabelColor::Purple, "a changed one keeps its color");
+
+        // Once colored it is left alone, so a folder set back to no color stays that way.
+        crate::edit::set_item_label(&mut project, music, LabelColor::None);
+        assert!(!color_older_project(&mut project));
+        assert_eq!(label(&project, music), LabelColor::None);
     }
 }

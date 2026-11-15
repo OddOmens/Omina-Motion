@@ -261,6 +261,21 @@ struct AnimatedFile<T> {
     keyframes: Vec<Keyframe<T>>,
 }
 
+/// Reads a number that may or may not be keyframed: project files from before a setting could
+/// be animated hold it as a bare number, and later ones as an animated value.
+pub fn number_or_animated<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Animated<f32>, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Number(f32),
+        Animated(Animated<f32>),
+    }
+    Ok(match <Saved as serde::Deserialize>::deserialize(deserializer)? {
+        Saved::Number(value) => Animated::constant(value),
+        Saved::Animated(animated) => animated,
+    })
+}
+
 impl<T> From<AnimatedFile<T>> for Animated<T> {
     fn from(file: AnimatedFile<T>) -> Self {
         let mut keyframes = file.keyframes;

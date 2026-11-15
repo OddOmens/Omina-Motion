@@ -145,16 +145,7 @@ fn color(rgba: Rgba) -> Value {
 }
 
 fn blend(mode: BlendMode) -> i64 {
-    match mode {
-        BlendMode::Normal => 0,
-        BlendMode::Multiply => 1,
-        BlendMode::Screen => 2,
-        BlendMode::Overlay => 3,
-        BlendMode::HardLight => 8,
-        BlendMode::SoftLight => 9,
-        BlendMode::Difference => 10,
-        BlendMode::Add => 16,
-    }
+    mode.lottie_number() as i64
 }
 
 fn image_id(item: Id) -> String {

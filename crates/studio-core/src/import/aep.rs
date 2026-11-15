@@ -174,7 +174,7 @@ impl Reader {
                 layers.push(layer);
             }
         }
-        Some(SceneComp { key, name, folder, width, height, fps, seconds, background: Rgba::hex(0x000000), layers })
+        Some(SceneComp { key, name, folder, width, height, fps, seconds, background: Rgba::hex(0x000000), linear_blending: true, layers })
     }
 
     fn layer(&mut self, layer: Chunk<'_>, time_scale: f64) -> Option<SceneLayer> {
@@ -207,7 +207,7 @@ impl Reader {
                 self.skipped.models += 1;
                 return None;
             }
-            LAYER_TEXT => SceneContent::Text(properties.and_then(text).unwrap_or(SceneText { text: name.clone(), font: None, size: 72.0, fill: Some(Rgba::hex(0xffffff)), align: TextAlign::Left })),
+            LAYER_TEXT => SceneContent::Text(properties.and_then(text).unwrap_or(SceneText::plain(name.clone(), None, 72.0, Some(Rgba::hex(0xffffff)), TextAlign::Left))),
             LAYER_SHAPE => {
                 let mut shapes = Vec::new();
                 if let Some(vectors) = properties.and_then(|group| member(group, "ADBE Root Vectors Group")) {
@@ -236,7 +236,7 @@ impl Reader {
                 transform = layer_transform(xform, start, time_scale);
             }
         }
-        Some(SceneLayer { key: u64::from(u32_at(header, 0)?), name, parent, start, in_point, out_point, visible: switches & 0x01 != 0, content, transform })
+        Some(SceneLayer { key: u64::from(u32_at(header, 0)?), name, parent, start, in_point, out_point, visible: switches & 0x01 != 0, blend: crate::model::BlendMode::Normal, content, transform, effects: Vec::new() })
     }
 }
 
@@ -439,7 +439,7 @@ fn contents(group: Chunk<'_>, to_layer: Affine, fill: Option<Rgba>, stroke: Opti
             _ => continue,
         };
         if fill.is_some() || stroke.is_some() {
-            out.push(SceneShape { geometry: to_layer.geometry(geometry), fill, stroke });
+            out.push(SceneShape::solid(to_layer.geometry(geometry), fill, stroke));
         }
     }
 }
@@ -515,7 +515,7 @@ fn text(properties: Chunk<'_>) -> Option<SceneText> {
         2 => TextAlign::Center,
         _ => TextAlign::Left,
     });
-    Some(SceneText { text: words, font, size, fill, align })
+    Some(SceneText::plain(words, font, size, fill, align))
 }
 
 fn find(data: &[u8], needle: &[u8], from: usize) -> Option<usize> {

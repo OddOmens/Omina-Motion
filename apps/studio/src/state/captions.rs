@@ -121,6 +121,34 @@ impl EditorState {
         }
     }
 
+    /// Cuts words `range` of caption layer `layer` out of the video: the time they are spoken
+    /// is removed from every unlocked layer and what follows closes up (see
+    /// `transcript::cut_words`). The playhead is left where the cut was made. Returns how many
+    /// frames were removed.
+    pub fn cut_caption_words(&mut self, layer: Id, range: std::ops::Range<usize>) -> Option<i64> {
+        self.settle_drags();
+        let cut_at = studio_core::transcript::word_span(self.composition().layer(layer)?, range.clone())?.0;
+        let comp = self.active_comp;
+        let removed = studio_core::transcript::cut_words(&mut self.project, comp, layer, range)?;
+        self.set_current_frame(cut_at);
+        Some(removed)
+    }
+
+    /// How many filler words ("um", "uh") caption layer `layer` has.
+    pub fn filler_word_count(&self, layer: Id) -> usize {
+        match self.composition().layer(layer).map(|layer| &layer.content) {
+            Some(LayerContent::Captions { words, .. }) => words.iter().filter(|word| studio_core::transcript::is_filler(&word.text)).count(),
+            _ => 0,
+        }
+    }
+
+    /// Cuts every filler word of caption layer `layer` out of the video. Returns how many.
+    pub fn cut_filler_words(&mut self, layer: Id) -> usize {
+        self.settle_drags();
+        let comp = self.active_comp;
+        studio_core::transcript::cut_filler_words(&mut self.project, comp, layer)
+    }
+
     /// Replaces words `range` with `text`, sharing their time among the new words by length
     /// (see `captions::spread_words`). An empty text deletes them. When the last word replaced
     /// ended a subtitle cue, the new last word does.

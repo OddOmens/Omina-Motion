@@ -40,6 +40,12 @@ impl Command {
     pub fn action(&self) -> Box<dyn Action> {
         (self.make)()
     }
+
+    /// Whether the command is something done in the editor, rather than to the whole app
+    /// (Quit, Hide).
+    pub fn works_in_editor(&self) -> bool {
+        self.scope != Scope::App
+    }
 }
 
 macro_rules! command {
@@ -101,8 +107,25 @@ pub static COMMANDS: &[Command] = &[
     command!("zoom-viewer-in", "Zoom the viewer in", "View", NotTyping, ZoomViewerIn),
     command!("zoom-viewer-out", "Zoom the viewer out", "View", NotTyping, ZoomViewerOut),
     command!("toggle-guides", "Show or hide guides", "View", NotTyping, ToggleGuides),
+    command!("show-position-keyframes", "Show position keyframes in the timeline", "View", NotTyping, ShowPositionKeyframes),
+    command!("show-rotation-keyframes", "Show rotation keyframes in the timeline", "View", NotTyping, ShowRotationKeyframes),
+    command!("show-scale-keyframes", "Show scale keyframes in the timeline", "View", NotTyping, ShowScaleKeyframes),
+    command!("show-all-keyframes", "Show all keyframes in the timeline", "View", NotTyping, ShowAllKeyframes),
+    command!("toggle-layer-controls", "Show or hide the outlines of selected layers", "View", NotTyping, ToggleLayerControls),
     command!("toggle-full-screen", "Full screen", "View", Editor, ToggleFullScreen),
     command!("dismiss", "Close a popup, or stop", "View", NotTyping, Dismiss),
+    command!("record-voiceover", "Record a voiceover at the playhead, or stop recording", "Playback", Editor, ToggleVoiceover),
+    command!("sync-by-sound", "Line up the selected clips by their sound", "Multicam", Editor, SyncBySound),
+    command!("toggle-multicam", "Start or end cutting between the selected clips", "Multicam", Editor, ToggleMulticam),
+    command!("multicam-angle-1", "Cut to angle 1", "Multicam", NotTyping, MulticamAngle1),
+    command!("multicam-angle-2", "Cut to angle 2", "Multicam", NotTyping, MulticamAngle2),
+    command!("multicam-angle-3", "Cut to angle 3", "Multicam", NotTyping, MulticamAngle3),
+    command!("multicam-angle-4", "Cut to angle 4", "Multicam", NotTyping, MulticamAngle4),
+    command!("multicam-angle-5", "Cut to angle 5", "Multicam", NotTyping, MulticamAngle5),
+    command!("multicam-angle-6", "Cut to angle 6", "Multicam", NotTyping, MulticamAngle6),
+    command!("multicam-angle-7", "Cut to angle 7", "Multicam", NotTyping, MulticamAngle7),
+    command!("multicam-angle-8", "Cut to angle 8", "Multicam", NotTyping, MulticamAngle8),
+    command!("multicam-angle-9", "Cut to angle 9", "Multicam", NotTyping, MulticamAngle9),
     command!("new-project", "New project", "Project", Editor, NewProject),
     command!("new-composition", "New composition", "Project", Editor, NewComposition),
     command!("composition-settings", "Composition settings", "Project", Editor, CompositionSettings),
@@ -112,9 +135,12 @@ pub static COMMANDS: &[Command] = &[
     command!("close-project", "Close project", "Project", Editor, CloseProject),
     command!("import", "Import", "Project", Editor, Import),
     command!("export", "Export", "Project", Editor, Export),
+    command!("save-frame", "Save the current frame as a picture", "Project", Editor, SaveFrame),
+    command!("copy-frame", "Copy the current frame to the clipboard", "Project", Editor, CopyFrame),
+    command!("export-queue", "Open the export queue", "Project", Editor, ExportQueue),
     command!("open-settings", "Settings", "Project", Editor, OpenSettings),
-    command!("quit", "Quit Studio", "Project", App, Quit),
-    command!("hide", "Hide Studio", "Project", App, HideStudio),
+    command!("quit", "Quit Omina Motion", "Project", App, Quit),
+    command!("hide", "Hide Omina Motion", "Project", App, HideStudio),
     command!("hide-others", "Hide other apps", "Project", App, HideOtherApps),
 ];
 
@@ -138,7 +164,7 @@ impl KeyPreset {
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Studio => "Studio",
+            Self::Studio => "Omina Motion",
             Self::AfterEffects => "After Effects",
             Self::Premiere => "Premiere Pro",
         }
@@ -186,8 +212,12 @@ const STUDIO: &[(&str, &str)] = &[
     ("ripple-tool", "b"),
     ("roll-tool", "n"),
     ("slip-tool", "y"),
-    ("slide-tool", "u"),
-    ("rate-stretch-tool", "r"),
+    ("slide-tool", "shift-u"),
+    ("rate-stretch-tool", "shift-r"),
+    ("show-position-keyframes", "p"),
+    ("show-rotation-keyframes", "r"),
+    ("show-scale-keyframes", "s"),
+    ("show-all-keyframes", "u"),
     ("undo", "cmd-z"),
     ("redo", "cmd-shift-z"),
     ("cut", "cmd-x"),
@@ -206,7 +236,7 @@ const STUDIO: &[(&str, &str)] = &[
     ("trim-out", "alt-]"),
     ("precompose", "cmd-shift-c"),
     ("easy-ease", "f9"),
-    ("toggle-snapping", "s"),
+    ("toggle-snapping", "cmd-shift-;"),
     ("new-solid", "cmd-y"),
     ("new-adjustment-layer", "cmd-alt-y"),
     ("new-null", "cmd-alt-shift-y"),
@@ -214,6 +244,7 @@ const STUDIO: &[(&str, &str)] = &[
     ("zoom-viewer-in", "cmd-+"),
     ("zoom-viewer-out", "cmd--"),
     ("toggle-guides", "'"),
+    ("toggle-layer-controls", "cmd-shift-h"),
     ("toggle-full-screen", "ctrl-cmd-f"),
     ("dismiss", "escape"),
     ("new-project", "cmd-alt-n"),
@@ -222,6 +253,15 @@ const STUDIO: &[(&str, &str)] = &[
     ("open", "cmd-o"),
     ("save", "cmd-s"),
     ("save-as", "cmd-shift-s"),
+    ("multicam-angle-1", "1"),
+    ("multicam-angle-2", "2"),
+    ("multicam-angle-3", "3"),
+    ("multicam-angle-4", "4"),
+    ("multicam-angle-5", "5"),
+    ("multicam-angle-6", "6"),
+    ("multicam-angle-7", "7"),
+    ("multicam-angle-8", "8"),
+    ("multicam-angle-9", "9"),
     ("close-project", "cmd-w"),
     ("import", "cmd-i"),
     ("export", "cmd-m"),
@@ -243,7 +283,6 @@ const AFTER_EFFECTS_CHANGES: &[(&str, &[&str])] = &[
     ("rate-stretch-tool", &[]),
     ("eyedropper-tool", &[]),
     ("toggle-marker", &["*"]),
-    ("toggle-snapping", &["cmd-shift-;"]),
     ("next-frame", &["pagedown", "cmd-right"]),
     ("previous-frame", &["pageup", "cmd-left"]),
 ];
@@ -259,6 +298,14 @@ const PREMIERE_CHANGES: &[(&str, &[&str])] = &[
     ("previous-ten-frames", &[]),
     ("type-tool", &["t"]),
     ("pen-tool", &["p"]),
+    // Premiere's own letters: P is the pen, S is snapping, U and R are editing tools.
+    ("show-position-keyframes", &[]),
+    ("show-rotation-keyframes", &[]),
+    ("show-scale-keyframes", &[]),
+    ("show-all-keyframes", &[]),
+    ("toggle-snapping", &["s"]),
+    ("slide-tool", &["u"]),
+    ("rate-stretch-tool", &["r"]),
     ("shape-tool", &[]),
     ("rotate-tool", &[]),
     ("split-layer", &["cmd-k"]),
@@ -326,6 +373,37 @@ struct BaseBindings(Vec<KeyBinding>);
 
 impl Global for BaseBindings {}
 
+/// The shortcuts Iris's recipes have (see `iris::recipes`), as each key and the recipe it
+/// runs. Kept here so every rebuild of the keymap binds them again.
+#[derive(Default)]
+struct RecipeKeys(Vec<(String, String)>);
+
+impl Global for RecipeKeys {}
+
+/// Runs the Iris recipe called `name`, from the shortcut it was given.
+#[derive(Clone, PartialEq, gpui_kit::Action)]
+#[action(namespace = studio, no_json)]
+pub struct RunRecipe {
+    pub name: String,
+}
+
+/// Binds the recipes' shortcuts (`keys`: each key and its recipe's name) in place of the ones
+/// bound before, so a shortcut taken away stops working at once.
+pub fn set_recipe_keys(settings: &crate::app_settings::AppSettings, keys: Vec<(String, String)>, cx: &mut App) {
+    cx.set_global(RecipeKeys(keys));
+    apply(settings, cx);
+}
+
+/// Every command's shortcuts written as Iris writes a recipe's (`iris::recipes::normalize_key`),
+/// so a recipe is never given one of them. Keys a recipe could never have (a letter alone)
+/// are left out, as no recipe could clash with them.
+pub fn keys_for_recipes(shortcuts: &Shortcuts) -> Vec<String> {
+    let mut keys: Vec<String> = keys_in_use(shortcuts).into_values().flatten().filter_map(|key| iris::recipes::normalize_key(&key).ok()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
 /// Notes the components' bindings, then binds `shortcuts`. Call once, after `gpui_kit::init`.
 pub fn init(settings: &crate::app_settings::AppSettings, cx: &mut App) {
     let base = cx.key_bindings().borrow().bindings().cloned().collect();
@@ -352,6 +430,13 @@ pub fn apply(settings: &crate::app_settings::AppSettings, cx: &mut App) {
             if let Ok(binding) = KeyBinding::load(&key, command.action(), context.clone(), false, None, cx) {
                 bindings.push(binding);
             }
+        }
+    }
+    // Recipes' shortcuts work anywhere in the editor, even while typing: each has ⌘, ⌃ or ⌥.
+    let recipe_keys = cx.try_global::<RecipeKeys>().map(|keys| keys.0.clone()).unwrap_or_default();
+    for (key, name) in recipe_keys {
+        if let Ok(binding) = KeyBinding::load(&key, Box::new(RunRecipe { name }), editor.clone(), false, None, cx) {
+            bindings.push(binding);
         }
     }
     cx.clear_key_bindings();

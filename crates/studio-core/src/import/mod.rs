@@ -79,6 +79,8 @@ pub struct SceneComp {
     pub fps: f64,
     pub seconds: f64,
     pub background: Rgba,
+    /// Whether its layers mix in linear light (see `Composition::linear_blending`).
+    pub linear_blending: bool,
     /// Top layer first.
     pub layers: Vec<SceneLayer>,
 }
@@ -94,8 +96,20 @@ pub struct SceneLayer {
     pub in_point: f64,
     pub out_point: f64,
     pub visible: bool,
+    /// How the layer mixes with those below it.
+    pub blend: crate::model::BlendMode,
     pub content: SceneContent,
     pub transform: SceneTransform,
+    /// Studio effects to add to the layer, in order.
+    pub effects: Vec<SceneEffect>,
+}
+
+/// An effect from Studio's catalog, by name, with its parameters' values in the catalog's
+/// order. Parameters past the end of `values` keep their defaults.
+#[derive(Clone, Debug)]
+pub struct SceneEffect {
+    pub name: &'static str,
+    pub values: Vec<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -123,18 +137,42 @@ pub struct SceneVector {
 #[derive(Clone, Debug)]
 pub struct SceneText {
     pub text: String,
+    /// The font's PostScript name ("MyriadPro-Bold"), read into a family and weight.
     pub font: Option<String>,
+    /// The family and weight when the file states them outright; used in place of `font`.
+    pub family: Option<(String, u16)>,
     pub size: f32,
+    /// Distance between baselines in pixels; `None` for 1.2 × the size.
+    pub line_height: Option<f32>,
+    /// Extra spacing between characters, in thousandths of an em.
+    pub tracking: Option<f32>,
     pub fill: Option<Rgba>,
+    /// The outline's color and width in pixels.
+    pub stroke: Option<(Rgba, f32)>,
     pub align: TextAlign,
 }
 
-/// One drawable of a shape layer, in the layer's own pixels (group transforms applied).
+impl SceneText {
+    /// Text in a font, size, color and alignment, with Studio's defaults for the rest.
+    pub fn plain(text: String, font: Option<String>, size: f32, fill: Option<Rgba>, align: TextAlign) -> Self {
+        Self { text, font, family: None, size, line_height: None, tracking: None, fill, stroke: None, align }
+    }
+}
+
+/// One drawable of a shape layer, in the layer's own pixels (group transforms applied). A
+/// gradient's `from` and `to` are in those pixels too, not yet fractions of the shape's box.
 #[derive(Clone, Debug)]
 pub struct SceneShape {
     pub geometry: Geometry,
-    pub fill: Option<Rgba>,
-    pub stroke: Option<(Rgba, f32)>,
+    pub fill: Option<Paint>,
+    pub stroke: Option<Stroke>,
+}
+
+impl SceneShape {
+    /// A shape filled and stroked with plain colors (the stroke's width in pixels).
+    pub fn solid(geometry: Geometry, fill: Option<Rgba>, stroke: Option<(Rgba, f32)>) -> Self {
+        Self { geometry, fill: fill.map(Paint::Solid), stroke: stroke.map(|(color, width)| Stroke { paint: Paint::Solid(color), width }) }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -303,6 +341,9 @@ pub fn build(project: &mut Project, scene: &Scene, name: &str, probe: &dyn Fn(&P
         if let Some(item) = working.items.iter_mut().find(|item| item.id == id) {
             item.parent = folder_of(comp.folder);
         }
+        if let Some(made) = working.composition_mut(id) {
+            made.linear_blending = comp.linear_blending;
+        }
         comps.insert(comp.key, id);
     }
     for comp in &scene.comps {
@@ -354,6 +395,7 @@ fn solid_item(project: &mut Project, name: &str, size: Vec2, color: Rgba) -> Id 
         name: name.to_owned(),
         kind: ProjectItemKind::Solid,
         label: LabelColor::Red,
+        label_picked: false,
         parent: None,
         size: Some(Vec2::new(size.x.clamp(1.0, 30_000.0), size.y.clamp(1.0, 30_000.0))),
         duration_seconds: None,
@@ -365,8 +407,8 @@ fn solid_item(project: &mut Project, name: &str, size: Vec2, color: Rgba) -> Id 
     id
 }
 
-/// Makes one layer (for a shape layer: a holder with one child per shape). Returns the layer
-/// other layers parent to.
+/// Makes one layer (for a shape layer of several shapes: a hidden holder with one child per
+/// shape; of one shape, that shape's layer). Returns the layer other layers parent to.
 fn add_layer(project: &mut Project, comp: Id, layer: &SceneLayer, sources: &HashMap<u64, Id>, comps: &HashMap<u64, Id>, notes: &mut Vec<String>) -> Option<Id> {
     let composition = project.composition(comp)?;
     let (fps, duration) = (composition.frame_rate.fps(), composition.duration_frames);
@@ -378,51 +420,61 @@ fn add_layer(project: &mut Project, comp: Id, layer: &SceneLayer, sources: &Hash
         return None; // Never on screen in this composition.
     }
 
-    let made = match &layer.content {
-        SceneContent::Source(key) => edit::add_layer_from_item(project, comp, *sources.get(key)?, 0, in_frame)?,
-        SceneContent::Comp(key) => match edit::add_layer_from_item(project, comp, *comps.get(key)?, 0, in_frame) {
-            Some(id) => id,
-            None => {
-                notes.push(format!("“{}” uses a composition inside itself, so it was left out.", layer.name));
-                return None;
+    // A shape layer of one shape becomes that shape's layer; its own pixels start at the
+    // shape's box, which shifts the anchor point by as much.
+    let single = single_shape(&layer.content);
+    let mut box_origin = Vec2::default();
+    let made = if let Some(shape) = single {
+        let (id, origin) = make_shape(project, comp, shape, in_frame)?;
+        box_origin = origin;
+        id
+    } else {
+        match &layer.content {
+            SceneContent::Source(key) => edit::add_layer_from_item(project, comp, *sources.get(key)?, 0, in_frame)?,
+            SceneContent::Comp(key) => match edit::add_layer_from_item(project, comp, *comps.get(key)?, 0, in_frame) {
+                Some(id) => id,
+                None => {
+                    notes.push(format!("“{}” uses a composition inside itself, so it was left out.", layer.name));
+                    return None;
+                }
+            },
+            SceneContent::Null | SceneContent::Shapes(_) => {
+                let item = solid_item(project, &layer.name, Vec2::new(100.0, 100.0), Rgba::hex(0xffffff));
+                let id = edit::add_layer_from_item(project, comp, item, 0, in_frame)?;
+                // The solid was only needed to make the layer.
+                project.items.retain(|candidate| candidate.id != item);
+                let found = project.composition_mut(comp)?.layer_mut(id)?;
+                found.content = LayerContent::Solid { color: Rgba::TRANSPARENT };
+                found.switches.visible = false;
+                id
             }
-        },
-        SceneContent::Null | SceneContent::Shapes(_) => {
-            let item = solid_item(project, &layer.name, Vec2::new(100.0, 100.0), Rgba::hex(0xffffff));
-            let id = edit::add_layer_from_item(project, comp, item, 0, in_frame)?;
-            // The solid was only needed to make the layer.
-            project.items.retain(|candidate| candidate.id != item);
-            let found = project.composition_mut(comp)?.layer_mut(id)?;
-            found.content = LayerContent::Solid { color: Rgba::TRANSPARENT };
-            found.switches.visible = false;
-            id
-        }
-        SceneContent::Adjustment => {
-            let size = Vec2::new(center.x * 2.0, center.y * 2.0);
-            let item = solid_item(project, &layer.name, size, Rgba::hex(0xffffff));
-            let id = edit::add_layer_from_item(project, comp, item, 0, in_frame)?;
-            project.items.retain(|candidate| candidate.id != item);
-            let found = project.composition_mut(comp)?.layer_mut(id)?;
-            found.content = LayerContent::Adjustment;
-            found.switches.adjustment = true;
-            id
-        }
-        SceneContent::Vector(vector) => {
-            let style = ShapeStyle { fill: vector.fill, stroke: vector.stroke, ..ShapeStyle::new(ShapeKind::Path) };
-            let id = edit::add_path_layer(project, comp, &vector.path, style, in_frame)?;
-            // `add_path_layer` gives an open outline a stroke in place of its fill; a vector shape
-            // keeps exactly the fill and stroke it was drawn with.
-            if let Some(LayerContent::Shape { style, .. }) = project.composition_mut(comp)?.layer_mut(id).map(|layer| &mut layer.content) {
-                style.fill = vector.fill;
-                style.stroke = vector.stroke;
+            SceneContent::Adjustment => {
+                let size = Vec2::new(center.x * 2.0, center.y * 2.0);
+                let item = solid_item(project, &layer.name, size, Rgba::hex(0xffffff));
+                let id = edit::add_layer_from_item(project, comp, item, 0, in_frame)?;
+                project.items.retain(|candidate| candidate.id != item);
+                let found = project.composition_mut(comp)?.layer_mut(id)?;
+                found.content = LayerContent::Adjustment;
+                found.switches.adjustment = true;
+                id
             }
-            id
-        }
-        SceneContent::Text(text) => {
-            let id = edit::add_text_layer(project, comp, &text.text, center, in_frame)?;
-            let composition = project.composition_mut(comp)?;
-            edit::edit_text(composition, id, |_, style| apply_text_style(style, text));
-            id
+            SceneContent::Vector(vector) => {
+                let style = ShapeStyle { fill: vector.fill, stroke: vector.stroke, ..ShapeStyle::new(ShapeKind::Path) };
+                let id = edit::add_path_layer(project, comp, &vector.path, style, in_frame)?;
+                // `add_path_layer` gives an open outline a stroke in place of its fill; a vector shape
+                // keeps exactly the fill and stroke it was drawn with.
+                if let Some(LayerContent::Shape { style, .. }) = project.composition_mut(comp)?.layer_mut(id).map(|layer| &mut layer.content) {
+                    style.fill = vector.fill;
+                    style.stroke = vector.stroke;
+                }
+                id
+            }
+            SceneContent::Text(text) => {
+                let id = edit::add_text_layer(project, comp, &text.text, center, in_frame)?;
+                let composition = project.composition_mut(comp)?;
+                edit::edit_text(composition, id, |_, style| apply_text_style(style, text));
+                id
+            }
         }
     };
 
@@ -435,6 +487,7 @@ fn add_layer(project: &mut Project, comp: Id, layer: &SceneLayer, sources: &Hash
     if !layer.visible {
         found.switches.visible = false;
     }
+    found.blend_mode = layer.blend;
     // Defaults the file leaves out: After Effects' (anchor at the source's middle, or the
     // origin for text and shapes, in the frame's middle, full size, upright, opaque).
     let size = found.size;
@@ -443,23 +496,45 @@ fn add_layer(project: &mut Project, comp: Id, layer: &SceneLayer, sources: &Hash
         SceneContent::Shapes(_) | SceneContent::Text(_) => Vec2::default(),
         _ => size * 0.5,
     };
-    let text_origin = if is_text { text_origin(found) } else { Vec2::default() };
+    let anchor_shift = if is_text { text_origin(found) } else { Vec2::default() - box_origin };
     if let Some(transform) = found.transform.as_mut() {
         let to_frames = |track: &Track<Vec2>, shift: Vec2| animated(track, fps, |value| value + shift);
         let anchor = layer.transform.anchor.clone().unwrap_or(Track::fixed(default_anchor));
-        transform.anchor_point = to_frames(&anchor, text_origin);
+        transform.anchor_point = to_frames(&anchor, anchor_shift);
         transform.position = to_frames(&layer.transform.position.clone().unwrap_or(Track::fixed(center)), Vec2::default());
         transform.scale = to_frames(&layer.transform.scale.clone().unwrap_or(Track::fixed(Vec2::new(100.0, 100.0))), Vec2::default());
         transform.rotation = animated(&layer.transform.rotation.clone().unwrap_or(Track::fixed(0.0)), fps, |value| value);
         transform.opacity = animated(&layer.transform.opacity.clone().unwrap_or(Track::fixed(100.0)), fps, |value| value.clamp(0.0, 100.0));
     }
 
-    if let SceneContent::Shapes(shapes) = &layer.content {
+    if let SceneContent::Shapes(shapes) = &layer.content
+        && single.is_none()
+    {
         for shape in shapes.iter().rev() {
             add_shape(project, comp, made, shape, in_frame, out_frame);
         }
     }
+    add_effects(project, comp, made, layer, notes);
     Some(made)
+}
+
+/// Adds the layer's effects with their values. A shape layer of several shapes is a hidden
+/// holder, which effects can't show on, so they are noted instead.
+fn add_effects(project: &mut Project, comp: Id, made: Id, layer: &SceneLayer, notes: &mut Vec<String>) {
+    let holder = project.composition(comp).and_then(|composition| composition.layer(made)).is_some_and(|found| !found.switches.visible && matches!(found.content, LayerContent::Solid { .. }));
+    for effect in &layer.effects {
+        let added = if holder { None } else { edit::add_effect(project, comp, made, effect.name) };
+        let Some(id) = added else {
+            notes.push(format!("“{}” had a {} that couldn't be added to it.", layer.name, effect.name));
+            continue;
+        };
+        let Some(found) = project.composition_mut(comp).and_then(|composition| composition.layer_mut(made)).and_then(|found| found.effects.iter_mut().find(|candidate| candidate.id == id)) else { continue };
+        for (property, &value) in found.properties.iter_mut().zip(&effect.values) {
+            if value.is_finite() {
+                property.value = Animated::constant(value.clamp(property.info.min, property.info.max));
+            }
+        }
+    }
 }
 
 /// Where a text layer's own origin (After Effects': the start of the first line's baseline, or
@@ -475,8 +550,7 @@ fn text_origin(layer: &crate::model::Layer) -> Vec2 {
 }
 
 fn apply_text_style(style: &mut TextStyle, text: &SceneText) {
-    if let Some(font) = &text.font {
-        let (family, weight) = font_family(font);
+    if let Some((family, weight)) = text.family.clone().or_else(|| text.font.as_deref().map(font_family)) {
         style.font_family = family;
         style.font_weight = weight;
     }
@@ -484,7 +558,15 @@ fn apply_text_style(style: &mut TextStyle, text: &SceneText) {
         style.font_size = text.size.clamp(1.0, 2_000.0);
         style.line_height = style.font_size * 1.2;
     }
+    let within = |value: Option<f32>, (low, high): (f32, f32)| value.filter(|value| value.is_finite()).map(|value| value.clamp(low, high));
+    if let Some(line_height) = within(text.line_height, crate::model::LINE_HEIGHT_RANGE) {
+        style.line_height = line_height;
+    }
+    if let Some(tracking) = within(text.tracking, crate::model::TRACKING_RANGE) {
+        style.tracking = tracking;
+    }
     style.fill = text.fill;
+    style.stroke = text.stroke.filter(|(_, width)| width.is_finite() && *width > 0.0).map(|(color, width)| (color, width.min(crate::model::MAX_STROKE_WIDTH)));
     style.align = text.align;
 }
 
@@ -528,35 +610,75 @@ fn animated<T: Copy + crate::animation::Lerp>(track: &Track<T>, fps: f64, map: i
     if keys.is_empty() { Animated::constant(map(track.value)) } else { Animated::keyframed(keys) }
 }
 
-/// One shape of a shape layer, as a child of the (hidden) layer holding them.
-fn add_shape(project: &mut Project, comp: Id, holder: Id, shape: &SceneShape, in_frame: i64, out_frame: i64) {
-    let fill = shape.fill.map(Paint::Solid);
-    let stroke = shape.stroke.filter(|(_, width)| width.is_finite() && *width > 0.0).map(|(color, width)| Stroke { paint: Paint::Solid(color), width: width.min(crate::model::MAX_STROKE_WIDTH) });
-    let (made, rotation) = match &shape.geometry {
-        Geometry::Rect { center, size, radius, rotation } => {
-            let style = ShapeStyle { fill, stroke, corner_radius: radius.max(0.0).min(size.x.min(size.y) * 0.5), ..ShapeStyle::new(ShapeKind::Rectangle) };
-            (edit::add_shape_layer(project, comp, style, *size, *center, in_frame), *rotation)
-        }
-        Geometry::Ellipse { center, size, rotation } => {
-            let style = ShapeStyle { fill, stroke, ..ShapeStyle::new(ShapeKind::Ellipse) };
-            (edit::add_shape_layer(project, comp, style, *size, *center, in_frame), *rotation)
-        }
+/// Makes one shape as a layer of its own, with any gradient laid over its box. Returns the
+/// layer and where the box's top-left corner is in the shape layer's pixels (the layer's own
+/// pixels start there).
+fn make_shape(project: &mut Project, comp: Id, shape: &SceneShape, in_frame: i64) -> Option<(Id, Vec2)> {
+    // The shape's box: its middle, size and turn, and the kind of shape layer it makes.
+    let (kind, center, size, rotation) = match &shape.geometry {
+        Geometry::Rect { center, size, rotation, .. } => (ShapeKind::Rectangle, *center, *size, *rotation),
+        Geometry::Ellipse { center, size, rotation } => (ShapeKind::Ellipse, *center, *size, *rotation),
         Geometry::Path(path) => {
-            let style = ShapeStyle { fill, stroke, ..ShapeStyle::new(ShapeKind::Path) };
-            (edit::add_path_layer(project, comp, path, style, in_frame), 0.0)
+            let (origin, size, _) = crate::path::fit_to_box(path)?;
+            (ShapeKind::Path, origin + size * 0.5, size, 0.0)
         }
     };
-    let Some(made) = made else { return };
-    let Some(composition) = project.composition_mut(comp) else { return };
-    if let Some(layer) = composition.layer_mut(made) {
+    let in_box = box_mapping(center, size, rotation);
+    let stroke = shape.stroke.filter(|stroke| stroke.width.is_finite() && stroke.width > 0.0).map(|stroke| Stroke { paint: in_box(stroke.paint), width: stroke.width.min(crate::model::MAX_STROKE_WIDTH) });
+    let style = ShapeStyle { fill: shape.fill.map(&in_box), stroke, ..ShapeStyle::new(kind) };
+    let made = match &shape.geometry {
+        Geometry::Rect { radius, .. } => edit::add_shape_layer(project, comp, ShapeStyle { corner_radius: radius.max(0.0).min(size.x.min(size.y) * 0.5), ..style }, size, center, in_frame)?,
+        Geometry::Ellipse { .. } => edit::add_shape_layer(project, comp, style, size, center, in_frame)?,
+        Geometry::Path(path) => edit::add_path_layer(project, comp, path, style, in_frame)?,
+    };
+    if rotation != 0.0
+        && rotation.is_finite()
+        && let Some(transform) = project.composition_mut(comp)?.layer_mut(made)?.transform.as_mut()
+    {
+        transform.rotation = Animated::constant(rotation);
+    }
+    Some((made, center - size * 0.5))
+}
+
+/// Turns a paint whose gradient points are in a shape layer's pixels into one placed over a
+/// shape's box (centered on `center`, `size` across, turned `rotation` degrees), where Studio
+/// keeps them as fractions of the box. Solid colors pass through.
+fn box_mapping(center: Vec2, size: Vec2, rotation: f32) -> impl Fn(Paint) -> Paint {
+    let (sin, cos) = (-rotation).to_radians().sin_cos();
+    let fraction = move |point: Vec2| {
+        let offset = point - center;
+        let upright = Vec2::new(offset.x * cos - offset.y * sin, offset.x * sin + offset.y * cos);
+        Vec2::new(upright.x / size.x.max(1.0) + 0.5, upright.y / size.y.max(1.0) + 0.5)
+    };
+    move |mut paint| {
+        if let Paint::Linear(gradient) | Paint::Radial(gradient) = &mut paint {
+            gradient.from = fraction(gradient.from);
+            gradient.to = fraction(gradient.to);
+        }
+        paint
+    }
+}
+
+/// One shape of a shape layer, as a child of the (hidden) layer holding them.
+fn add_shape(project: &mut Project, comp: Id, holder: Id, shape: &SceneShape, in_frame: i64, out_frame: i64) {
+    let Some((made, _)) = make_shape(project, comp, shape, in_frame) else { return };
+    if let Some(layer) = project.composition_mut(comp).and_then(|composition| composition.layer_mut(made)) {
         layer.parent = Some(holder);
         layer.out_frame = out_frame;
-        if let Some(transform) = layer.transform.as_mut()
-            && rotation.is_finite()
-        {
-            transform.rotation = Animated::constant(rotation);
-        }
     }
+}
+
+/// The one shape a shape layer comes down to, when it can be that layer itself rather than a
+/// child of a hidden holder: a shape whose box isn't turned inside the layer (the layer's own
+/// rotation carries any turn).
+fn single_shape(content: &SceneContent) -> Option<&SceneShape> {
+    let SceneContent::Shapes(shapes) = content else { return None };
+    let [shape] = shapes.as_slice() else { return None };
+    let turned = match shape.geometry {
+        Geometry::Rect { rotation, .. } | Geometry::Ellipse { rotation, .. } => rotation.abs() > 1e-3,
+        Geometry::Path(_) => false,
+    };
+    (!turned).then_some(shape)
 }
 
 /// A 2D affine transform (for shape groups): `x' = a x + c y + e`, `y' = b x + d y + f`.
@@ -612,11 +734,18 @@ impl Affine {
         match geometry {
             Geometry::Rect { center, size, radius, rotation } => Geometry::Rect { center: self.point(center), size: Vec2::new(size.x * stretch.x, size.y * stretch.y), radius: radius * stretch.x.min(stretch.y), rotation: rotation + turn },
             Geometry::Ellipse { center, size, rotation } => Geometry::Ellipse { center: self.point(center), size: Vec2::new(size.x * stretch.x, size.y * stretch.y), rotation: rotation + turn },
-            Geometry::Path(path) => Geometry::Path(ShapePath {
-                points: path.points.iter().map(|point| PathPoint { at: self.point(point.at), handle_in: self.vector(point.handle_in), handle_out: self.vector(point.handle_out) }).collect(),
-                closed: path.closed,
-                ..Default::default()
-            }),
+            Geometry::Path(path) => Geometry::Path(self.path(&path)),
+        }
+    }
+
+    /// A path drawn under this transform, its extra outlines too. Handles are offsets, so they
+    /// turn and stretch but don't move.
+    fn path(self, path: &ShapePath) -> ShapePath {
+        ShapePath {
+            points: path.points.iter().map(|point| PathPoint { at: self.point(point.at), handle_in: self.vector(point.handle_in), handle_out: self.vector(point.handle_out) }).collect(),
+            closed: path.closed,
+            compound: path.compound.iter().map(|outline| self.path(outline)).collect(),
+            even_odd: path.even_odd,
         }
     }
 }

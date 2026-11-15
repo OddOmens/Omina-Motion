@@ -221,6 +221,10 @@ fn shape_code(kind: ShapeKind) -> f32 {
 }
 
 pub struct Renderer {
+    /// Whether the composition being composited mixes its layers in display colors rather
+    /// than linear light (see `Composition::linear_blending`). Set per composition as it is
+    /// drawn; nested compositions are drawn before, so each uses its own.
+    display_blending: bool,
     /// Whether simple layers are drawn together (see `render`). Always on, except to check
     /// that drawing them one at a time gives the same picture.
     batching: bool,
@@ -300,6 +304,9 @@ fn premultiply(pixels: &[u8]) -> Vec<u8> {
         let alpha = f32::from(pixel[3]) / 255.0;
         if pixel[3] == 255 {
             out.extend_from_slice(pixel);
+        } else if pixel[3] == 0 {
+            // Fully transparent, as most of a shape's raster or a nested composition often is.
+            out.extend_from_slice(&[0, 0, 0, 0]);
         } else {
             out.extend([0, 1, 2].map(|channel| encode(to_linear[usize::from(pixel[channel])] * alpha)));
             out.push(pixel[3]);
@@ -513,6 +520,7 @@ impl Renderer {
 
         Ok(Self {
             batching: true,
+            display_blending: false,
             device,
             queue,
             layer_pipeline,
@@ -970,6 +978,7 @@ impl Renderer {
         for (index, mode) in modes.iter().enumerate() {
             uniform[index * 4..index * 4 + 4].copy_from_slice(&mode.to_le_bytes());
         }
+        uniform[12..16].copy_from_slice(&u32::from(self.display_blending).to_le_bytes());
         uniform[16..20].copy_from_slice(&opacity.to_le_bytes());
         let buffer = self.uniform(&uniform);
         let matte_view = matte.map_or(&self.blank, |slot| &targets.work[slot].view);
@@ -1230,13 +1239,20 @@ impl Renderer {
         let modified = std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok();
         if self.images.get(path).is_none_or(|(loaded_at, _)| *loaded_at != modified) {
             let max = self.max_texture;
-            let loaded = image::open(path).ok().map(|image| {
-                // Larger than the GPU accepts: scale down to fit (the layer stretches it back).
-                let image = if image.width() > max || image.height() > max { image.resize(max, max, image::imageops::FilterType::Triangle) } else { image };
-                let rgba = image.to_rgba8();
-                let (width, height) = rgba.dimensions();
-                MediaTexture { view: self.upload(width, height, rgba.as_raw()), size: Vec2::new(width as f32, height as f32) }
-            });
+            // An SVG used as one picture layer is drawn from its file; the layer stretches the
+            // drawing over its box, so it needn't be the SVG's stated size.
+            let is_svg = path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("svg"));
+            let loaded = if is_svg {
+                crate::svg::rasterize(path, max).map(|image| MediaTexture { view: self.upload(image.width, image.height, &image.pixels), size: Vec2::new(image.width as f32, image.height as f32) })
+            } else {
+                image::open(path).ok().map(|image| {
+                    // Larger than the GPU accepts: scale down to fit (the layer stretches it back).
+                    let image = if image.width() > max || image.height() > max { image.resize(max, max, image::imageops::FilterType::Triangle) } else { image };
+                    let rgba = image.to_rgba8();
+                    let (width, height) = rgba.dimensions();
+                    MediaTexture { view: self.upload(width, height, rgba.as_raw()), size: Vec2::new(width as f32, height as f32) }
+                })
+            };
             self.images.insert(path.clone(), (modified, loaded));
         }
         self.images[path].1.is_some()
@@ -1425,6 +1441,7 @@ impl Renderer {
         let luts_used: HashSet<&LutSource> = project.compositions.iter().flat_map(|comp| &comp.layers).flat_map(|layer| &layer.effects).filter_map(|effect| effect.lut.as_ref()).collect();
         self.luts.retain(|source, _| luts_used.contains(source));
 
+        self.display_blending = !composition.linear_blending;
         let index = self.ensure_targets(width, height);
         self.ensure_graph_slots(index, composition);
         let targets = &self.targets[index];
@@ -1470,7 +1487,9 @@ impl Renderer {
                 && !has_effects
                 && !cut_out
                 && shutter.is_none();
-            if simple && self.batching && let Some(single) = self.single_source(project, layer, world, &text_keys) {
+            // Batched layers are laid over each other in linear light, so a composition that
+            // blends in display colors composites every layer on its own.
+            if simple && self.batching && !self.display_blending && let Some(single) = self.single_source(project, layer, world, &text_keys) {
                 if let Some((world, source, rect)) = single {
                     batch.push((world, source, rect, opacity));
                 }

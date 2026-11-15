@@ -5,21 +5,26 @@
 //! - the main animation and its precompositions (`assets` with `layers`), with their size,
 //!   frame rate and length,
 //! - images (embedded ones are written out to `asset_folder` first),
-//! - layers: precompositions, solids, images, nulls, text and shapes (rectangles, ellipses and
-//!   paths, inside groups with their transforms, filled and stroked),
+//! - layers: precompositions, solids, images, nulls, text (font, size, line height, tracking,
+//!   fill and outline) and shapes (rectangles, ellipses and paths, inside groups with their
+//!   transforms, filled and stroked with colors or gradients; the paths of one group are one
+//!   compound shape, so an outline inside another cuts a hole),
+//! - a shape layer of one shape becomes that one shape layer, with the layer's own transform,
+//! - the Drop Shadow layer effect,
 //! - timing, parents and transforms with keyframes; Lottie's easing is already a cubic bezier.
 //!
-//! Gradients, trim paths, repeaters, masks, mattes, effects and expressions aren't read; the
-//! report says so.
+//! Trim paths, repeaters, masks, mattes, other effects and expressions aren't read; the report
+//! says so.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{Affine, Geometry, Scene, SceneComp, SceneContent, SceneLayer, SceneShape, SceneSource, SceneText, SceneTransform, SourceKind, Track};
+use super::{Affine, Geometry, Scene, SceneComp, SceneContent, SceneEffect, SceneLayer, SceneShape, SceneSource, SceneText, SceneTransform, SourceKind, Track};
 use crate::animation::{CubicBezier, Easing, Vec2};
-use crate::model::{Rgba, TextAlign};
+use crate::gradient::{Gradient, GradientStop};
+use crate::model::{BlendMode, Paint, Rgba, Stroke, TextAlign};
 use crate::path::{PathPoint, ShapePath};
 
 /// How deep groups may nest, and how many points a path may have, against hostile files.
@@ -35,7 +40,7 @@ pub fn read(text: &str, file: &Path, asset_folder: &Path) -> Result<Scene, Strin
     if !(fps > 0.0 && fps <= 999.0) || !(1.0..=30_000.0).contains(&width) || !(1.0..=30_000.0).contains(&height) {
         return Err("This Lottie animation has an impossible size or frame rate.".into());
     }
-    let mut reader = Reader { scene: Scene::default(), fps, assets: HashMap::new(), keys: 1, file: file.to_owned(), asset_folder: asset_folder.to_owned(), unsupported: Vec::new(), time_offset: 0.0 };
+    let mut reader = Reader { scene: Scene::default(), fps, assets: HashMap::new(), keys: 1, file: file.to_owned(), asset_folder: asset_folder.to_owned(), unsupported: Vec::new(), time_offset: 0.0, fonts: font_list(&root) };
     let length = |value: &Value| (value.get("op").and_then(Value::as_f64).unwrap_or(fps * 10.0) - value.get("ip").and_then(Value::as_f64).unwrap_or(0.0)).max(1.0) / fps;
     // Precompositions have no size of their own in most files: the layers showing them carry it.
     let sizes = precomp_sizes(&root);
@@ -62,6 +67,8 @@ pub fn read(text: &str, file: &Path, asset_folder: &Path) -> Result<Scene, Strin
         // the precomposition starts early (a negative `st` on the layer showing it).
         let last_out = layers.iter().map(|layer| layer.out_point).fold(0.0, f64::max);
         reader.scene.comps.push(SceneComp {
+            // Lottie players blend colors as browsers do, in display colors.
+            linear_blending: false,
             key,
             name: asset.get("nm").and_then(Value::as_str).map_or_else(|| format!("Precomp {id}"), str::to_owned),
             folder: None,
@@ -79,7 +86,7 @@ pub fn read(text: &str, file: &Path, asset_folder: &Path) -> Result<Scene, Strin
     let main = reader.next_key();
     let name = root.get("nm").and_then(Value::as_str).filter(|name| !name.trim().is_empty()).map_or_else(|| file.file_stem().map_or("Lottie".into(), |stem| stem.to_string_lossy().into_owned()), str::to_owned);
     // The main animation first, so it opens.
-    reader.scene.comps.insert(0, SceneComp { key: main, name, folder: None, width: width as u32, height: height as u32, fps, seconds: length(&root), background: Rgba::TRANSPARENT, layers });
+    reader.scene.comps.insert(0, SceneComp { linear_blending: false, key: main, name, folder: None, width: width as u32, height: height as u32, fps, seconds: length(&root), background: Rgba::TRANSPARENT, layers });
     reader.unsupported.sort();
     reader.unsupported.dedup();
     if !reader.unsupported.is_empty() {
@@ -122,6 +129,8 @@ struct Reader {
     unsupported: Vec<&'static str>,
     /// Seconds taken off every layer's timing: the main animation's start, while its layers are read.
     time_offset: f64,
+    /// The file's fonts (`fonts.list`): family and weight by the name text documents use.
+    fonts: HashMap<String, (String, u16)>,
 }
 
 impl Reader {
@@ -194,7 +203,7 @@ impl Reader {
                 }
                 SceneContent::Shapes(shapes)
             }
-            5 => SceneContent::Text(text(layer)?),
+            5 => SceneContent::Text(text(layer, &self.fonts)?),
             _ => {
                 self.unsupported.push("audio, camera and other special layers");
                 return None;
@@ -206,8 +215,20 @@ impl Reader {
         if layer.get("tt").is_some() {
             self.unsupported.push("track mattes");
         }
-        if layer.get("ef").and_then(Value::as_array).is_some_and(|effects| !effects.is_empty()) {
-            self.unsupported.push("effects");
+        if layer.get("bm").and_then(Value::as_u64).is_some_and(|number| BlendMode::from_lottie(number).is_none()) {
+            self.unsupported.push("some blend modes (shown as Normal)");
+        }
+        let mut effects = Vec::new();
+        for effect in layer.get("ef").and_then(Value::as_array).into_iter().flatten() {
+            match drop_shadow(effect) {
+                Some((shadow, black)) => {
+                    effects.push(shadow);
+                    if !black {
+                        self.unsupported.push("drop shadow colors (shadows are black)");
+                    }
+                }
+                None => self.unsupported.push("effects"),
+            }
         }
         let transform = layer.get("ks").map(|ks| transform(ks, start, fps)).unwrap_or_default();
         Some(SceneLayer {
@@ -218,31 +239,59 @@ impl Reader {
             in_point: number("ip").unwrap_or(0.0) / fps - self.time_offset,
             out_point: number("op").unwrap_or(fps * 10.0) / fps - self.time_offset,
             visible: layer.get("hd").and_then(Value::as_bool) != Some(true),
+            // Modes Studio doesn't have come in as Normal (and are noted above).
+            blend: layer.get("bm").and_then(Value::as_u64).and_then(BlendMode::from_lottie).unwrap_or(BlendMode::Normal),
             content,
             transform,
+            effects,
         })
     }
 
     /// Shape items, as `aep::contents` does for After Effects: fills and strokes apply to the
-    /// shapes in their group, and group transforms fold in.
-    fn contents(&mut self, items: &[Value], to_layer: Affine, fill: Option<Rgba>, stroke: Option<(Rgba, f32)>, out: &mut Vec<SceneShape>, depth: usize) {
+    /// shapes in their group, and group transforms fold in. A gradient wins over a plain color
+    /// in the same group (a file may give both, the color for players without gradients). The
+    /// paths of one group are one compound shape, filled together as Lottie players do.
+    fn contents(&mut self, items: &[Value], to_layer: Affine, fill: Option<Paint>, stroke: Option<Stroke>, out: &mut Vec<SceneShape>, depth: usize) {
         if depth > MAX_DEPTH {
             return;
         }
-        let (mut fill, mut stroke) = (fill, stroke);
         let mut transform = Affine::IDENTITY;
         for item in items {
+            if item.get("ty").and_then(Value::as_str) == Some("tr") {
+                transform = group_transform(item);
+            }
+        }
+        let to_layer = transform.then_outer(to_layer);
+        // This group's own paints, by kind, with gradients mapped into the layer's pixels.
+        let (mut color_fill, mut gradient_fill, mut color_stroke, mut gradient_stroke) = (None, None, None, None);
+        let mut even_odd = false;
+        for item in items {
+            let width = || fixed(item.get("w")).and_then(|w| w.first().copied()).unwrap_or(1.0) as f32;
             match item.get("ty").and_then(Value::as_str) {
-                Some("fl") => fill = paint(item),
-                Some("st") => stroke = paint(item).map(|color| (color, fixed(item.get("w")).and_then(|w| w.first().copied()).unwrap_or(1.0) as f32)),
-                Some("tr") => transform = group_transform(item),
-                Some("gf" | "gs") => self.unsupported.push("gradients"),
+                Some("fl") => color_fill = paint(item).map(Paint::Solid),
+                Some("gf") => gradient_fill = gradient(item, to_layer),
+                Some("st") => color_stroke = paint(item).map(|color| Stroke { paint: Paint::Solid(color), width: width() }),
+                Some("gs") => gradient_stroke = gradient(item, to_layer).map(|paint| Stroke { paint, width: width() }),
                 Some("tm") => self.unsupported.push("trim paths"),
                 Some("rp") => self.unsupported.push("repeaters"),
                 _ => {}
             }
+            // A fill's rule `r`: 1 non-zero, 2 even-odd.
+            if matches!(item.get("ty").and_then(Value::as_str), Some("fl" | "gf")) {
+                even_odd = item.get("r").and_then(Value::as_i64) == Some(2);
+            }
         }
-        let to_layer = transform.then_outer(to_layer);
+        let fill = gradient_fill.or(color_fill).or(fill);
+        let stroke = gradient_stroke.or(color_stroke).or(stroke);
+        let painted = fill.is_some() || stroke.is_some();
+
+        // The group's paths, gathered into one shape placed where its first path is listed.
+        let mut paths = items.iter().filter(|item| item.get("ty").and_then(Value::as_str) == Some("sh")).filter_map(|item| item.get("ks").and_then(first_value).and_then(bezier_path));
+        let mut compound = paths.next().map(|mut first| {
+            first.compound = paths.take(crate::path::MAX_COMPOUND_OUTLINES).collect();
+            first.even_odd = even_odd && !first.compound.is_empty();
+            first
+        });
         for item in items {
             let geometry = match item.get("ty").and_then(Value::as_str) {
                 Some("gr") => {
@@ -258,17 +307,103 @@ impl Reader {
                     rotation: 0.0,
                 },
                 Some("el") => Geometry::Ellipse { center: fixed_pair(item.get("p")).unwrap_or_default(), size: fixed_pair(item.get("s")).unwrap_or(Vec2::new(100.0, 100.0)), rotation: 0.0 },
-                Some("sh") => match item.get("ks").and_then(first_value).and_then(bezier_path) {
+                Some("sh") => match compound.take() {
                     Some(path) => Geometry::Path(path),
                     None => continue,
                 },
                 _ => continue,
             };
-            if fill.is_some() || stroke.is_some() {
+            if painted {
                 out.push(SceneShape { geometry: to_layer.geometry(geometry), fill, stroke });
             }
         }
     }
+}
+
+/// A file's fonts (`fonts.list`) by the name text documents refer to them by (`fName`): each
+/// one's family (`fFamily`), and its weight (`fWeight`, or else read from its style name).
+fn font_list(root: &Value) -> HashMap<String, (String, u16)> {
+    let list = root.get("fonts").and_then(|fonts| fonts.get("list")).and_then(Value::as_array);
+    list.into_iter()
+        .flatten()
+        .filter_map(|font| {
+            let name = font.get("fName").and_then(Value::as_str)?;
+            let family = font.get("fFamily").and_then(Value::as_str).map(str::trim).filter(|family| !family.is_empty())?;
+            // The weight is a number or a string of one ("700"); without it, the style name ("Bold") says.
+            let stated = font.get("fWeight").and_then(|weight| weight.as_u64().or_else(|| weight.as_str()?.trim().parse().ok()));
+            let from_style = || font.get("fStyle").and_then(Value::as_str).map(|style| super::font_family(&format!("-{style}")).1);
+            let weight = stated.filter(|weight| (1..=1000).contains(weight)).map(|weight| weight as u16).or_else(from_style).unwrap_or(400);
+            Some((name.to_owned(), (family.to_owned(), weight)))
+        })
+        .collect()
+}
+
+/// A gradient fill or stroke (`gf`, `gs`): linear (`t` 1) or radial (`t` 2) from its start `s`
+/// to its end `e` (in the group's pixels, mapped into the layer's by `to_layer`), with `g.p`
+/// color stops `[offset, r, g, b, …]` in `g.k`, any alpha stops `[offset, alpha, …]` after
+/// them, and an opacity `o`. A gradient of one color is that color.
+fn gradient(item: &Value, to_layer: Affine) -> Option<Paint> {
+    let colors = item.get("g")?;
+    let count = colors.get("p").and_then(Value::as_u64).filter(|count| *count > 0)? as usize;
+    let values = fixed(colors.get("k"))?;
+    let opacity = fixed(item.get("o")).and_then(|o| o.first().copied()).unwrap_or(100.0).clamp(0.0, 100.0) / 100.0;
+    let color_values = values.get(..count.checked_mul(4)?)?;
+    let alphas: Vec<(f64, f64)> = values[color_values.len()..].as_chunks::<2>().0.iter().map(|&[at, alpha]| (at, alpha)).collect();
+    let stops: Vec<GradientStop> = color_values
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .take(crate::gradient::MAX_STOPS)
+        .map(|&[at, r, g, b]| {
+            let channel = |value: f64| value.clamp(0.0, 1.0) as f32;
+            let alpha = (alpha_at(&alphas, at) * opacity).clamp(0.0, 1.0) as f32;
+            GradientStop { at: at as f32, color: Rgba { r: channel(r), g: channel(g), b: channel(b), a: alpha, link: None } }
+        })
+        .collect();
+    if let [only] = stops.as_slice() {
+        return Some(Paint::Solid(only.color));
+    }
+    let from = to_layer.point(fixed_pair(item.get("s")).unwrap_or_default());
+    let to = to_layer.point(fixed_pair(item.get("e")).unwrap_or(Vec2::new(100.0, 0.0)));
+    let gradient = Gradient::new(&stops, from, to);
+    match item.get("t").and_then(Value::as_i64) {
+        Some(2) => Some(Paint::Radial(gradient)),
+        _ => Some(Paint::Linear(gradient)),
+    }
+}
+
+/// The alpha a gradient's alpha stops give at `offset`, blending between the stops on either
+/// side; fully opaque when there are none.
+fn alpha_at(stops: &[(f64, f64)], offset: f64) -> f64 {
+    let Some(&(first_at, first)) = stops.first() else { return 1.0 };
+    if offset <= first_at {
+        return first;
+    }
+    for pair in stops.windows(2) {
+        let ((from_at, from), (to_at, to)) = (pair[0], pair[1]);
+        if offset <= to_at {
+            let span = to_at - from_at;
+            return if span > 1e-9 { from + (to - from) * (offset - from_at) / span } else { to };
+        }
+    }
+    stops.last().map_or(1.0, |&(_, alpha)| alpha)
+}
+
+/// Lottie's Drop Shadow layer effect (`ty` 25) as Studio's. Its values are, in order, the
+/// shadow's color, opacity (0–255), direction (degrees clockwise from up), distance and
+/// softness. Studio's shadows are black, so this also says whether the file's was (near enough).
+fn drop_shadow(effect: &Value) -> Option<(SceneEffect, bool)> {
+    if effect.get("ty").and_then(Value::as_i64) != Some(25) {
+        return None;
+    }
+    let values: Vec<Vec<f64>> = effect.get("ef")?.as_array()?.iter().map(|value| fixed(value.get("v")).unwrap_or_default()).collect();
+    let number = |index: usize, fallback: f64| values.get(index).and_then(|value| value.first().copied()).unwrap_or(fallback);
+    let color = values.first().cloned().unwrap_or_default();
+    let black = color.iter().take(3).all(|channel| *channel < 0.1);
+    let color_alpha = color.get(3).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+    let opacity = number(1, 127.5) / 255.0 * 100.0 * color_alpha;
+    let values = [opacity, number(2, 135.0), number(3, 5.0), number(4, 0.0)].map(|value| value as f32).to_vec();
+    Some((SceneEffect { name: "Drop Shadow", values }, black))
 }
 
 /// The first value of a property: `{"a":0,"k":value}`, or the first keyframe's `s`.
@@ -384,17 +519,31 @@ fn track<T: Copy>(property: &Value, start: f64, fps: f64, make: impl Fn(&[f64]) 
     Some(Track { value, keys: out })
 }
 
-/// A text layer's first text document.
-fn text(layer: &Value) -> Option<SceneText> {
+/// A text layer's first text document: its words, font (`f`, looked up in the file's font
+/// list), size `s`, line height `lh`, tracking `tr`, fill `fc`, outline `sc` and `sw`, and
+/// alignment `j`.
+fn text(layer: &Value, fonts: &HashMap<String, (String, u16)>) -> Option<SceneText> {
     let document = layer.get("t")?.get("d")?.get("k")?.as_array()?.first()?.get("s")?;
     let words = document.get("t").and_then(Value::as_str)?.replace('\r', "\n");
-    let fill = document.get("fc").and_then(numbers).map(|c| Rgba { r: c[0].clamp(0.0, 1.0) as f32, g: c.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0) as f32, b: c.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0) as f32, a: 1.0, link: None });
+    let number = |name: &str| document.get(name).and_then(Value::as_f64).filter(|value| value.is_finite()).map(|value| value as f32);
+    let color = |name: &str| document.get(name).and_then(numbers).map(|c| Rgba { r: c[0].clamp(0.0, 1.0) as f32, g: c.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0) as f32, b: c.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0) as f32, a: 1.0, link: None });
     let align = match document.get("j").and_then(Value::as_i64) {
         Some(1) => TextAlign::Right,
         Some(2) => TextAlign::Center,
         _ => TextAlign::Left,
     };
-    Some(SceneText { text: words, font: document.get("f").and_then(Value::as_str).map(str::to_owned), size: document.get("s").and_then(Value::as_f64).unwrap_or(72.0) as f32, fill, align })
+    let font = document.get("f").and_then(Value::as_str).map(str::to_owned);
+    Some(SceneText {
+        family: font.as_ref().and_then(|font| fonts.get(font).cloned()),
+        font,
+        size: number("s").unwrap_or(72.0),
+        line_height: number("lh").filter(|height| *height > 0.0),
+        tracking: number("tr"),
+        fill: color("fc"),
+        stroke: color("sc").zip(number("sw")).filter(|(_, width)| *width > 0.0),
+        align,
+        text: words,
+    })
 }
 
 /// Standard base64 (with or without padding), or `None` if it isn't.
@@ -448,6 +597,17 @@ mod tests {
     }"##;
 
     #[test]
+    fn blend_modes_come_in_and_ones_studio_lacks_are_noted() {
+        let text = r##"{"v":"5.7.4","fr":30,"ip":0,"op":30,"w":100,"h":100,"layers":[
+            {"ty":1,"nm":"Shade","ind":1,"sc":"#000000","sw":100,"sh":100,"ip":0,"op":30,"st":0,"bm":1,"ks":{}},
+            {"ty":1,"nm":"Dodge","ind":2,"sc":"#ffffff","sw":100,"sh":100,"ip":0,"op":30,"st":0,"bm":6,"ks":{}}]}"##;
+        let scene = read(text, Path::new("/a/b.json"), Path::new("/tmp")).unwrap();
+        let blends: Vec<BlendMode> = scene.comps[0].layers.iter().map(|layer| layer.blend).collect();
+        assert_eq!(blends, [BlendMode::Multiply, BlendMode::Normal]);
+        assert!(scene.notes.iter().any(|note| note.contains("blend modes")), "{:?}", scene.notes);
+    }
+
+    #[test]
     fn a_lottie_file_becomes_a_scene() {
         let scene = read(SAMPLE, Path::new("/tmp/demo.json"), Path::new("/tmp/assets")).unwrap();
         let comp = &scene.comps[0];
@@ -456,7 +616,7 @@ mod tests {
         let SceneContent::Shapes(shapes) = &comp.layers[0].content else { panic!() };
         let Geometry::Rect { center, size, radius, .. } = shapes[0].geometry else { panic!() };
         assert_eq!((center, size, radius), (Vec2::new(10.0, 5.0), Vec2::new(80.0, 40.0), 8.0), "the group moved it");
-        assert_eq!(shapes[0].fill, Some(Rgba::hex(0xff0000)));
+        assert_eq!(shapes[0].fill, Some(Paint::Solid(Rgba::hex(0xff0000))));
         let position = comp.layers[0].transform.position.as_ref().unwrap();
         assert_eq!(position.keys.len(), 2);
         assert_eq!(position.keys[0].2, Easing::Curve(CubicBezier::new(0.33, 0.0, 0.67, 1.0)));
@@ -472,20 +632,100 @@ mod tests {
         let imported = super::super::build(&mut project, &scene, "demo", &|_| None).unwrap();
         let comp = project.composition(imported.compositions[0]).unwrap();
         assert_eq!(comp.name, "Demo");
-        // The box layer holds its rectangle as a child; the holder follows the null.
+        // The box layer is its one rectangle, following the null; its own pixels start at the
+        // rectangle's corner, (10, 5) less half its size, so the anchor moves by as much.
         let box_layer = comp.layers.iter().find(|layer| layer.name == "Box").unwrap();
         let mover = comp.layers.iter().find(|layer| layer.name == "Mover").unwrap();
         assert_eq!(box_layer.parent, Some(mover.id));
-        assert!(comp.layers.iter().any(|layer| layer.parent == Some(box_layer.id) && matches!(layer.content, crate::model::LayerContent::Shape { .. })));
+        assert!(matches!(box_layer.content, crate::model::LayerContent::Shape { .. }));
+        assert!(!comp.layers.iter().any(|layer| layer.parent == Some(box_layer.id)), "no hidden holder with a child");
+        assert_eq!(box_layer.transform.as_ref().unwrap().anchor_point.value_at(0.0), Vec2::new(30.0, 15.0));
         let position = &box_layer.transform.as_ref().unwrap().position;
         assert_eq!(position.keyframe_frames(), vec![0, 30]);
+    }
+
+    /// A vector as Canvas sends it: one group of two outlines (a square with a square hole),
+    /// a plain red fill then a red-to-blue gradient, a stroke, an identity group transform, and
+    /// a drop shadow; the layer centered at (400, 300), turned 30° and scaled 150%.
+    const CANVAS_VECTOR: &str = r##"{"v":"5.7.4","fr":30,"ip":0,"op":60,"w":800,"h":600,"layers":[
+        {"ty":4,"nm":"Badge","ind":1,"ip":0,"op":60,"st":0,
+         "ks":{"a":{"a":0,"k":[0,0]},"p":{"a":0,"k":[400,300]},"r":{"a":0,"k":30},"s":{"a":0,"k":[150,150]},"o":{"a":0,"k":100}},
+         "ef":[{"ty":25,"nm":"Drop Shadow","ef":[
+             {"ty":2,"v":{"a":0,"k":[0,0,0,1]}},{"ty":0,"v":{"a":0,"k":127.5}},{"ty":0,"v":{"a":0,"k":135}},
+             {"ty":0,"v":{"a":0,"k":10}},{"ty":0,"v":{"a":0,"k":8}}]}],
+         "shapes":[{"ty":"gr","it":[
+             {"ty":"sh","ks":{"a":0,"k":{"v":[[-100,-100],[100,-100],[100,100],[-100,100]],"i":[[0,0],[0,0],[0,0],[0,0]],"o":[[0,0],[0,0],[0,0],[0,0]],"c":true}}},
+             {"ty":"sh","ks":{"a":0,"k":{"v":[[-50,-50],[-50,50],[50,50],[50,-50]],"i":[[0,0],[0,0],[0,0],[0,0]],"o":[[0,0],[0,0],[0,0],[0,0]],"c":true}}},
+             {"ty":"fl","c":{"a":0,"k":[1,0,0,1]},"o":{"a":0,"k":100},"r":1},
+             {"ty":"gf","t":1,"s":{"a":0,"k":[-100,0]},"e":{"a":0,"k":[100,0]},"o":{"a":0,"k":100},"r":1,
+              "g":{"p":2,"k":{"a":0,"k":[0,1,0,0,1,0,0,1]}}},
+             {"ty":"st","c":{"a":0,"k":[0,0,0,1]},"o":{"a":0,"k":100},"w":{"a":0,"k":4}},
+             {"ty":"tr","p":{"a":0,"k":[0,0]},"a":{"a":0,"k":[0,0]},"s":{"a":0,"k":[100,100]},"r":{"a":0,"k":0},"o":{"a":0,"k":100}}
+         ]}]}]}"##;
+
+    #[test]
+    fn a_canvas_vector_arrives_as_one_editable_shape_layer() {
+        use crate::model::LayerContent;
+        let scene = read(CANVAS_VECTOR, Path::new("/tmp/badge.json"), Path::new("/tmp/assets")).unwrap();
+        assert!(scene.notes.is_empty(), "the shadow and the gradient both came in: {:?}", scene.notes);
+        let mut project = crate::sample::sample_project();
+        let imported = super::super::build(&mut project, &scene, "badge", &|_| None).unwrap();
+        let comp = project.composition(imported.compositions[0]).unwrap();
+        assert_eq!(comp.layers.len(), 1, "one layer, no hidden holder");
+        let layer = &comp.layers[0];
+        let LayerContent::Shape { style, path: Some(path) } = &layer.content else { panic!("a shape layer: {:?}", layer.content) };
+        assert_eq!(path.compound.len(), 1, "the hole is part of the same shape");
+        // The gradient wins over the plain fill, running across the box left to right.
+        let Some(crate::model::Paint::Linear(gradient)) = style.fill else { panic!("a linear gradient: {:?}", style.fill) };
+        assert!((gradient.from - Vec2::new(0.0, 0.5)).length() < 1e-4 && (gradient.to - Vec2::new(1.0, 0.5)).length() < 1e-4, "{gradient:?}");
+        assert_eq!(gradient.stops()[1].color, Rgba::hex(0x0000ff));
+        assert_eq!(style.stroke.map(|stroke| stroke.width), Some(4.0));
+        // Its own transform: turned and scaled about the shape's middle, which sits at (400, 300).
+        let transform = layer.transform.as_ref().unwrap();
+        assert_eq!((transform.rotation.value_at(0.0), transform.scale.value_at(0.0)), (30.0, Vec2::new(150.0, 150.0)));
+        let corners = crate::transform::layer_corners(comp, layer.id, 0.0).unwrap();
+        let middle = corners.iter().fold(Vec2::default(), |sum, corner| sum + *corner) * 0.25;
+        assert!((middle - Vec2::new(400.0, 300.0)).length() < 0.01, "{middle:?}");
+        assert!(((corners[1] - corners[0]).length() - 300.0).abs() < 0.01, "200 pixels at 150%");
+        // Lottie's opacity of 127.5 out of 255 is Studio's 50%.
+        let [shadow] = layer.effects.as_slice() else { panic!("one effect") };
+        let values: Vec<f32> = shadow.properties.iter().map(|property| property.value.value_at(0.0)).collect();
+        assert_eq!((shadow.name.as_str(), values), ("Drop Shadow", vec![50.0, 135.0, 10.0, 8.0]));
+    }
+
+    #[test]
+    fn text_keeps_its_leading_tracking_outline_and_listed_font() {
+        let file = r##"{"fr":30,"ip":0,"op":30,"w":800,"h":600,
+            "fonts":{"list":[{"fName":"AvenirNext-Bold","fFamily":"Avenir Next","fStyle":"Bold","fWeight":"700"}]},
+            "layers":[{"ty":5,"nm":"Title","ind":1,"ip":0,"op":30,"st":0,"ks":{},
+            "t":{"d":{"k":[{"t":0,"s":{"t":"Hollow","s":60,"f":"AvenirNext-Bold","lh":90,"tr":50,"sc":[1,0,0],"sw":3,"j":0}}]}}}]}"##;
+        let scene = read(file, Path::new("/tmp/title.json"), Path::new("/tmp/assets")).unwrap();
+        let mut project = crate::sample::sample_project();
+        let imported = super::super::build(&mut project, &scene, "title", &|_| None).unwrap();
+        let comp = project.composition(imported.compositions[0]).unwrap();
+        let crate::model::LayerContent::Text { style, .. } = &comp.layers[0].content else { panic!() };
+        assert_eq!((style.font_family.as_str(), style.font_weight), ("Avenir Next", 700));
+        assert_eq!((style.font_size, style.line_height, style.tracking), (60.0, 90.0, 50.0));
+        assert_eq!(style.fill, None, "no fill color: outlined text");
+        assert_eq!(style.stroke, Some((Rgba::hex(0xff0000), 3.0)));
+    }
+
+    #[test]
+    fn gradient_alpha_stops_and_single_colors() {
+        // Two color stops, fading from opaque to half see-through.
+        let fading = serde_json::json!({"t": 2, "s": {"k": [0, 0]}, "e": {"k": [50, 0]}, "g": {"p": 2, "k": {"k": [0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0.5]}}});
+        let Some(Paint::Radial(radial)) = gradient(&fading, Affine::IDENTITY) else { panic!("a radial gradient") };
+        assert_eq!((radial.stops()[0].color.a, radial.stops()[1].color.a), (1.0, 0.5));
+        assert_eq!(radial.to, Vec2::new(50.0, 0.0));
+        let one = serde_json::json!({"t": 1, "g": {"p": 1, "k": {"k": [0, 0, 1, 0]}}});
+        assert_eq!(gradient(&one, Affine::IDENTITY), Some(Paint::Solid(Rgba::hex(0x00ff00))));
     }
 
     #[test]
     fn base64_and_unsafe_paths() {
         assert_eq!(decode_base64("aGk=").unwrap(), b"hi");
         assert_eq!(decode_base64("aGVsbG8").unwrap(), b"hello");
-        let mut reader = Reader { scene: Scene::default(), fps: 30.0, assets: HashMap::new(), keys: 0, file: "/a/b.json".into(), asset_folder: "/tmp".into(), unsupported: Vec::new(), time_offset: 0.0 };
+        let mut reader = Reader { scene: Scene::default(), fps: 30.0, assets: HashMap::new(), keys: 0, file: "/a/b.json".into(), asset_folder: "/tmp".into(), unsupported: Vec::new(), time_offset: 0.0, fonts: HashMap::new() };
         let climbing = serde_json::json!({"p": "secret.png", "u": "../../etc/"});
         assert!(reader.image(&climbing, 1).is_none(), "paths can't climb out of the animation's folder");
         let beside = serde_json::json!({"p": "img_0.png", "u": "images/"});

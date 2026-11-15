@@ -66,7 +66,7 @@ pub fn parse_feed(text: &str) -> Result<Release, String> {
 pub fn check(workspace: &mut Workspace, asked: bool, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(feed) = FEED else {
         if asked {
-            window.push_notification("This copy of Studio doesn't have an update address, so it can't check for updates.", cx);
+            window.push_notification("This copy of Omina Motion doesn't have an update address, so it can't check for updates.", cx);
         }
         return;
     };
@@ -100,11 +100,11 @@ fn show_result(result: Result<Release, String>, asked: bool, window: &mut Window
     let current = env!("CARGO_PKG_VERSION");
     match result {
         Ok(release) if is_newer(&release.version, current) => {
-            let title = format!("Studio {} is available", release.version);
+            let title = format!("Omina Motion {} is available", release.version);
             let notes = if release.notes.trim().is_empty() { String::new() } else { format!("\n\n{}", release.notes.trim()) };
-            let description = format!("You have version {current}. Download the new version, then replace Studio in your Applications folder with it. Your projects and settings are kept.{notes}");
+            let description = format!("You have version {current}. Download the new version, then replace Omina Motion in your Applications folder with it. Your projects and settings are kept.{notes}");
             let url = release.url.clone();
-            window.open_alert_dialog(cx, move |dialog, _, _| {
+            crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| {
                 let url = url.clone();
                 dialog.title(title.clone()).description(description.clone()).ok_text("Download").cancel_text("Later").show_cancel(true).on_ok(move |_, _, cx| {
                     cx.open_url(&url);
@@ -112,7 +112,7 @@ fn show_result(result: Result<Release, String>, asked: bool, window: &mut Window
                 })
             });
         }
-        Ok(_) if asked => window.push_notification(format!("Studio {current} is the latest version.").as_str(), cx),
+        Ok(_) if asked => window.push_notification(format!("Omina Motion {current} is the latest version.").as_str(), cx),
         Err(error) if asked => window.push_notification(format!("Couldn't check for updates: {error}").as_str(), cx),
         _ => {}
     }

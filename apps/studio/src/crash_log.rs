@@ -46,7 +46,7 @@ pub fn install() {
 /// there.
 fn report_text(message: &str, location: &str, thread: &str, backtrace: &str) -> String {
     format!(
-        "Studio {version} crashed\nWhen: {when} (seconds since 1970)\nSystem: {os} {arch}\nThread: {thread}\nWhere: {location}\nError: {message}\n\nCalls leading to it:\n{backtrace}\n",
+        "Omina Motion {version} crashed\nWhen: {when} (seconds since 1970)\nSystem: {os} {arch}\nThread: {thread}\nWhere: {location}\nError: {message}\n\nCalls leading to it:\n{backtrace}\n",
         version = env!("CARGO_PKG_VERSION"),
         when = crate::app_settings::now_seconds(),
         os = std::env::consts::OS,
@@ -57,7 +57,7 @@ fn report_text(message: &str, location: &str, thread: &str, backtrace: &str) -> 
 /// Writes `report` to a new file in the reports folder and marks it as not yet shown.
 fn save_report(report: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(folder())?;
-    let path = folder().join(format!("Studio crash {}.txt", crate::app_settings::now_seconds()));
+    let path = folder().join(format!("Omina Motion crash {}.txt", crate::app_settings::now_seconds()));
     std::fs::write(&path, report)?;
     std::fs::write(unseen_marker(), path.to_string_lossy().as_bytes())?;
     Ok(path)
@@ -76,10 +76,10 @@ fn take_unseen() -> Option<PathBuf> {
 #[cfg_attr(test, allow(dead_code))]
 pub fn mention_last_crash(window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(report) = take_unseen() else { return };
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| {
         let report = report.clone();
         dialog
-            .title("Studio closed unexpectedly")
+            .title("Omina Motion closed unexpectedly")
             .description("A report of what went wrong was saved on this Mac. Sending it with a description of what you were doing helps get it fixed. It isn't sent anywhere by itself.")
             .ok_text("Show Report")
             .cancel_text("Close")

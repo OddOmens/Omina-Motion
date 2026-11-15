@@ -24,9 +24,10 @@ mod morph;
 mod nodes;
 mod snap;
 mod stabilize;
+mod tabs;
 mod viewer;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -90,6 +91,8 @@ pub enum AudioSetting {
     DuckAmount,
     /// 0 to 100.
     NoiseGate,
+    /// Left (-100) to right (100).
+    Pan,
 }
 
 /// Numeric shape settings that the Properties panel edits.
@@ -108,6 +111,11 @@ pub enum ShapeSetting {
     /// The direction of a linear gradient, in degrees.
     FillAngle,
     StrokeAngle,
+    /// Where the drawn part of the stroke starts and ends, and how far it is slid along the
+    /// outline, each in percent of the outline's length (see `model::Trim`).
+    TrimStart,
+    TrimEnd,
+    TrimOffset,
 }
 
 /// Which of a shape's paints: its fill or its stroke.
@@ -162,11 +170,14 @@ impl ShapeSetting {
             Self::StrokeWidth => style.stroke.map_or(0.0, |stroke| stroke.width),
             Self::FillAngle => paint_angle(style.fill, size),
             Self::StrokeAngle => paint_angle(style.stroke.map(|stroke| stroke.paint), size),
+            Self::TrimStart => style.trim.start,
+            Self::TrimEnd => style.trim.end,
+            Self::TrimOffset => style.trim.offset,
         }
     }
 }
 
-/// Numeric text settings that the Properties panel edits./// Numeric text settings that the Properties panel edits.
+/// Numeric text settings that the Properties panel edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextSetting {
     FontSize,
@@ -282,6 +293,10 @@ pub struct EditorState {
     file: Option<PathBuf>,
     /// The eyedropper's current color, its recent picks and the saved swatches (see `grade`).
     pub colors: crate::app_settings::SavedColors,
+    /// The compositions open as tabs, in order (see `tabs`), and where each one not showing
+    /// was left.
+    open_tabs: Vec<Id>,
+    tab_views: HashMap<Id, tabs::TabView>,
 }
 
 /// Composition settings from the new-composition defaults in Settings: transparent, as new
@@ -306,6 +321,8 @@ impl EditorState {
         let settings = if cfg!(test) { crate::app_settings::AppSettings::default() } else { crate::app_settings::load() };
         let duration = project.composition(ids::MAIN_COMP).map_or(240, |comp| comp.duration_frames) as f64;
         Self {
+            open_tabs: vec![ids::MAIN_COMP],
+            tab_views: HashMap::new(),
             active_comp: ids::MAIN_COMP,
             selected_item: Some(ids::MAIN_COMP),
             current_frame: 0,
@@ -736,6 +753,8 @@ impl EditorState {
     pub fn add_template(&mut self, index: usize, format: studio_core::templates::Format, look: TemplateLook) -> Option<Id> {
         let template = self.styled_template(index, look)?;
         let comp = studio_core::templates::build(&mut self.project, &template, format)?;
+        // Its photo spots start out filled with sample pictures; dropping media on one replaces it.
+        studio_core::templates::fill_photo_spots(&mut self.project, comp, crate::template_photos::photos());
         self.open_composition(comp);
         self.selected_item = Some(comp);
         Some(comp)
@@ -766,12 +785,14 @@ impl EditorState {
         let mut project = Project::new(Vec::new(), Vec::new());
         let settings = edit::CompositionSettings { name: "Main Comp".into(), ..new_composition_settings(size) };
         let duration = settings.duration_frames as f64;
-        let Ok(comp) = edit::new_composition(&mut project, &settings) else { return };
+        // The folders first, so the composition has its Exports folder to go into.
         studio_core::folders::add_default_folders(&mut project, folders);
+        let Ok(comp) = edit::new_composition(&mut project, &settings) else { return };
         self.end_keyframe_drag();
         self.end_viewer_drag();
         self.end_layer_time_drag();
         self.project = project;
+        self.reset_tabs();
         self.open_composition(comp);
         self.selected_item = Some(comp);
         self.current_frame = 0;
@@ -857,13 +878,21 @@ impl EditorState {
         }
     }
 
+    /// The style a shape layer is drawn with at the playhead: its own, or while its fill and
+    /// stroke are keyframed, the style those keyframes give there.
+    pub fn shape_style_now(&self, layer: Id) -> Option<ShapeStyle> {
+        self.composition().layer(layer)?.shape_style_at(self.current_frame as f64)
+    }
+
     /// Sets a shape setting. Sizes keep the shape centered on its anchor; with
     /// `shape_size_linked`, width and height change together.
     pub fn set_shape_setting(&mut self, layer: Id, setting: ShapeSetting, value: f32) {
         if self.shape_of(layer).is_none() {
             return;
         }
-        let Some(size) = self.composition().layer(layer).map(|layer| layer.size) else { return };
+        let frame = self.current_frame;
+        // While the outline is keyframed, the size is the outline's at the playhead.
+        let Some((size, animated)) = self.composition().layer(layer).map(|layer| (layer.shape_size_at(frame as f64), layer.is_morphing())) else { return };
         let ratio = size.y / size.x.max(1.0);
         let new_size = match setting {
             ShapeSetting::Width if self.shape_size_linked => Some(Vec2::new(value, value * ratio)),
@@ -874,11 +903,21 @@ impl EditorState {
             _ => None,
         };
         if let Some(new_size) = new_size {
-            edit::set_shape_size(self.composition_mut(), layer, new_size);
+            // An animated outline gets a keyframe at the playhead; a still shape gets a new box.
+            if animated {
+                studio_core::morph::set_morph_size(self.composition_mut(), layer, frame, new_size);
+            } else {
+                edit::set_shape_size(self.composition_mut(), layer, new_size);
+            }
+            return;
+        }
+        // Only a pen path's stroke can be trimmed, so a drawn shape becomes one first (it keeps its look).
+        if matches!(setting, ShapeSetting::TrimStart | ShapeSetting::TrimEnd | ShapeSetting::TrimOffset) && !self.convert_to_path(layer) {
             return;
         }
         let outer = size.x.min(size.y) * 0.5;
-        edit::edit_shape(self.composition_mut(), layer, |style| match setting {
+        // A keyframed style is edited, and keyframed, at the playhead.
+        studio_core::morph::edit_style_at(self.composition_mut(), layer, frame, |style| match setting {
             ShapeSetting::InnerRadius => style.inner_radius = value / outer.max(1.0),
             ShapeSetting::CornerRadius => style.corner_radius = value,
             ShapeSetting::Points => style.points = value.round().clamp(0.0, u32::MAX as f32) as u32,
@@ -889,13 +928,18 @@ impl EditorState {
             }
             ShapeSetting::FillAngle => style.fill.iter_mut().for_each(|paint| set_angle(paint, value, size)),
             ShapeSetting::StrokeAngle => style.stroke.iter_mut().for_each(|stroke| set_angle(&mut stroke.paint, value, size)),
+            ShapeSetting::TrimStart => style.trim.start = value,
+            ShapeSetting::TrimEnd => style.trim.end = value,
+            ShapeSetting::TrimOffset => style.trim.offset = value,
             ShapeSetting::Width | ShapeSetting::Height | ShapeSetting::OuterRadius => {}
         });
     }
 
     /// Sets a shape's fill or stroke paint; `None` turns it off. A stroke turned on starts 4 px wide.
     pub fn set_shape_paint(&mut self, layer: Id, slot: PaintSlot, paint: Option<Paint>) {
-        edit::edit_shape(self.composition_mut(), layer, |style| match slot {
+        let frame = self.current_frame;
+        // A keyframed style is edited, and keyframed, at the playhead.
+        studio_core::morph::edit_style_at(self.composition_mut(), layer, frame, |style| match slot {
             PaintSlot::Fill => style.fill = paint,
             PaintSlot::Stroke => {
                 let width = style.stroke.map_or(4.0, |stroke| stroke.width);
@@ -938,7 +982,7 @@ impl EditorState {
 
     /// A shape's fill or stroke paint.
     pub fn shape_paint(&self, layer: Id, slot: PaintSlot) -> Option<Paint> {
-        let style = self.shape_of(layer)?;
+        let style = self.shape_style_now(layer)?;
         match slot {
             PaintSlot::Fill => style.fill,
             PaintSlot::Stroke => style.stroke.map(|stroke| stroke.paint),
@@ -964,24 +1008,34 @@ impl EditorState {
         self.composition().layer(layer).is_some_and(|layer| studio_core::audio::layer_has_sound(&self.project, layer))
     }
 
+    /// A sound setting of a layer. Volume and pan can be keyframed, so they are read as they
+    /// are at the playhead.
     pub fn audio_setting(&self, layer: Id, setting: AudioSetting) -> Option<f32> {
         let audio = &self.composition().layer(layer)?.audio;
+        let at = self.current_frame as f64;
         Some(match setting {
-            AudioSetting::Volume => audio.volume_db,
+            AudioSetting::Volume => audio.volume_db.value_at(at),
             AudioSetting::FadeIn => audio.fade_in,
             AudioSetting::FadeOut => audio.fade_out,
             AudioSetting::DuckAmount => audio.duck_db,
             AudioSetting::NoiseGate => audio.noise_gate,
+            AudioSetting::Pan => audio.pan.value_at(at),
         })
     }
 
+    /// Sets a sound setting of a layer. Keyframed volume and pan get a keyframe at the
+    /// playhead, as any animated property does.
     pub fn set_audio_setting(&mut self, layer: Id, setting: AudioSetting, value: f32) {
+        use studio_core::model::LayerAudio;
+        let frame = self.current_frame;
+        let value = if value.is_finite() { value } else { 0.0 };
         edit::set_layer_audio(self.composition_mut(), layer, |audio| match setting {
-            AudioSetting::Volume => audio.volume_db = value,
+            AudioSetting::Volume => audio.volume_db.set_at(frame, value.clamp(LayerAudio::VOLUME_RANGE.0, LayerAudio::VOLUME_RANGE.1)),
             AudioSetting::FadeIn => audio.fade_in = value,
             AudioSetting::FadeOut => audio.fade_out = value,
             AudioSetting::DuckAmount => audio.duck_db = value,
             AudioSetting::NoiseGate => audio.noise_gate = value,
+            AudioSetting::Pan => audio.pan.set_at(frame, value.clamp(-100.0, 100.0)),
         });
     }
 
@@ -1187,8 +1241,17 @@ impl EditorState {
         layer.time.constant_factor().map(|factor| (factor * 100.0) as f32)
     }
 
+    /// Gives `layer` a steady speed. Its length changes to fit, so a clip that grows over the
+    /// next one on its track moves to a track of its own (on a magnetic main track, the clips
+    /// after it are pushed along instead when the edit is recorded).
     pub fn set_speed(&mut self, layer: Id, percent: f32) {
-        studio_core::speed::set_speed(self.composition_mut(), layer, percent);
+        if !studio_core::speed::set_speed(self.composition_mut(), layer, percent) {
+            return;
+        }
+        let on_magnetic_track = self.magnetic_main_track && self.composition().layer(layer).is_some_and(|layer| layer.track == studio_core::tracks::MAIN_TRACK);
+        if !on_magnetic_track {
+            self.settle_on_track(layer);
+        }
     }
 
     pub fn set_reverse(&mut self, layer: Id, reverse: bool) {
@@ -1351,19 +1414,35 @@ impl EditorState {
     }
 
     /// Sets the open composition's motion blur shutter, from the Composition Settings dialog.
+    /// Sets whether the open composition mixes its layers in linear light or in display colors.
+    pub fn set_linear_blending(&mut self, linear: bool) {
+        if let Some(composition) = self.project.composition_mut(self.active_comp) {
+            composition.linear_blending = linear;
+        }
+    }
+
     pub fn set_motion_blur(&mut self, settings: studio_core::motion_blur::MotionBlur) -> Result<(), String> {
         studio_core::motion_blur::set_motion_blur(&mut self.project, self.active_comp, settings)
     }
 
-    /// Opens a composition in the viewer and timeline.
+    /// Opens a composition in the viewer and timeline, in a tab of its own (see `tabs`). A
+    /// composition whose tab was open before comes back as it was left; one opened anew starts
+    /// at its first frame, whole.
     pub fn open_composition(&mut self, id: Id) {
         let Some(comp) = self.project.composition(id) else { return };
-        let duration = comp.duration_frames as f64;
+        let duration = comp.duration_frames;
+        // Only a tab still open is remembered: after another project replaces this one, the old
+        // composition's id may belong to a different composition.
+        if id != self.active_comp && self.open_tabs.contains(&self.active_comp) {
+            self.remember_tab_view();
+        }
+        let whole = FrameRange::new(0.0, duration as f64);
+        let (frame, work_area, view_range) = self.take_tab_view(id, duration).unwrap_or((0, whole, whole));
         self.active_comp = id;
         self.playback = None;
-        self.current_frame = 0;
-        self.work_area = FrameRange::new(0.0, duration);
-        self.view_range = FrameRange::new(0.0, duration);
+        self.current_frame = frame;
+        self.work_area = work_area;
+        self.view_range = view_range;
         self.clear_selection();
         self.selected_item = Some(id);
     }
@@ -1431,6 +1510,10 @@ pub fn read_project_file(path: &std::path::Path, asset_folder: &std::path::Path,
 /// What a media file is: an image, a video (with or without sound) or sound alone.
 fn probe_media(path: &std::path::Path) -> Option<studio_core::import::Probed> {
     use studio_core::import::Probed;
+    // An SVG brought in as one picture: an image the size the drawing states.
+    if is_extension(path, "svg") {
+        return std::fs::read_to_string(path).ok().and_then(|text| studio_core::import::svg::size(&text)).map(Probed::Image);
+    }
     if let Ok((width, height)) = image::image_dimensions(path) {
         return Some(Probed::Image(Vec2::new(width as f32, height as f32)));
     }
@@ -1510,6 +1593,30 @@ impl EditorState {
         }
         self.after_project_replaced();
         true
+    }
+
+    /// The changes made (oldest first) and the ones undone (the next to redo first), each in
+    /// a few words, for the History panel.
+    pub fn history_changes(&self) -> (Vec<&str>, Vec<&str>) {
+        self.history.changes()
+    }
+
+    /// Steps back or forward through the history until exactly `made` of its changes are
+    /// applied: 0 is the project before any of them. Stops early if a step can't be taken
+    /// (in the middle of a drag, say).
+    pub fn go_to_history(&mut self, made: usize) {
+        // Anything not recorded yet becomes a step first, so the count below includes it.
+        self.history.record(&self.project);
+        while self.history.changes_made() > made {
+            if !self.undo() {
+                return;
+            }
+        }
+        while self.history.changes_made() < made {
+            if !self.redo() {
+                return;
+            }
+        }
     }
 
     /// Redoes the last undone change. Returns whether anything changed.
@@ -1616,6 +1723,9 @@ impl EditorState {
         self.end_viewer_drag();
         self.end_layer_time_drag();
         self.project = project;
+        self.reset_tabs();
+        // A project saved before folders had colors gets them now.
+        studio_core::folders::color_older_project(&mut self.project);
         // Library colors and text styles may have changed since it was saved.
         studio_core::library::sync_project(&mut self.project, &self.libraries);
         self.open_composition(view.active_composition);
@@ -1991,7 +2101,10 @@ mod tests {
         let mut reopened = EditorState::new();
         let (missing, _) = reopened.open_project(&std::fs::read_to_string(&path).unwrap(), path.clone()).unwrap();
         assert!(missing.is_empty(), "the sample's media has no files to miss");
-        assert_eq!(reopened.project, state.project);
+        // The sample's folders have no colors, so opening it gives them some.
+        let mut expected = state.project.clone();
+        studio_core::folders::color_older_project(&mut expected);
+        assert_eq!(reopened.project, expected);
         assert_eq!((reopened.current_frame, reopened.file()), (77, Some(path.as_path())));
         assert!(!reopened.has_unsaved_changes() && !reopened.can_undo(), "opening is not an edit");
         std::fs::remove_dir_all(&folder).unwrap();

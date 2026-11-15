@@ -5,7 +5,7 @@
 
 use studio_core::cut::{self, SplitReport};
 use studio_core::model::Id;
-use studio_core::trim;
+use studio_core::{tracks, trim};
 use studio_core::trim_tools::{self, End};
 
 use super::EditorState;
@@ -253,6 +253,26 @@ impl EditorState {
         })
     }
 
+    /// Moves clip `other` so that the sound it shares with `reference` plays at the same moment
+    /// in both. `lag_seconds` is how much later that sound is found in `other`'s file than in
+    /// `reference`'s. Returns whether it could be moved (not if it is locked or gone).
+    pub fn line_up_clip(&mut self, reference: Id, other: Id, lag_seconds: f64) -> bool {
+        let magnetic = self.magnetic_main_track;
+        let composition = self.composition_mut();
+        let fps = composition.frame_rate.fps();
+        let Some(reference_start) = composition.layer(reference).map(|layer| layer.start_frame) else { return false };
+        let Some(clip) = composition.layer(other).filter(|layer| !layer.switches.locked) else { return false };
+        // The files' first frames are `lag_seconds` apart, the later-starting sound's file earlier.
+        let wanted_start = reference_start - (lag_seconds * fps).round() as i64;
+        let in_frame = clip.in_frame + (wanted_start - clip.start_frame);
+        // The clip keeps its track if it fits there at its new time, and otherwise gets a track
+        // of its own. A magnetic main track would pack it back against its neighbours and undo
+        // the lining up, so a clip there moves to the track above.
+        let track = if magnetic && clip.track == tracks::MAIN_TRACK { tracks::MAIN_TRACK + 1 } else { clip.track };
+        tracks::place_clip(composition, other, track, in_frame);
+        true
+    }
+
     /// Deletes the selected layers and closes the gaps they leave. Returns how many were deleted.
     pub fn ripple_delete_selection(&mut self) -> usize {
         let comp = self.active_comp;
@@ -319,6 +339,43 @@ mod tests {
     fn timing(state: &EditorState, layer: Id) -> (i64, i64, i64) {
         let layer = state.composition().layer(layer).unwrap();
         (layer.start_frame, layer.in_frame, layer.out_frame)
+    }
+
+    #[test]
+    fn lining_clips_up_by_sound_keeps_them_apart_and_off_the_magnetic_track() {
+        let (mut state, first) = with_clip();
+        let item = state.selected_item.unwrap();
+        state.add_layer_from_item(item, 0, 48);
+        let second = state.composition().layers.iter().find(|layer| layer.id != first).unwrap().id;
+        // Both clips on one track, end to end.
+        let track = state.composition().layer(first).unwrap().track;
+        studio_core::tracks::place_clip(state.composition_mut(), second, track, 48);
+        state.record_history(false);
+        assert_eq!(state.composition().layer(second).unwrap().track, state.composition().layer(first).unwrap().track);
+        // The second clip's sound is one second later in its file, so it moves to start 24 frames early.
+        assert!(state.line_up_clip(first, second, 1.0));
+        state.record_history(false);
+        let (reference, moved) = (state.composition().layer(first).unwrap().clone(), state.composition().layer(second).unwrap().clone());
+        assert_eq!(moved.start_frame, reference.start_frame - 24, "lined up, and the magnetic main track left it there");
+        let overlap = moved.track == reference.track && moved.in_frame < reference.out_frame && reference.in_frame < moved.out_frame;
+        assert!(!overlap, "it moved to a track of its own rather than over the first clip");
+    }
+
+    #[test]
+    fn slowing_a_clip_down_never_covers_the_next_one_on_its_track() {
+        let (mut state, first) = with_clip();
+        state.magnetic_main_track = false;
+        let item = state.selected_item.unwrap();
+        state.add_layer_from_item(item, 0, 48);
+        let second = state.composition().layers.iter().find(|layer| layer.id != first).unwrap().id;
+        let track = state.composition().layer(first).unwrap().track;
+        studio_core::tracks::place_clip(state.composition_mut(), second, track, 48);
+        // At half speed the first clip runs 0–96, past where the second starts.
+        state.set_speed(first, 50.0);
+        let (slowed, next) = (state.composition().layer(first).unwrap().clone(), state.composition().layer(second).unwrap().clone());
+        assert_eq!((slowed.in_frame, slowed.out_frame), (0, 96));
+        assert_eq!((next.in_frame, next.out_frame), (48, 96), "the next clip stays where it was");
+        assert_ne!(slowed.track, next.track, "the slowed clip went to a track of its own");
     }
 
     #[test]

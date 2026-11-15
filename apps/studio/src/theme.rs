@@ -1,11 +1,11 @@
-//! Studio's palettes and element sizes. The layout follows After Effects; the default colors
-//! are near-blacks with a slight cool, inky cast, a violet accent for selection, and one lime
-//! "time" color for everything that marks a moment (the playhead's handle, the current
-//! timecode, the snap guide).
+//! Studio's palettes and element sizes. The layout follows After Effects; the surfaces are
+//! neutral greys and there is exactly one color besides them, the accent: a vivid lime by
+//! default. Selection, values, the playhead's handle, the timecode, the snap guide and the
+//! Export button all use it, so nothing else on screen competes with the clips.
 //!
-//! Panels name colors by the constants in `color` (the Dark theme's values) and turn them into
-//! GPUI colors with `hsla`, which swaps in the active theme's color for each one. So a theme
-//! (Dark, Black or Light) and an accent (violet, blue, and so on) change every panel at once,
+//! Panels name colors by the constants in `color` (the Obsidian theme's values) and turn them
+//! into GPUI colors with `hsla`, which swaps in the active theme's color for each one. So a
+//! theme (Midnight, Obsidian, Winter or Mist) and an accent change every panel at once,
 //! without each panel knowing about themes.
 
 use std::cell::RefCell;
@@ -16,87 +16,110 @@ use serde::{Deserialize, Serialize};
 
 /// Palette as 0xRRGGBB values.
 pub mod color {
-    // The Dark theme's surfaces are not pure greys: each leans slightly blue, which gives the
-    // app its own cast and lets the lime time color and the clip colors stand out.
     /// The window behind the panels, and the gaps between them.
-    pub const BACKGROUND: u32 = 0x07080b;
-    pub const PANEL: u32 = 0x111318;
+    pub const BACKGROUND: u32 = 0x0e0e0f;
+    pub const PANEL: u32 = 0x1a1a1c;
     /// Wells inside a panel (fields, lists, the timeline's rows).
-    pub const INSET: u32 = 0x0c0d11;
+    pub const INSET: u32 = 0x141415;
     /// Around the composition frame in the viewer.
-    pub const PASTEBOARD: u32 = 0x0a0b0e;
-    pub const BORDER: u32 = 0x040507;
-    pub const HAIRLINE: u32 = 0x1f222a;
-    pub const HOVER: u32 = 0x1b1e25;
+    pub const PASTEBOARD: u32 = 0x111112;
+    pub const BORDER: u32 = 0x09090a;
+    pub const HAIRLINE: u32 = 0x2a2a2d;
+    pub const HOVER: u32 = 0x26262a;
     pub const ROW_SELECTED: u32 = 0x251f3a;
-    pub const TEXT: u32 = 0xeceef2;
-    pub const MUTED: u32 = 0x838893;
-    /// Selection, focus and active controls: a violet, as in the motion tools this is styled on.
-    pub const ACCENT: u32 = 0x8b5cf6;
+    pub const TEXT: u32 = 0xededef;
+    pub const MUTED: u32 = 0x8b8b92;
+    /// The one color besides the greys: selection, focus, active controls and everything
+    /// that marks a moment in time. A vivid lime unless another accent is picked.
+    pub const ACCENT: u32 = 0xd4f25c;
     pub const VALUE: u32 = 0xa78bfa;
-    /// Studio's signature lime, used only for things that mark a moment in time: the playhead's
-    /// handle, the current timecode and the snap guide. (One step off `HIGHLIGHT`, so a theme
-    /// can give it a darker shade where lime would not show.)
-    pub const TIME: u32 = 0xd4f25d;
-    /// The guide line showing where a timeline drag snapped.
-    pub const SNAP: u32 = TIME;
-    /// The bright lime used for the one call to action on screen (Export).
-    pub const HIGHLIGHT: u32 = 0xd4f25c;
+    /// The guide line showing where a timeline drag snapped. The accent, so there is only
+    /// one color on screen.
+    pub const SNAP: u32 = ACCENT;
+    /// The one call to action on screen (Export). The accent as well.
+    pub const HIGHLIGHT: u32 = ACCENT;
     pub const WORK_AREA: u32 = 0x3a3150;
-    pub const NAVIGATOR_THUMB: u32 = 0x2e323c;
+    pub const NAVIGATOR_THUMB: u32 = 0x3a3a40;
     /// Menus, dialogs and other surfaces that float above the panels.
-    pub const POPOVER: u32 = 0x16181e;
+    pub const POPOVER: u32 = 0x202023;
     /// Buttons and other raised controls at rest.
-    pub const RAISED: u32 = 0x181b21;
-    /// The playhead: white, so it reads over any clip color. (One step off pure white, so the
-    /// Light theme can tell it apart from white used for other things.)
+    pub const RAISED: u32 = 0x232326;
+    /// The playhead's line: white, so it reads over any clip color. (One step off pure white,
+    /// so the light themes can tell it apart from white used for other things.)
     pub const PLAYHEAD: u32 = 0xfffffe;
 }
 
 /// Fixed element sizes in pixels.
 pub mod size {
-    pub const TOOLBAR_HEIGHT: f32 = 40.0;
+    pub const TOOLBAR_HEIGHT: f32 = 44.0;
     pub const PANEL_HEADER_HEIGHT: f32 = 30.0;
     pub const PANEL_FOOTER_HEIGHT: f32 = 28.0;
     pub const ROW_HEIGHT: f32 = 22.0;
     pub const TEXT: f32 = 12.0;
     pub const SMALL_TEXT: f32 = 11.0;
     pub const GUTTER: f32 = 6.0;
-    /// Corner radius of panels: gently rounded, so each reads as its own slab on the darker
-    /// window behind it.
-    pub const PANEL_RADIUS: f32 = 6.0;
+    /// Corner radius of panels: barely rounded, enough to soften each panel's corners
+    /// without making it look like a card.
+    pub const PANEL_RADIUS: f32 = 3.0;
+    /// Corner radius of everything that floats over the editor (dialogs, the quick search,
+    /// progress popups): a little rounder than a panel, so it reads as lifted off the layout
+    /// while still belonging to it.
+    pub const POPUP_RADIUS: f32 = 6.0;
 }
 
 /// The fixed-width font for timecodes, frame counts and property values, so digits keep their
 /// place while a value changes.
 pub const MONO_FONT: &str = "Menlo";
 
-/// The app's look: how light the surfaces are.
+/// The app's look: how light the surfaces are. (The aliases are the names these themes were
+/// saved under before they were renamed.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeName {
-    #[default]
-    Dark,
     /// Pure black surfaces, for dark rooms and OLED screens.
-    Black,
-    Light,
+    #[serde(alias = "Black")]
+    Midnight,
+    /// Dark grey surfaces, not black.
+    #[default]
+    #[serde(alias = "Dark")]
+    Obsidian,
+    /// White panels.
+    #[serde(alias = "Light")]
+    Winter,
+    /// Light grey panels, softer than Winter in a bright room.
+    Mist,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 3] = [Self::Dark, Self::Black, Self::Light];
+    pub const ALL: [ThemeName; 4] = [Self::Midnight, Self::Obsidian, Self::Winter, Self::Mist];
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Dark => "Dark",
-            Self::Black => "Black",
-            Self::Light => "Light",
+            Self::Midnight => "Midnight",
+            Self::Obsidian => "Obsidian",
+            Self::Winter => "Winter",
+            Self::Mist => "Mist",
         }
+    }
+
+    /// Whether the theme has light surfaces with dark text.
+    pub fn is_light(self) -> bool {
+        matches!(self, Self::Winter | Self::Mist)
+    }
+
+    /// The theme's window background, panel and text colors, for drawing a small picture
+    /// of it where themes are picked.
+    pub fn preview(self) -> (u32, u32, u32) {
+        let Surfaces([background, panel, _, _, _, _, _, text, ..]) = surfaces(self);
+        (background, panel, text)
     }
 }
 
-/// The color used for selection, focus, values and active controls.
+/// The one color used besides the greys: selection, focus, values, active controls and the
+/// time markers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Accent {
     #[default]
+    Lime,
     Violet,
     Blue,
     Teal,
@@ -107,10 +130,11 @@ pub enum Accent {
 }
 
 impl Accent {
-    pub const ALL: [Accent; 7] = [Self::Violet, Self::Blue, Self::Teal, Self::Green, Self::Orange, Self::Pink, Self::Red];
+    pub const ALL: [Accent; 8] = [Self::Lime, Self::Violet, Self::Blue, Self::Teal, Self::Green, Self::Orange, Self::Pink, Self::Red];
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::Lime => "Lime",
             Self::Violet => "Violet",
             Self::Blue => "Blue",
             Self::Teal => "Teal",
@@ -123,7 +147,8 @@ impl Accent {
 
     pub fn value(self) -> u32 {
         match self {
-            Self::Violet => color::ACCENT,
+            Self::Lime => color::ACCENT,
+            Self::Violet => 0x8b5cf6,
             Self::Blue => 0x3b82f6,
             Self::Teal => 0x14b8a6,
             Self::Green => 0x22c55e,
@@ -132,10 +157,16 @@ impl Accent {
             Self::Red => 0xef4444,
         }
     }
+
+    /// The accent as drawn on a theme. Lime is too pale to read on light surfaces, so the
+    /// light themes use a deeper green of the same hue; the other accents are the same on all.
+    pub fn on_theme(self, theme: ThemeName) -> u32 {
+        if self == Self::Lime && theme.is_light() { 0x5a9a0a } else { self.value() }
+    }
 }
 
 /// The palette colors a theme sets, in this order.
-const KEYS: [u32; 18] = [
+const KEYS: [u32; 17] = [
     color::BACKGROUND,
     color::PANEL,
     color::INSET,
@@ -153,7 +184,6 @@ const KEYS: [u32; 18] = [
     color::POPOVER,
     color::RAISED,
     color::PLAYHEAD,
-    color::TIME,
 ];
 
 /// A theme's surfaces and text: background, panel, inset, pasteboard, border, hairline, hover,
@@ -163,9 +193,10 @@ struct Surfaces([u32; 13]);
 fn surfaces(theme: ThemeName) -> Surfaces {
     use color::*;
     Surfaces(match theme {
-        ThemeName::Dark => [BACKGROUND, PANEL, INSET, PASTEBOARD, BORDER, HAIRLINE, HOVER, TEXT, MUTED, NAVIGATOR_THUMB, POPOVER, RAISED, PLAYHEAD],
-        ThemeName::Black => [0x000000, 0x0a0a0a, 0x050505, 0x030303, 0x000000, 0x1a1a1a, 0x151515, 0xf2f2f2, 0x808086, 0x262626, 0x111111, 0x141414, 0xffffff],
-        ThemeName::Light => [0xdcdce0, 0xf6f6f7, 0xececee, 0xcfcfd4, 0xc4c4ca, 0xdadade, 0xe6e6e9, 0x18181b, 0x66666e, 0xc2c2c8, 0xffffff, 0xeeeef0, 0x18181b],
+        ThemeName::Obsidian => [BACKGROUND, PANEL, INSET, PASTEBOARD, BORDER, HAIRLINE, HOVER, TEXT, MUTED, NAVIGATOR_THUMB, POPOVER, RAISED, PLAYHEAD],
+        ThemeName::Midnight => [0x000000, 0x0a0a0a, 0x050505, 0x030303, 0x000000, 0x1a1a1a, 0x151515, 0xf2f2f2, 0x808086, 0x262626, 0x111111, 0x141414, 0xffffff],
+        ThemeName::Winter => [0xeeeef1, 0xffffff, 0xf5f5f7, 0xe4e4e8, 0xd0d0d6, 0xe2e2e6, 0xededf0, 0x18181b, 0x66666e, 0xc8c8ce, 0xffffff, 0xf3f3f5, 0x18181b],
+        ThemeName::Mist => [0xc9c9ce, 0xe4e4e7, 0xdadade, 0xc0c0c6, 0xb2b2b9, 0xcacacf, 0xd6d6da, 0x18181b, 0x5c5c64, 0xb0b0b7, 0xeeeef0, 0xdcdce0, 0x18181b],
     })
 }
 
@@ -179,23 +210,21 @@ fn mix(a: u32, b: u32, amount: f32) -> u32 {
 }
 
 /// The colors standing in for `KEYS` in a theme with an accent.
-fn palette(theme: ThemeName, accent: Accent) -> [u32; 18] {
+fn palette(theme: ThemeName, accent: Accent) -> [u32; 17] {
     let Surfaces([background, panel, inset, pasteboard, border, hairline, hover, text, muted, thumb, popover, raised, playhead]) = surfaces(theme);
-    let accent = accent.value();
-    let light = theme == ThemeName::Light;
+    let accent = accent.on_theme(theme);
+    let light = theme.is_light();
     // Shades of the accent: a tint for selected rows and the work area, and a readable tone
     // for values (lighter on dark surfaces, darker on light ones).
     let selected = mix(panel, accent, if light { 0.18 } else { 0.16 });
     let value = if light { mix(accent, 0x000000, 0.2) } else { mix(accent, 0xffffff, 0.25) };
     let work_area = mix(panel, accent, if light { 0.35 } else { 0.28 });
-    // Lime disappears on light surfaces, so the Light theme uses a dark olive of the same hue.
-    let time = if light { 0x5a7a00 } else { color::TIME };
-    [background, panel, inset, pasteboard, border, hairline, hover, selected, text, muted, accent, value, work_area, thumb, popover, raised, playhead, time]
+    [background, panel, inset, pasteboard, border, hairline, hover, selected, text, muted, accent, value, work_area, thumb, popover, raised, playhead]
 }
 
 thread_local! {
     /// The active theme's colors for `KEYS`. The UI runs on one thread, so this is per thread.
-    static ACTIVE: RefCell<[u32; 18]> = const { RefCell::new(KEYS) };
+    static ACTIVE: RefCell<[u32; 17]> = const { RefCell::new(KEYS) };
 }
 
 /// A palette color (one of the `color` constants, or any 0xRRGGBB) as a GPUI color, in the
@@ -203,6 +232,16 @@ thread_local! {
 pub fn hsla(value: u32) -> Hsla {
     let themed = KEYS.iter().position(|&key| key == value).map_or(value, |index| ACTIVE.with(|active| active.borrow()[index]));
     rgb(themed).into()
+}
+
+/// The color for text and icons drawn on top of the accent: near-black on a bright accent
+/// (lime, say) and white on a deep one, so it always reads.
+pub fn on_accent() -> Hsla {
+    let accent = themed(color::ACCENT);
+    let (red, green, blue) = ((accent >> 16) & 0xff, (accent >> 8) & 0xff, accent & 0xff);
+    // Perceived brightness, 0–255, weighting green most as the eye does.
+    let brightness = (red * 299 + green * 587 + blue * 114) / 1000;
+    rgb(if brightness > 150 { 0x10130a } else { 0xffffff }).into()
 }
 
 /// The active theme's value for a palette color, as 0xRRGGBB.
@@ -214,7 +253,7 @@ pub fn themed(value: u32) -> u32 {
 /// them (menus, dialogs, inputs and buttons). Call `cx.refresh_windows()` after a change.
 pub fn apply(theme: ThemeName, accent: Accent, cx: &mut App) {
     ACTIVE.with(|active| *active.borrow_mut() = palette(theme, accent));
-    let mode = if theme == ThemeName::Light { ThemeMode::Light } else { ThemeMode::Dark };
+    let mode = if theme.is_light() { ThemeMode::Light } else { ThemeMode::Dark };
     Theme::change(mode, None, cx);
     let theme = Theme::global_mut(cx);
     theme.colors.background = hsla(color::BACKGROUND);
@@ -222,6 +261,7 @@ pub fn apply(theme: ThemeName, accent: Accent, cx: &mut App) {
     theme.colors.border = hsla(color::HAIRLINE);
     theme.colors.muted_foreground = hsla(color::MUTED);
     theme.colors.primary = hsla(color::ACCENT);
+    theme.colors.primary_foreground = on_accent();
     // A quiet focus ring on text fields, not a bright one.
     theme.colors.ring = hsla(if mode == ThemeMode::Light { 0xb4b4bc } else { 0x3a3a42 });
     theme.colors.selection = gpui_kit::rgba((themed(color::ACCENT) << 8) | 0x55).into();
@@ -245,6 +285,7 @@ pub fn apply(theme: ThemeName, accent: Accent, cx: &mut App) {
     theme.colors.scrollbar = hsla(color::PANEL);
     theme.colors.scrollbar_thumb = hsla(color::HAIRLINE);
     theme.font_size = px(size::TEXT);
+    theme.radius_lg = px(size::POPUP_RADIUS);
 }
 
 #[cfg(test)]
@@ -252,18 +293,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_dark_violet_theme_keeps_the_original_colors_and_others_swap_them() {
-        let dark = palette(ThemeName::Dark, Accent::Violet);
-        assert_eq!(dark[0], color::BACKGROUND);
-        assert_eq!(dark[10], color::ACCENT);
-        let light = palette(ThemeName::Light, Accent::Blue);
-        assert_eq!(light[10], 0x3b82f6);
-        assert_ne!(light[1], color::PANEL, "light panels");
-        // The time color is lime on dark surfaces and a darker shade on light ones.
-        assert_eq!(dark[17], color::TIME);
-        assert!(light[17] < color::TIME, "a darker time color on light panels");
+    fn obsidian_with_lime_keeps_the_named_colors_and_others_swap_them() {
+        let obsidian = palette(ThemeName::Obsidian, Accent::Lime);
+        assert_eq!(obsidian[0], color::BACKGROUND);
+        assert_eq!(obsidian[10], color::ACCENT);
+        let winter = palette(ThemeName::Winter, Accent::Blue);
+        assert_eq!(winter[10], 0x3b82f6);
+        assert_ne!(winter[1], color::PANEL, "light panels");
         // Text on panels stays readable: dark on light.
-        assert!(light[8] < 0x404040 && dark[8] > 0xc0c0c0);
+        assert!(winter[8] < 0x404040 && obsidian[8] > 0xc0c0c0);
+        // Lime is deepened on the light themes, where the pale lime would not show.
+        assert_ne!(palette(ThemeName::Mist, Accent::Lime)[10], color::ACCENT);
+    }
+
+    #[test]
+    fn themes_saved_under_their_old_names_still_load() {
+        let load = |name: &str| serde_json::from_str::<ThemeName>(&format!("\"{name}\"")).unwrap();
+        assert_eq!((load("Dark"), load("Black"), load("Light")), (ThemeName::Obsidian, ThemeName::Midnight, ThemeName::Winter));
     }
 
     #[test]

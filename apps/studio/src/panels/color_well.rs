@@ -51,7 +51,8 @@ fn chip(key: &'static str, index: usize, color: Rgba, removable: bool, cx: &mut 
 /// "Save to library": adds the current color to a brand's colors.
 fn save_to_library(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let brands: Vec<_> = workspace.state.libraries.brands.iter().map(|brand| (brand.id, brand.name.clone())).collect();
-    if brands.is_empty() {
+    // Hidden with Libraries turned off in Settings ▸ Tools & Features.
+    if brands.is_empty() || !workspace.has(crate::features::Feature::Libraries) {
         return None;
     }
     let weak = cx.weak_entity();

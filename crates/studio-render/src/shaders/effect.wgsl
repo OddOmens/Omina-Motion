@@ -1078,6 +1078,74 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             }
             return vec4(c.rgb + light * u.p0.z / 100.0 * c.a, c.a);
         }
+        // Film Grain: p0.x amount (%), p0.y grain size (px), p0.z color (%), p0.w changes per
+        // second (0 holds one pattern). Two layers of smooth noise make each grain soft and
+        // uneven rather than a hard square; it is added to display values, weighted toward the
+        // midtones as real film grain is.
+        case 103u: {
+            let grain_size = max(u.p0.y, 0.5);
+            let seed = select(floor(u.info.z * u.p0.w), 0.0, u.p0.w <= 0.0);
+            let shift = vec2(hash(vec2(seed, 1.7)), hash(vec2(3.1, seed))) * 512.0;
+            let at = pixel / grain_size + shift;
+            let fine = vec3(value_noise(at), value_noise(at + 41.3), value_noise(at + 87.9));
+            let coarse = vec3(value_noise(at * 0.5 + 13.0), value_noise(at * 0.5 + 57.0), value_noise(at * 0.5 + 99.0));
+            let noise = (fine * 0.7 + coarse * 0.3) - 0.5;
+            let mono = vec3(noise.x);
+            let grain = mix(mono, noise, u.p0.z / 100.0);
+            let display = to_display(rgb);
+            let lightness = clamp(dot(display, LUMA), 0.0, 1.0);
+            let weight = 0.35 + 2.6 * lightness * (1.0 - lightness);
+            let amount = u.p0.x / 100.0 * 0.45;
+            return with_alpha(to_linear(display + grain * amount * weight), c.a);
+        }
+        // Paper Texture: p0.x amount (%), p0.y scale (px). Large soft blotches and fibers from
+        // fractal noise, plus fine specks, multiplied into the picture so it looks printed.
+        case 104u: {
+            let scale = max(u.p0.y, 1.0);
+            let blotches = fbm(pixel / scale);
+            let fibers = value_noise(vec2(pixel.x / (scale * 0.25), pixel.y / (scale * 0.6)) + 7.0);
+            let fine = value_noise(pixel / 2.5);
+            let specks = step(0.985, hash(floor(pixel / 1.5)));
+            let rough = clamp(blotches * 0.55 + fibers * 0.2 + fine * 0.25 + specks * 0.8, 0.0, 1.0);
+            let shade = 1.0 - rough * 0.35 * u.p0.x / 100.0;
+            let display = to_display(rgb) * shade;
+            return with_alpha(to_linear(display), c.a);
+        }
+        // Old Film: p0.x amount (%), p0.y dust (%), p0.z scratches (%), p0.w flicker (%). Works in
+        // whole film frames (24 a second) so dust and scratches jump like the real thing.
+        case 105u: {
+            let amount = u.p0.x / 100.0;
+            let frame_number = floor(u.info.z * 24.0);
+            var display = to_display(rgb);
+            // A faded, warm print: less contrast and a sepia cast.
+            let lightness = dot(display, LUMA);
+            let sepia = vec3(lightness * 1.07, lightness * 0.94, lightness * 0.76);
+            display = mix(display, sepia * 0.88 + 0.06, amount * 0.7);
+            // The whole frame brightening and dimming a little, unevenly.
+            display *= 1.0 + (value_noise(vec2(u.info.z * 9.0, 2.0)) - 0.5) * 0.35 * u.p0.w / 100.0;
+            // Dust: a few dark specks in random cells, new each frame.
+            let cell_size = 46.0;
+            let cell = floor(pixel / cell_size);
+            let dust_pick = hash(cell + frame_number * 7.31);
+            if (dust_pick > 1.0 - 0.03 * u.p0.y / 100.0) {
+                let spot = (cell + vec2(hash(cell + frame_number), hash(cell - frame_number))) * cell_size;
+                let radius = 0.8 + 2.4 * hash(cell * 1.7 + frame_number);
+                display *= mix(1.0, 0.25, 1.0 - smoothstep(radius - 0.6, radius + 0.6, length(pixel - spot)));
+            }
+            // Scratches: thin pale vertical lines that hold for a few frames, then move.
+            let scratch_time = floor(frame_number / 3.0);
+            for (var i = 0; i < 3; i++) {
+                let pick = vec2(f32(i) * 11.0, scratch_time);
+                if (hash(pick) < u.p0.z / 100.0 * 0.8) {
+                    let x = hash(pick + 0.37) * size.x;
+                    let line = exp(-abs(pixel.x - x) * 1.2) * (0.5 + 0.5 * value_noise(vec2(pixel.y * 0.02, pick.x)));
+                    display = mix(display, vec3(0.92, 0.9, 0.82), line * 0.6);
+                }
+            }
+            // Fine grain over everything.
+            display += (hash(pixel + frame_number * 13.0) - 0.5) * 0.12 * amount;
+            return with_alpha(to_linear(display), c.a);
+        }
         default: { return c; }
     }
 }

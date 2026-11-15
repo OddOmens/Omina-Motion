@@ -505,7 +505,9 @@ fn custom_tab(workspace: &Workspace, picker: &Picker, cx: &mut Context<Workspace
     used.truncate(16);
 
     let brands: Vec<(LinkId, String)> = workspace.state.libraries.brands.iter().map(|brand| (brand.id, brand.name.clone())).collect();
-    let save = if !brands.is_empty() && !matches!(picker.target, ColorTarget::Library(_)) { Some(save_to_library(brands, cx)) } else { None };
+    // Saving to a library goes with Libraries (Settings ▸ Tools & Features).
+    let libraries_on = workspace.has(crate::features::Feature::Libraries);
+    let save = if libraries_on && !brands.is_empty() && !matches!(picker.target, ColorTarget::Library(_)) { Some(save_to_library(brands, cx)) } else { None };
 
     let mut tab = div().flex().flex_col().gap_3();
     if let ColorTarget::Shape { layer, slot, stop } = picker.target {
@@ -588,8 +590,9 @@ fn libraries_tab(workspace: &Workspace, cx: &mut Context<Workspace>) -> gpui_kit
 /// The open picker, drawn above everything, or nothing.
 pub fn popover(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl IntoElement + use<>> {
     let picker = workspace.ui.color_picker.as_ref()?;
-    // A library color can't be linked to another library color.
-    let can_link = !matches!(picker.target, ColorTarget::Library(_));
+    // A library color can't be linked to another library color, and with Libraries turned off
+    // (Settings ▸ Tools & Features) there is no Libraries tab. Colors already linked stay linked.
+    let can_link = !matches!(picker.target, ColorTarget::Library(_)) && workspace.has(crate::features::Feature::Libraries);
     let tab_button = |label: &'static str, tab: PickerTab, cx: &mut Context<Workspace>| {
         let selected = picker.tab == tab;
         div()

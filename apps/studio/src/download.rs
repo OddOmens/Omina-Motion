@@ -1,6 +1,7 @@
-//! Downloading AI models. Each file is fetched with the system's `curl` (on every Mac, and on
-//! Windows 10 and most Linux systems) to a temporary name, checked against the SHA-256 it was
-//! published with, and only then put in place, so a broken or tampered download is never used.
+//! Downloading files with the system's `curl` (on every Mac, and on Windows 10 and most Linux
+//! systems). An AI model is fetched to a temporary name, checked against the SHA-256 it was
+//! published with, and only then put in place, so a broken or tampered download is never
+//! used. Stock pictures, video and sound have no published checksum and are kept as fetched.
 //! A download that stalls gives up, and one that is cancelled stops at once.
 
 use std::path::{Path, PathBuf};
@@ -12,6 +13,10 @@ use std::time::Duration;
 const PROTOCOLS: &str = "=https";
 #[cfg(test)]
 const PROTOCOLS: &str = "=https,file";
+
+/// How Studio names itself to the servers it fetches from. It says nothing about the person
+/// or their computer.
+const USER_AGENT: &str = concat!("Studio/", env!("CARGO_PKG_VERSION"), " (video editor)");
 
 /// How often a running download checks whether it was cancelled.
 const CANCEL_CHECK: Duration = Duration::from_millis(100);
@@ -28,7 +33,7 @@ fn partial_path(destination: &Path) -> PathBuf {
 /// up after 15 seconds, so a slow network never leaves a check hanging.
 pub fn fetch_text(url: &str, max_bytes: u64) -> Result<String, String> {
     let output = std::process::Command::new("curl")
-        .args(["-q", "-sSfL", "--proto", PROTOCOLS, "--proto-redir", PROTOCOLS, "--connect-timeout", "10", "--max-time", "15", "--max-filesize"])
+        .args(["-q", "-sSfL", "-A", USER_AGENT, "--proto", PROTOCOLS, "--proto-redir", PROTOCOLS, "--connect-timeout", "10", "--max-time", "15", "--max-filesize"])
         .arg(max_bytes.to_string())
         .arg(url)
         .output()
@@ -39,21 +44,53 @@ pub fn fetch_text(url: &str, max_bytes: u64) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|_| "the reply was not text".to_owned())
 }
 
-/// Downloads `url` to `destination` if its SHA-256 is `sha256` (lowercase hex). `what` names
-/// the file in error messages ("the captions model"). Stops, removing what it fetched, when
-/// `cancelled` says so.
-pub fn fetch_checked(url: &str, destination: &Path, sha256: &str, what: &str, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
-    use sha2::Digest as _;
-    let partial = partial_path(destination);
+/// A value written into a curl config file: in double quotes, with `\\` and `"` escaped.
+fn config_value(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Fetches a small text file (at most `max_bytes`) like `fetch_text`, for requests that carry
+/// an API key in the address or in `header`. The address and header are handed to curl on its
+/// standard input instead of its command line, so the key never shows in the system's list of
+/// running programs.
+pub fn fetch_text_privately(url: &str, header: Option<&str>, max_bytes: u64) -> Result<String, String> {
+    use std::io::Write as _;
+    let mut curl = std::process::Command::new("curl")
+        .args(["-q", "-sSfL", "-A", USER_AGENT, "--proto", PROTOCOLS, "--proto-redir", PROTOCOLS, "--connect-timeout", "10", "--max-time", "15", "--max-filesize"])
+        .arg(max_bytes.to_string())
+        .args(["--config", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start the request: {error}"))?;
+    let mut config = format!("url = {}\n", config_value(url));
+    if let Some(header) = header {
+        config.push_str(&format!("header = {}\n", config_value(header)));
+    }
+    // Dropping the handle closes it, which tells curl the config is complete.
+    if let Some(mut input) = curl.stdin.take() {
+        input.write_all(config.as_bytes()).map_err(|error| format!("could not start the request: {error}"))?;
+    }
+    let output = curl.wait_with_output().map_err(|error| format!("the request failed: {error}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().trim_start_matches("curl: ").to_owned());
+    }
+    String::from_utf8(output.stdout).map_err(|_| "the reply was not text".to_owned())
+}
+
+/// Runs curl to fetch `url` into `partial`, stopping when `cancelled` says so. `what` names the
+/// file in error messages. On any failure the partial file is removed.
+fn fetch_partial(url: &str, partial: &Path, what: &str, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     let discard = |message: String| {
-        let _ = std::fs::remove_file(&partial);
+        let _ = std::fs::remove_file(partial);
         Err(message)
     };
     // `-q` ignores the user's ~/.curlrc; a connection that can't be made in 20 s, or that moves
     // less than 1 KB a second for a minute, gives up rather than hanging the job.
     let mut curl = std::process::Command::new("curl")
-        .args(["-q", "-sSfL", "--proto", PROTOCOLS, "--proto-redir", PROTOCOLS, "--connect-timeout", "20", "--speed-limit", "1024", "--speed-time", "60", "-o"])
-        .arg(&partial)
+        .args(["-q", "-sSfL", "-A", USER_AGENT, "--proto", PROTOCOLS, "--proto-redir", PROTOCOLS, "--connect-timeout", "20", "--speed-limit", "1024", "--speed-time", "60", "-o"])
+        .arg(partial)
         .arg(url)
         .spawn()
         .map_err(|error| format!("could not start the download: {error}"))?;
@@ -72,6 +109,20 @@ pub fn fetch_checked(url: &str, destination: &Path, sha256: &str, what: &str, ca
     if !status.success() {
         return discard(format!("{what} could not be downloaded. Check the internet connection and try again."));
     }
+    Ok(())
+}
+
+/// Downloads `url` to `destination` if its SHA-256 is `sha256` (lowercase hex). `what` names
+/// the file in error messages ("the captions model"). Stops, removing what it fetched, when
+/// `cancelled` says so.
+pub fn fetch_checked(url: &str, destination: &Path, sha256: &str, what: &str, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+    use sha2::Digest as _;
+    let partial = partial_path(destination);
+    let discard = |message: String| {
+        let _ = std::fs::remove_file(&partial);
+        Err(message)
+    };
+    fetch_partial(url, &partial, what, cancelled)?;
     let bytes = match std::fs::read(&partial) {
         Ok(bytes) => bytes,
         Err(error) => return discard(format!("could not read the download: {error}")),
@@ -83,9 +134,38 @@ pub fn fetch_checked(url: &str, destination: &Path, sha256: &str, what: &str, ca
     std::fs::rename(&partial, destination).or_else(|error| discard(format!("could not save {what}: {error}")))
 }
 
+/// Downloads `url` to `destination` as it is, for files that are published without a checksum
+/// (stock pictures, video and sound). An empty download is refused. Stops, removing what it
+/// fetched, when `cancelled` says so.
+pub fn fetch_file(url: &str, destination: &Path, what: &str, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
+    let partial = partial_path(destination);
+    let discard = |message: String| {
+        let _ = std::fs::remove_file(&partial);
+        Err(message)
+    };
+    fetch_partial(url, &partial, what, cancelled)?;
+    if std::fs::metadata(&partial).map_or(true, |file| file.len() == 0) {
+        return discard(format!("{what} came back empty, so it was not used."));
+    }
+    std::fs::rename(&partial, destination).or_else(|error| discard(format!("could not save {what}: {error}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_private_request_reads_its_address_from_standard_input() {
+        let folder = std::env::temp_dir().join(format!("studio-private-fetch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        // A quote in the name checks the config value is escaped.
+        let source = folder.join("reply \"one\".json");
+        std::fs::write(&source, b"{\"ok\":true}").unwrap();
+        let url = format!("file://{}", source.display()).replace(' ', "%20").replace('"', "%22");
+        assert_eq!(fetch_text_privately(&url, Some("Authorization: test"), 1024).unwrap(), "{\"ok\":true}");
+        assert!(fetch_text_privately(&format!("file://{}", folder.join("missing.json").display()), None, 1024).is_err());
+        std::fs::remove_file(&source).unwrap();
+    }
 
     #[test]
     fn only_the_published_file_is_kept() {

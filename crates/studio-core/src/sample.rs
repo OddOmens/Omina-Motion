@@ -76,6 +76,7 @@ fn item(id: Id, name: &str, kind: ProjectItemKind, label: LabelColor, parent: Op
         name: name.into(),
         kind,
         label,
+        label_picked: false,
         parent,
         size: None,
         duration_seconds: None,
@@ -154,6 +155,7 @@ pub fn sample_project() -> Project {
         layers: vec![title, grade, logo, b_roll, a_cam, background],
         markers: Vec::new(),
         motion_blur: Default::default(),
+        linear_blending: true,
     };
 
     let footage = Some(ids::FOOTAGE_FOLDER);

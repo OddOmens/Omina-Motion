@@ -50,6 +50,13 @@ pub struct ViewerRender {
     pub frames_drawn: usize,
 }
 
+impl ViewerRender {
+    /// The picture the viewer is showing, for the scopes to measure.
+    pub fn shown_image(&self) -> Option<&Arc<RenderImage>> {
+        self.image.as_ref()
+    }
+}
+
 /// Everything a viewer frame depends on. The cheap parts are checked first, so a changed
 /// frame is told apart before the projects are compared.
 struct DrawnFrame {
@@ -219,6 +226,7 @@ impl ViewerRender {
 pub fn scratch_template(template: &studio_core::templates::Template, format: studio_core::templates::Format) -> Option<(studio_core::model::Project, studio_core::model::Id)> {
     let mut project = studio_core::model::Project::new(Vec::new(), Vec::new());
     let comp = studio_core::templates::build(&mut project, template, format)?;
+    studio_core::templates::fill_photo_spots(&mut project, comp, crate::template_photos::photos());
     Some((project, comp))
 }
 
@@ -838,6 +846,34 @@ fn curve_canvas(segments: Vec<[Vec2; 4]>, composition_size: Vec2, line: gpui_kit
     .into_any_element()
 }
 
+/// The motion path of a selected layer whose position is animated: a line along where it
+/// travels, with a small square at each position keyframe. It is only a guide, so it takes no
+/// clicks.
+fn motion_path_overlay(workspace: &Workspace, layer: Id) -> Vec<AnyElement> {
+    let composition = workspace.state.composition();
+    let Some(path) = studio_core::transform::motion_path(composition, layer) else { return Vec::new() };
+    let size = Vec2::new(composition.width as f32, composition.height as f32);
+    // Straight pieces between neighboring samples, close enough together to read as a curve.
+    let pieces = path.points.windows(2).map(|pair| [pair[0], pair[0], pair[1], pair[1]]).collect();
+    let line = div().id(("motion-path", layer.0 as usize)).absolute().size_full().child(curve_canvas(pieces, size, hsla(color::ACCENT))).test_support().into_any_element();
+    let mut elements = vec![line];
+    elements.extend(path.keyframes.iter().map(|at| {
+        div()
+            .absolute()
+            .left(relative(at.x / size.x))
+            .top(relative(at.y / size.y))
+            .ml(px(-3.5))
+            .mt(px(-3.5))
+            .size(px(7.0))
+            .rounded(px(1.0))
+            .bg(hsla(color::PANEL))
+            .border_1()
+            .border_color(hsla(color::ACCENT))
+            .into_any_element()
+    }));
+    elements
+}
+
 /// A small square marking a path point (filled for the first point of a path being drawn, which
 /// closes it when clicked).
 fn point_mark(at: (f32, f32), filled: bool) -> gpui_kit::Div {
@@ -871,7 +907,29 @@ fn pen_draft_overlay(workspace: &Workspace) -> Vec<AnyElement> {
     elements
 }
 
-/// The points and handles of a selected pen path layer, each draggable to reshape it.
+/// Starts editing a shape layer's outline in the viewer: the layer is selected and its points
+/// show, ready to drag. A drawn shape (a rectangle, say) has no points of its own, so it is
+/// first turned into a path with the same look, and a notice says so. Locked layers are left
+/// alone.
+fn begin_path_editing(workspace: &mut Workspace, layer: Id, window: &mut Window, cx: &mut Context<Workspace>) {
+    use gpui_kit::component::WindowExt as _;
+    if workspace.state.composition().layer(layer).is_none_or(|target| target.switches.locked) {
+        return;
+    }
+    let Some(kind) = workspace.state.shape_of(layer).map(|style| style.kind) else { return };
+    if kind != studio_core::model::ShapeKind::Path {
+        if !workspace.state.convert_to_path(layer) {
+            return;
+        }
+        window.push_notification(format!("The {} is now a path, so its points can be edited. Undo brings it back.", kind.name().to_lowercase()).as_str(), cx);
+    }
+    workspace.state.select_layer(layer, false);
+    workspace.ui.path_editing = Some(layer);
+    workspace.ui.tabs.insert(PanelId::Properties, 0);
+    cx.notify();
+}
+
+/// The points and handles of a shape layer being edited, each draggable to reshape it.
 fn path_points_overlay(workspace: &Workspace, layer: Id, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     use studio_core::edit::PathPart;
     let composition = workspace.state.composition();
@@ -1187,6 +1245,8 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         };
         if finished.is_some() {
             workspace.ui.tabs.insert(PanelId::Properties, 0);
+            // A path just drawn keeps its points up, to adjust them straight away.
+            workspace.ui.path_editing = finished;
         }
         cx.notify();
         return;
@@ -1207,6 +1267,13 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         cx.notify();
         return;
     }
+    // Double-clicking a shape edits its outline: its points show and can be dragged.
+    if event.click_count >= 2
+        && let Some(layer) = workspace.state.layer_at(point).filter(|&layer| workspace.state.shape_of(layer).is_some())
+    {
+        begin_path_editing(workspace, layer, window, cx);
+        return;
+    }
     // Double-clicking a text layer edits its text right there, over the layer.
     if event.click_count >= 2
         && let Some(layer) = workspace.state.layer_at(point).filter(|&layer| workspace.state.text_of(layer).is_some())
@@ -1223,6 +1290,10 @@ fn press_viewer(workspace: &mut Workspace, event: &MouseDownEvent, window: &mut 
         return;
     }
     let additive = event.modifiers.shift || event.modifiers.platform;
+    // A click anywhere but on the shape being edited ends the editing of its points.
+    if workspace.ui.path_editing.is_some_and(|editing| workspace.state.layer_at(point) != Some(editing)) {
+        workspace.ui.path_editing = None;
+    }
     match workspace.state.layer_at(point) {
         Some(layer) if !workspace.state.selected_layers.contains(&layer) || additive => workspace.state.select_layer(layer, additive),
         Some(_) => {}
@@ -1416,6 +1487,10 @@ fn text_editor_overlay(workspace: &mut Workspace, cx: &mut Context<Workspace>) -
 /// The selection outline (the layer's real, possibly rotated rectangle), anchor point and
 /// corner handles for each selected layer at the playhead.
 fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
+    // Put away with Cmd+Shift+H, to see the picture clean; the layers stay selected.
+    if workspace.ui.layer_controls_hidden {
+        return Vec::new();
+    }
     let composition = workspace.state.composition();
     let frame = workspace.state.current_frame;
     let (width, height) = (composition.width as f32, composition.height as f32);
@@ -1449,8 +1524,11 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
         if picking_layer(workspace) == Some(id) || workspace.ui.key_color_pick.is_some() {
             continue;
         }
+        // While a shape's points are being edited its scale handles are put away, so a point
+        // sitting on a corner can be grabbed.
+        let editing_path = workspace.ui.path_editing == Some(id);
         let handles = [ScaleHandle::TopLeft, ScaleHandle::TopRight, ScaleHandle::BottomRight, ScaleHandle::BottomLeft];
-        for (handle, corner) in handles.into_iter().zip(outline) {
+        for (handle, corner) in handles.into_iter().zip(outline).filter(|_| !editing_path) {
             let (hx, hy) = corner;
             elements.push(
                 div()
@@ -1479,8 +1557,12 @@ fn selection_overlay(workspace: &Workspace, cx: &mut Context<Workspace>) -> Vec<
             );
         }
 
-        // A pen path's own points, over the scale handles (a point often sits on a corner).
-        elements.extend(path_points_overlay(workspace, id, cx));
+        // The path the layer travels, when its position is animated.
+        elements.extend(motion_path_overlay(workspace, id));
+        // A shape's own points, while it is being edited (after a double-click on it).
+        if editing_path {
+            elements.extend(path_points_overlay(workspace, id, cx));
+        }
         // A gradient's line and its two ends, to drag where it runs.
         elements.extend(gradient_overlay(workspace, id, cx));
         elements.extend(effect_points_overlay(workspace, id, cx));
@@ -1778,6 +1860,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         }))
         .child(workspace.ui.viewer_bounds.probe())
         .child(comp_frame)
+        .children(super::assistant::tip(workspace, cx))
         .test_support()
         // Right-clicking a layer opens its menu (see `layer_menu`).
         .context_menu(super::layer_menu::build(None, cx.weak_entity()));
@@ -1787,7 +1870,7 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
         PanelId::Composition,
         &[title.as_str()],
         Some(transport(workspace, scale, cx).into_any_element()),
-        div().size_full().flex().flex_col().child(viewer),
+        div().size_full().flex().flex_col().child(super::comp_tabs::strip(workspace, cx)).child(viewer),
         workspace,
         cx,
     )

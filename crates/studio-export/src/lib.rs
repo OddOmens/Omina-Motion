@@ -229,6 +229,33 @@ pub fn export(
     }
 }
 
+/// Saves one frame of a composition as a PNG picture at `path`, at the composition's full
+/// size and with its transparency kept. Footage is decoded at full quality, as in an export.
+pub fn save_frame(project: &Project, composition: Id, frame: i64, path: &Path) -> Result<(), String> {
+    let settings = project.composition(composition).ok_or("The composition no longer exists.")?;
+    if settings.width > MAX_SIZE || settings.height > MAX_SIZE {
+        return Err(format!("Compositions larger than {MAX_SIZE} × {MAX_SIZE} pixels can’t be exported yet."));
+    }
+    let (width, height) = (settings.width, settings.height);
+    let mut renderer = Renderer::new().map_err(|error| format!("The GPU could not be used: {error}"))?;
+    let video = ExactFrames::new();
+    let picture = renderer.render(project, composition, frame, width, height, &video).map_err(|error| format!("The frame could not be rendered: {error}"))?;
+    if let Some((source, error)) = video.errors().into_iter().next() {
+        return Err(format!("{} could not be decoded ({error}).", source.display()));
+    }
+    let picture = image::RgbaImage::from_raw(picture.width, picture.height, sink::to_rgba(&picture.bgra)).ok_or("The frame is smaller than its size says.")?;
+    // Written under a temporary name first, so a picture that fails halfway leaves nothing behind.
+    let temporary = temporary_path(path);
+    let saved = picture
+        .save_with_format(&temporary, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())
+        .and_then(|()| std::fs::rename(&temporary, path).map_err(|error| error.to_string()));
+    if saved.is_err() {
+        discard(&temporary);
+    }
+    saved.map_err(|error| format!("The picture could not be saved: {error}"))
+}
+
 /// A hidden file next to the final one, so the rename at the end is a single, atomic step. An
 /// app that crashes mid-export can find it here afterwards to clean it up.
 pub fn temporary_path(path: &Path) -> PathBuf {

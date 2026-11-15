@@ -59,6 +59,7 @@ fn project(layers: Vec<Layer>) -> Project {
         layers,
         markers: Vec::new(),
         motion_blur: Default::default(),
+        linear_blending: true,
     };
     Project::new(Vec::new(), vec![composition])
 }
@@ -92,6 +93,23 @@ fn opacity_mixes_in_linear_light() {
     white.transform.as_mut().unwrap().opacity = Animated::constant(50.0);
     // 50% of linear white is 0.5 linear, which is about 188 in sRGB.
     assert!(close(pixel(&render(&project(vec![white])), 50, 50), [188, 188, 188]));
+}
+
+#[test]
+fn a_composition_can_mix_in_display_colors_as_design_tools_do() {
+    let mut white = full(2, 0xffffff);
+    white.transform.as_mut().unwrap().opacity = Animated::constant(50.0);
+    let mut red = full(3, 0xff0000);
+    red.transform.as_mut().unwrap().opacity = Animated::constant(50.0);
+    red.blend_mode = studio_core::model::BlendMode::Multiply;
+    let mut display = project(vec![white]);
+    display.compositions[0].linear_blending = false;
+    // Half white over black is half way in display values, as in Photoshop or Canvas.
+    assert!(close(pixel(&render(&display), 50, 50), [128, 128, 128]));
+    // Blend modes mix in display values too: half-strength red multiplied over mid gray.
+    display.compositions[0].layers.insert(0, red);
+    let [r, g, b] = pixel(&render(&display), 50, 50);
+    assert!(close([r, g, b], [128, 64, 64]), "{r} {g} {b}");
 }
 
 #[test]
@@ -661,6 +679,7 @@ fn footage_shows_the_source_frame_for_the_current_time() {
         name: "clip.mov".into(),
         kind: ProjectItemKind::Footage,
         label: LabelColor::Aqua,
+        label_picked: false,
         parent: None,
         size: Some(Vec2::new(100.0, 100.0)),
         duration_seconds: Some(10.0),
@@ -752,6 +771,7 @@ fn images_larger_than_the_gpu_limit_are_scaled_down_to_fit() {
         name: "wide.png".into(),
         kind: ProjectItemKind::Image,
         label: LabelColor::Aqua,
+        label_picked: false,
         parent: None,
         size: Some(Vec2::new(100.0, 100.0)),
         duration_seconds: None,
@@ -780,6 +800,7 @@ fn two_layers_of_one_clip_each_show_their_own_moment() {
         name: "clip.mov".into(),
         kind: ProjectItemKind::Footage,
         label: LabelColor::Aqua,
+        label_picked: false,
         parent: None,
         size: Some(Vec2::new(50.0, 100.0)),
         duration_seconds: Some(10.0),
@@ -828,6 +849,7 @@ fn semi_transparent_edges_are_filtered_without_dark_fringes() {
         name: "edge.png".into(),
         kind: ProjectItemKind::Image,
         label: LabelColor::Aqua,
+        label_picked: false,
         parent: None,
         size: Some(Vec2::new(100.0, 100.0)),
         duration_seconds: None,
@@ -855,6 +877,7 @@ fn an_image_changed_on_disk_is_shown_as_it_is_now() {
         name: "changing.png".into(),
         kind: ProjectItemKind::Image,
         label: LabelColor::Aqua,
+        label_picked: false,
         parent: None,
         size: Some(Vec2::new(100.0, 100.0)),
         duration_seconds: None,
@@ -1163,6 +1186,7 @@ fn clear_comp(id: u64, layers: Vec<Layer>) -> Composition {
         layers,
         markers: Vec::new(),
         motion_blur: Default::default(),
+        linear_blending: true,
     }
 }
 
@@ -1266,6 +1290,7 @@ fn matted(folder: &std::path::Path, setup: impl FnOnce(&mut Layer)) -> studio_re
         name: "red.png".into(),
         kind: ProjectItemKind::Image,
         label: LabelColor::Aqua,
+        label_picked: false,
         parent: None,
         size: Some(Vec2::new(50.0, 50.0)),
         duration_seconds: None,
@@ -1646,6 +1671,7 @@ fn mockup_sheet() {
             name: "Screen".into(),
             kind: studio_core::model::ProjectItemKind::Solid,
             label: LabelColor::Red,
+            label_picked: false,
             parent: None,
             size: Some(Vec2::new(100.0, 100.0)),
             duration_seconds: None,
@@ -2113,6 +2139,7 @@ fn key_view_frame(view: studio_core::key_view::KeyView) -> studio_render::Render
         name: "screen.png".into(),
         kind: ProjectItemKind::Image,
         label: LabelColor::Aqua,
+        label_picked: false,
         parent: None,
         size: Some(Vec2::new(100.0, 100.0)),
         duration_seconds: None,

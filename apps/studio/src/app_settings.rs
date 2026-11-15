@@ -19,6 +19,62 @@ pub struct WindowPlacement {
     pub maximized: bool,
 }
 
+/// The Stock panel's sources. Every service is on unless it is listed in `sources_off`; one
+/// that needs an API key is only searched once its key is filled in.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StockSettings {
+    pub sources_off: Vec<crate::stock::Source>,
+    /// The person's own API keys. They are kept in this settings file on their computer and
+    /// sent only to the service each belongs to.
+    pub pexels_key: String,
+    pub pixabay_key: String,
+}
+
+impl StockSettings {
+    /// Whether the service is switched on (whether or not it has the key it needs).
+    pub fn is_on(&self, source: crate::stock::Source) -> bool {
+        !self.sources_off.contains(&source)
+    }
+
+    /// Switches a service on or off.
+    pub fn set_on(&mut self, source: crate::stock::Source, on: bool) {
+        self.sources_off.retain(|off| *off != source);
+        if !on {
+            self.sources_off.push(source);
+        }
+    }
+
+    /// The saved API key for a service, empty when there is none (or it needs none).
+    pub fn key(&self, source: crate::stock::Source) -> &str {
+        match source {
+            crate::stock::Source::Pexels => &self.pexels_key,
+            crate::stock::Source::Pixabay => &self.pixabay_key,
+            crate::stock::Source::WikimediaCommons | crate::stock::Source::Openverse => "",
+        }
+    }
+
+    /// Saves the API key for a service that takes one.
+    pub fn set_key(&mut self, source: crate::stock::Source, key: &str) {
+        let key = crate::stock::clean_key(key);
+        match source {
+            crate::stock::Source::Pexels => self.pexels_key = key,
+            crate::stock::Source::Pixabay => self.pixabay_key = key,
+            crate::stock::Source::WikimediaCommons | crate::stock::Source::Openverse => {}
+        }
+    }
+
+    /// The services that can be searched for `kind` right now: switched on, offering that
+    /// kind, and with a key if they need one. Each comes with its key.
+    pub fn searchable(&self, kind: crate::stock::Kind) -> Vec<crate::stock::Access> {
+        crate::stock::Source::ALL
+            .into_iter()
+            .filter(|source| self.is_on(*source) && source.kinds().contains(&kind) && (!source.needs_key() || !self.key(*source).is_empty()))
+            .map(|source| (source, self.key(source).to_owned()))
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -42,6 +98,8 @@ pub struct AppSettings {
     pub default_folders: Vec<String>,
     /// Which folder imported files go into, by kind (`None` leaves them at the top).
     pub import_folders: ImportFolders,
+    /// Which services the Stock panel searches, and the keys for the ones that need one.
+    pub stock: StockSettings,
     /// What Studio shows when it starts: the start screen, or the last project.
     pub start_with: StartWith,
     /// The projects opened or saved lately, newest first, for the start screen and Open Recent.
@@ -69,6 +127,20 @@ pub struct AppSettings {
     pub show_render_time: bool,
     /// Short timeline rows: each clip shows just its name strip, so more tracks fit.
     pub compact_timeline: bool,
+    /// Which of the Motion Assistant's rules run, and the numbers they use.
+    pub assistant: studio_core::assistant::Options,
+    /// Whether the Motion Assistant shows its face and tips in a corner of the viewer.
+    pub assistant_tips: bool,
+    /// What the Motion Assistant is called in its panel, its tips and Settings. Empty means its
+    /// usual name.
+    pub assistant_name: String,
+    /// Whether the Motion Assistant's face blinks now and then.
+    pub assistant_blinks: bool,
+    /// The feel Iris animates in when asked to animate without saying which.
+    pub assistant_style: studio_core::auto_animate::Style,
+    /// Whether Iris also answers questions about the other apps (Canvas, Develop), from the
+    /// help they share. Off, she sticks to Studio.
+    pub assistant_other_apps: bool,
     /// Background removal rests the GPU between frames: slower, but cool and quiet.
     pub cooler_background_removal: bool,
     /// Which AI features are shown (Settings > AI Models).
@@ -315,6 +387,7 @@ impl Default for AppSettings {
             project_columns: ProjectColumns::default(),
             default_folders: ["Footage", "Images", "Music", "Sound Effects", "Voice Over"].map(String::from).to_vec(),
             import_folders: ImportFolders::default(),
+            stock: StockSettings::default(),
             start_with: StartWith::default(),
             recent_projects: Vec::new(),
             last_update_check: 0,
@@ -329,6 +402,12 @@ impl Default for AppSettings {
             clip_waveforms: true,
             show_render_time: false,
             compact_timeline: false,
+            assistant: studio_core::assistant::Options::default(),
+            assistant_tips: true,
+            assistant_name: crate::panels::assistant::DEFAULT_NAME.to_owned(),
+            assistant_blinks: true,
+            assistant_style: studio_core::auto_animate::Style::Smooth,
+            assistant_other_apps: true,
             cooler_background_removal: false,
             ai: AiFeatures::default(),
             onboarded: false,
@@ -421,12 +500,58 @@ pub fn recovery_path() -> PathBuf {
 pub fn load() -> AppSettings {
     let Ok(text) = std::fs::read_to_string(settings_path()) else { return AppSettings::default() };
     if let Ok(settings) = serde_json::from_str(&text) {
-        return settings;
+        return with_shared_iris(with_current_defaults(settings));
     }
     if let Err(error) = std::fs::write(folder().join("settings.damaged.json"), &text) {
         eprintln!("could not keep a copy of the unreadable settings: {error}");
     }
-    serde_json::from_str::<serde_json::Value>(&text).map_or_else(|_| AppSettings::default(), |saved| readable_part(&saved))
+    let settings = serde_json::from_str::<serde_json::Value>(&text).map_or_else(|_| AppSettings::default(), |saved| readable_part(&saved));
+    with_shared_iris(with_current_defaults(settings))
+}
+
+/// Where Iris's settings shared with Canvas and Develop are kept (see `iris::settings`).
+fn iris_folder() -> Option<PathBuf> {
+    if cfg!(test) {
+        return Some(folder().join("iris"));
+    }
+    iris::settings::default_folder()
+}
+
+/// Iris's settings as Studio keeps them.
+fn iris_part(settings: &AppSettings) -> iris::settings::Shared {
+    iris::settings::Shared { name: settings.assistant_name.clone(), blinks: settings.assistant_blinks }
+}
+
+/// `settings` with Iris's name and blinking taken from the file every app shares, since
+/// another app may have changed them. When no app has written that file yet, Studio's own
+/// are written there, so the other apps start from them.
+fn with_shared_iris(mut settings: AppSettings) -> AppSettings {
+    let Some(shared_folder) = iris_folder() else { return settings };
+    match iris::settings::load(&shared_folder) {
+        Some(shared) => {
+            settings.assistant_name = shared.name;
+            settings.assistant_blinks = shared.blinks;
+        }
+        None => {
+            if let Err(error) = iris::settings::save(&shared_folder, &iris_part(&settings)) {
+                eprintln!("could not share Iris's settings with the other apps: {error}");
+            }
+        }
+    }
+    settings
+}
+
+/// The Motion Assistant's name before it was Iris. Settings saved then hold it because the
+/// default name was written out, not because anyone chose it.
+const FORMER_ASSISTANT_NAME: &str = "Tween";
+
+/// Saved settings with any value that was only an earlier version's default replaced by
+/// today's, so renaming a default reaches people who never changed it.
+fn with_current_defaults(mut settings: AppSettings) -> AppSettings {
+    if settings.assistant_name.trim() == FORMER_ASSISTANT_NAME {
+        settings.assistant_name = crate::panels::assistant::DEFAULT_NAME.to_owned();
+    }
+    settings
 }
 
 /// The settings in `saved` that can be read, each over the default.
@@ -450,6 +575,12 @@ pub fn save(settings: &AppSettings) {
         .and_then(|text| write_atomically(&settings_path(), &text));
     if let Err(error) = written {
         eprintln!("could not save Studio's settings: {error}");
+    }
+    // Iris's part goes to the other apps too, so renaming her here renames her everywhere.
+    if let Some(shared_folder) = iris_folder()
+        && let Err(error) = iris::settings::save(&shared_folder, &iris_part(settings))
+    {
+        eprintln!("could not share Iris's settings with the other apps: {error}");
     }
 }
 
@@ -503,6 +634,26 @@ pub fn clear_recovery() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_assistants_old_default_name_becomes_iris_but_a_chosen_name_stays() {
+        let saved = |name: &str| with_current_defaults(AppSettings { assistant_name: name.to_owned(), ..AppSettings::default() }).assistant_name;
+        assert_eq!(saved("Tween"), "Iris");
+        assert_eq!(saved("Pip"), "Pip");
+    }
+
+    #[test]
+    fn iris_settings_are_shared_with_the_other_apps() {
+        let _ = std::fs::remove_dir_all(folder());
+        save(&AppSettings { assistant_name: "Pip".to_owned(), ..AppSettings::default() });
+        let shared = iris::settings::load(&iris_folder().unwrap()).expect("saving shares Iris's settings");
+        assert_eq!(shared.name, "Pip");
+        // Another app renames her and turns her blinking off; Studio reads that.
+        iris::settings::save(&iris_folder().unwrap(), &iris::settings::Shared { name: "Nova".to_owned(), blinks: false }).unwrap();
+        let loaded = load();
+        assert_eq!((loaded.assistant_name.as_str(), loaded.assistant_blinks), ("Nova", false));
+        let _ = std::fs::remove_dir_all(folder());
+    }
 
     #[test]
     #[cfg(unix)]

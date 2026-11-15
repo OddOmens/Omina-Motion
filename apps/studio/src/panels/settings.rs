@@ -23,6 +23,8 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 
+mod recipes;
+
 use crate::app_settings::{self, AppSettings, ImportFolders, PlaybackQuality, ProjectColumns, StartWith, Transparency};
 use crate::theme::{Accent, ThemeName, color, hsla, size};
 use crate::workspace::Workspace;
@@ -70,6 +72,10 @@ enum Section {
     Playback,
     Timeline,
     Features,
+    Iris,
+    Suggestions,
+    Recipes,
+    Stock,
     ProjectPanel,
     Folders,
     MediaCache,
@@ -80,8 +86,10 @@ enum Section {
 
 impl Section {
     /// The menu, in groups.
-    const GROUPS: [(&'static str, &'static [Section]); 4] = [
-        ("Studio", &[Self::General, Self::Appearance, Self::Playback, Self::Timeline, Self::Features]),
+    const GROUPS: [(&'static str, &'static [Section]); 5] = [
+        ("Omina Motion", &[Self::General, Self::Appearance, Self::Playback, Self::Timeline, Self::Features, Self::Stock]),
+        // Iris, the assistant, has a group of her own: who she is, then what she looks for.
+        ("Iris", &[Self::Iris, Self::Suggestions, Self::Recipes]),
         ("Project", &[Self::ProjectPanel, Self::Folders]),
         ("Storage", &[Self::MediaCache, Self::Models]),
         ("Help", &[Self::Shortcuts, Self::About]),
@@ -94,6 +102,10 @@ impl Section {
             Self::Playback => "Playback",
             Self::Timeline => "Timeline & Viewer",
             Self::Features => "Tools & Features",
+            Self::Iris => "Iris",
+            Self::Suggestions => "Suggestions",
+            Self::Recipes => "Recipes",
+            Self::Stock => "Stock",
             Self::ProjectPanel => "Project Panel",
             Self::Folders => "Folders",
             Self::MediaCache => "Media Cache",
@@ -110,6 +122,10 @@ impl Section {
             Self::Playback => IconName::Play,
             Self::Timeline => IconName::Film,
             Self::Features => IconName::ToggleRight,
+            Self::Iris => IconName::Spline,
+            Self::Suggestions => IconName::Eye,
+            Self::Recipes => IconName::Workflow,
+            Self::Stock => IconName::Images,
             Self::ProjectPanel => IconName::Menu,
             Self::Folders => IconName::Folder,
             Self::MediaCache => IconName::Hourglass,
@@ -123,16 +139,20 @@ impl Section {
     fn about(self) -> &'static str {
         match self {
             Self::General => "Starting up, keeping unsaved work safe, and what new compositions start as.",
-            Self::Appearance => "How Studio looks.",
+            Self::Appearance => "How Omina Motion looks.",
             Self::Playback => "How the viewer plays.",
             Self::Timeline => "What the timeline and viewer show, and what snaps.",
             Self::Features => "Turn off what you don't use, and it's hidden everywhere: tools, panels, menus and shortcuts.",
+            Self::Iris => "Your assistant in Omina Motion, Omina Edit and Omina Develop: her name and face, how she animates for you, and what she answers.",
+            Self::Suggestions => "What Iris looks for in the open composition, area by area. Each switch turns one check on or off.",
+            Self::Recipes => "Things Iris does by name: their steps, a shortcut, a button at the top of her chat, and moments they run by themselves.",
+            Self::Stock => "Which sites the Stock panel searches for free video, pictures and sound.",
             Self::ProjectPanel => "Which columns the Project panel's list shows.",
             Self::Folders => "The folders new projects start with, and where imports go.",
-            Self::MediaCache => "Files Studio makes to keep playback smooth, and can always make again.",
+            Self::MediaCache => "Files Omina Motion makes to keep playback smooth, and can always make again.",
             Self::Models => "Captions and background removal run on this computer with these models.",
             Self::Shortcuts => "Keys for the things you do most.",
-            Self::About => "This copy of Studio, and where it keeps things.",
+            Self::About => "This copy of Omina Motion, and where it keeps things.",
         }
     }
 }
@@ -150,6 +170,10 @@ struct Shown {
     downloading: Vec<&'static str>,
     /// The command waiting for its new shortcut on the Keyboard Shortcuts page.
     recording: Option<&'static str>,
+    /// The recipe being changed on the Recipes page, by name.
+    recipe_editing: Option<String>,
+    /// The recipe deleted last on the Recipes page, with its place, for Undo.
+    recipe_undo: Option<(usize, iris::recipes::Recipe)>,
     note: Option<String>,
 }
 
@@ -284,7 +308,7 @@ fn general(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::
         .child(page(Section::General))
         .child(group_title("Starting up"))
         .child(card(vec![
-            setting("When Studio starts", "Show the start screen, or go straight back to the project you were working on.", menu("general-start", start_choices, now.start_with, shown, workspace, |settings, start| settings.start_with = start)),
+            setting("When Omina Motion starts", "Show the start screen, or go straight back to the project you were working on.", menu("general-start", start_choices, now.start_with, shown, workspace, |settings, start| settings.start_with = start)),
             setting(
                 "Welcome setup",
                 "Pick a theme, the tools and features you want, and whether to use AI, step by step.",
@@ -354,12 +378,8 @@ fn appearance(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_ki
 /// A theme to pick: a small picture of it (its background, a panel, a line of text and the
 /// accent) with its name under it. Shared by Settings ▸ Appearance and the welcome setup.
 pub(super) fn theme_choice(theme: ThemeName, accent: Accent, selected: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
-    let (background, panel, text) = match theme {
-        ThemeName::Dark => (0x070708, 0x18181b, 0xededef),
-        ThemeName::Black => (0x000000, 0x111111, 0xf2f2f2),
-        ThemeName::Light => (0xe9e9ec, 0xffffff, 0x18181b),
-    };
-    let accent = accent.value();
+    let (background, panel, text) = theme.preview();
+    let accent = accent.on_theme(theme);
     div()
         .id(("theme", theme as usize))
         .flex_1()
@@ -436,7 +456,7 @@ fn timeline(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit:
             setting("Waveforms on clips", "The shape of the sound along clips with sound.", switch("timeline-waveforms", now.clip_waveforms, shown, workspace, |settings, on| settings.clip_waveforms = on)),
             setting("Compact tracks", "Short rows showing just each clip's name, so more tracks fit. The rows button in the timeline's bar changes it too.", switch("timeline-compact", now.compact_timeline, shown, workspace, |settings, on| settings.compact_timeline = on)),
             setting("Frame render time", "How long the last frame took to draw, under the timeline.", switch("timeline-render-time", now.show_render_time, shown, workspace, |settings, on| settings.show_render_time = on)),
-            setting("Snapping starts on", "Moves and trims snap to edges, keyframes, markers and the playhead. Applies from the next start; S turns it on and off now.", switch("timeline-snapping", now.snapping, shown, workspace, |settings, on| settings.snapping = on)),
+            setting("Snapping starts on", "Moves and trims snap to edges, keyframes, markers and the playhead. Applies from the next start; the Snapping shortcut turns it on and off now.", switch("timeline-snapping", now.snapping, shown, workspace, |settings, on| settings.snapping = on)),
         ]))
         .child(group_title("Viewer"))
         .child(card(vec![
@@ -485,6 +505,187 @@ fn features(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit:
                 })),
         )
         .children(note(shown))
+}
+
+/// A number setting for the Motion Assistant with − and + buttons, kept inside `range`.
+fn assistant_number(id: &'static str, value: i64, range: (i64, i64), shown: &SharedShown, workspace: &WeakEntity<Workspace>, set: fn(&mut studio_core::assistant::Options, i64)) -> impl IntoElement {
+    let step = |suffix: &'static str, by: i64, text: &'static str| {
+        let (shown, workspace) = (shown.clone(), workspace.clone());
+        let next = (value + by).clamp(range.0, range.1);
+        Button::new(gpui_kit::ElementId::Name(format!("{id}-{suffix}").into())).outline().xsmall().label(text).disabled(next == value).on_click(move |_, window, cx| {
+            change(&shown, &workspace, window, cx, |settings| {
+                set(&mut settings.assistant, next);
+                settings.assistant = settings.assistant.sound();
+            });
+        })
+    };
+    let amount = format!("{value} {}", if value == 1 { "frame" } else { "frames" });
+    div().flex().items_center().gap_2().child(step("less", -1, "−")).child(div().id(id).w(px(64.0)).text_center().text_color(hsla(color::TEXT)).child(amount).test_support()).child(step("more", 1, "+"))
+}
+
+/// The Iris page: who she is (her name, typed into `name`, her face and where it waits), how
+/// she animates when asked, and which apps she answers questions about. Her name and blinking
+/// are shared with the other apps (see `app_settings::with_shared_iris`).
+fn iris_page(shown: &SharedShown, workspace: &WeakEntity<Workspace>, name: &Entity<InputState>, cx: &App) -> gpui_kit::Div {
+    use studio_core::auto_animate::Style;
+    let now = shown.borrow().settings.clone();
+    let look = workspace.upgrade().map(|workspace| super::assistant::current_look(workspace.read(cx))).unwrap_or_default();
+    // Her face and name as they appear in her panel, so a change shows at once.
+    let hello = div()
+        .p_3p5()
+        .flex()
+        .items_center()
+        .gap_3p5()
+        .child(super::assistant::face("settings", 56.0, look))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(div().id("settings-assistant-name").text_size(px(16.0)).text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(super::assistant::name(&now)).test_support())
+                .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Reads the open composition (its motion, cuts, sound, text and pictures), suggests fixes you can make in a click, animates designs when asked, and answers questions from ready-written help. Rules and word matching, not AI.")),
+        )
+        .into_any_element();
+    // Switching tips back on also ends a "Not Now" from earlier, so the face returns at once.
+    let tips = {
+        let (shown, workspace) = (shown.clone(), workspace.clone());
+        Switch::new("assistant-page-tips").checked(now.assistant_tips).on_click(move |checked: &bool, window, cx| {
+            let checked = *checked;
+            workspace.update(cx, |this, _| this.ui.assistant.tips_snoozed = false).ok();
+            change(&shown, &workspace, window, cx, |settings| settings.assistant_tips = checked);
+        })
+    };
+    let styles: Vec<(String, Style)> = Style::ALL.iter().map(|style| (capitalized(style.name()), *style)).collect();
+    div()
+        .child(page(Section::Iris))
+        .child(card(vec![hello]))
+        .children(turned_off_note(&now))
+        .child(group_title("Character"))
+        .child(card(vec![
+            setting("Name", "What she is called in her panel and tips, here and in the other apps.", div().id("assistant-page-name").w(px(180.0)).child(Input::new(name).small()).test_support()),
+            setting("Blinks and looks around", "Her eyes blink and glance about every few seconds. Off, she holds still but still shows her mood. Shared with the other apps.", switch("assistant-page-blinks", now.assistant_blinks, shown, workspace, |settings, on| settings.assistant_blinks = on)),
+            setting("Waits in the viewer", "Her face sits in a corner of the viewer, with a count of what she noticed. Click it for a suggestion, or to ask her something.", tips),
+        ]))
+        .child(group_title("Animating for you"))
+        .child(card(vec![setting(
+            "Usual feel",
+            "How designs move when you ask her to animate without saying how. Saying \"bouncy\", \"snappy\" or \"smooth\" still picks that one.",
+            menu("assistant-page-style", styles, now.assistant_style, shown, workspace, |settings, style| settings.assistant_style = style),
+        )]))
+        .child(group_title("Answers"))
+        .child(card(vec![setting(
+            "Answers about the other apps",
+            "She also answers questions about Omina Edit and Omina Develop, saying where each thing is done. Off, she sticks to Omina Motion.",
+            switch("assistant-page-other-apps", now.assistant_other_apps, shown, workspace, |settings, on| settings.assistant_other_apps = on),
+        )]))
+}
+
+/// The Suggestions page: a switch for each thing Iris looks for, grouped by area, with the
+/// numbers two of those rules use.
+fn suggestions_page(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {
+    use studio_core::assistant::{Check, Options};
+    let now = shown.borrow().settings.clone();
+    // The rules of each area get a card of their own under the area's name.
+    let mut areas: Vec<(studio_core::assistant::Area, Vec<AnyElement>)> = Vec::new();
+    for check in Check::ALL {
+        if areas.last().is_none_or(|(area, _)| *area != check.area()) {
+            areas.push((check.area(), Vec::new()));
+        }
+        let rules = &mut areas.last_mut().expect("just pushed").1;
+        let on = now.assistant.runs(check);
+        let (for_shown, for_workspace) = (shown.clone(), workspace.clone());
+        let rule = Switch::new(gpui_kit::ElementId::Name(format!("assistant-rule-{check:?}").into())).checked(on).on_click(move |checked: &bool, window, cx| {
+            let checked = *checked;
+            change(&for_shown, &for_workspace, window, cx, |settings| {
+                settings.assistant.set(check, checked);
+                settings.assistant = settings.assistant.sound();
+            });
+        });
+        rules.push(setting(check.name(), check.about(), rule));
+        // The two rules that depend on a number carry it in the row under their switch.
+        match check {
+            Check::FastMove if on => rules.push(setting(
+                "Too fast is under",
+                "A move shorter than this is suggested for lengthening.",
+                assistant_number("assistant-page-shortest", now.assistant.shortest_move, Options::SHORTEST_MOVE_RANGE, shown, workspace, |options, value| options.shortest_move = value),
+            )),
+            Check::NearlyAligned if on => rules.push(setting(
+                "Nearly lined up is within",
+                "Keyframes this close to another layer's are suggested for lining up.",
+                assistant_number("assistant-page-within", now.assistant.aligned_within, Options::ALIGNED_WITHIN_RANGE, shown, workspace, |options, value| options.aligned_within = value),
+            )),
+            _ => {}
+        }
+    }
+    div()
+        .child(page(Section::Suggestions))
+        .children(turned_off_note(&now))
+        .children(areas.into_iter().flat_map(|(area, rules)| [group_title(area.name()).into_any_element(), card(rules).into_any_element()]))
+}
+
+/// A line saying the assistant is turned off in Tools & Features, when it is.
+fn turned_off_note(now: &AppSettings) -> Option<gpui_kit::Div> {
+    (!now.feature_on(crate::features::Feature::Assistant))
+        .then(|| div().pt_2().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::VALUE)).child("Iris is turned off in Tools & Features, so none of this shows until she is turned back on."))
+}
+
+/// `word` with its first letter in capitals ("smooth" → "Smooth").
+fn capitalized(word: &str) -> String {
+    let mut letters = word.chars();
+    letters.next().map_or_else(String::new, |first| first.to_uppercase().chain(letters).collect())
+}
+
+/// The Stock page: a switch for each site the Stock panel can search, and, for the sites that
+/// need one, a field for the person's own API key (`keys` holds a text field per such site).
+fn stock(shown: &SharedShown, workspace: &WeakEntity<Workspace>, keys: &[(crate::stock::Source, Entity<InputState>)]) -> gpui_kit::Div {
+    use crate::stock::Source;
+    let now = shown.borrow().settings.stock.clone();
+    let mut rows = Vec::new();
+    for source in Source::ALL {
+        let toggle = {
+            let (shown, workspace) = (shown.clone(), workspace.clone());
+            Switch::new(gpui_kit::ElementId::Name(format!("stock-source-{}", source.name()).into())).checked(now.is_on(source)).on_click(move |checked: &bool, window, cx| {
+                let checked = *checked;
+                change(&shown, &workspace, window, cx, |settings| settings.stock.set_on(source, checked));
+            })
+        };
+        rows.push(setting(source.name(), source.about(), toggle));
+        // A site that needs a key gets a field for it under its switch, and says where it stands.
+        let Some((_, input)) = keys.iter().find(|(with_key, _)| *with_key == source) else { continue };
+        let has_key = !now.key(source).is_empty();
+        let status = match (has_key, source.key_page()) {
+            (true, _) => "A key is saved. It is kept on this computer and sent only to this site.".to_owned(),
+            (false, Some(page)) => format!("Not searched until it has a key. Make a free one at {page}, then paste it here."),
+            (false, None) => String::new(),
+        };
+        let save = {
+            let (shown, workspace, input) = (shown.clone(), workspace.clone(), input.clone());
+            Button::new(gpui_kit::ElementId::Name(format!("stock-key-save-{}", source.name()).into())).outline().small().label("Save Key").on_click(move |_, window, cx| {
+                let key = input.read(cx).value().to_string();
+                change(&shown, &workspace, window, cx, |settings| settings.stock.set_key(source, &key));
+            })
+        };
+        rows.push(
+            div()
+                .px_3p5()
+                .pb_2p5()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().flex().gap_2().child(div().flex_1().child(Input::new(input).small().mask_toggle())).child(save))
+                .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(status))
+                .into_any_element(),
+        );
+    }
+    div()
+        .child(page(Section::Stock))
+        .child(group_title("Search these sites"))
+        .child(card(rows))
+        .child(div().pt_2().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(
+            "Wikimedia Commons and Openverse results are limited to public-domain (CC0) work. Pexels and Pixabay use their own licences: free for commercial use without credit, but not public domain, so check each site's terms for what they rule out. Every result in the Stock panel says which site it came from.",
+        ))
 }
 
 fn project_panel(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {
@@ -865,7 +1066,7 @@ fn shortcuts(shown: &SharedShown, workspace: &WeakEntity<Workspace>, capture: &g
     let mut page_div = div().child(page(Section::Shortcuts)).child(card(vec![
         setting(
             "Start from",
-            "Studio's keys, or the ones you know from After Effects or Premiere Pro. Choosing one sets aside your own changes.",
+            "Omina Motion's keys, or the ones you know from After Effects or Premiere Pro. Choosing one sets aside your own changes.",
             menu("shortcuts-preset", presets, now.preset, shown, workspace, |settings, preset| {
                 settings.shortcuts.preset = preset;
                 settings.shortcuts.custom.clear();
@@ -1009,7 +1210,7 @@ fn about(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Di
                 })
                 .ok();
             measure(&shown, &workspace, cx);
-            shown.borrow_mut().note = Some("Settings are back to how Studio comes. Your projects, libraries and caches are untouched.".into());
+            shown.borrow_mut().note = Some("Settings are back to how Omina Motion comes. Your projects, libraries and caches are untouched.".into());
             window.refresh();
         })
     };
@@ -1025,20 +1226,20 @@ fn about(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Di
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(div().size(px(44.0)).rounded(px(10.0)).bg(hsla(color::ACCENT)).flex().items_center().justify_center().child(Icon::new(IconName::Clapperboard).size(px(22.0)).text_color(rgb(0xffffff))))
-                .child(div().flex().flex_col().gap_0p5().child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Studio")).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))),
+                .child(div().size(px(44.0)).rounded(px(10.0)).bg(hsla(color::ACCENT)).flex().items_center().justify_center().child(Icon::new(IconName::Clapperboard).size(px(22.0)).text_color(crate::theme::on_accent())))
+                .child(div().flex().flex_col().gap_0p5().child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Omina Motion")).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))),
         )
-        .child(group_title("Where Studio keeps things"))
+        .child(group_title("Where Omina Motion keeps things"))
         .child(card(vec![
             setting("Settings, libraries and models", folder.display().to_string(), reveal),
-            setting("Reset settings", "Puts every setting back to how Studio comes. Projects, libraries and caches are not touched.", reset),
+            setting("Reset settings", "Puts every setting back to how Omina Motion comes. Projects, libraries and caches are not touched.", reset),
         ]))
         // The legal notices the GPL asks an interactive program to show.
         .child(group_title("License"))
         .child(card(vec![
             setting(
                 "Free software",
-                "Copyright © 2026 Odd Omens LLC. Studio is free software under the GNU General Public License, version 3 or later: you may share and change it under its terms. It comes with no warranty.",
+                "Copyright © 2026 Odd Omens LLC. Omina Motion is free software under the GNU General Public License, version 3 or later: you may share and change it under its terms. It comes with no warranty.",
                 document_button("about-license", "License", "LICENSE"),
             ),
             setting(
@@ -1096,6 +1297,21 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
     open_at(Section::General, workspace, window, cx);
 }
 
+/// Opens Settings at Iris's page (from her panel).
+pub fn open_iris(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_at(Section::Iris, workspace, window, cx);
+}
+
+/// Opens Settings at the Recipes page (from Iris's chat).
+pub fn open_recipes(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_at(Section::Recipes, workspace, window, cx);
+}
+
+/// Opens Settings at the Stock page (from the Stock panel).
+pub fn open_stock(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    open_at(Section::Stock, workspace, window, cx);
+}
+
 /// Studio ▸ About Studio: Settings, on its About page.
 pub fn open_about(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     open_at(Section::About, workspace, window, cx);
@@ -1112,17 +1328,45 @@ fn open_at(section: Section, workspace: &mut Workspace, window: &mut Window, cx:
         imported_bytes: folder_size(&workspace.imported_folder()),
         downloading: Vec::new(),
         recording: None,
+        recipe_editing: None,
+        recipe_undo: None,
         note: None,
     }));
+    let recipe_fields = recipes::Fields::new(window, cx);
     // Holds the keyboard while a shortcut is being changed, so the key pressed is captured.
     let capture = cx.focus_handle();
     let shortcut_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search commands or keys"));
     let redraw = cx.subscribe_in(&shortcut_search, window, |_, _, _: &gpui_kit::component::input::InputEvent, window, _| window.refresh());
     workspace.ui.dialog_subscriptions.push(redraw);
+    // The Motion Assistant's name is kept as it is typed, so its panel and tips follow at once.
+    let assistant_name = cx.new(|cx| InputState::new(window, cx).placeholder(super::assistant::DEFAULT_NAME).default_value(super::assistant::name(&shown.borrow().settings)));
+    let name_shown = shown.clone();
+    let renamed = cx.subscribe_in(&assistant_name, window, move |this, input, event: &gpui_kit::component::input::InputEvent, window, cx| {
+        if !matches!(event, gpui_kit::component::input::InputEvent::Change) {
+            return;
+        }
+        let name = super::assistant::tidy_name(&input.read(cx).value());
+        if name == name_shown.borrow().settings.assistant_name {
+            return;
+        }
+        name_shown.borrow_mut().settings.assistant_name = name.clone();
+        this.ui.settings.assistant_name = name.clone();
+        app_settings::update(move |settings| settings.assistant_name = name.clone());
+        cx.notify();
+        window.refresh();
+    });
+    workspace.ui.dialog_subscriptions.push(renamed);
     let target = cx.weak_entity();
     let new_folder_name = cx.new(|cx| InputState::new(window, cx).placeholder("New folder name"));
+    // A masked field for each stock site that takes an API key, holding the key saved so far.
+    let saved_keys = shown.borrow().settings.stock.clone();
+    let stock_keys: Vec<(crate::stock::Source, Entity<InputState>)> = crate::stock::Source::ALL
+        .into_iter()
+        .filter(|source| source.needs_key())
+        .map(|source| (source, cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("API key").default_value(saved_keys.key(source).to_owned()))))
+        .collect();
 
-    window.open_dialog(cx, move |dialog, _, cx| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, cx| {
         let section = shown.borrow().section;
         let content = match section {
             Section::General => general(&shown, &target),
@@ -1130,6 +1374,10 @@ fn open_at(section: Section, workspace: &mut Workspace, window: &mut Window, cx:
             Section::Playback => playback(&shown, &target),
             Section::Timeline => timeline(&shown, &target),
             Section::Features => features(&shown, &target),
+            Section::Iris => iris_page(&shown, &target, &assistant_name, cx),
+            Section::Suggestions => suggestions_page(&shown, &target),
+            Section::Recipes => recipes::recipes_page(&shown, &target, &recipe_fields, cx),
+            Section::Stock => stock(&shown, &target, &stock_keys),
             Section::ProjectPanel => project_panel(&shown, &target),
             Section::Folders => folders(&shown, &target, &new_folder_name),
             Section::MediaCache => media_cache(&shown, &target, cx),
@@ -1164,6 +1412,9 @@ fn open_at(section: Section, workspace: &mut Workspace, window: &mut Window, cx:
             )
             // A compact Done at the bottom right (the dialog's own close button stretches).
             .footer(div().w_full().flex().justify_end().child(Button::new("settings-done").primary().small().px_4().label("Done").on_click(|_, window, cx| window.close_dialog(cx))))
+            // Return belongs to the field being typed in (a recipe's steps take one a line), so
+            // it never closes Settings by itself: Done and Esc do.
+            .on_ok(|_, _, _| false)
     });
 }
 
@@ -1194,6 +1445,6 @@ mod tests {
     #[test]
     fn the_menu_lists_every_page() {
         let listed: Vec<Section> = Section::GROUPS.iter().flat_map(|(_, sections)| sections.iter().copied()).collect();
-        assert_eq!(listed.len(), 11);
+        assert_eq!(listed.len(), 15);
     }
 }

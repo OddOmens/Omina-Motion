@@ -106,6 +106,115 @@ pub fn choose_file_then(workspace: &mut Workspace, queue: bool, window: &mut Win
     .detach();
 }
 
+/// A name in `folder` for a new file called `stem.extension` that doesn't replace one already
+/// there: "Name.png", then "Name 2.png", "Name 3.png" and so on.
+pub(crate) fn unused_path(folder: &Path, stem: &str, extension: &str) -> PathBuf {
+    let first = folder.join(format!("{stem}.{extension}"));
+    if !first.exists() {
+        return first;
+    }
+    (2..).map(|number| folder.join(format!("{stem} {number}.{extension}"))).find(|path| !path.exists()).unwrap_or(first)
+}
+
+/// Saves the frame under the playhead as a PNG picture at the composition's full size, into
+/// the Exports folder (see `exports_folder`), without asking anything. The picture is drawn
+/// on a background thread; a notice says where it went.
+pub fn save_frame(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if !workspace.has(crate::features::Feature::Export) {
+        return;
+    }
+    before_export(workspace, window, cx);
+    let started = save_frame_then(workspace, window, cx, |_, path, saved, window, cx| match saved {
+        Ok(()) => {
+            let file_name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            let folder = path.parent().map_or_else(String::new, |folder| folder.display().to_string());
+            window.push_notification(format!("Saved “{file_name}” to {folder}.").as_str(), cx);
+        }
+        Err(error) => super::chrome::open_alert_dialog(window, cx, move |dialog, _, _| dialog.title("The frame could not be saved").description(error.clone())),
+    });
+    if let Err(why) = started {
+        window.push_notification(why.as_str(), cx);
+    }
+}
+
+/// Starts saving the frame under the playhead as a PNG picture in the Exports folder, under a
+/// name that replaces nothing, and returns where it is being written. `then` is called once
+/// the picture is there, or with why it couldn't be saved. `Err` says why it couldn't start.
+pub fn save_frame_then(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+    then: impl FnOnce(&mut Workspace, &Path, Result<(), String>, &mut Window, &mut Context<Workspace>) + 'static,
+) -> Result<PathBuf, String> {
+    let state = &workspace.state;
+    let (comp, frame) = (state.active_comp, state.current_frame);
+    // File names can't hold slashes or colons, which composition names may.
+    let name: String = state.composition().name.chars().map(|c| if matches!(c, '/' | ':' | '\\') { '-' } else { c }).collect();
+    let folder = exports_folder(state.file());
+    std::fs::create_dir_all(&folder).map_err(|error| format!("The frame could not be saved: {} could not be created ({error}).", folder.display()))?;
+    let path = unused_path(&folder, &format!("{name} frame {frame}"), "png");
+    // The name is taken at once, so a second frame saved before this one is written (a recipe
+    // run before an export saves one too) gets a name of its own rather than the same one.
+    std::fs::File::create_new(&path).map_err(|error| format!("The frame could not be saved: {} could not be written ({error}).", path.display()))?;
+    let project = state.project.clone();
+    let written = path.clone();
+    cx.spawn_in(window, async move |this, cx| {
+        let target = written.clone();
+        let saved = cx
+            .background_executor()
+            .spawn(async move {
+                let saved = studio_export::save_frame(&project, comp, frame, &target);
+                // A frame that couldn't be drawn leaves no empty file behind under its name.
+                if saved.is_err() {
+                    let _ = std::fs::remove_file(&target);
+                }
+                saved
+            })
+            .await;
+        this.update_in(cx, |this, window, cx| then(this, &written, saved, window, cx)).ok();
+    })
+    .detach();
+    Ok(path)
+}
+
+/// Copies the frame under the playhead to the clipboard as a picture at the composition's
+/// full size, to paste into another app. The picture is drawn on a background thread; a
+/// notice says when it is ready to paste.
+pub fn copy_frame(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if !workspace.has(crate::features::Feature::Export) {
+        return;
+    }
+    let state = &workspace.state;
+    let (comp, frame) = (state.active_comp, state.current_frame);
+    let project = state.project.clone();
+    // Drawn into a temporary PNG file (the same way Save Frame makes its picture), then read back.
+    // Each copy has a file of its own, so a second copy started before the first is done can't
+    // read or remove the first one's picture.
+    static COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let copy = COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scratch = std::env::temp_dir().join(format!("studio-copied-frame-{}-{copy}.png", std::process::id()));
+    cx.spawn_in(window, async move |this, cx| {
+        let drawn = cx
+            .background_executor()
+            .spawn(async move {
+                studio_export::save_frame(&project, comp, frame, &scratch)?;
+                let bytes = std::fs::read(&scratch).map_err(|error| format!("the picture could not be read back ({error})"));
+                let _ = std::fs::remove_file(&scratch);
+                bytes
+            })
+            .await;
+        this.update_in(cx, |_, window, cx| match drawn {
+            Ok(bytes) => {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(&gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, bytes)));
+                window.push_notification(format!("Copied frame {frame}. Paste it into another app.").as_str(), cx);
+            }
+            Err(error) => super::chrome::open_alert_dialog(window, cx, move |dialog, _, _| dialog.title("The frame could not be copied").description(error.clone())),
+        })
+        .ok();
+    })
+    .detach();
+}
+
 /// What to do once an export finishes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AfterExport {
@@ -131,13 +240,21 @@ pub fn exports_folder(project_file: Option<&Path>) -> PathBuf {
 }
 
 /// A file name in `folder` that is not taken yet: `name.extension`, else `name 2.extension`,
-/// and so on. Characters the Finder can't show in names are replaced.
-fn free_path(folder: &Path, name: &str, extension: &str) -> PathBuf {
+/// and so on. Characters the Finder can't show in names are replaced. A PNG sequence is a
+/// folder, so it has no extension. `reserved` says whether a path with nothing at it yet is
+/// spoken for all the same (by an export still waiting in the queue, say).
+pub(crate) fn free_path(folder: &Path, name: &str, extension: Option<&str>, reserved: impl Fn(&Path) -> bool) -> PathBuf {
     let clean: String = name.chars().map(|c| if matches!(c, '/' | ':' | '\\') || c.is_control() { '-' } else { c }).collect();
     let clean = if clean.trim().is_empty() { "Layer".to_owned() } else { clean.trim().to_owned() };
     (1..)
-        .map(|n| folder.join(if n == 1 { format!("{clean}.{extension}") } else { format!("{clean} {n}.{extension}") }))
-        .find(|path| !path.exists())
+        .map(|n| {
+            let stem = if n == 1 { clean.clone() } else { format!("{clean} {n}") };
+            folder.join(match extension {
+                Some(extension) => format!("{stem}.{extension}"),
+                None => stem,
+            })
+        })
+        .find(|path| !path.exists() && !reserved(path))
         .expect("some numbered name is free")
 }
 
@@ -154,6 +271,7 @@ pub fn quick_export_layer(workspace: &mut Workspace, layer: Id, replace: bool, w
         window.push_notification("Other layers use this one (as a parent, mask or text path), so it can't be replaced.", cx);
         return;
     }
+    before_export(workspace, window, cx);
     let Some((project, frames)) = studio_core::bake::solo_copy(&workspace.state.project, comp, layer) else {
         window.push_notification("This layer isn't on screen inside the composition, so there is nothing to export.", cx);
         return;
@@ -166,7 +284,7 @@ pub fn quick_export_layer(workspace: &mut Workspace, layer: Id, replace: bool, w
     let composition = workspace.state.composition();
     let layer_name = composition.layer(layer).map_or_else(String::new, |layer| layer.name.clone());
     let format = MovieFormat::ProRes4444;
-    let path = free_path(&folder, &format!("{} - {layer_name}", composition.name), format.extension());
+    let path = free_path(&folder, &format!("{} - {layer_name}", composition.name), Some(format.extension()), |_| false);
     let request = ExportRequest::new(comp, frames, format, path);
     let after = if replace { AfterExport::Replace { comp, layer } } else { AfterExport::Announce };
     run(workspace, project, request, after, window, cx);
@@ -199,9 +317,16 @@ pub fn request_for(workspace: &Workspace, path: PathBuf) -> ExportRequest {
 
 /// Starts exporting a snapshot of the project to `path` on a background thread.
 pub fn start(workspace: &mut Workspace, path: PathBuf, window: &mut Window, cx: &mut Context<Workspace>) {
+    before_export(workspace, window, cx);
     let request = request_for(workspace, path);
     let project = workspace.state.project.clone();
     run(workspace, project, request, AfterExport::Nothing, window, cx);
+}
+
+/// Runs Iris's recipes set to run before each export, so what they change is in the export.
+/// Exports the recipes themselves ask for don't run them again (see `assistant_automation::at`).
+pub(crate) fn before_export(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    super::assistant_automation::at(workspace, iris::recipes::Trigger::BeforeExport, window, cx);
 }
 
 /// Exports one item of the export queue; when it ends, the queue moves on (see `export_queue`).
@@ -282,7 +407,7 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
                     Ok(Outcome::Finished { left_out }) if !left_out.is_empty() && after == AfterExport::Nothing => {
                         let title = format!("Exported “{file_name}”, with changes");
                         let list = left_out.iter().map(|line| format!("• {line}")).collect::<Vec<_>>().join("\n");
-                        window.open_alert_dialog(cx, move |dialog, _, _| dialog.title(title.clone()).description(list.clone()));
+                        crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| dialog.title(title.clone()).description(list.clone()));
                     }
                     Ok(Outcome::Finished { .. }) => match after {
                         AfterExport::Nothing => window.push_notification(format!("Exported “{file_name}”.").as_str(), cx),
@@ -295,7 +420,7 @@ fn run(workspace: &mut Workspace, project: studio_core::model::Project, request:
                     },
                     Ok(Outcome::Cancelled) => window.push_notification("Export cancelled.", cx),
                     Err(error) => {
-                        window.open_alert_dialog(cx, move |dialog, _, _| dialog.title("The export failed").description(error.clone()));
+                        crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| dialog.title("The export failed").description(error.clone()));
                     }
                 }
                 false

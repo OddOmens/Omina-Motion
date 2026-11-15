@@ -97,7 +97,30 @@ pub fn rasterize(path: &ShapePath, style: &ShapeStyle, size: Vec2, scale: f32, m
     }
     if let Some(stroke) = style.stroke.filter(|stroke| stroke.width > 0.0) {
         let line = tiny_skia::Stroke { width: stroke.width, line_join: LineJoin::Miter, line_cap: if path.closed { LineCap::Butt } else { LineCap::Round }, ..Default::default() };
-        pixmap.stroke_path(&outline, &paint_with(stroke.paint), &line, to_raster, None);
+        if style.trim.is_whole() {
+            pixmap.stroke_path(&outline, &paint_with(stroke.paint), &line, to_raster, None);
+        } else {
+            // A trimmed stroke: each outline is stroked on its own, as one dash the length of
+            // the part to draw followed by a gap for the rest, started where the trim starts.
+            for part in pixels_path.outlines().filter(|part| part.points.len() >= 2) {
+                let Some(length) = studio_core::path::Walk::new(part, |point| point).map(|walk| walk.length()) else { continue };
+                let Some((begins, drawn)) = style.trim.stretch(length) else { continue };
+                let mut builder = PathBuilder::new();
+                builder.move_to(part.points[0].at.x, part.points[0].at.y);
+                for [_, control_a, control_b, end] in part.segments() {
+                    builder.cubic_to(control_a.x, control_a.y, control_b.x, control_b.y, end.x, end.y);
+                }
+                if part.closed {
+                    builder.close();
+                }
+                let Some(part_path) = builder.finish() else { continue };
+                // The dash pattern is one outline long, so sliding it back by `begins` puts
+                // the dash's start there; what runs off the end wraps around to the beginning.
+                let dash = if drawn >= length { None } else { tiny_skia::StrokeDash::new(vec![drawn, length - drawn], length - begins) };
+                let trimmed = tiny_skia::Stroke { dash, line_cap: LineCap::Butt, ..line.clone() };
+                pixmap.stroke_path(&part_path, &paint_with(stroke.paint), &trimmed, to_raster, None);
+            }
+        }
     }
     let pixels = pixmap.pixels().iter().flat_map(|pixel| {
         let straight = pixel.demultiply();
@@ -106,4 +129,41 @@ pub fn rasterize(path: &ShapePath, style: &ShapeStyle, size: Vec2, scale: f32, m
     // The rectangle the whole raster covers (a touch more than `covered`, from rounding up).
     let size = Vec2::new(width as f32 / scale, height as f32 / scale);
     Some(PathImage { width, height, pixels: pixels.collect(), origin, size })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use studio_core::model::{ShapeKind, Stroke, Trim};
+    use studio_core::path::PathPoint;
+
+    /// How opaque the raster is at a point given in layer pixels.
+    fn alpha_at(image: &PathImage, x: f32, y: f32) -> u8 {
+        let (column, row) = ((x - image.origin.x).round() as u32, (y - image.origin.y).round() as u32);
+        image.pixels[((row * image.width + column) * 4 + 3) as usize]
+    }
+
+    /// A level line across the middle of a 100 × 100 box, stroked white, drawn with `trim`.
+    fn trimmed_line(trim: Trim) -> PathImage {
+        let path = ShapePath { points: vec![PathPoint::corner(Vec2::new(0.0, 0.5)), PathPoint::corner(Vec2::new(1.0, 0.5))], closed: false, ..Default::default() };
+        let style = ShapeStyle { fill: None, stroke: Some(Stroke { paint: Paint::Solid(Rgba::hex(0xffffff)), width: 10.0 }), trim, ..ShapeStyle::new(ShapeKind::Path) };
+        rasterize(&path, &style, Vec2::new(100.0, 100.0), 1.0, 4096).expect("a line can be drawn")
+    }
+
+    #[test]
+    fn a_trimmed_stroke_draws_only_its_part_of_the_outline() {
+        let whole = trimmed_line(Trim::default());
+        assert!(alpha_at(&whole, 25.0, 50.0) > 200 && alpha_at(&whole, 75.0, 50.0) > 200);
+        // The first half only.
+        let first_half = trimmed_line(Trim { start: 0.0, end: 50.0, offset: 0.0 });
+        assert!(alpha_at(&first_half, 25.0, 50.0) > 200);
+        assert_eq!(alpha_at(&first_half, 75.0, 50.0), 0);
+        // The same half slid along by half the line: now the second half.
+        let slid = trimmed_line(Trim { start: 0.0, end: 50.0, offset: 50.0 });
+        assert_eq!(alpha_at(&slid, 25.0, 50.0), 0);
+        assert!(alpha_at(&slid, 75.0, 50.0) > 200);
+        // Nothing between equal ends.
+        let nothing = trimmed_line(Trim { start: 40.0, end: 40.0, offset: 0.0 });
+        assert_eq!(alpha_at(&nothing, 50.0, 50.0), 0);
+    }
 }

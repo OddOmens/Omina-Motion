@@ -421,6 +421,31 @@ pub const CATEGORIES: &[EffectCategory] = &[
         name: "Noise & Grain",
         effects: &[
             EffectDefinition { name: "Add Grain", parameters: &[(param("Intensity", "", 0.01, 0.0, 10.0, 2), 1.0), (param("Size", "", 0.01, 0.0, 10.0, 2), 1.0)] },
+            // Soft, organic grain like film stock: strongest in the midtones, lighter in deep
+            // shadows and bright highlights. Changes per Second at 0 holds one grain pattern.
+            EffectDefinition {
+                name: "Film Grain",
+                parameters: &[
+                    (param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 35.0),
+                    (param("Size", "px", 0.05, 0.5, 20.0, 1), 1.5),
+                    (param("Color", "%", 0.5, PERCENT.0, PERCENT.1, 0), 20.0),
+                    (param("Changes per Second", "", 0.1, 0.0, 60.0, 0), 24.0),
+                ],
+            },
+            // A still, printed-paper texture: blotchy fibers and fine specks, darkening the picture a
+            // little where the paper is rough. Good on flat colors and type.
+            EffectDefinition { name: "Paper Texture", parameters: &[(param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 40.0), (param("Scale", "px", 0.5, 10.0, 2000.0, 0), 180.0)] },
+            // Worn film: a faded warm tone, flickering brightness, dust specks and scratches that
+            // come and go frame by frame.
+            EffectDefinition {
+                name: "Old Film",
+                parameters: &[
+                    (param("Amount", "%", 0.5, PERCENT.0, PERCENT.1, 0), 60.0),
+                    (param("Dust", "%", 0.5, PERCENT.0, PERCENT.1, 0), 40.0),
+                    (param("Scratches", "%", 0.5, PERCENT.0, PERCENT.1, 0), 30.0),
+                    (param("Flicker", "%", 0.5, PERCENT.0, PERCENT.1, 0), 30.0),
+                ],
+            },
             // The middle value of nine samples spaced by the radius, which removes specks and keeps edges.
             EffectDefinition { name: "Median", parameters: &[(param("Radius", "px", 0.1, 0.0, 100.0, 1), 1.0)] },
         ],

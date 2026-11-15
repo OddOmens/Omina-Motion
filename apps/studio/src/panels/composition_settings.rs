@@ -111,6 +111,8 @@ struct Fields {
     background: Rc<Cell<Rgba>>,
     /// While set, width and height keep this ratio (width / height).
     locked_ratio: Rc<Cell<Option<f64>>>,
+    /// Whether layers mix in linear light (see `Composition::linear_blending`).
+    linear_blending: Rc<Cell<bool>>,
 }
 
 impl Fields {
@@ -208,6 +210,7 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
     };
     // A new composition starts with the default shutter; an open one shows its own.
     let shutter = if create { MotionBlur::default() } else { workspace.state.composition().motion_blur };
+    let linear = create || workspace.state.composition().linear_blending;
     let make = |value: String, window: &mut Window, cx: &mut Context<Workspace>| cx.new(|cx| InputState::new(window, cx).default_value(value));
     let fields = Fields {
         name: make(base.name.clone(), window, cx),
@@ -219,11 +222,12 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
         samples: make(shutter.samples.to_string(), window, cx),
         background: Rc::new(Cell::new(base.background)),
         locked_ratio: Rc::new(Cell::new(None)),
+        linear_blending: Rc::new(Cell::new(linear)),
     };
     link_frame_size(workspace, &fields, window, cx);
     let target = cx.weak_entity();
 
-    window.open_dialog(cx, move |dialog, _, cx| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, cx| {
         let size_now = fields.frame_size(cx);
         let rate_now = parse_frame_rate(&Fields::text(&fields.frame_rate, cx));
         let preset_label = size_now
@@ -312,6 +316,18 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
             })
         };
 
+        let blending = {
+            let fields = fields.clone();
+            Checkbox::new("comp-linear-blending").checked(fields.linear_blending.get()).label("Blend colors in linear light").on_click(move |checked: &bool, window, _| {
+                fields.linear_blending.set(*checked);
+                window.refresh();
+            })
+        };
+        let blending_note = if fields.linear_blending.get() {
+            "Fades, glows and soft edges mix like real light."
+        } else {
+            "Mixes like Photoshop, Figma and Omina Edit: half-transparent layers look darker."
+        };
         let (ok_fields, ok_target) = (fields.clone(), target.clone());
         dialog
             .title(if create { "New Composition" } else { "Composition Settings" })
@@ -353,7 +369,8 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
                             .child(muted("° shutter"))
                             .child(div().w(px(60.0)).child(Input::new(&fields.samples).small()))
                             .child(muted("samples")),
-                    )),
+                    ))
+                    .child(row("Color Mixing", div().flex().flex_col().gap_1().child(blending).child(muted(blending_note)))),
             )
             // A plain dialog draws no buttons of its own; Cancel closes it and OK runs `on_ok`.
             .footer(
@@ -363,11 +380,13 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
             )
             .on_ok(move |_, window, cx| match ok_fields.read(cx).and_then(|settings| Ok((settings, ok_fields.read_motion_blur(cx)?))) {
                 Ok((settings, shutter)) => {
+                    let linear = ok_fields.linear_blending.get();
                     let result = ok_target
                         .update(cx, |this, cx| {
                             let result = if create { this.state.create_composition(&settings) } else { this.state.update_composition(&settings) };
                             // Either way the composition just set up is the open one.
                             let result = result.and_then(|()| this.state.set_motion_blur(shutter));
+                            this.state.set_linear_blending(linear);
                             this.ui.dialog_subscriptions.clear();
                             cx.notify();
                             result

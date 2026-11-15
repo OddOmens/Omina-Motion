@@ -48,20 +48,16 @@ impl EditorState {
         morph::toggle_path_keyframe(self.composition_mut(), layer, frame)
     }
 
-    /// Moves the playhead to `layer`'s previous or next morph keyframe, if there is one.
-    pub fn jump_to_morph_keyframe(&mut self, layer: Id, forward: bool) {
-        let Some(frames) = self.composition().layer(layer).and_then(|layer| layer.morph.as_ref()).map(|morph| morph.keyframe_frames()) else { return };
-        let current = self.current_frame;
-        let target = if forward { frames.into_iter().find(|&frame| frame > current) } else { frames.into_iter().rev().find(|&frame| frame < current) };
-        if let Some(frame) = target {
-            self.set_current_frame(frame);
-        }
+    /// The Fill & Stroke stopwatch on `layer` (see `morph::toggle_style_animation`).
+    pub fn toggle_style_animation(&mut self, layer: Id) -> bool {
+        let frame = self.current_frame;
+        morph::toggle_style_animation(self.composition_mut(), layer, frame)
     }
 
-    /// Stops `layer`'s fill and stroke from morphing, keeping the look they have at the playhead.
-    pub fn stop_style_morph(&mut self, layer: Id) -> bool {
+    /// Adds or removes a fill and stroke keyframe on `layer` at the playhead.
+    pub fn toggle_style_keyframe(&mut self, layer: Id) -> bool {
         let frame = self.current_frame;
-        morph::stop_style_morph(self.composition_mut(), layer, frame)
+        morph::toggle_style_keyframe(self.composition_mut(), layer, frame)
     }
 
     /// Turns `layer`, a drawn shape, into a pen path with the same outline.

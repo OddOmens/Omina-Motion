@@ -8,7 +8,7 @@
 //! The sound card's callback only copies samples out of that queue, so it never waits on a
 //! decoder or a lock.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -100,6 +100,9 @@ struct Session {
     /// Set when the mix reached the end of a range that does not loop.
     finished: AtomicBool,
     error: Mutex<Option<String>>,
+    /// The loudest sample mixed on the left and on the right since the meter last looked, as
+    /// the bits of a non-negative `f32` (which sort the same way the numbers do).
+    peaks: [AtomicU32; 2],
 }
 
 impl Session {
@@ -158,6 +161,7 @@ impl AudioOutput {
             clips_version: AtomicU64::new(0),
             finished: AtomicBool::new(false),
             error: Mutex::new(None),
+            peaks: [AtomicU32::new(0), AtomicU32::new(0)],
         });
         if self.commands.send(Command::Play(session.clone(), timeline)).is_err() {
             let created = session.clock().created;
@@ -190,6 +194,13 @@ impl AudioPlayer {
     /// How long this playback has been heard: the playhead's clock while playing.
     pub fn heard(&self) -> Duration {
         Duration::from_secs_f64(self.session.clock().heard(Instant::now()))
+    }
+
+    /// The loudest level mixed on the left and on the right since this was last called (1.0 is
+    /// full scale; more than that clips). For level meters: call it once per screen frame. The
+    /// mix runs about a tenth of a second ahead of the speakers, so the meter leads by that.
+    pub fn take_peaks(&self) -> [f32; 2] {
+        [0, 1].map(|side| f32::from_bits(self.session.peaks[side].swap(0, Ordering::Relaxed)))
     }
 
     /// Why there is no sound, if the device could not be used.
@@ -357,6 +368,12 @@ fn top_up(playing: &mut Playing, block: &mut [f32]) {
     let session = &playing.session;
     while !session.finished.load(Ordering::Relaxed) && playing.producer.slots() >= block.len() {
         let frames = playing.mixer.mix(&playing.clips, block);
+        // Note each side's loudest sample for the level meters.
+        for frame in block[..frames * CHANNELS].chunks_exact(CHANNELS) {
+            for (side, sample) in frame.iter().enumerate().take(2) {
+                session.peaks[side].fetch_max(sample.abs().to_bits(), Ordering::Relaxed);
+            }
+        }
         if let Ok(chunk) = playing.producer.write_chunk_uninit(frames * CHANNELS) {
             chunk.fill_from_iter(block[..frames * CHANNELS].iter().copied());
         }

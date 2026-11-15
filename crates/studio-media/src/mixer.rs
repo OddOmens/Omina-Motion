@@ -175,12 +175,19 @@ impl Mixer {
         let fading = clip.fades();
         let span = (to - from).max(1) as f32;
         let mut energy = 0.0f32;
+        // A pan that isn't keyframed is the same for the whole block.
+        let panning = clip.pans();
+        let mut side_gains = clip.side_gains_at(start as f64 / f64::from(sample_rate));
         for (index, (mixed, sample)) in into.iter_mut().zip(samples.iter()).enumerate() {
             let frame = start + (index / CHANNELS) as i64;
+            if panning && index % CHANNELS == 0 {
+                side_gains = clip.side_gains_at(frame as f64 / f64::from(sample_rate));
+            }
             // Fades change the level sample by sample; without them it is one gain.
             let level = if fading { clip.level_at(frame as f64 / f64::from(sample_rate)) } else { clip.gain };
             let ducked = duck.0 + (duck.1 - duck.0) * ((frame - from) as f32 / span);
-            let value = sample * level * ducked;
+            // Samples alternate left and right; each side takes its share of the pan.
+            let value = sample * level * ducked * side_gains[index % CHANNELS];
             energy += value * value;
             *mixed += value;
         }

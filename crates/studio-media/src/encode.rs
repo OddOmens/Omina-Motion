@@ -558,8 +558,8 @@ fn open_audio(output: &mut ffmpeg::format::context::Output, format: MovieFormat,
     let mut audio = codec::context::Context::new_with_codec(codec).encoder().audio()?;
     let time_base = Rational::new(1, rate as i32);
     audio.set_rate(rate as i32);
+    // The layout carries the channel count (two, matching `CHANNELS`), so it isn't set separately.
     audio.set_channel_layout(ChannelLayout::STEREO);
-    audio.set_channels(CHANNELS as i32);
     audio.set_format(sample);
     audio.set_time_base(time_base);
     match store {

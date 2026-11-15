@@ -1,6 +1,6 @@
 //! The Elements panel, opened from the rail: ready-made graphics (see `studio_core::elements`)
-//! grouped as shapes, lines and arrows, badges and labels, frames, social buttons and emoji
-//! stickers. Clicking one adds it to the middle of the open composition at the playhead,
+//! grouped as shapes, lines and arrows, callouts, titles and captions, badges and labels,
+//! frames, social buttons and emoji stickers. Clicking one adds it to the middle of the open composition at the playhead,
 //! selected, ready to move, recolor and animate.
 //!
 //! Each tile shows the element itself, rendered a few at a time so the panel opens at once.

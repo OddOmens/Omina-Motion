@@ -110,11 +110,11 @@ pub fn generate(workspace: &mut Workspace, clip: Id, window: &mut Window, cx: &m
         return;
     }
     let target = cx.weak_entity();
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| {
         let (target, source) = (target.clone(), source.clone());
         dialog
             .title("Download the captions model?")
-            .description("Captions are made on this computer with OpenAI's Whisper (tiny) model. It is downloaded once from huggingface.co (about 150 MB) and kept in Studio's settings folder. Your sound is never uploaded.")
+            .description("Captions are made on this computer with OpenAI's Whisper (tiny) model. It is downloaded once from huggingface.co (about 150 MB) and kept in Omina Motion's settings folder. Your sound is never uploaded.")
             .ok_text("Download and Make Captions")
             .show_cancel(true)
             .on_ok(move |_, window, cx| {

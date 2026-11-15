@@ -38,6 +38,18 @@ impl EditorState {
                 clip.time.speed_before_ramp = Some(time.speed.value);
             }
         }
+        // A shape's outline has its own stopwatch, which also turns a drawn shape into a path.
+        if path == PropertyPath::ShapePath {
+            self.toggle_path_animation(layer);
+            self.selected_keyframes.retain(|key| !(key.layer == layer && key.path == path));
+            return;
+        }
+        // So do its fill and stroke, which keep the look they have when it is turned off.
+        if path == PropertyPath::ShapeStyle {
+            self.toggle_style_animation(layer);
+            self.selected_keyframes.retain(|key| !(key.layer == layer && key.path == path));
+            return;
+        }
         if let Some(animated) = self.composition_mut().layer_mut(layer).and_then(|l| l.animated_mut(path)) {
             animated.toggle_stopwatch(frame);
         }
@@ -47,6 +59,16 @@ impl EditorState {
     /// Adds a keyframe at the playhead, or removes the one already there.
     pub fn toggle_keyframe_at_playhead(&mut self, layer: Id, path: PropertyPath) {
         let frame = self.current_frame;
+        // Removing an outline's last keyframe ends its animation, which needs tidying up.
+        if path == PropertyPath::ShapePath || path == PropertyPath::ShapeStyle {
+            if path == PropertyPath::ShapePath {
+                self.toggle_path_keyframe(layer);
+            } else {
+                self.toggle_style_keyframe(layer);
+            }
+            self.selected_keyframes.retain(|key| *key != KeyframeRef { layer, path, frame });
+            return;
+        }
         if let Some(animated) = self.composition_mut().layer_mut(layer).and_then(|l| l.animated_mut(path)) {
             animated.toggle_keyframe(frame);
         }
@@ -88,8 +110,17 @@ impl EditorState {
     pub(super) fn delete_selected_keyframes(&mut self) -> usize {
         let keys = std::mem::take(&mut self.selected_keyframes);
         for key in &keys {
-            if let Some(animated) = self.composition_mut().layer_mut(key.layer).and_then(|l| l.animated_mut(key.path)) {
+            let Some(layer) = self.composition_mut().layer_mut(key.layer) else { continue };
+            if let Some(animated) = layer.animated_mut(key.path) {
                 animated.remove_keyframe(key.frame);
+                // An outline whose last keyframe went keeps the shape it had, no longer animated.
+                if key.path == PropertyPath::ShapePath {
+                    studio_core::morph::settle_path_keyframes(layer);
+                }
+                // The same goes for its fill and stroke.
+                if key.path == PropertyPath::ShapeStyle {
+                    studio_core::morph::settle_style_keyframes(layer);
+                }
             }
         }
         keys.len()
@@ -184,6 +215,12 @@ impl EditorState {
                 animated.set_easing(key.frame, easing);
             }
         }
+    }
+
+    /// Makes one of the Motion Assistant's fixes in the open composition. Returns whether
+    /// anything changed.
+    pub fn apply_motion_fix(&mut self, fix: &studio_core::assistant::Fix) -> bool {
+        studio_core::assistant::apply(self.composition_mut(), fix)
     }
 
     /// Easy Ease (F9): eases both into and out of every selected keyframe.

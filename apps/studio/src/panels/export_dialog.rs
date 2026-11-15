@@ -4,7 +4,9 @@
 //! H.265 their quality and encoding speed), the picture (size and frame rate), which frames,
 //! and the sound. Every choice is kept in `ExportChoice` between exports; Export… asks where
 //! to save, then `export::start` runs it in the background. Add to Queue… saves the export to
-//! run later with others (see `export_queue`).
+//! run later with others (see `export_queue`). At the top, a Preset menu puts a saved set of
+//! choices in place, and Save as Preset keeps the current ones under a name (see
+//! `export_presets`).
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -156,8 +158,11 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut gpui_kit::C
     }
     // Each opening starts at the playhead's frame.
     forget_preview(workspace, window, cx);
+    if workspace.ui.export_preset_name.is_none() {
+        workspace.ui.export_preset_name = Some(cx.new(|cx| gpui_kit::component::input::InputState::new(window, cx).placeholder("Preset name")));
+    }
     let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, window, cx| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, window, cx| {
         let Some(workspace) = target.upgrade() else { return dialog };
         let start = target.clone();
         let close = target.clone();
@@ -479,6 +484,59 @@ fn format_note(format: ExportFormat) -> &'static str {
 }
 
 /// The right column: one group each for the format, the picture, the frames and the sound.
+/// The Preset group: a menu of the saved presets and the ones Motion comes with, which puts a
+/// preset's choices in place, and a name field with Save as Preset, which keeps the choices
+/// made now. A preset made for another frame shape says so, since the window can't reshape the
+/// composition (Iris can: "export for Instagram Reel" makes a copy at that size first).
+fn presets(workspace: &Workspace, target: &WeakEntity<Workspace>) -> impl IntoElement {
+    use super::export_presets::{self as presets, PresetSettings};
+    let choice = workspace.ui.export_choice;
+    let comp = workspace.state.composition();
+    let saved = presets::saved();
+    let own = presets::built_in();
+    let listed: Vec<(iris::export_presets::Preset, bool)> = saved.iter().cloned().map(|preset| (preset, false)).chain(own.iter().filter(|preset| !saved.iter().any(|kept| kept.name.eq_ignore_ascii_case(&preset.name))).cloned().map(|preset| (preset, true))).collect();
+    let current = listed.iter().find(|(preset, _)| PresetSettings::of(preset).choice() == choice).map(|(preset, _)| preset.clone());
+    let mut entries = Vec::new();
+    if listed.iter().any(|(_, own)| !own) {
+        entries.push(MenuEntry::Heading("Saved"));
+    }
+    for (index, (preset, is_own)) in listed.iter().enumerate() {
+        if *is_own && (index == 0 || !listed[index - 1].1) {
+            if index > 0 {
+                entries.push(MenuEntry::Separator);
+            }
+            entries.push(MenuEntry::Heading("Comes with Omina Motion"));
+        }
+        let picked = PresetSettings::of(preset).choice();
+        entries.push(MenuEntry::choice(preset.name.clone(), picked == choice, picked));
+    }
+    let label = current.as_ref().map_or_else(|| "Custom".to_owned(), |preset| preset.name.clone());
+    let menu = choice_menu("export-preset", label, entries, |c, picked| *c = picked, target.clone());
+    let reshape = current.as_ref().and_then(|preset| PresetSettings::of(preset).frame).filter(|frame| *frame != (comp.width, comp.height)).map(|(width, height)| {
+        let name = current.as_ref().map_or_else(String::new, |preset| preset.name.clone());
+        div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("Made for {width} × {height}; this composition is {} × {}. Ask Iris “export for {name}” to export a copy at that size.", comp.width, comp.height))
+    });
+    let name_field = workspace.ui.export_preset_name.clone();
+    let save = {
+        let (target, field) = (target.clone(), name_field.clone());
+        Button::new("export-preset-save").outline().small().label("Save as Preset").on_click(move |_, window, cx| {
+            let Some(field) = field.as_ref() else { return };
+            let name = field.read(cx).value().trim().to_owned();
+            if name.is_empty() {
+                window.push_notification("Type a name for the preset first.", cx);
+                return;
+            }
+            let Some(choice) = target.upgrade().map(|workspace| workspace.read(cx).ui.export_choice) else { return };
+            let said = presets::save_current(&choice, &name).unwrap_or_else(|why| why);
+            field.update(cx, |field, cx| field.set_value("", window, cx));
+            window.push_notification(said.as_str(), cx);
+            target.update(cx, |_, cx| cx.notify()).ok();
+        })
+    };
+    let field = name_field.map(|field| div().id("export-preset-name").w(px(140.0)).child(gpui_kit::component::input::Input::new(&field).small()).test_support());
+    group("Preset").child(div().flex().items_center().gap_2().child(menu).child(div().flex_1()).children(field).child(save)).children(reshape)
+}
+
 fn settings(workspace: &Workspace, target: &WeakEntity<Workspace>) -> impl IntoElement {
     let choice = workspace.ui.export_choice;
     let comp = workspace.state.composition();
@@ -568,6 +626,7 @@ fn settings(workspace: &Workspace, target: &WeakEntity<Workspace>) -> impl IntoE
         .flex()
         .flex_col()
         .gap_4()
+        .child(presets(workspace, target))
         .child(
             group("Format")
                 .child(format_menu)

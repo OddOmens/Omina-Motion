@@ -5,7 +5,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{Disableable as _, Icon, Sizable as _, WindowExt as _};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _};
 use gpui_kit::{
     ClickEvent, Context, Div, ElementId, InteractiveElement, IntoElement, MouseButton, ParentElement, StatefulInteractiveElement, Styled,
     TestSupportExt as _, Window, div, px, rgba,
@@ -55,7 +55,7 @@ fn confirm_delete_brand(brand: &Brand, window: &mut Window, cx: &mut Context<Wor
     let (id, name) = (brand.id, brand.name.clone());
     let count = brand.colors.len() + brand.text_styles.len();
     let workspace = cx.weak_entity();
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| {
         let workspace = workspace.clone();
         let contents = match count {
             0 => "It is empty.".to_owned(),
@@ -64,7 +64,7 @@ fn confirm_delete_brand(brand: &Brand, window: &mut Window, cx: &mut Context<Wor
         };
         dialog
             .title(format!("Delete “{name}”?"))
-            .description(format!("{contents} Projects that use them keep their look. A backup of your libraries is kept in Studio's settings folder."))
+            .description(format!("{contents} Projects that use them keep their look. A backup of your libraries is kept in Omina Motion's settings folder."))
             .ok_text("Delete")
             .show_cancel(true)
             .on_ok(move |_, _, cx| {

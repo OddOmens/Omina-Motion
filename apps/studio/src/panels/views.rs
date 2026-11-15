@@ -17,13 +17,14 @@ use crate::workspace::{LeftPanel, PanelId, Workspace};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelKind {
     Toolbar,
-    /// The panel beside the rail: Media, Effects, Libraries and so on, whichever the rail picked.
+    /// The panel beside the rail: Media, Effects, Libraries, Stock and so on, whichever the rail picked.
     Side,
     Viewer,
     Timeline,
     Properties,
     Align,
     Nodes,
+    Mixer,
 }
 
 impl PanelKind {
@@ -37,6 +38,7 @@ impl PanelKind {
             PanelKind::Properties => PanelId::Properties,
             PanelKind::Align => PanelId::Align,
             PanelKind::Nodes => PanelId::Nodes,
+            PanelKind::Mixer => PanelId::Mixer,
         })
     }
 }
@@ -100,12 +102,16 @@ impl Render for PanelView {
                         LeftPanel::Captions => captions::render(workspace, cx).into_any_element(),
                         LeftPanel::Elements => elements::render(workspace, cx).into_any_element(),
                         LeftPanel::Mockups => mockups::render(workspace, cx).into_any_element(),
+                        LeftPanel::Stock => stock::render(workspace, cx).into_any_element(),
+                        LeftPanel::History => history::render(workspace, cx).into_any_element(),
+                        LeftPanel::Assistant => assistant::render(workspace, cx).into_any_element(),
                     },
                     PanelKind::Viewer => viewer::render(workspace, window, cx).into_any_element(),
                     PanelKind::Timeline => timeline::render(workspace, window, cx).into_any_element(),
                     PanelKind::Properties => properties::render(workspace, cx).into_any_element(),
                     PanelKind::Align => align::render(workspace, cx).into_any_element(),
                     PanelKind::Nodes => nodes::render(workspace, cx).into_any_element(),
+                    PanelKind::Mixer => mixer::render(workspace, cx).into_any_element(),
                 }
             })
             .unwrap_or_else(|_| div().into_any_element());
@@ -126,7 +132,8 @@ impl Focusable for PanelView {
 }
 
 /// How the dock sees a panel. Panels are never closed (each always has a place in the layout),
-/// and are hidden instead while they are turned off.
+/// and are hidden instead while they are turned off. Any panel can fill the window for a
+/// while (Maximize Panel, in the menu on its tab's grip).
 impl BasePanel for PanelView {
     fn panel_name(&self) -> &'static str {
         self.kind.dock_id().map_or("Toolbar", PanelId::name)
@@ -141,7 +148,7 @@ impl BasePanel for PanelView {
     }
 
     fn zoomable(&self, _: &App) -> bool {
-        false
+        true
     }
 }
 

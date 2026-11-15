@@ -115,16 +115,20 @@ impl FieldTarget {
                 Some((setting.get(style), FieldFormat { step, decimals, unit, rotation: false }))
             }
             Self::Shape { layer, setting } => {
-                let style = state.shape_of(layer)?;
-                let size = state.composition().layer(layer)?.size;
+                let style = state.shape_style_now(layer)?;
+                let shape = state.composition().layer(layer)?;
+                // An animated outline's width and height are read at the playhead; the other
+                // settings are measured against the layer's own box.
+                let size = if matches!(setting, ShapeSetting::Width | ShapeSetting::Height) { shape.shape_size_at(state.current_frame as f64) } else { shape.size };
                 let (step, decimals, unit) = match setting {
                     ShapeSetting::Width | ShapeSetting::Height | ShapeSetting::OuterRadius | ShapeSetting::InnerRadius => (1.0, 0, "px"),
                     ShapeSetting::CornerRadius => (0.5, 0, "px"),
                     ShapeSetting::StrokeWidth => (0.1, 1, "px"),
                     ShapeSetting::Points => (0.1, 0, ""),
                     ShapeSetting::FillAngle | ShapeSetting::StrokeAngle => (1.0, 0, "°"),
+                    ShapeSetting::TrimStart | ShapeSetting::TrimEnd | ShapeSetting::TrimOffset => (0.5, 0, "%"),
                 };
-                Some((setting.get(style, size), FieldFormat { step, decimals, unit, rotation: false }))
+                Some((setting.get(&style, size), FieldFormat { step, decimals, unit, rotation: false }))
             }
             Self::Audio { layer, setting } => {
                 let value = state.audio_setting(layer, setting)?;
@@ -133,6 +137,7 @@ impl FieldTarget {
                     AudioSetting::FadeIn | AudioSetting::FadeOut => (0.01, 2, " s"),
                     AudioSetting::DuckAmount => (0.1, 0, " dB"),
                     AudioSetting::NoiseGate => (0.5, 0, "%"),
+                    AudioSetting::Pan => (1.0, 0, ""),
                 };
                 Some((value, FieldFormat { step, decimals, unit, rotation: false }))
             }
@@ -273,8 +278,72 @@ pub fn value_field(target: FieldTarget, workspace: &Workspace, cx: &mut Context<
         .into_any_element()
 }
 
-/// A property row: stopwatch, name, one field per component, and (when animated) a button
-/// that adds or removes a keyframe at the playhead. `extra` sits between the name and the fields.
+/// Which small control a property row shows: each has its own icon, drawn at the size that
+/// makes the three look the same weight side by side.
+#[derive(Clone, Copy, PartialEq)]
+pub enum RowControl {
+    /// Starts or stops animating the property.
+    Stopwatch,
+    /// Adds or removes a keyframe at the playhead.
+    Keyframe,
+    /// Moves the playhead to the previous keyframe.
+    PreviousKeyframe,
+    /// Moves the playhead to the next keyframe.
+    NextKeyframe,
+}
+
+/// One of a property row's small square controls, lit in the accent color when `lit`. The
+/// caller adds the click handler, so every animatable row (transform properties, a shape's
+/// path) is drawn from the same pieces.
+pub fn row_control(id: impl Into<ElementId>, control: RowControl, lit: bool) -> gpui_kit::Stateful<gpui_kit::Div> {
+    use gpui_kit::assets::IconName;
+    use gpui_kit::component::Icon;
+
+    let (icon, icon_size) = match control {
+        RowControl::Stopwatch => (IconName::Timer, 14.0),
+        RowControl::Keyframe => (IconName::Diamond, 11.0),
+        RowControl::PreviousKeyframe => (IconName::ChevronLeft, 12.0),
+        RowControl::NextKeyframe => (IconName::ChevronRight, 12.0),
+    };
+    div()
+        .id(id)
+        .size(px(ROW_CONTROL_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(3.0))
+        .hover(|style| style.bg(hsla(color::HOVER)))
+        .child(Icon::new(icon).size(px(icon_size)).text_color(hsla(if lit { color::ACCENT } else { color::MUTED })))
+}
+
+/// The side of a property row's square controls, and the width of the columns that hold one.
+const ROW_CONTROL_SIZE: f32 = 18.0;
+
+/// How far from a card's left edge the names start: the stopwatch column and the gap after it.
+/// Anything in a card that isn't a row (a checkbox, a button, a note) is indented this far, so
+/// it lines up under the names and only stopwatches sit in the left margin.
+pub const NAME_INDENT: f32 = ROW_CONTROL_SIZE + 8.0;
+
+/// The columns every Properties row shares, so names and values line up from row to row and
+/// card to card: a stopwatch (empty for a setting that isn't animated), the name, one small
+/// extra control such as a link or a checkbox, then the values, which take the rest of the row.
+pub fn grid_row(stopwatch: Option<AnyElement>, name: impl Into<gpui_kit::SharedString>, extra: Option<AnyElement>, values: impl IntoElement) -> gpui_kit::Div {
+    // A minimum, not a fixed height: a row grows for a taller value such as a text box.
+    div()
+        .min_h(px(28.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().w(px(ROW_CONTROL_SIZE)).flex_none().children(stopwatch))
+        .child(div().w(px(104.0)).flex_none().truncate().child(name.into()))
+        .child(div().w(px(ROW_CONTROL_SIZE)).flex_none().flex().justify_center().children(extra))
+        .child(div().flex_1().min_w_0().child(values))
+}
+
+/// A property row: stopwatch, name, one field per component, and (when animated) buttons that
+/// step between keyframes and add or remove one at the playhead. `extra` sits between the name
+/// and the fields.
 pub fn property_row(
     layer: Id,
     path: PropertyPath,
@@ -282,9 +351,6 @@ pub fn property_row(
     workspace: &Workspace,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    use gpui_kit::assets::IconName;
-    use gpui_kit::component::Icon;
-
     let frame = workspace.state.current_frame;
     let Some(snapshot) = workspace.state.composition().layer(layer).and_then(|l| l.property(path, frame)) else {
         return div().into_any_element();
@@ -292,22 +358,13 @@ pub fn property_row(
     let animated = !snapshot.keyframes.is_empty();
     let on_keyframe = snapshot.keyframes.contains(&frame);
     let key = format!("{path:?}:{}", layer.0);
+    let control_id = |name: &str| ElementId::Name(format!("{name}:{key}").into());
 
-    let stopwatch = div()
-        .id(ElementId::Name(format!("stopwatch:{key}").into()))
-        .size(px(18.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(3.0))
-        .hover(|style| style.bg(hsla(color::HOVER)))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.state.toggle_stopwatch(layer, path);
-            cx.notify();
-        }))
-        .child(Icon::new(IconName::Timer).size(px(14.0)).text_color(hsla(if animated { color::ACCENT } else { color::MUTED })))
-        .test_support();
+    let stopwatch = row_control(control_id("stopwatch"), RowControl::Stopwatch, animated).on_click(cx.listener(move |this, _, _, cx| {
+        this.state.toggle_stopwatch(layer, path);
+        cx.notify();
+    }))
+    .test_support();
 
     let fields = (0..snapshot.value.components())
         .map(|component| value_field(FieldTarget::Property { layer, path, component }, workspace, cx))
@@ -315,51 +372,23 @@ pub fn property_row(
 
     // Previous / next keyframe of this property, as in After Effects' keyframe navigator.
     let jump = |forward: bool, cx: &mut Context<Workspace>| {
-        div()
-            .id(ElementId::Name(format!("{}:{key}", if forward { "next-keyframe" } else { "previous-keyframe" }).into()))
-            .size(px(18.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(3.0))
-            .hover(|style| style.bg(hsla(color::HOVER)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.state.jump_to_keyframe(layer, path, forward);
-                cx.notify();
-            }))
-            .child(Icon::new(if forward { IconName::ChevronRight } else { IconName::ChevronLeft }).size(px(12.0)).text_color(hsla(color::MUTED)))
-            .test_support()
+        let (name, control) = if forward { ("next-keyframe", RowControl::NextKeyframe) } else { ("previous-keyframe", RowControl::PreviousKeyframe) };
+        row_control(control_id(name), control, false).on_click(cx.listener(move |this, _, _, cx| {
+            this.state.jump_to_keyframe(layer, path, forward);
+            cx.notify();
+        }))
+        .test_support()
     };
     let previous = animated.then(|| jump(false, cx));
     let next = animated.then(|| jump(true, cx));
     let keyframe_button = animated.then(|| {
-        div()
-            .id(ElementId::Name(format!("keyframe:{key}").into()))
-            .size(px(18.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(3.0))
-            .hover(|style| style.bg(hsla(color::HOVER)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.state.toggle_keyframe_at_playhead(layer, path);
-                cx.notify();
-            }))
-            .child(Icon::new(IconName::Diamond).size(px(11.0)).text_color(hsla(if on_keyframe { color::ACCENT } else { color::MUTED })))
+        row_control(control_id("keyframe"), RowControl::Keyframe, on_keyframe).on_click(cx.listener(move |this, _, _, cx| {
+            this.state.toggle_keyframe_at_playhead(layer, path);
+            cx.notify();
+        }))
     });
 
-    div()
-        .h(px(26.0))
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(stopwatch)
-        .child(div().w(px(104.0)).flex_none().truncate().child(snapshot.name.clone()))
-        .child(div().w(px(18.0)).flex_none().children(extra))
-        .child(div().flex().gap_3().children(fields))
-        .child(div().flex_1())
+    grid_row(Some(stopwatch.into_any_element()), snapshot.name.clone(), extra, div().flex().gap_3().children(fields))
         .children(previous)
         .children(keyframe_button)
         .children(next)

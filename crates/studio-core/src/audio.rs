@@ -33,9 +33,40 @@ pub struct AudioClip {
     pub duck_db: f32,
     /// How strongly background sound is turned down between louder sound, 0 to 100.
     pub noise_gate: f32,
+    /// Where the sound sits between the speakers, from -1 (all left) to 1 (all right). Panning
+    /// one way turns the other side down; the side panned toward stays as loud as it was.
+    pub pan: f32,
+    /// The clip's volume over time, when it is keyframed. `gain` then leaves the clip's own
+    /// volume out, and `level_at` reads it from here.
+    pub volume_curve: Option<Curve>,
+    /// The clip's pan over time, when it is keyframed, in place of `pan`.
+    pub pan_curve: Option<Curve>,
     /// Effects on the sound, in the order they run: the layer's own, then those of the
     /// composition layers it plays inside, innermost first.
     pub effects: Vec<ClipEffect>,
+}
+
+/// A keyframed setting of a clip (its volume in decibels, or its pan from -100 to 100), with
+/// the clock its keyframes are read on: where its composition's frame 0 falls on the played
+/// timeline, and that composition's frame rate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Curve {
+    pub values: crate::animation::Animated<f32>,
+    pub shift_seconds: f64,
+    pub fps: f64,
+}
+
+impl Curve {
+    /// A layer's setting as a curve, if it is keyframed, on a clock that starts with the
+    /// layer's composition.
+    fn of(setting: &crate::animation::Animated<f32>, fps: f64) -> Option<Self> {
+        setting.is_animated().then(|| Self { values: setting.clone(), shift_seconds: 0.0, fps })
+    }
+
+    /// The setting at `seconds` of the played timeline.
+    pub fn at(&self, seconds: f64) -> f32 {
+        self.values.value_at((seconds - self.shift_seconds) * self.fps)
+    }
 }
 
 /// A sound effect on a clip, with the clock its keyframes are read on: the layer's effect,
@@ -87,20 +118,38 @@ impl AudioClip {
             duck_under: None,
             duck_db: 0.0,
             noise_gate: 0.0,
+            pan: 0.0,
+            volume_curve: None,
+            pan_curve: None,
             effects: Vec::new(),
         }
     }
 
-    /// Whether the clip's level changes over time (from any fade), rather than being one gain.
+    /// The factor each side is multiplied by for the clip's pan at `seconds` of composition
+    /// time: left, then right.
+    pub fn side_gains_at(&self, seconds: f64) -> [f32; 2] {
+        let pan = self.pan_curve.as_ref().map_or(self.pan, |curve| crate::model::LayerAudio::balance_of(curve.at(seconds)));
+        let pan = if pan.is_finite() { pan.clamp(-1.0, 1.0) } else { 0.0 };
+        [(1.0 - pan).min(1.0), (1.0 + pan).min(1.0)]
+    }
+
+    /// Whether the clip's pan moves over time, rather than staying in one place.
+    pub fn pans(&self) -> bool {
+        self.pan_curve.is_some()
+    }
+
+    /// Whether the clip's level changes over time (from a fade or volume keyframes), rather
+    /// than being one gain.
     pub fn fades(&self) -> bool {
-        self.fade_in > 0.0 || self.fade_out > 0.0 || !self.outer_fades.is_empty()
+        self.fade_in > 0.0 || self.fade_out > 0.0 || !self.outer_fades.is_empty() || self.volume_curve.is_some()
     }
 
     /// How loud the clip is at `seconds` of composition time, from its volume and fades.
     pub fn level_at(&self, seconds: f64) -> f32 {
         let own = Fade { start_seconds: self.start_seconds, end_seconds: self.end_seconds, fade_in: self.fade_in, fade_out: self.fade_out };
         let outer: f64 = self.outer_fades.iter().map(|fade| fade.level_at(seconds)).product();
-        self.gain * (own.level_at(seconds) * outer) as f32
+        let keyframed = self.volume_curve.as_ref().map_or(1.0, |curve| crate::model::LayerAudio::gain_of(curve.at(seconds)));
+        self.gain * keyframed * (own.level_at(seconds) * outer) as f32
     }
 }
 
@@ -133,7 +182,7 @@ const MAX_DEPTH: usize = 8;
 /// be played.
 pub fn composition_audio(project: &Project, composition: &Composition) -> Vec<AudioClip> {
     let mut clips = Vec::new();
-    let everything = Placement { shift: 0.0, window: (f64::NEG_INFINITY, f64::INFINITY), gain: 1.0, fades: Vec::new(), chain: Vec::new(), duck: None, noise_gate: 0.0, effects: Vec::new() };
+    let everything = Placement { shift: 0.0, window: (f64::NEG_INFINITY, f64::INFINITY), gain: 1.0, fades: Vec::new(), chain: Vec::new(), duck: None, noise_gate: 0.0, pan: 0.0, effects: Vec::new() };
     collect(project, composition, &everything, &mut clips);
     clips
 }
@@ -180,6 +229,8 @@ struct Placement {
     duck: Option<(Id, f32)>,
     /// The strongest noise gate set on the composition layers.
     noise_gate: f32,
+    /// The composition layers' pans added together, from -1 (all left) to 1 (all right).
+    pan: f32,
     /// The sound effects of the composition layers, innermost first, on their own clocks.
     effects: Vec<ClipEffect>,
 }
@@ -247,6 +298,7 @@ fn collect(project: &Project, composition: &Composition, placement: &Placement, 
                     chain,
                     duck,
                     noise_gate: placement.noise_gate.max(layer.audio.noise_gate.clamp(0.0, 100.0)),
+                    pan: (placement.pan + crate::model::LayerAudio::balance_of(layer.audio.pan.value)).clamp(-1.0, 1.0),
                     effects,
                 };
                 collect(project, inner, &nested, clips);
@@ -278,7 +330,8 @@ fn own_clip(project: &Project, composition: &Composition, layer: &crate::model::
         offset_seconds: layer.start_frame as f64 / fps,
         start_seconds: layer.in_frame as f64 / fps,
         end_seconds: layer.out_frame as f64 / fps,
-        gain: layer.audio.gain(),
+        // Keyframed volume is read moment by moment from `volume_curve` instead.
+        gain: if layer.audio.volume_db.is_animated() { 1.0 } else { layer.audio.gain() },
         fade_in: f64::from(layer.audio.fade_in.max(0.0)),
         fade_out: f64::from(layer.audio.fade_out.max(0.0)),
         outer_fades: Vec::new(),
@@ -286,6 +339,9 @@ fn own_clip(project: &Project, composition: &Composition, layer: &crate::model::
         duck_under: ducks_under(composition, layer),
         duck_db: duck_db(layer),
         noise_gate: layer.audio.noise_gate.clamp(0.0, 100.0),
+        pan: crate::model::LayerAudio::balance_of(layer.audio.pan.value),
+        volume_curve: Curve::of(&layer.audio.volume_db, fps),
+        pan_curve: Curve::of(&layer.audio.pan, fps),
         effects: sound_effects(layer, 0.0, fps),
     })
 }
@@ -326,6 +382,10 @@ fn placed(mut clip: AudioClip, placement: &Placement) -> Option<AudioClip> {
     clip.start_seconds = start;
     clip.end_seconds = end;
     clip.gain *= placement.gain;
+    // Keyframes inside a nested composition are timed from where that composition starts.
+    for curve in clip.volume_curve.iter_mut().chain(clip.pan_curve.iter_mut()) {
+        curve.shift_seconds += placement.shift;
+    }
     match clip.duck_under {
         // Ducking under a neighbour inside the same composition.
         Some(under) => clip.duck_under = Some(placement.key(under)),
@@ -337,6 +397,13 @@ fn placed(mut clip: AudioClip, placement: &Placement) -> Option<AudioClip> {
         }
     }
     clip.noise_gate = clip.noise_gate.max(placement.noise_gate);
+    // The composition layers' pan moves the clip's own along, keyframed or not.
+    if placement.pan != 0.0 {
+        clip.pan = (clip.pan + placement.pan).clamp(-1.0, 1.0);
+        if let Some(curve) = &mut clip.pan_curve {
+            curve.values.map_values(|pan| pan + placement.pan * 100.0);
+        }
+    }
     // The clip's own effects keep their keyframes in step as it moves; the composition
     // layers' effects follow.
     for effect in &mut clip.effects {
@@ -436,6 +503,54 @@ mod tests {
     }
 
     #[test]
+    fn keyframed_volume_and_pan_change_over_the_clip_even_inside_a_nested_composition() {
+        use crate::animation::{Animated, Keyframe};
+        let (mut project, outer, _, inner, footage) = nested_sound();
+        // In the inner composition (30 fps): silent at frame 15, full volume by frame 45, and
+        // panned from all left to all right over the same second.
+        let audio = &mut project.composition_mut(inner).unwrap().layer_mut(footage).unwrap().audio;
+        audio.volume_db = Animated::keyframed(vec![Keyframe::linear(15, -60.0), Keyframe::linear(45, 0.0)]);
+        audio.pan = Animated::keyframed(vec![Keyframe::linear(15, -100.0), Keyframe::linear(45, 100.0)]);
+        let own = &sound_of(&project, inner)[0];
+        assert!(own.fades() && own.pans(), "the mixer reads the level and pan moment by moment");
+        assert_eq!(own.level_at(0.5), 0.0, "silent at its first keyframe");
+        assert!((own.level_at(1.5) - 1.0).abs() < 1e-4, "full volume at its last");
+        assert!(own.level_at(1.0) > 0.0 && own.level_at(1.0) < 1.0);
+        assert_eq!(own.side_gains_at(0.5), [1.0, 0.0]);
+        assert_eq!(own.side_gains_at(1.0), [1.0, 1.0]);
+        assert_eq!(own.side_gains_at(1.5), [0.0, 1.0]);
+        // The outer composition shows the inner one from 2 s, so the same keyframes land 2 s later.
+        let nested = &sound_of(&project, outer)[0];
+        assert_eq!(nested.level_at(2.5), 0.0);
+        assert!((nested.level_at(3.5) - 1.0).abs() < 1e-4);
+        assert_eq!(nested.side_gains_at(3.5), [0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_composition_layers_pan_moves_the_sound_inside_it() {
+        let (mut project, outer, shown, inner, footage) = nested_sound();
+        project.composition_mut(outer).unwrap().layer_mut(shown).unwrap().audio.pan.value = -100.0;
+        assert_eq!(sound_of(&project, outer)[0].side_gains_at(2.5), [1.0, 0.0], "all left");
+        // A clip panned inside the composition is moved along by the layer showing it.
+        project.composition_mut(outer).unwrap().layer_mut(shown).unwrap().audio.pan.value = 50.0;
+        project.composition_mut(inner).unwrap().layer_mut(footage).unwrap().audio.pan.value = -50.0;
+        assert_eq!(sound_of(&project, outer)[0].side_gains_at(2.5), [1.0, 1.0], "the two pans cancel out");
+    }
+
+    #[test]
+    fn volume_and_pan_saved_as_plain_numbers_still_open() {
+        // Project files from before volume could be keyframed hold it as a bare number.
+        let old: crate::model::LayerAudio = serde_json::from_str(r#"{"volume_db":-6.5,"fade_in":0.0,"fade_out":0.0,"pan":40.0}"#).unwrap();
+        assert_eq!((old.volume_db.value, old.pan.value), (-6.5, 40.0));
+        assert!(!old.volume_db.is_animated());
+        // And one saved now, keyframes included, reads back the same.
+        let mut now = crate::model::LayerAudio::default();
+        now.volume_db = crate::animation::Animated::keyframed(vec![crate::animation::Keyframe::linear(0, -12.0), crate::animation::Keyframe::linear(24, 0.0)]);
+        let read: crate::model::LayerAudio = serde_json::from_str(&serde_json::to_string(&now).unwrap()).unwrap();
+        assert_eq!(read, now);
+    }
+
+    #[test]
     fn a_nested_composition_plays_its_sound_where_its_layer_starts() {
         let (mut project, outer, shown, _, footage) = nested_sound();
         let clips = sound_of(&project, outer);
@@ -446,7 +561,7 @@ mod tests {
         // Trimming the composition layer's start to 3 s cuts the sound there; its volume applies.
         let layer = project.composition_mut(outer).unwrap().layer_mut(shown).unwrap();
         layer.in_frame = 90;
-        layer.audio.volume_db = -6.0;
+        layer.audio.volume_db = crate::animation::Animated::constant(-6.0);
         let clip = &sound_of(&project, outer)[0];
         assert_eq!((clip.offset_seconds, clip.start_seconds, clip.end_seconds), (2.5, 3.0, 4.5));
         assert!((clip.gain - 0.501).abs() < 0.001, "gain {}", clip.gain);

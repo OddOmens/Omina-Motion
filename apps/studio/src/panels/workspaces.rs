@@ -1,7 +1,7 @@
 //! Named workspaces (Window ▸ Workspace), as in After Effects: the panel layout on screen can be
 //! saved under a name, switched back to later, updated with the current layout, or deleted. The
-//! built-in Standard workspace is the standard layout (`dock::default_layout`) and can't be
-//! changed or deleted. Saved workspaces live in the app settings (`saved_workspaces`), with the
+//! built-in workspaces (Standard, Color Correction and Audio Editing) are fixed layouts from
+//! `dock` and can't be changed or deleted. Saved workspaces live in the app settings (`saved_workspaces`), with the
 //! name of the one picked (`current_workspace`).
 
 use gpui_kit::component::WindowExt as _;
@@ -14,8 +14,39 @@ use crate::app_settings::{self, SavedWorkspace};
 use crate::theme::size;
 use crate::workspace::{Workspace, refresh_menus};
 
-/// The built-in workspace's name.
+/// The name of the built-in workspace Studio starts in.
 pub const STANDARD: &str = "Standard";
+
+/// A built-in workspace besides Standard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltIn {
+    /// A large viewer beside a wide Properties panel, opened on its Color tab.
+    ColorCorrection,
+    /// A tall timeline for working on sound.
+    AudioEditing,
+}
+
+impl BuiltIn {
+    pub const ALL: [BuiltIn; 2] = [Self::ColorCorrection, Self::AudioEditing];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ColorCorrection => "Color Correction",
+            Self::AudioEditing => "Audio Editing",
+        }
+    }
+
+    /// The built-in workspace called `name`, if there is one.
+    pub fn named(name: &str) -> Option<BuiltIn> {
+        Self::ALL.into_iter().find(|built_in| built_in.name() == name)
+    }
+}
+
+/// Whether `current` (the current workspace's name, `None` for Standard) is a workspace the
+/// user saved, which can be updated and deleted. Built-in ones can't.
+pub fn is_saved(current: Option<&str>, saved: &[SavedWorkspace]) -> bool {
+    current.is_some_and(|name| saved.iter().any(|workspace| workspace.name == name))
+}
 
 /// A name typed for a new workspace, tidied, or why it can't be used.
 pub fn check_name(typed: &str, saved: &[SavedWorkspace]) -> Result<String, String> {
@@ -23,7 +54,8 @@ pub fn check_name(typed: &str, saved: &[SavedWorkspace]) -> Result<String, Strin
     if name.is_empty() {
         return Err("Give the workspace a name.".into());
     }
-    if name.eq_ignore_ascii_case(STANDARD) || saved.iter().any(|workspace| workspace.name.eq_ignore_ascii_case(name)) {
+    let built_in = name.eq_ignore_ascii_case(STANDARD) || BuiltIn::ALL.iter().any(|built_in| built_in.name().eq_ignore_ascii_case(name));
+    if built_in || saved.iter().any(|workspace| workspace.name.eq_ignore_ascii_case(name)) {
         return Err(format!("There is already a workspace called “{name}”. Pick another name, or switch to it and use Update Current Workspace."));
     }
     Ok(name.to_owned())
@@ -34,7 +66,7 @@ pub fn check_name(typed: &str, saved: &[SavedWorkspace]) -> Result<String, Strin
 pub fn save_as_new(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let input = cx.new(|cx| InputState::new(window, cx).placeholder("Workspace name"));
     let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, _| {
         let (input, target) = (input.clone(), target.clone());
         dialog
             .title("New Workspace")
@@ -78,8 +110,9 @@ pub fn save_as_new(_: &mut Workspace, window: &mut Window, cx: &mut Context<Work
 /// Window ▸ Workspace ▸ Update Current Workspace: saves the layout on screen over the current
 /// workspace. Standard can't be changed (the menu item is off for it).
 pub fn update_current(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let Some(name) = app_settings::load().current_workspace else {
-        window.push_notification("Standard can't be changed. Use Save as New Workspace… to keep this layout.", cx);
+    let settings = app_settings::load();
+    let Some(name) = settings.current_workspace.filter(|name| is_saved(Some(name), &settings.saved_workspaces)) else {
+        window.push_notification("Built-in workspaces can't be changed. Use Save as New Workspace… to keep this layout.", cx);
         return;
     };
     let Some(layout) = workspace.current_layout(cx) else { return };
@@ -97,11 +130,12 @@ pub fn update_current(workspace: &mut Workspace, window: &mut Window, cx: &mut C
 /// Window ▸ Workspace ▸ Delete Workspace…: asks first, then deletes the current workspace.
 /// The panels stay where they are, and Standard becomes the current workspace.
 pub fn delete_current(_: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let Some(name) = app_settings::load().current_workspace else {
-        window.push_notification("Standard is built in and can't be deleted.", cx);
+    let settings = app_settings::load();
+    let Some(name) = settings.current_workspace.filter(|name| is_saved(Some(name), &settings.saved_workspaces)) else {
+        window.push_notification("Built-in workspaces can't be deleted.", cx);
         return;
     };
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_alert_dialog(window, cx, move |dialog, _, _| {
         let name = name.clone();
         dialog
             .title(format!("Delete the “{name}” workspace?"))
@@ -131,6 +165,7 @@ mod tests {
         assert_eq!(check_name("  Color  ", &saved), Ok("Color".into()), "trimmed");
         assert!(check_name("   ", &saved).is_err(), "blank");
         assert!(check_name("standard", &saved).is_err(), "the built-in name");
+        assert!(check_name("audio editing", &saved).is_err(), "another built-in name");
         assert!(check_name("EDITING", &saved).is_err(), "one already saved");
     }
 }

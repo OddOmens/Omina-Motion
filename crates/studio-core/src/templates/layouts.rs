@@ -1,4 +1,4 @@
-//! The first twenty animated designs (see `Layout`; `fun`, `social` and `ads` have the rest). Each places its layers by fractions of the frame,
+//! The first twenty animated designs (see `Layout`; `fun`, `social`, `ads`, `editorial` and `magazine` have the rest). Each places its layers by fractions of the frame,
 //! choosing a stacked arrangement for the tall formats and a side-by-side one for 16:9 where
 //! that reads better, and times everything in seconds from the start.
 
@@ -27,6 +27,11 @@ pub(super) fn words_needed(layout: Layout) -> usize {
         Layout::PosterStretch | Layout::PhotoTagline => 4,
         Layout::SlidingBlocks | Layout::CardStack => 3,
         Layout::TypeRepeater | Layout::BoldCountdown | Layout::BlurSpin | Layout::SplitReveal | Layout::GradientTitle | Layout::BouncyPeriod => 2,
+        Layout::NameEcho | Layout::MinimalProduct | Layout::PrintStack | Layout::ArchPortrait | Layout::HugeTypePhoto | Layout::FramedMemory => 2,
+        Layout::SaleSpotlight | Layout::ScriptBeauty => 3,
+        Layout::TapeSale | Layout::GrungeTips => 4,
+        Layout::SpeakerPromo => 6,
+        Layout::EventSchedule => 8,
     }
 }
 
@@ -93,6 +98,18 @@ pub(super) fn build(b: &mut Builder) {
         Layout::GradientTitle => super::editorial::gradient_title(b),
         Layout::PhotoTagline => super::editorial::photo_tagline(b),
         Layout::BouncyPeriod => super::editorial::bouncy_period(b),
+        Layout::NameEcho => super::magazine::name_echo(b),
+        Layout::SpeakerPromo => super::magazine::speaker_promo(b),
+        Layout::SaleSpotlight => super::magazine::sale_spotlight(b),
+        Layout::MinimalProduct => super::magazine::minimal_product(b),
+        Layout::TapeSale => super::magazine::tape_sale(b),
+        Layout::EventSchedule => super::magazine::event_schedule(b),
+        Layout::PrintStack => super::magazine::print_stack(b),
+        Layout::ArchPortrait => super::magazine::arch_portrait(b),
+        Layout::HugeTypePhoto => super::magazine::huge_type_photo(b),
+        Layout::ScriptBeauty => super::magazine::script_beauty(b),
+        Layout::GrungeTips => super::magazine::grunge_tips(b),
+        Layout::FramedMemory => super::magazine::framed_memory(b),
     }
 }
 
@@ -445,6 +462,11 @@ fn before_after(b: &mut Builder) {
     let left = b.placeholder(full, b.at(0.5, 0.5), 0.0, 0.0, "before photo");
     b.layer(left).name = "Drop your before photo here".into();
     let right = b.block(full, b.at(0.5, 0.5), p.background_2, 0.0, 0.0, "Drop your after photo here");
+    // With the same photo in both spots, a grade tells them apart: the before is flat and dull,
+    // the after warm, bright and rich. Both stay on the layers, so a real pair of photos can
+    // have them turned off in Properties.
+    b.effect(left, "Basic Correction", &[(0, -18.0), (2, -0.45), (3, -30.0), (4, -20.0), (8, 35.0)]);
+    b.effect(right, "Basic Correction", &[(0, 22.0), (2, 0.25), (3, 18.0), (5, 25.0), (8, 118.0), (9, 30.0)]);
     // The after picture is revealed by a wipe that follows the divider line across.
     b.effect(right, "Linear Wipe", &[(0, 100.0), (1, 90.0)]);
     if let Some(effect) = b.layer(right).effects.last_mut() {
@@ -540,7 +562,7 @@ fn podcast(b: &mut Builder) {
     let (show, episode, guest) = (b.copy(0), b.copy(1), b.copy(2));
     let tall = b.tall();
     let photo_at = if tall { b.at(0.5, 0.3) } else { b.at(0.27, 0.45) };
-    let photo = b.shape(ShapeKind::Ellipse, Vec2::new(440.0, 440.0), photo_at, Some(Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0)), Some((p.accent, 10.0)), 0.0, 0.2, "Drop your guest photo here");
+    let photo = b.round_placeholder(440.0, photo_at, Some((p.accent, 10.0)), 0.2, "guest photo");
     b.pop_in(photo, 0.2);
     let text_x = if tall { 0.5 } else { 0.66 };
     let top = if tall { 0.55 } else { 0.3 };
@@ -606,8 +628,8 @@ fn collage(b: &mut Builder) {
     let head = b.text(title, text_at, 96.0, p.text, b.heavy(), 1.4);
     b.words_in(head, 0.7);
     // Below the title, however many lines it has.
-    let lines = title.lines().count().max(1) as f32;
-    let line = b.text(sub, text_at + Vec2::new(0.0, (55.0 * lines + 50.0) * unit), 44.0, p.muted, b.light(), 1.9);
+    let line_at = b.below(text_at, title, 96.0, 28.0, 44.0, text_at);
+    let line = b.text(sub, line_at, 44.0, p.muted, b.light(), 1.9);
     b.fade_in(line, 1.9, 0.6);
     b.fade_everything_out();
 }
@@ -645,7 +667,7 @@ fn end_card(b: &mut Builder) {
     let (title, handle, cta) = (b.copy(0), b.copy(1), b.copy(2));
     // Smaller and higher in the shorter formats, so it clears the headline.
     let (avatar_size, avatar_y) = if b.vertical() { (300.0, 0.32) } else if b.tall() { (240.0, 0.24) } else { (200.0, 0.2) };
-    let avatar = b.shape(ShapeKind::Ellipse, Vec2::new(avatar_size, avatar_size), b.at(0.5, avatar_y), Some(Paint::linear(Rgba::hex(0x3f3f46), Rgba::hex(0x27272a), 60.0)), Some((p.accent, 10.0)), 0.0, 0.2, "Drop your profile photo here");
+    let avatar = b.round_placeholder(avatar_size, b.at(0.5, avatar_y), Some((p.accent, 10.0)), 0.2, "profile photo");
     b.pop_in(avatar, 0.2);
     let head_y = if b.vertical() { 0.5 } else { 0.46 };
     let head = b.text(title, b.at(0.5, head_y), 96.0, p.text, b.heavy(), 0.7);

@@ -25,7 +25,7 @@ const OPACITY: PropertyPath = PropertyPath::Transform(TransformProperty::Opacity
 fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
-        crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx);
+        crate::theme::apply(crate::theme::ThemeName::Obsidian, crate::theme::Accent::Violet, cx);
         crate::workspace::bind_keys(cx);
     });
     open_window(cx, true)
@@ -35,6 +35,11 @@ fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) 
 /// `standard_layout`, the panels are laid out in the standard arrangement at the window's final
 /// size; without it they keep whatever arrangement the window started with (a saved one, say).
 fn open_window(cx: &mut TestAppContext, standard_layout: bool) -> (Entity<Workspace>, &mut VisualTestContext) {
+    // Iris keeps her recipes, conversation, export presets and hand-offs in a folder each test
+    // thread has of its own; an earlier test on this thread may have left some there.
+    if let Some(folder) = crate::panels::assistant::shared_folder() {
+        let _ = std::fs::remove_dir_all(folder);
+    }
     let mut workspace = None;
     let (_, visual) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| Workspace::new(window, cx));
@@ -748,6 +753,355 @@ fn command_return_searches_effects_and_applies_the_highlighted_one(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn the_quick_menu_sits_in_the_middle_scrolls_and_runs_commands(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.press("cmd-enter", cx));
+    render(visual);
+    // The box is in the middle of the window, both ways.
+    let (card, window_size) = (bounds_of(visual, "effect-search"), visual.update(|window, _| window.viewport_size()));
+    assert!((card.center().x - window_size.width / 2.0).abs() < px(2.0) && (card.center().y - window_size.height / 2.0).abs() < px(2.0), "centered: {card:?} in {window_size:?}");
+
+    // There are more effects than fit, so stepping far down scrolls the list to keep the
+    // highlighted row inside it.
+    let row = ElementId::NamedInteger("effect-search-result".into(), 30);
+    let list = bounds_of(visual, "effect-search-results");
+    assert!(bounds_of(visual, row.clone()).top() > list.bottom(), "row 30 starts out below the list");
+    visual.update(|window, cx| (0..30).for_each(|_| window.press("down", cx)));
+    render(visual);
+    render(visual);
+    let shown = bounds_of(visual, row);
+    assert!(shown.top() >= list.top() - px(1.0) && shown.bottom() <= list.bottom() + px(1.0), "row 30 scrolled into view: {shown:?} in {list:?}");
+
+    // Typing finds commands too; Return runs the highlighted one.
+    let snapping = visual.update(|_, cx| workspace.read(cx).state.snapping);
+    visual.update(|window, cx| window.input("snapping on", cx));
+    render(visual);
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("effect-search")).is_none(), "the menu closed");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.snapping), !snapping, "the command ran");
+
+    // A quick action runs its command with one click.
+    visual.update(|window, cx| window.press("cmd-enter", cx));
+    render(visual);
+    let export = center_of(visual, ElementId::Name("quick-action:export".into()));
+    visual.simulate_click(export, gpui_kit::Modifiers::default());
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("effect-search")).is_none());
+    visual.update(|window, cx| assert!(window.has_active_dialog(cx), "Export opened its dialog"));
+}
+
+#[gpui_kit::test]
+fn save_frame_writes_a_picture_of_the_frame_under_the_playhead(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let (name, frame, size) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.composition().name.clone(), state.current_frame, (state.composition().width, state.composition().height))
+    });
+    // The two pictures this test saves, cleared first in case an earlier run left them.
+    let folder = crate::panels::export::exports_folder(None);
+    let (first, second) = (folder.join(format!("{name} frame {frame}.png")), folder.join(format!("{name} frame {frame} 2.png")));
+    for path in [&first, &second] {
+        let _ = std::fs::remove_file(path);
+    }
+    visual.update(|window, cx| window.press("cmd-enter", cx));
+    render(visual);
+    let save = center_of(visual, ElementId::Name("quick-action:save-frame".into()));
+    visual.simulate_click(save, gpui_kit::Modifiers::default());
+    visual.run_until_parked();
+    assert_eq!(image::image_dimensions(&first).unwrap(), size, "a full-size picture is saved");
+    // Saving the same frame again keeps the first picture.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::SaveFrame), cx));
+    visual.run_until_parked();
+    assert!(second.exists());
+    for path in [&first, &second] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[gpui_kit::test]
+fn multicam_needs_two_video_clips_and_its_keys_do_nothing_until_it_is_on(cx: &mut TestAppContext) {
+    // The cutting itself is tested in `studio_core::multicam`; video clips aren't used here
+    // because drawing them starts decoder threads, which the test scheduler does not allow.
+    let (workspace, visual) = open(cx);
+    let layers_before = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    // With multicam off, a cut key changes nothing.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| ws.cut_to_angle(1, cx)));
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), layers_before);
+    // It doesn't start on a selection that isn't two or more video clips.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+        ws.state.selected_layers = vec![TITLE];
+        ws.toggle_multicam(window, cx);
+    }));
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.ui.multicam.is_empty());
+        // The number keys are the cuts' shortcuts.
+        assert_eq!(crate::keymap::key_for(&ws.ui.settings.shortcuts, "multicam-angle-2").as_deref(), Some("2"));
+    });
+}
+
+#[gpui_kit::test]
+fn the_history_panel_lists_changes_and_a_click_goes_back_to_one(cx: &mut TestAppContext) {
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    let layers_at_start = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    // Two changes: two shapes added.
+    add_shape(&workspace, visual, ShapeKind::Rectangle);
+    render(visual);
+    add_shape(&workspace, visual, ShapeKind::Ellipse);
+    render(visual);
+    visual.update(|window, cx| window.click("rail-history", cx));
+    render(visual);
+    let layer_count = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    assert_eq!(layer_count(visual), layers_at_start + 2);
+    let made = visual.update(|_, cx| workspace.read(cx).state.history_changes().0.len());
+    assert!(made >= 2, "each shape is at least one step");
+    // Back to before anything was done, then forward again to the last step.
+    visual.update(|window, cx| window.click(ElementId::NamedInteger("history-step".into(), 0), cx));
+    render(visual);
+    assert_eq!(layer_count(visual), layers_at_start);
+    visual.update(|_, cx| {
+        let (done, undone) = workspace.read(cx).state.history_changes();
+        assert!(done.is_empty());
+        assert_eq!(undone.len(), made);
+    });
+    visual.update(|window, cx| window.click(ElementId::NamedInteger("history-step".into(), made as u64), cx));
+    render(visual);
+    assert_eq!(layer_count(visual), layers_at_start + 2);
+}
+
+#[gpui_kit::test]
+fn volume_is_keyframed_with_its_stopwatch_and_the_mixer_follows_the_playhead(cx: &mut TestAppContext) {
+    use studio_core::property::AudioProperty;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let clip = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        // Sound only, so no picture is decoded in the background.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/tone.m4a");
+        ws.state.import_files(vec![path]);
+        let item = ws.state.selected_item.unwrap();
+        ws.state.add_layer_from_item(item, 0, 0);
+        cx.notify();
+        ws.state.selected_layers[0]
+    }));
+    render(visual);
+    let volume = PropertyPath::Audio(AudioProperty::Volume);
+    let keyframes = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).unwrap().keyframe_easings(volume).len());
+    // The Volume row in Properties has a stopwatch; clicking it starts keyframing at the playhead.
+    assert_eq!(keyframes(visual), 0);
+    visual.update(|window, cx| window.click(ElementId::Name(format!("stopwatch:{volume:?}:{}", clip.0).into()), cx));
+    render(visual);
+    assert_eq!(keyframes(visual), 1);
+    // A change further along adds a second keyframe, from the Mixer's field as from any other.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_current_frame(24);
+        ws.state.set_audio_setting(clip, crate::state::AudioSetting::Volume, -12.0);
+        cx.notify();
+    }));
+    render(visual);
+    assert_eq!(keyframes(visual), 2);
+    // Halfway between, the volume field reads halfway, and the sound that plays is keyframed too.
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let layer = state.composition().layer(clip).unwrap();
+        assert!((layer.audio.volume_db.value_at(12.0) + 6.0).abs() < 0.01);
+        let sound = studio_core::audio::composition_audio(&state.project, state.composition());
+        assert!(sound.iter().any(|sound| sound.layer == clip && sound.volume_curve.is_some()));
+        assert!(layer.property_paths().contains(&volume), "so it has a keyframe row in the timeline");
+    });
+}
+
+#[gpui_kit::test]
+fn the_mixer_lists_clips_with_sound_and_mutes_them(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let clip = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        // Sound only, so no picture is decoded in the background.
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/tone.m4a");
+        ws.state.import_files(vec![path]);
+        let item = ws.state.selected_item.unwrap();
+        ws.state.add_layer_from_item(item, 0, 0);
+        cx.notify();
+        ws.state.selected_layers[0]
+    }));
+    // The Mixer is a tab behind Properties on the right; bring it to the front.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.reveal(crate::workspace::PanelId::Mixer);
+        cx.notify();
+    }));
+    render(visual);
+    render(visual);
+    // The clip has a strip; its checkbox mutes it.
+    assert!(visual.update(|window, _| window.try_find(ElementId::NamedInteger("mixer-strip".into(), clip.0))).is_some());
+    visual.update(|window, cx| window.click(ElementId::NamedInteger("mixer-heard".into(), clip.0), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert!(!ws.state.composition().layer(clip).unwrap().switches.audio);
+    });
+    // Pan is kept between all left and all right.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.set_audio_setting(clip, crate::state::AudioSetting::Pan, 250.0)));
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.audio_setting(clip, crate::state::AudioSetting::Pan)), Some(100.0));
+}
+
+#[gpui_kit::test]
+fn the_color_tab_offers_three_scopes(cx: &mut TestAppContext) {
+    use crate::scopes::ScopeKind;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // The Color tab is the third of the Properties panel; its cards are unfolded in tests.
+    visual.update(|window, cx| window.click("tab:Properties:2", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.scope_kind), ScopeKind::Waveform);
+    visual.update(|window, cx| window.click("scope-vectorscope", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.scope_kind), ScopeKind::Vectorscope);
+    visual.update(|window, cx| window.click("scope-histogram", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.scope_kind), ScopeKind::Histogram);
+}
+
+#[gpui_kit::test]
+fn a_stock_sound_can_be_played_before_it_is_added(cx: &mut TestAppContext) {
+    use crate::stock::{Kind, Page, Source, StockItem};
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("rail-stock", cx));
+    render(visual);
+    // A sound on disk stands in for one online, so the test needs no network.
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/tone.m4a");
+    let address = format!("file://{}", fixture.canonicalize().unwrap().display()).replace(' ', "%20");
+    let item = StockItem { id: "test-sound".into(), kind: Kind::Audio, source: Source::Openverse, origin: "Freesound via Openverse".into(), title: "Stock test: tone".into(), creator: None, thumbnail_url: None, download_url: address, extension: "m4a".into(), width: None, height: None, duration_seconds: None, bytes: None };
+    let _ = std::fs::remove_file(crate::stock::preview_path(&item));
+    let items_before = visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+        // The Sound tab, showing one result.
+        ws.ui.tabs.insert(crate::workspace::PanelId::Stock, 2);
+        ws.ui.stock.kind = Kind::Audio;
+        ws.ui.stock.query = "tone".into();
+        crate::panels::stock::show_page(ws, 0, Page { items: vec![item.clone()], ..Page::default() }, window, cx);
+        ws.state.project.items.len()
+    }));
+    render(visual);
+    // Its play button fetches the sound and plays it, without adding it to the project.
+    visual.update(|window, cx| window.click(ElementId::NamedInteger("stock-preview".into(), 0), cx));
+    visual.run_until_parked();
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        let (path, seconds) = ws.ui.stock.previews.get("test-sound").expect("the sound was fetched");
+        assert!(path.exists() && *seconds > 0.0);
+        assert_eq!(ws.ui.stock.playing.as_ref().map(|(id, _)| id.as_str()), Some("test-sound"));
+        assert_eq!(ws.state.project.items.len(), items_before, "playing it adds nothing");
+    });
+    // The same button stops it.
+    visual.update(|window, cx| window.click(ElementId::NamedInteger("stock-preview".into(), 0), cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.stock.playing.is_none()));
+    let _ = std::fs::remove_file(crate::stock::preview_path(&item));
+}
+
+#[gpui_kit::test]
+fn the_stock_panel_lists_results_and_a_click_downloads_and_imports_one(cx: &mut TestAppContext) {
+    use crate::stock::{Kind, Page, Source, StockItem};
+    let (workspace, visual) = open(cx);
+    visual.update(|window, cx| window.click("rail-stock", cx));
+    render(visual);
+    // Before a search the panel offers words to try, under its three tabs.
+    assert!(visual.update(|window, _| window.try_find(ElementId::Name("stock-suggestion:ocean".into()))).is_some());
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.stock.kind, Kind::Video));
+
+    // Stand in for the online search with a picture on disk, so the test needs no network.
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../crates/studio-media/tests/fixtures/still.png");
+    // A space in the path must be written as %20 in an address.
+    let address = format!("file://{}", fixture.canonicalize().unwrap().display()).replace(' ', "%20");
+    let item = StockItem { id: "test-1".into(), kind: Kind::Image, source: Source::Openverse, origin: "Flickr via Openverse".into(), title: "Stock test: still".into(), creator: Some("Nobody".into()), thumbnail_url: None, download_url: address, extension: "png".into(), width: Some(64), height: Some(36), duration_seconds: None, bytes: None };
+    let saved = crate::stock::folder(None).join(item.file_name());
+    let _ = std::fs::remove_file(&saved);
+    let items_before = visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.stock.query = "still".into();
+        crate::panels::stock::show_page(ws, 0, Page { items: vec![item.clone()], more: true, problems: vec!["Pexels did not accept the API key. Check it in Settings ▸ Stock.".into()] }, window, cx);
+        ws.state.project.items.len()
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("stock-more")).is_some(), "more results can be loaded");
+    // The result keeps the site it came from, and a site that failed is kept to show under the results.
+    visual.update(|_, cx| {
+        let stock = &workspace.read(cx).ui.stock;
+        assert_eq!(stock.items[0].origin, "Flickr via Openverse");
+        assert_eq!(stock.problems.len(), 1);
+    });
+
+    // A click downloads the file into the Stock folder and imports it.
+    visual.update(|window, cx| window.click(ElementId::NamedInteger("stock-item".into(), 0), cx));
+    visual.run_until_parked();
+    render(visual);
+    visual.run_until_parked();
+    assert!(saved.exists(), "the file was saved as {}", saved.display());
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.state.project.items.len(), items_before + 1, "and imported into the project");
+        assert!(ws.ui.stock.added.contains("test-1"));
+    });
+
+    // What was added is remembered among the recents, and its star keeps it as a favourite.
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.stock.shelf().unwrap().recents[0].id, "test-1"));
+    visual.update(|window, cx| window.click(ElementId::NamedInteger("stock-star".into(), 0), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert!(ws.ui.stock.shelf().unwrap().is_favorite("test-1"));
+        assert_eq!(ws.state.project.items.len(), items_before + 1, "starring adds nothing to the project");
+        // Both are saved, to be there next time.
+        let saved = crate::stock::Shelf::load();
+        assert!(saved.is_favorite("test-1") && saved.recents.iter().any(|item| item.id == "test-1"));
+    });
+
+    // A reply to a search that has since been replaced is dropped.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+        crate::panels::stock::search(ws, String::new(), window, cx);
+        crate::panels::stock::show_page(ws, 0, Page { items: vec![item.clone()], ..Page::default() }, window, cx);
+        assert!(ws.ui.stock.items.is_empty());
+    }));
+    let _ = std::fs::remove_file(&saved);
+
+    // With every site that has video switched off, the panel says so and offers Settings.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let mut settings = ws.ui.settings.clone();
+        for source in Source::ALL {
+            settings.stock.set_on(source, !source.kinds().contains(&Kind::Video));
+        }
+        ws.use_settings(settings);
+        cx.notify();
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("stock-open-settings")).is_some());
+    assert!(visual.update(|window, _| window.try_find(ElementId::Name("stock-suggestion:ocean".into()))).is_none());
+}
+
+#[test]
+fn stock_sources_are_searched_only_when_on_and_keyed() {
+    use crate::app_settings::StockSettings;
+    use crate::stock::{Kind, Source};
+    let sources = |settings: &StockSettings, kind: Kind| settings.searchable(kind).into_iter().map(|(source, _)| source).collect::<Vec<_>>();
+    let mut settings = StockSettings::default();
+    // Out of the box only the sites that need no key are searched.
+    assert_eq!(sources(&settings, Kind::Video), [Source::WikimediaCommons]);
+    assert_eq!(sources(&settings, Kind::Image), [Source::Openverse]);
+    // A key brings its site in, for the kinds it has; stray characters in a pasted key are dropped.
+    settings.set_key(Source::Pexels, " abc-123\n");
+    assert_eq!(settings.key(Source::Pexels), "abc-123");
+    assert_eq!(sources(&settings, Kind::Video), [Source::WikimediaCommons, Source::Pexels]);
+    assert_eq!(sources(&settings, Kind::Audio), [Source::Openverse], "Pexels has no sound");
+    // Switched off, a site is left out even with its key, and the choice is saved by name.
+    settings.set_on(Source::Pexels, false);
+    settings.set_on(Source::WikimediaCommons, false);
+    assert!(sources(&settings, Kind::Video).is_empty());
+    let saved = serde_json::to_string(&settings).unwrap();
+    assert_eq!(serde_json::from_str::<StockSettings>(&saved).unwrap(), settings);
+    settings.set_on(Source::Pexels, true);
+    assert_eq!(sources(&settings, Kind::Video), [Source::Pexels]);
+}
+
+#[gpui_kit::test]
 fn the_type_tool_places_text_and_typing_sets_it(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-t", cx));
@@ -1045,7 +1399,7 @@ fn a_fresh_editor_has_nothing_to_undo_or_save(cx: &mut TestAppContext) {
     render(visual);
     visual.update(|_, cx| assert!(!workspace.read(cx).state.can_undo()));
     assert!(!has_unsaved_changes(&workspace, visual));
-    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.window_title, "Untitled — Studio"));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.window_title, "Untitled — Omina Motion"));
 }
 
 #[gpui_kit::test]
@@ -1139,7 +1493,7 @@ fn saving_asks_where_the_first_time_then_saves_in_place(cx: &mut TestAppContext)
     let saved = folder.join("Promo.studio");
     assert!(saved.exists(), "the extension is added");
     assert!(!has_unsaved_changes(&workspace, visual));
-    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.window_title, "Promo — Studio"));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.window_title, "Promo — Omina Motion"));
 
     // The second save writes straight to the same file.
     make_an_edit(&workspace, visual);
@@ -1182,7 +1536,7 @@ fn opening_with_unsaved_changes_asks_first(cx: &mut TestAppContext) {
     visual.run_until_parked();
     render(visual);
     assert_eq!(title_value(&workspace, visual, ROTATION, 0), PropertyValue::Scalar(33.0));
-    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.window_title, "Other — Studio"));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.window_title, "Other — Omina Motion"));
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
@@ -1569,19 +1923,19 @@ fn moving_a_layer_snaps_to_the_playhead_and_shows_where(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
-fn s_turns_snapping_off_and_on(cx: &mut TestAppContext) {
+fn the_snapping_key_turns_snapping_off_and_on(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     let (_, title_in, _) = layer_timing(&workspace, visual, TITLE);
     visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_current_frame(title_in + 20); cx.notify(); }));
     render(visual);
-    visual.update(|window, cx| window.press("s", cx));
+    visual.update(|window, cx| window.press("cmd-shift-;", cx));
     render(visual);
     visual.update(|_, cx| assert!(!workspace.read(cx).state.snapping));
     let released = hold_title_drag(&workspace, visual, 18.0);
     let moved = layer_timing(&workspace, visual, TITLE).1;
     visual.update(|window, cx| window.pointer_up(released, MouseButton::Left, cx));
     assert!((moved - (title_in + 18)).abs() <= 1, "without snapping it stays where dragged ({moved})");
-    visual.update(|window, cx| window.press("s", cx));
+    visual.update(|window, cx| window.press("cmd-shift-;", cx));
     visual.update(|_, cx| assert!(workspace.read(cx).state.snapping));
 }
 
@@ -1931,6 +2285,481 @@ fn save_as(visual: &mut VisualTestContext, folder: &std::path::Path, name: &str)
     path
 }
 
+/// Gives the title a rotation that turns a quarter turn in two frames with no easing, which
+/// the Motion Assistant has two things to say about. Returns the frame the turn starts on.
+fn add_abrupt_turn(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> i64 {
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let start = ws.state.composition().layer(TITLE).unwrap().in_frame + 5;
+        let animated = ws.state.composition().layer(TITLE).and_then(|layer| layer.property(ROTATION, 0)).is_some_and(|property| !property.keyframes.is_empty());
+        assert!(!animated, "the sample title's rotation starts without keyframes");
+        ws.state.set_current_frame(start);
+        ws.state.toggle_stopwatch(TITLE, ROTATION);
+        ws.state.set_current_frame(start + 2);
+        ws.state.set_property_component(TITLE, ROTATION, 0, 90.0);
+        cx.notify();
+        start
+    }))
+}
+
+#[gpui_kit::test]
+fn the_motion_assistant_lists_what_it_notices_and_fixes_it_in_a_click(cx: &mut TestAppContext) {
+    use studio_core::animation::{EASY_EASE, Easing};
+    use studio_core::assistant::Check;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let start = add_abrupt_turn(&workspace, visual);
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    let found = |visual: &mut VisualTestContext| visual.update(|_, cx| crate::panels::assistant::open_suggestions(workspace.read(cx)));
+    let about_turn = |visual: &mut VisualTestContext, check: Check| found(visual).iter().position(|suggestion| suggestion.check == check && suggestion.layer == TITLE && suggestion.path == Some(ROTATION));
+    let before = found(visual).len();
+    let constant = about_turn(visual, Check::ConstantSpeed).expect("the linear turn is noticed");
+    assert!(about_turn(visual, Check::FastMove).is_some(), "and that it is over in two frames");
+    assert!(visual.update(|window, _| window.try_find(("assistant-card", constant))).is_some(), "each has a card");
+    // Its fix eases the turn, and the suggestion goes.
+    visual.update(|window, cx| window.click(("assistant-fix", constant), cx));
+    render(visual);
+    let easing = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().keyframe_easings(ROTATION)[0].1);
+    assert_eq!(easing, Easing::Curve(EASY_EASE));
+    assert!(about_turn(visual, Check::ConstantSpeed).is_none());
+    assert_eq!(found(visual).len(), before - 1);
+    // Show selects the layer, goes to the keyframe and opens that property's row.
+    let fast = about_turn(visual, Check::FastMove).unwrap();
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_current_frame(0); cx.notify(); }));
+    visual.update(|window, cx| window.click(("assistant-show", fast), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!((ws.state.current_frame, ws.state.selected_layers.clone()), (start, vec![TITLE]));
+        assert_eq!(ws.ui.timeline.only_property.get(&TITLE), Some(&ROTATION));
+    });
+    // Dismiss hides one until it is brought back.
+    visual.update(|window, cx| window.click(("assistant-dismiss", fast), cx));
+    render(visual);
+    assert!(about_turn(visual, Check::FastMove).is_none());
+    visual.update(|window, cx| window.click("assistant-restore", cx));
+    render(visual);
+    assert!(about_turn(visual, Check::FastMove).is_some());
+    // Undo takes the fix back.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.undo(); cx.notify(); }));
+    let easing = visual.update(|_, cx| workspace.read(cx).state.composition().layer(TITLE).unwrap().keyframe_easings(ROTATION)[0].1);
+    assert_eq!(easing, Easing::Linear);
+}
+
+#[gpui_kit::test]
+fn the_motion_assistants_rules_can_be_switched_off_and_tuned(cx: &mut TestAppContext) {
+    use studio_core::assistant::Check;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    add_abrupt_turn(&workspace, visual);
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    let count = |visual: &mut VisualTestContext, check: Check| visual.update(|_, cx| crate::panels::assistant::open_suggestions(workspace.read(cx)).iter().filter(|suggestion| suggestion.check == check).count());
+    assert!(count(visual, Check::FastMove) > 0);
+    assert!(visual.update(|window, _| window.try_find("assistant-settings-list")).is_none(), "the rules are put away to begin with");
+    visual.update(|window, cx| window.click("assistant-settings", cx));
+    render(visual);
+    // A two-frame turn stops counting as too fast once the limit is two frames.
+    let fast_moves = Check::ALL.iter().position(|check| *check == Check::FastMove).unwrap();
+    for _ in 0..2 {
+        visual.update(|window, cx| window.click("assistant-shortest-less", cx));
+        render(visual);
+    }
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.settings.assistant.shortest_move), 2);
+    assert_eq!(count(visual, Check::FastMove), 0);
+    visual.update(|window, cx| window.click("assistant-shortest-more", cx));
+    render(visual);
+    assert!(count(visual, Check::FastMove) > 0);
+    // Switching the rule off silences it whatever the number.
+    visual.update(|window, cx| window.click(("assistant-check", fast_moves), cx));
+    render(visual);
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.settings.assistant.fast_moves));
+    assert_eq!(count(visual, Check::FastMove), 0);
+    assert!(visual.update(|window, _| window.try_find("assistant-shortest")).is_none(), "its number goes with it");
+}
+
+#[gpui_kit::test]
+fn the_motion_assistant_has_a_name_and_a_page_in_settings_and_blinks(cx: &mut TestAppContext) {
+    use studio_core::assistant::Check;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    add_abrupt_turn(&workspace, visual);
+    render(visual);
+    let shows = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.try_find(id).is_some());
+    let blink = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| workspace.update(cx, |this, cx| crate::panels::assistant::blink(this, window, cx)));
+        render(visual);
+        visual.update(|_, cx| workspace.read(cx).ui.assistant.blinks)
+    };
+    // Its face is in the viewer's corner, so it blinks, and still draws while it does.
+    assert_eq!(blink(visual), 1);
+    assert!(shows(visual, "assistant-tip-face"));
+
+    // Settings ▸ Iris (the first page of her own group) shows her under her usual name.
+    visual.update(|window, cx| window.press("cmd-,", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(("settings-section", 6_usize), cx));
+    render(visual);
+    assert!(shows(visual, "settings-assistant-name"));
+    assert_eq!(visual.update(|_, cx| crate::panels::assistant::name(&workspace.read(cx).ui.settings)), "Iris");
+    assert_eq!(blink(visual), 2, "it blinks in Settings too");
+    // Typing a new name renames it at once, and the name is remembered.
+    visual.update(|window, cx| window.click("assistant-page-name", cx));
+    visual.update(|window, cx| window.press("cmd-a", cx));
+    visual.simulate_input("  Pip ");
+    render(visual);
+    assert_eq!(visual.update(|_, cx| crate::panels::assistant::name(&workspace.read(cx).ui.settings)), "Pip");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.settings.assistant_name.clone()), "Pip");
+    assert_eq!(crate::app_settings::load().assistant_name, "Pip");
+    // With blinking switched off the face holds still.
+    let over_page = visual.update(|window, _| window.find("assistant-page-blinks").bounds().center());
+    click_in_settings(visual, over_page, "assistant-page-blinks");
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.settings.assistant_blinks));
+    blink(visual);
+    assert_eq!(visual.update(|_, cx| crate::panels::assistant::current_look(workspace.read(cx)).blink), None);
+    // Settings ▸ Suggestions, the next page: a rule switched off stops its suggestions, and its
+    // number goes with it.
+    visual.update(|window, cx| window.click(("settings-section", 7_usize), cx));
+    render(visual);
+    let over_page = visual.update(|window, _| window.find("assistant-page-shortest").bounds().center());
+    click_in_settings(visual, over_page, "assistant-page-shortest-more");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.settings.assistant.shortest_move), 5);
+    click_in_settings(visual, over_page, &format!("assistant-rule-{:?}", Check::FastMove));
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.settings.assistant.fast_moves));
+    assert!(!shows(visual, "assistant-page-shortest"));
+    assert!(!crate::app_settings::load().assistant.fast_moves, "remembered");
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+
+    // The new name is on its tip in the viewer and at the top of its panel.
+    visual.update(|window, cx| window.click("assistant-tip-face", cx));
+    render(visual);
+    assert!(shows(visual, "assistant-tip-name"));
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    assert!(shows(visual, "assistant-name"));
+    assert_eq!(visual.update(|_, cx| crate::panels::assistant::name(&workspace.read(cx).ui.settings)), "Pip");
+}
+
+#[gpui_kit::test]
+fn the_motion_assistant_holds_a_conversation(cx: &mut TestAppContext) {
+    use studio_core::assistant::Check;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let shows = |visual: &mut VisualTestContext, id: ElementId| visual.update(|window, _| window.try_find(id).is_some());
+    // With nothing to suggest its face still waits in the viewer, and a click opens its panel
+    // on the conversation, which starts with a welcome.
+    visual.update(|_, cx| {
+        workspace.update(cx, |this, cx| {
+            for check in Check::ALL {
+                this.ui.settings.assistant.set(check, false);
+            }
+            cx.notify();
+        })
+    });
+    render(visual);
+    assert!(visual.update(|_, cx| crate::panels::assistant::open_suggestions(workspace.read(cx)).is_empty()));
+    visual.update(|window, cx| window.click("assistant-tip-face", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.left_panel), crate::workspace::LeftPanel::Assistant);
+    assert!(shows(visual, "assistant-welcome".into()) && shows(visual, "assistant-ask".into()));
+
+    // Typing a message and pressing Return adds it and the reply to the conversation.
+    let say = |visual: &mut VisualTestContext, message: &str| {
+        visual.update(|window, cx| window.click("assistant-ask", cx));
+        visual.simulate_input(message);
+        visual.update(|window, cx| window.press("enter", cx));
+        render(visual);
+        visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().map(|message| message.text.clone()).unwrap_or_default())
+    };
+    let length = visual.update(|_, cx| workspace.read(cx).state.composition().duration_frames);
+    let reply = say(visual, "Hello, how long is the video?");
+    assert!(reply.contains(&format!("{length} frames")), "answered from the project: {reply}");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.len()), 2, "the question and the answer");
+    assert!(shows(visual, ("assistant-message", 1_usize).into()) && !shows(visual, "assistant-welcome".into()));
+
+    // Asking how to do something gets a help answer whose button does it.
+    let reply = say(visual, "how do I hide the outlines?");
+    assert!(reply.starts_with("Hide the outlines"), "{reply}");
+    let last = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.len() - 1);
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.layer_controls_hidden));
+    visual.update(|window, cx| window.click(("assistant-message-do", last), cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.layer_controls_hidden), "Do It ran the command");
+    assert!(say(visual, "hi").starts_with("Hello"));
+    assert!(say(visual, "how many layers are there?").contains("layers"));
+    assert!(say(visual, "/tracks").contains("video track"));
+
+    // Something it has no answer for gets an honest reply instead of a guess.
+    assert!(say(visual, "xylophone marmalade").starts_with("I don't know"));
+    // A click on its face adds a tip, /name renames it, and /clear empties the conversation.
+    visual.update(|window, cx| window.click("assistant-face", cx));
+    render(visual);
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().unwrap().text.starts_with("Tip:")));
+    assert_eq!(say(visual, "/name Pixel"), "Pixel it is.");
+    assert_eq!(visual.update(|_, cx| crate::panels::assistant::name(&workspace.read(cx).ui.settings)), "Pixel");
+    say(visual, "/clear");
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.is_empty()));
+    assert!(shows(visual, "assistant-welcome".into()));
+}
+
+#[gpui_kit::test]
+fn the_motion_assistant_animates_the_design_when_asked(cx: &mut TestAppContext) {
+    use studio_core::animation::Vec2;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // A still design of its own: a headline, a line under it and a small badge, all from frame 0.
+    let (headline, line, badge) = visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let settings = studio_core::edit::CompositionSettings { name: "Poster".into(), width: 1080, height: 1920, frame_rate: studio_core::time::FrameRate::new(30, 1), duration_frames: 300, background: studio_core::model::Rgba::hex(0x222222) };
+        ws.state.create_composition(&settings).unwrap();
+        let comp = ws.state.composition().id;
+        let headline = ws.state.add_text_layer("Big News Today", Vec2::new(540.0, 600.0)).unwrap();
+        let line = ws.state.add_text_layer("Something small under it", Vec2::new(540.0, 800.0)).unwrap();
+        let composition = ws.state.project.composition_mut(comp).unwrap();
+        studio_core::edit::edit_text(composition, headline, |_, style| style.font_size = 120.0);
+        studio_core::edit::edit_text(composition, line, |_, style| style.font_size = 40.0);
+        let style = studio_core::model::ShapeStyle::new(studio_core::model::ShapeKind::Ellipse);
+        let badge = studio_core::edit::add_shape_layer(&mut ws.state.project, comp, style, Vec2::new(120.0, 120.0), Vec2::new(900.0, 300.0), 0).unwrap();
+        ws.state.clear_selection();
+        (headline, line, badge)
+    }));
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.simulate_input("animate this for me");
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    let reply = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().map(|message| message.text.clone()).unwrap_or_default());
+    assert!(reply.starts_with("Done: I animated the design, 3 layers"), "{reply}");
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let layer = |id| state.composition().layer(id).unwrap();
+        assert!(layer(headline).animation.text_in.is_some(), "the headline comes in word by word");
+        assert!(layer(line).animation.enter.is_some() && layer(badge).animation.enter.is_some());
+        assert!(layer(line).in_frame > layer(headline).in_frame, "one after another");
+        assert_eq!(state.current_frame, 0, "ready to watch from the start");
+    });
+    // One Undo takes it all back.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Undo), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert!(state.composition().layers.iter().all(|layer| layer.animation.is_none() && layer.in_frame == 0));
+    });
+}
+
+#[gpui_kit::test]
+fn the_motion_assistant_makes_a_copy_in_another_size_when_asked_and_shows_its_mood(cx: &mut TestAppContext) {
+    use crate::panels::assistant::{Mood, mood};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    let feels = |visual: &mut VisualTestContext| visual.update(|_, cx| mood(workspace.read(cx)));
+    let say = |visual: &mut VisualTestContext, message: &str| {
+        visual.update(|window, cx| window.click("assistant-ask", cx));
+        visual.simulate_input(message);
+        visual.update(|window, cx| window.press("enter", cx));
+        render(visual);
+        visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().map(|message| message.text.clone()).unwrap_or_default())
+    };
+    assert_eq!(feels(visual), Mood::Awake);
+    // Something it can't answer leaves it sad for a moment.
+    say(visual, "xylophone marmalade");
+    assert_eq!(feels(visual), Mood::Sad);
+
+    // Asking for a vertical version makes a 1080 × 1920 copy, opens it, and leaves the original.
+    let (original, compositions) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.composition().id, state.project.compositions.len())
+    });
+    let reply = say(visual, "convert this comp to vertical");
+    assert!(reply.starts_with("Done.") && reply.contains("1080 × 1920"), "{reply}");
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.project.compositions.len(), compositions + 1);
+        assert_eq!((state.composition().width, state.composition().height), (1080, 1920), "the copy is open");
+        assert_ne!(state.composition().id, original);
+        assert!(state.project.composition(original).is_some(), "the original is still there");
+    });
+    assert_eq!(feels(visual), Mood::Happy);
+    // Asking again for the size it now is makes nothing.
+    assert!(say(visual, "/resize 1080x1920").contains("already"));
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.compositions.len()), compositions + 1);
+
+    // It sleeps once nothing has happened for a while.
+    visual.update(|_, cx| workspace.update(cx, |this, _| {
+        this.ui.assistant.feeling = None;
+        this.ui.assistant.active_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(600));
+    }));
+    assert_eq!(feels(visual), Mood::Asleep);
+    render(visual);
+    say(visual, "hello");
+    assert_eq!(feels(visual), Mood::Awake, "a message wakes it");
+}
+
+#[gpui_kit::test]
+fn the_motion_assistant_reports_and_fixes_what_it_noticed_when_asked(cx: &mut TestAppContext) {
+    use studio_core::assistant::Check;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    add_abrupt_turn(&workspace, visual);
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    // There are suggestions, so the panel opens on them; the message field is there all the same.
+    assert!(visual.update(|window, _| window.try_find("assistant-ask").is_some() && window.try_find("assistant-welcome").is_none()));
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.simulate_input("is anything wrong?");
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    let (text, index) = visual.update(|_, cx| {
+        let messages = &workspace.read(cx).ui.assistant.messages;
+        (messages.last().unwrap().text.clone(), messages.len() - 1)
+    });
+    assert!(text.starts_with("I noticed"), "{text}");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.assistant.chat_chosen), Some(true), "sending a message shows the conversation");
+    // Its button goes to the Suggestions tab.
+    visual.update(|window, cx| window.click(("assistant-message-suggestions", index), cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.assistant.chat_chosen), Some(false));
+    let found = visual.update(|_, cx| crate::panels::assistant::open_suggestions(workspace.read(cx)));
+    let constant = found.iter().position(|suggestion| suggestion.check == Check::ConstantSpeed).unwrap();
+    assert!(visual.update(|window, _| window.try_find(("assistant-card", constant)).is_some()));
+}
+
+#[gpui_kit::test]
+fn the_motion_assistant_sorts_suggestions_by_area_and_fixes_the_safe_ones_together(cx: &mut TestAppContext) {
+    use studio_core::animation::{Animated, Keyframe, Vec2};
+    use studio_core::assistant::{Area, Check};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let solid = Id(105);
+    // Two layers get a position keyframe that does nothing, and the solid becomes a sliver.
+    visual.update(|_, cx| {
+        workspace.update(cx, |this, cx| {
+            let comp = this.state.composition().id;
+            let composition = this.state.project.composition_mut(comp).unwrap();
+            for id in [TITLE, solid] {
+                let transform = composition.layer_mut(id).unwrap().transform.as_mut().unwrap();
+                let (here, there) = (Vec2::new(100.0, 100.0), Vec2::new(300.0, 100.0));
+                transform.position = Animated::keyframed(vec![Keyframe::linear(30, here), Keyframe::linear(40, here), Keyframe::linear(50, here), Keyframe::linear(90, there)]);
+            }
+            let sliver = composition.layer_mut(solid).unwrap();
+            sliver.out_frame = sliver.in_frame + 4;
+            cx.notify();
+        })
+    });
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    let found = |visual: &mut VisualTestContext| visual.update(|_, cx| crate::panels::assistant::open_suggestions(workspace.read(cx)));
+    let count = |visual: &mut VisualTestContext, check: Check| found(visual).iter().filter(|suggestion| suggestion.check == check).count();
+    let index_of = |visual: &mut VisualTestContext, check: Check| found(visual).iter().position(|suggestion| suggestion.check == check).unwrap();
+    let shows = |visual: &mut VisualTestContext, id: ElementId| visual.update(|window, _| window.try_find(id).is_some());
+    assert_eq!((count(visual, Check::RedundantKeyframes), count(visual, Check::ShortClip)), (2, 1));
+    let (sliver, motion) = (index_of(visual, Check::ShortClip), index_of(visual, Check::RedundantKeyframes));
+
+    // Narrowing to Editing (the third chip: All, Motion, Editing) leaves the sliver's card.
+    assert!(shows(visual, ("assistant-card", motion).into()));
+    visual.update(|window, cx| window.click(("assistant-area", 2_usize), cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.assistant.area), Some(Area::Editing));
+    assert!(shows(visual, ("assistant-card", sliver).into()) && !shows(visual, ("assistant-card", motion).into()));
+    visual.update(|window, cx| window.click(("assistant-area", 0_usize), cx));
+    render(visual);
+
+    // Fix All Safe removes both idle keyframes and leaves the sliver, which is a judgement call.
+    visual.update(|window, cx| window.click("assistant-fix-all", cx));
+    render(visual);
+    assert_eq!((count(visual, Check::RedundantKeyframes), count(visual, Check::ShortClip)), (0, 1));
+    // One Undo takes all of it back.
+    visual.update(|window, cx| window.press("cmd-z", cx));
+    render(visual);
+    assert_eq!(count(visual, Check::RedundantKeyframes), 2);
+}
+
+#[gpui_kit::test]
+fn the_motion_assistant_waits_in_the_viewers_corner_and_opens_a_tip_when_clicked(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    add_abrupt_turn(&workspace, visual);
+    render(visual);
+    let shows = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.try_find(id).is_some());
+    assert!(shows(visual, "assistant-tip-face") && !shows(visual, "assistant-tip"), "folded to its face until clicked");
+    visual.update(|window, cx| window.click("assistant-tip-face", cx));
+    render(visual);
+    assert!(shows(visual, "assistant-tip"), "the first suggestion opens");
+    visual.update(|window, cx| window.click("assistant-tip-fold", cx));
+    render(visual);
+    assert!(shows(visual, "assistant-tip-face") && !shows(visual, "assistant-tip"));
+    // "See All" opens the panel, which takes the tip's place.
+    visual.update(|window, cx| window.click("assistant-tip-face", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("assistant-tip-all", cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.left_panel), crate::workspace::LeftPanel::Assistant);
+    assert!(!shows(visual, "assistant-tip") && !shows(visual, "assistant-tip-face"));
+    // Back on another panel the tip returns, until Not Now.
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    assert!(shows(visual, "assistant-tip"));
+    visual.update(|window, cx| window.click("assistant-tip-later", cx));
+    render(visual);
+    assert!(!shows(visual, "assistant-tip") && !shows(visual, "assistant-tip-face"));
+    // Switching tips off and on in the assistant's settings brings the face back.
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("assistant-settings", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("assistant-tips", cx));
+    render(visual);
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.settings.assistant_tips));
+    visual.update(|window, cx| window.click("assistant-tips", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("rail-effects", cx));
+    render(visual);
+    assert!(shows(visual, "assistant-tip-face"));
+}
+
+#[gpui_kit::test]
+fn p_r_s_and_u_show_keyframe_rows_under_the_selected_clip(cx: &mut TestAppContext) {
+    use crate::workspace::{ShowAllKeyframes, ShowPositionKeyframes, ShowRotationKeyframes};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // A title with position and rotation keyframes, selected.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        for path in [POSITION, ROTATION] {
+            let animated = ws.state.composition().layer(TITLE).and_then(|layer| layer.property(path, 0)).is_some_and(|property| !property.keyframes.is_empty());
+            if !animated {
+                ws.state.toggle_stopwatch(TITLE, path);
+            }
+        }
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    let row = |visual: &mut VisualTestContext, path: PropertyPath| visual.update(|window, _| window.try_find(ElementId::Name(format!("clip-prop:{}:{path:?}", TITLE.0).into())).is_some());
+    assert!(!row(visual, POSITION), "closed to begin with");
+    // U opens every animated property.
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowAllKeyframes), cx));
+    render(visual);
+    assert!(row(visual, POSITION) && row(visual, ROTATION));
+    // P narrows to position, R switches to rotation.
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowPositionKeyframes), cx));
+    render(visual);
+    assert!(row(visual, POSITION) && !row(visual, ROTATION));
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowRotationKeyframes), cx));
+    render(visual);
+    assert!(!row(visual, POSITION) && row(visual, ROTATION));
+    // The same key again closes the rows.
+    visual.update(|window, cx| window.dispatch_action(Box::new(ShowRotationKeyframes), cx));
+    render(visual);
+    assert!(!row(visual, POSITION) && !row(visual, ROTATION));
+    let keys = crate::keymap::preset_keys(crate::keymap::KeyPreset::Studio);
+    for (command, key) in [("show-position-keyframes", "p"), ("show-rotation-keyframes", "r"), ("show-scale-keyframes", "s"), ("show-all-keyframes", "u")] {
+        assert_eq!(keys.get(command), Some(&vec![key.to_owned()]), "{command}");
+    }
+}
+
 #[gpui_kit::test]
 fn a_saved_project_reopens_with_the_editor_as_it_was(cx: &mut TestAppContext) {
     let folder = scratch_folder("remember");
@@ -2009,6 +2838,10 @@ fn unsaved_work_is_recovered_after_studio_closes_without_saving(cx: &mut TestApp
     }));
     visual.run_until_parked();
     assert!(visual.has_pending_prompt(), "it offers the work back");
+    // While it waits for an answer, the regular save of unsaved work leaves the copy alone
+    // (the fresh project behind the question has nothing unsaved, which would remove it).
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.keep_work_safe(window, cx)));
+    assert!(crate::app_settings::recovery_path().exists(), "the copy survives until it is answered");
     visual.simulate_prompt_answer("Restore");
     visual.run_until_parked();
     render(visual);
@@ -2027,6 +2860,22 @@ fn undoing_back_to_the_saved_project_removes_the_recovery_copy(cx: &mut TestAppC
     assert!(!has_unsaved_changes(&workspace, visual));
     visual.update(|_, cx| workspace.read(cx).keep_recovery_copy().unwrap());
     assert!(!crate::app_settings::recovery_path().exists(), "nothing to offer back on the next launch");
+}
+
+#[gpui_kit::test]
+fn versions_are_still_kept_with_the_recovery_copy_turned_off(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    let _ = std::fs::remove_file(crate::app_settings::recovery_path());
+    let before = crate::versions::list(None).len();
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.settings.recovery_seconds = 0;
+        ws.ui.last_version_at = None;
+        ws.keep_work_safe(window, cx);
+    }));
+    assert!(!crate::app_settings::recovery_path().exists(), "no recovery copy, as Settings asks");
+    assert_eq!(crate::versions::list(None).len(), before + 1, "but the timed version is kept");
+    std::fs::remove_dir_all(crate::versions::folder_for(None)).ok();
 }
 
 #[gpui_kit::test]
@@ -3111,27 +3960,27 @@ fn settings_change_the_theme_and_accent_and_clear_the_cache(cx: &mut TestAppCont
     // Appearance is the second page.
     visual.update(|window, cx| window.click(("settings-section", 1_usize), cx));
     render(visual);
-    visual.update(|window, cx| window.click(("theme", crate::theme::ThemeName::Light as usize), cx));
+    visual.update(|window, cx| window.click(("theme", crate::theme::ThemeName::Winter as usize), cx));
     visual.update(|window, cx| window.click(("accent", crate::theme::Accent::Green as usize), cx));
     render(visual);
     assert_eq!(crate::theme::themed(crate::theme::color::ACCENT), crate::theme::Accent::Green.value());
     assert_ne!(crate::theme::themed(crate::theme::color::PANEL), crate::theme::color::PANEL, "light panels");
     let saved = crate::app_settings::load();
-    assert_eq!((saved.theme, saved.accent), (crate::theme::ThemeName::Light, crate::theme::Accent::Green));
+    assert_eq!((saved.theme, saved.accent), (crate::theme::ThemeName::Winter, crate::theme::Accent::Green));
     // Clearing the (test) proxy folder removes the proxies in it, and nothing else.
     let folder = visual.update(|_, cx| workspace.read(cx).render.proxies.cache_folder().to_path_buf());
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("0123456789abcdef.mov"), vec![0u8; 1000]).unwrap();
     std::fs::write(folder.join("notes.txt"), "mine").unwrap();
     // The cache has its own section in the menu on the left.
-    visual.update(|window, cx| window.click(("settings-section", 7_usize), cx));
+    visual.update(|window, cx| window.click(("settings-section", 11_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("cache-clear", cx));
     render(visual);
     assert!(!folder.join("0123456789abcdef.mov").exists());
     assert!(folder.join("notes.txt").exists(), "a file that isn't a proxy stays");
     std::fs::remove_file(folder.join("notes.txt")).unwrap();
-    visual.update(|_, cx| crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx));
+    visual.update(|_, cx| crate::theme::apply(crate::theme::ThemeName::Obsidian, crate::theme::Accent::Violet, cx));
 }
 
 // Captions -------------------------------------------------------------------------------------
@@ -3211,6 +4060,34 @@ fn a_phrase_in_the_transcript_can_be_corrected(cx: &mut TestAppContext) {
     render(visual);
     let words: Vec<String> = visual.update(|_, cx| workspace.read(cx).state.caption_words(layer).unwrap().iter().map(|w| w.text.clone()).collect());
     assert_eq!(words, ["make", "it", "shine."]);
+}
+
+#[gpui_kit::test]
+fn picked_words_in_the_transcript_are_cut_from_the_video(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let layer = add_test_captions(&workspace, visual);
+    let title_length = |cx: &mut gpui_kit::App| {
+        let ws = workspace.read(cx);
+        ws.state.composition().layers.iter().filter(|layer| matches!(&layer.content, LayerContent::Text { .. })).map(|layer| layer.out_frame - layer.in_frame).sum::<i64>()
+    };
+    let before = visual.update(|_, cx| title_length(cx));
+    // Nothing is picked yet, so there is nothing to cut.
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.transcript_selection.is_none()));
+    visual.update(|window, cx| window.click(("caption-word", 1usize), cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.transcript_selection), Some((layer, 1, 1)));
+    let span = visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        studio_core::transcript::word_span(ws.state.composition().layer(layer).unwrap(), 1..2).unwrap()
+    });
+    visual.update(|window, cx| window.click("transcript-cut", cx));
+    render(visual);
+    let words: Vec<String> = visual.update(|_, cx| workspace.read(cx).state.caption_words(layer).unwrap().iter().map(|w| w.text.clone()).collect());
+    assert_eq!(words, ["make", "pop."]);
+    // The title the captions sit over lost the same moment.
+    assert_eq!(visual.update(|_, cx| title_length(cx)), before - (span.1 - span.0));
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.transcript_selection.is_none()));
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.current_frame), span.0);
 }
 
 #[gpui_kit::test]
@@ -3364,7 +4241,7 @@ fn video_and_sound_switch_separately_and_volume_and_fades_set(cx: &mut TestAppCo
     }));
     render(visual);
     let audio = visual.update(|_, cx| workspace.read(cx).state.composition().layer(video).unwrap().audio.clone());
-    assert_eq!((audio.volume_db, audio.fade_in), (-6.0, 0.5));
+    assert_eq!((audio.volume_db.value, audio.fade_in), (-6.0, 0.5));
     assert_eq!(audio.fade_out, 2.0, "no longer than the two-second clip");
     assert!((audio.gain() - 0.501).abs() < 0.01, "-6 dB is about half");
 }
@@ -3407,6 +4284,208 @@ fn the_pen_tool_draws_a_closed_shape_whose_points_can_be_dragged(cx: &mut TestAp
     render(visual);
     let size = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().size);
     assert!((size.y - 600.0).abs() < 4.0, "the bottom point moved down, stretching the box: {size:?}");
+}
+
+/// A double-click at a point in the window.
+fn double_click_at(visual: &mut VisualTestContext, at: Point<Pixels>) {
+    let modifiers = gpui_kit::Modifiers::default();
+    for click_count in [1, 2] {
+        visual.simulate_event(gpui_kit::MouseDownEvent { button: MouseButton::Left, position: at, modifiers, click_count, first_mouse: false });
+        visual.simulate_event(gpui_kit::MouseUpEvent { button: MouseButton::Left, position: at, modifiers, click_count });
+    }
+    render(visual);
+}
+
+#[gpui_kit::test]
+fn a_click_moves_a_shape_and_a_double_click_edits_its_points(cx: &mut TestAppContext) {
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    // Big enough that its middle is clear of the handles on its corners.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.shape_size_linked = false;
+        ws.state.set_shape_setting(layer, crate::state::ShapeSetting::Width, 400.0);
+        ws.state.set_shape_setting(layer, crate::state::ShapeSetting::Height, 300.0);
+        cx.notify();
+    }));
+    render(visual);
+    let point_id = |index: usize| ElementId::Name(format!("path-point:{}:{index}", layer.0).into());
+    let handle_id = ElementId::Name(format!("scale-handle:{}:TopLeft", layer.0).into());
+    let inside = |visual: &mut VisualTestContext| {
+        let position = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().transform.as_ref().unwrap().position.value_at(0.0));
+        // A little off the very middle, where the anchor point's own handle sits.
+        screen_point(&workspace, visual, position + Vec2::new(80.0, 60.0))
+    };
+
+    // Selected with one click, the shape shows its box to move and scale, and no points.
+    let at = inside(visual);
+    click_at(visual, at);
+    assert!(visual.update(|window, _| window.try_find(handle_id.clone())).is_some());
+    assert!(visual.update(|window, _| window.try_find(point_id(0))).is_none(), "a selected shape shows no points");
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.path_editing, None));
+
+    // A double-click turns the rectangle into a path and shows its points in place of the box.
+    double_click_at(visual, at);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.ui.path_editing, Some(layer));
+        assert_eq!(ws.state.shape_of(layer).unwrap().kind, ShapeKind::Path);
+    });
+    assert!(visual.update(|window, _| window.try_find(handle_id.clone())).is_none(), "the scale handles are put away");
+    let size_before = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().size);
+    let from = center_of(visual, point_id(0));
+    visual.update(|window, cx| window.drag(from, from + point(px(-40.0), px(-30.0)), cx));
+    render(visual);
+    let size_after = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().size);
+    assert!(size_after.x > size_before.x && size_after.y > size_before.y, "dragging a point reshaped it: {size_before:?} to {size_after:?}");
+
+    // Escape puts the points away; the shape stays selected and moves as a whole again.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find(point_id(0))).is_none());
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.selected_layers, vec![layer]));
+    let (from, before) = (inside(visual), visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().transform.as_ref().unwrap().position.value_at(0.0)));
+    visual.update(|window, cx| window.drag(from, from + point(px(60.0), px(0.0)), cx));
+    render(visual);
+    let after = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().transform.as_ref().unwrap().position.value_at(0.0));
+    assert!(after.x > before.x + 10.0, "a drag moves the whole shape: {before:?} to {after:?}");
+
+    // A click on empty space while editing ends the editing too.
+    let at = inside(visual);
+    double_click_at(visual, at);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.path_editing, Some(layer)));
+    let empty = screen_point(&workspace, visual, Vec2::new(20.0, 20.0));
+    click_at(visual, empty);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.path_editing, None));
+}
+
+#[gpui_kit::test]
+fn the_shape_card_animates_the_path_and_the_size(cx: &mut TestAppContext) {
+    use crate::state::ShapeSetting;
+    use studio_core::model::ShapeKind;
+    let (workspace, visual) = open(cx);
+    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    render(visual);
+    let start = visual.update(|_, cx| workspace.read(cx).state.current_frame);
+    let size_at = |visual: &mut VisualTestContext, frame: i64| visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().shape_size_at(frame as f64));
+    let before = size_at(visual, start);
+
+    // The stopwatch in the Shape card starts animating the outline, with a keyframe at the playhead.
+    visual.update(|window, cx| window.click("shape-path-stopwatch", cx));
+    render(visual);
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().layer(layer).unwrap().is_morphing()));
+    // Later on, a new width is keyframed there, and the Width field reads the size at the playhead.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.shape_size_linked = false;
+        ws.state.set_current_frame(start + 20);
+        ws.state.set_shape_setting(layer, ShapeSetting::Width, before.x * 2.0);
+        cx.notify();
+    }));
+    render(visual);
+    assert!((size_at(visual, start).x - before.x).abs() < 0.5, "the first keyframe keeps its width");
+    assert!((size_at(visual, start + 20).x - before.x * 2.0).abs() < 0.5);
+    assert!((size_at(visual, start + 10).x - before.x * 1.5).abs() < 0.5, "and the width animates between them");
+    let shown = visual.update(|_, cx| crate::panels::fields::FieldTarget::Shape { layer, setting: ShapeSetting::Width }.read(&workspace.read(cx).state).map(|(width, _)| width));
+    assert!(shown.is_some_and(|width| (width - before.x * 2.0).abs() < 0.5), "{shown:?}");
+    // The keyframe buttons step between the two keyframes.
+    visual.update(|window, cx| window.click("shape-path-previous-keyframe", cx));
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).state.current_frame, start));
+}
+
+#[gpui_kit::test]
+fn the_fill_and_stroke_stopwatch_keyframes_color_changes_at_the_playhead(cx: &mut TestAppContext) {
+    use studio_core::model::{Paint, Rgba, ShapeKind};
+    let (workspace, visual) = open(cx);
+    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    tall_window(visual);
+    render(visual);
+    let (red, blue) = (Paint::Solid(Rgba::hex(0xff0000)), Paint::Solid(Rgba::hex(0x0000ff)));
+    let start = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_shape_paint(layer, crate::state::PaintSlot::Fill, Some(red));
+        cx.notify();
+        ws.state.current_frame
+    }));
+    // The stopwatch keyframes the look where the playhead is.
+    visual.update(|window, cx| window.click("shape-style-stopwatch", cx));
+    render(visual);
+    // A second later the fill is changed: that is keyframed there, and the first keeps its red.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_current_frame(start + 30);
+        ws.state.set_shape_paint(layer, crate::state::PaintSlot::Fill, Some(blue));
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        let shape = ws.state.composition().layer(layer).unwrap();
+        assert_eq!(shape.property(PropertyPath::ShapeStyle, start).unwrap().keyframes, vec![start, start + 30]);
+        assert_eq!(shape.shape_style_at(start as f64).unwrap().fill, Some(red));
+        assert_eq!(shape.shape_style_at((start + 30) as f64).unwrap().fill, Some(blue));
+        let between = shape.shape_style_at((start + 15) as f64).unwrap().fill;
+        assert!(between != Some(red) && between != Some(blue), "the color blends in between");
+    });
+    // Turning the stopwatch off keeps the look at the playhead and ends the animation.
+    visual.update(|window, cx| window.click("shape-style-stopwatch", cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        let shape = ws.state.composition().layer(layer).unwrap();
+        assert!(shape.morph.is_none());
+        assert_eq!(ws.state.shape_of(layer).unwrap().fill, Some(blue));
+    });
+}
+
+#[gpui_kit::test]
+fn path_keyframes_show_as_diamonds_in_the_timeline(cx: &mut TestAppContext) {
+    use crate::state::{KeyframeRef, ShapeSetting};
+    use studio_core::model::ShapeKind;
+    use studio_core::property::PropertyPath;
+    let (workspace, visual) = open(cx);
+    let layer = add_shape(&workspace, visual, ShapeKind::Rectangle);
+    let start = visual.update(|_, cx| workspace.read(cx).state.current_frame);
+    // Animate the outline: a keyframe at the playhead, and a wider one 20 frames on.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.toggle_path_animation(layer);
+        ws.state.shape_size_linked = false;
+        ws.state.set_current_frame(start + 20);
+        ws.state.set_shape_setting(layer, ShapeSetting::Width, 500.0);
+        ws.ui.timeline.expanded_clips.insert(layer);
+        cx.notify();
+    }));
+    render(visual);
+    // The opened clip has a Path row with a diamond on each keyframe.
+    let diamond = |frame: i64| ElementId::Name(format!("clip-kf:{}:{:?}:{frame}", layer.0, PropertyPath::ShapePath).into());
+    assert!(visual.update(|window, _| window.try_find(diamond(start))).is_some());
+    assert!(visual.update(|window, _| window.try_find(diamond(start + 20))).is_some());
+    let frames = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().morph.as_ref().map(|morph| morph.path.keyframe_frames()));
+    assert_eq!(frames(visual), Some(vec![start, start + 20]));
+
+    // Dragging a diamond moves its keyframe in time.
+    let from = center_of(visual, diamond(start + 20));
+    let other = center_of(visual, diamond(start));
+    let step = (from.x - other.x) / 20.0;
+    visual.update(|window, cx| window.drag(from, from + point(step * 10.0, px(0.0)), cx));
+    render(visual);
+    assert_eq!(frames(visual), Some(vec![start, start + 30]));
+
+    // Deleting both keyframes ends the animation, and the shape keeps the outline it had last.
+    let wide = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().shape_size_at((start + 30) as f64));
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_keyframe_selection(vec![KeyframeRef { layer, path: PropertyPath::ShapePath, frame: start }]);
+        ws.state.delete_selection();
+        ws.state.set_keyframe_selection(vec![KeyframeRef { layer, path: PropertyPath::ShapePath, frame: start + 30 }]);
+        ws.state.delete_selection();
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|_, cx| {
+        let shape = workspace.read(cx).state.composition().layer(layer).unwrap().clone();
+        assert!(shape.morph.is_none() && !shape.is_morphing());
+        let (min, max) = shape.shape_path_at(0.0).unwrap().bounds().unwrap();
+        let kept = (max.x - min.x) * shape.size.x;
+        assert!((kept - wide.x).abs() < 0.5, "the last outline stays: {kept} against {}", wide.x);
+    });
+    assert!(visual.update(|window, _| window.try_find(diamond(start + 30))).is_none());
 }
 
 #[gpui_kit::test]
@@ -3665,7 +4744,7 @@ fn settings_choose_the_project_panels_columns(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     visual.update(|window, cx| window.press("cmd-,", cx));
     render(visual);
-    visual.update(|window, cx| window.click(("settings-section", 5_usize), cx));
+    visual.update(|window, cx| window.click(("settings-section", 9_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("column-type", cx));
     visual.update(|window, cx| window.click("column-duration", cx));
@@ -4686,7 +5765,7 @@ fn ai_features_can_be_hidden_and_models_offered_for_download(cx: &mut TestAppCon
     visual.update(|window, cx| window.press("cmd-,", cx));
     render(visual);
     // AI Models is the ninth page.
-    visual.update(|window, cx| window.click(("settings-section", 8_usize), cx));
+    visual.update(|window, cx| window.click(("settings-section", 12_usize), cx));
     render(visual);
     // The test model folders are empty, so both models offer a download.
     assert!(visual.update(|window, _| window.try_find("model-whisper-download")).is_some());
@@ -4716,6 +5795,86 @@ fn importing_shows_a_popup_until_the_files_are_in(cx: &mut TestAppContext) {
     render(visual);
     assert!(visual.update(|window, _| window.try_find("import-popup")).is_none(), "and goes once they are in");
     assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.items.len()), items + 3);
+}
+
+/// Writes a small SVG (a plate with a dot on it) into a scratch folder and returns its path.
+fn scratch_svg(folder_name: &str) -> std::path::PathBuf {
+    let file = scratch_folder(folder_name).join("badge.svg");
+    std::fs::write(&file, r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200">
+        <rect id="plate" width="400" height="200" fill="#1e293b"/>
+        <circle id="dot" cx="100" cy="100" r="50" fill="#f59e0b"/>
+    </svg>"##).unwrap();
+    file
+}
+
+#[gpui_kit::test]
+fn importing_an_svg_asks_first_and_one_layer_brings_it_in_as_a_picture(cx: &mut TestAppContext) {
+    use studio_core::model::ProjectItemKind;
+    let (workspace, visual) = open(cx);
+    let file = scratch_svg("svg-as-layer");
+    let items = visual.update(|_, cx| workspace.read(cx).state.project.items.len());
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.import_paths(vec![file.clone()], None, window, cx)));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("svg-import-popup")).is_some(), "the question shows");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.items.len()), items, "nothing comes in until it is answered");
+    visual.update(|window, cx| window.click("svg-import-layer", cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("svg-import-popup")).is_none());
+    visual.update(|_, cx| {
+        let project = &workspace.read(cx).state.project;
+        assert_eq!(project.items.len(), items + 1);
+        let item = project.items.iter().find(|item| item.name == "badge.svg").expect("the SVG is in the project");
+        assert!(matches!(item.kind, ProjectItemKind::Image), "one picture, not a composition");
+        assert_eq!(item.size.map(|size| (size.x, size.y)), Some((400.0, 200.0)), "the size the drawing states");
+    });
+}
+
+#[gpui_kit::test]
+fn an_svg_answered_as_a_composition_has_a_layer_for_each_shape_and_cancel_adds_nothing(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let file = scratch_svg("svg-as-composition");
+    let items = visual.update(|_, cx| workspace.read(cx).state.project.items.len());
+    // Cancel drops the import.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.import_paths(vec![file.clone()], None, window, cx)));
+    render(visual);
+    visual.update(|window, cx| window.click("svg-import-cancel", cx));
+    visual.run_until_parked();
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("svg-import-popup")).is_none());
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.project.items.len()), items, "nothing was added");
+    // Composition brings in a composition of the two shapes.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.import_paths(vec![file.clone()], None, window, cx)));
+    render(visual);
+    visual.update(|window, cx| window.click("svg-import-composition", cx));
+    visual.run_until_parked();
+    render(visual);
+    visual.update(|_, cx| {
+        let project = &workspace.read(cx).state.project;
+        let item = project.items.iter().find(|item| item.name == "badge.svg").expect("the SVG is in the project");
+        let names: Vec<&str> = project.composition(item.id).expect("a composition").layers.iter().map(|layer| layer.name.as_str()).collect();
+        assert_eq!(names, ["dot", "plate"]);
+    });
+}
+
+#[gpui_kit::test]
+fn command_shift_h_hides_and_shows_the_outlines_of_selected_layers(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let layer = Id(105);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.select_layer(layer, false)));
+    render(visual);
+    let handle = ElementId::Name(format!("scale-handle:{}:TopLeft", layer.0).into());
+    let shown = |visual: &mut VisualTestContext| visual.update(|window, _| window.try_find(handle.clone()).is_some());
+    assert!(shown(visual), "a selected layer shows its handles");
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::ToggleLayerControls), cx));
+    render(visual);
+    assert!(!shown(visual), "hidden");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.selected_layers.clone()), vec![layer], "the layer stays selected");
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::ToggleLayerControls), cx));
+    render(visual);
+    assert!(shown(visual), "and back");
+    let keys = crate::keymap::preset_keys(crate::keymap::KeyPreset::Studio);
+    assert_eq!(keys.get("toggle-layer-controls"), Some(&vec!["cmd-shift-h".to_owned()]));
 }
 
 #[gpui_kit::test]
@@ -5286,7 +6445,7 @@ fn the_rate_stretch_tool_changes_a_clips_speed(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);
     tall_window(visual);
     let clip = first_footage(&workspace, visual);
-    visual.update(|window, cx| window.press("r", cx));
+    visual.update(|window, cx| window.press("shift-r", cx));
     render(visual);
     visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.tool, crate::workspace::Tool::RateStretch));
     let (_, in_before, out_before) = layer_timing(&workspace, visual, clip);
@@ -5842,7 +7001,7 @@ fn a_shortcut_changes_by_pressing_the_new_key(cx: &mut TestAppContext) {
     visual.update(|window, cx| window.press("cmd-,", cx));
     render(visual);
     // Keyboard Shortcuts is the tenth page.
-    visual.update(|window, cx| window.click(("settings-section", 9_usize), cx));
+    visual.update(|window, cx| window.click(("settings-section", 13_usize), cx));
     render(visual);
     visual.update(|window, cx| window.click("shortcut-change:toggle-playback", cx));
     render(visual);
@@ -5880,13 +7039,15 @@ fn empty_panels_say_what_to_do(cx: &mut TestAppContext) {
         cx.notify();
     }));
     render(visual);
-    assert!(visual.update(|window, _| window.try_find("project-empty-hint")).is_some(), "the Project panel says how to import");
-    assert!(visual.update(|window, _| window.try_find("timeline-empty-hint")).is_some(), "the empty timeline says what to add");
+    assert!(visual.update(|window, _| window.try_find("project-import")).is_some(), "the Project panel has its Import button");
+    // The timeline's hint is written inside the first track's row.
+    let hint = bounds_of(visual, "timeline-empty-hint");
+    let timeline = dock_content(visual, "Timeline");
+    assert!(hint.size.height < px(120.0) && hint.origin.y < timeline.origin.y + px(120.0), "one row tall, at the top of the tracks: {hint:?} {timeline:?}");
     // A layer and some media: both hints go.
     let clip = add_tone_clip(&workspace, visual);
     render(visual);
     assert!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(clip).is_some()));
-    assert!(visual.update(|window, _| window.try_find("project-empty-hint")).is_none());
     assert!(visual.update(|window, _| window.try_find("timeline-empty-hint")).is_none());
 }
 
@@ -5926,6 +7087,12 @@ fn earlier_versions_are_kept_and_restored(cx: &mut TestAppContext) {
     visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_property_component(TITLE, ROTATION, 0, 75.0); cx.notify(); }));
     visual.update(|_, cx| workspace.update(cx, |ws, _| { ws.ui.last_version_at = None; ws.keep_timed_version(); }));
     assert_eq!(crate::versions::list(Some(&file)).len(), 2);
+    // More work, with versions now turned off in Settings: restoring must still keep it.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.settings.versions.keep = false;
+        ws.state.set_property_component(TITLE, ROTATION, 0, 90.0);
+        cx.notify();
+    }));
 
     // Restore the saved one (the older): the rotation goes back, as unsaved changes.
     visual.update(|window, cx| window.dispatch_action(Box::new(BrowseVersions), cx));
@@ -5936,9 +7103,9 @@ fn earlier_versions_are_kept_and_restored(cx: &mut TestAppContext) {
     assert_eq!(title_value(&workspace, visual, ROTATION, 0), PropertyValue::Scalar(33.0));
     visual.update(|_, cx| assert_eq!(workspace.read(cx).state.file(), Some(file.as_path()), "still the same project"));
     assert!(has_unsaved_changes(&workspace, visual));
-    // The work at 75° wasn't lost: it is the newest version.
+    // The work at 90° wasn't lost: it is the newest version.
     let newest = crate::versions::list(Some(&file)).remove(0);
-    assert!(std::fs::read_to_string(&newest.path).unwrap().contains("75.0"));
+    assert!(std::fs::read_to_string(&newest.path).unwrap().contains("90.0"));
     std::fs::remove_dir_all(crate::versions::folder_for(Some(&file))).ok();
     std::fs::remove_dir_all(&folder).ok();
 }
@@ -6426,6 +7593,16 @@ fn motion_blur_is_switched_in_properties_and_off_from_the_clip(cx: &mut TestAppC
     click_label(visual, "OK");
     render(visual);
     visual.update(|_, cx| assert_eq!(workspace.read(cx).state.composition().motion_blur, shutter));
+
+    // Color Mixing, in the same dialog: unticking it mixes in display colors.
+    visual.update(|_, cx| assert!(workspace.read(cx).state.composition().linear_blending));
+    visual.update(|window, cx| window.press("cmd-k", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("comp-linear-blending", cx));
+    render(visual);
+    click_label(visual, "OK");
+    render(visual);
+    visual.update(|_, cx| assert!(!workspace.read(cx).state.composition().linear_blending));
 }
 
 #[gpui_kit::test]
@@ -6838,7 +8015,7 @@ fn tools_and_features_turned_off_are_hidden_everywhere(cx: &mut TestAppContext) 
     assert!(!file.iter().any(|name| name.starts_with("Export")), "{file:?}");
     assert!(file.contains(&"Import…".to_owned()) && file.contains(&"Package…".to_owned()));
     assert!(!menu_names("Edit").contains(&"Close Gaps".to_owned()));
-    assert_eq!(menu_names("View"), ["Zoom In", "Zoom Out"], "the separator before Show Guides goes with it");
+    assert_eq!(menu_names("View"), ["Zoom In", "Zoom Out", "-", "Show or Hide Layer Outlines"], "Show Guides is gone; the layer outlines toggle is always there");
     // And from a clip's right-click menu: no Close Gaps in Time, and a text layer has nothing
     // else there, so the submenu goes.
     visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));
@@ -6853,7 +8030,8 @@ fn tools_and_features_turned_off_are_hidden_everywhere(cx: &mut TestAppContext) 
     render(visual);
     visual.update(|window, cx| window.click(("settings-section", 4_usize), cx));
     render(visual);
-    let over_page = visual.update(|window, _| window.find("feature-track-select").bounds().center());
+    // The page keeps its place between visits, so the wheel turns where it did before: the
+    // first switch may have scrolled out of view.
     click_in_settings(visual, over_page, "features-all-on");
     visual.update(|window, cx| window.press("escape", cx));
     render(visual);
@@ -6865,20 +8043,31 @@ fn tools_and_features_turned_off_are_hidden_everywhere(cx: &mut TestAppContext) 
     assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.tool), crate::workspace::Tool::Pen);
 }
 
-/// Clicks `id` on the open Settings page, scrolling the page down first until it is in view.
+/// Clicks `id` on the open Settings page, scrolling the page until it is in view: down first,
+/// then back up (the page keeps its place between visits, so the control may be above).
 /// The wheel turns at `over_page`, a point on the page (taken from a control in view when it opened).
 fn click_in_settings(visual: &mut VisualTestContext, over_page: gpui_kit::Point<gpui_kit::Pixels>, id: &str) {
     let element = || gpui_kit::ElementId::Name(id.to_owned().into());
-    for _ in 0..40 {
-        if visual.update(|window, _| window.try_find(element()).is_some_and(|found| found.visible())) {
-            break;
-        }
+    let turn_wheel = |visual: &mut VisualTestContext, step: f32| {
         visual.update(|window, cx| {
             use gpui_kit::InputEvent as _;
-            let wheel = gpui_kit::ScrollEvent { position: over_page, delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(-80.0))), ..Default::default() };
+            let wheel = gpui_kit::ScrollEvent { position: over_page, delta: gpui_kit::ScrollDelta::Pixels(point(px(0.0), px(step))), ..Default::default() };
             window.dispatch_event(wheel.to_platform_input(), cx);
         });
         render(visual);
+    };
+    'search: for step in [-80.0, 80.0] {
+        // Enough turns of the wheel to cross the longest page (Tools & Features).
+        for turn in 0..80 {
+            if visual.update(|window, _| window.try_find(element()).is_some_and(|found| found.visible())) {
+                // It may only be peeking over the page's edge: one more turn brings it well in.
+                if turn > 0 {
+                    turn_wheel(visual, step);
+                }
+                break 'search;
+            }
+            turn_wheel(visual, step);
+        }
     }
     visual.update(|window, cx| window.click(element(), cx));
     render(visual);
@@ -6909,9 +8098,9 @@ fn the_welcome_setup_runs_on_first_launch_and_applies_each_choice(cx: &mut TestA
     assert_eq!(step(visual), Some(Step::Look));
 
     // 1. Look: Light, teal. Each applies straight away.
-    click(visual, ("theme", ThemeName::Light as usize).into());
+    click(visual, ("theme", ThemeName::Winter as usize).into());
     click(visual, ("accent", Accent::Teal as usize).into());
-    assert_eq!((settings(visual).theme, settings(visual).accent), (ThemeName::Light, Accent::Teal));
+    assert_eq!((settings(visual).theme, settings(visual).accent), (ThemeName::Winter, Accent::Teal));
     click(visual, "onboarding-next".into());
     assert_eq!(step(visual), Some(Step::Features));
 
@@ -6945,7 +8134,7 @@ fn the_welcome_setup_runs_on_first_launch_and_applies_each_choice(cx: &mut TestA
     assert_eq!(step(visual), None);
     let saved = crate::app_settings::load();
     assert!(saved.onboarded);
-    assert_eq!((saved.theme, saved.accent), (ThemeName::Light, Accent::Teal));
+    assert_eq!((saved.theme, saved.accent), (ThemeName::Winter, Accent::Teal));
     assert!(!saved.feature_on(Feature::GraphEditor) && saved.feature_on(Feature::PenTool) && !saved.ai.any(), "every choice is remembered");
     // The editor behind follows: no Captions on the rail, no graph editor button.
     visual.update(|window, cx| window.press("escape", cx));
@@ -6971,7 +8160,7 @@ fn the_welcome_setup_runs_on_first_launch_and_applies_each_choice(cx: &mut TestA
     assert_eq!(step(visual), Some(Step::Look));
     click(visual, "onboarding-skip".into());
     assert_eq!(step(visual), None);
-    assert_eq!(settings(visual).theme, ThemeName::Light);
+    assert_eq!(settings(visual).theme, ThemeName::Winter);
 }
 
 #[gpui_kit::test]
@@ -6989,6 +8178,41 @@ fn the_start_screens_home_shows_a_welcome_and_a_strip_of_templates(cx: &mut Test
     render(visual);
     let tab = visual.update(|_, cx| workspace.read(cx).ui.start_screen.as_ref().map(|screen| screen.tab));
     assert_eq!(tab, Some(crate::panels::start_screen::StartTab::Templates));
+    // The Templates page has a button back to Home, and the hero's own button returns to it.
+    visual.update(|window, cx| window.click("start-home", cx));
+    render(visual);
+    let tab = visual.update(|_, cx| workspace.read(cx).ui.start_screen.as_ref().map(|screen| screen.tab));
+    assert_eq!(tab, Some(crate::panels::start_screen::StartTab::Home));
+    visual.update(|window, cx| window.click("start-templates", cx));
+    render(visual);
+    let tab = visual.update(|_, cx| workspace.read(cx).ui.start_screen.as_ref().map(|screen| screen.tab));
+    assert_eq!(tab, Some(crate::panels::start_screen::StartTab::Templates));
+}
+
+#[gpui_kit::test]
+fn the_start_screen_leaves_out_templates_when_they_are_switched_off(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let shows = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.try_find(id).is_some());
+    let tab = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.start_screen.as_ref().map(|screen| screen.tab));
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.settings.set_feature(crate::features::Feature::Templates, false)));
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| crate::panels::start_screen::show(ws, window, cx)));
+    render(visual);
+    assert!(shows(visual, "start-hero") && shows(visual, "start-new"), "the rest of Home is there");
+    for id in ["start-template-strip", "start-see-templates", "start-templates"] {
+        assert!(!shows(visual, id), "{id} is hidden with Templates off");
+    }
+    // Even asked for, the Templates page isn't shown: Home is.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.start_screen.as_mut().unwrap().tab = crate::panels::start_screen::StartTab::Templates));
+    render(visual);
+    assert!(shows(visual, "start-hero") && !shows(visual, "start-home"), "Home, not the Templates page");
+    // Switched back on, it all comes back.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.settings.set_feature(crate::features::Feature::Templates, true)));
+    render(visual);
+    assert!(shows(visual, "start-home"), "the Templates page it was set to");
+    assert_eq!(tab(visual), Some(crate::panels::start_screen::StartTab::Templates));
+    visual.update(|window, cx| window.click("start-home", cx));
+    render(visual);
+    assert!(shows(visual, "start-template-strip") && shows(visual, "start-templates"));
 }
 
 /// Where a docked panel's content is drawn (below its tab bar).
@@ -7060,7 +8284,7 @@ fn the_side_panel_moves_as_one_and_shows_what_the_rail_picks(cx: &mut TestAppCon
     // Dragged onto Properties' tab, the whole side panel joins that group, in front.
     let properties_tab = center_of(visual, dock_tab("Properties"));
     drag_tab(visual, "Side", properties_tab);
-    assert_eq!(group(visual, PanelId::Properties), vec![PanelId::Side, PanelId::Properties]);
+    assert_eq!(group(visual, PanelId::Properties), vec![PanelId::Side, PanelId::Properties, PanelId::Mixer]);
     assert!(showing(visual, PanelId::Libraries), "still showing what the rail picked");
 
     // With Properties in front, a rail button brings the side panel forward where it now
@@ -7072,7 +8296,7 @@ fn the_side_panel_moves_as_one_and_shows_what_the_rail_picks(cx: &mut TestAppCon
     render(visual);
     visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.left_panel, LeftPanel::Effects));
     assert!(showing(visual, PanelId::Effects) && !showing(visual, PanelId::Properties));
-    assert_eq!(group(visual, PanelId::Properties), vec![PanelId::Side, PanelId::Properties], "not moved back");
+    assert_eq!(group(visual, PanelId::Properties), vec![PanelId::Side, PanelId::Properties, PanelId::Mixer], "not moved back");
     assert!(tab_title(visual).contains("Effects"));
 
     // Dropped in the middle of the viewer, a panel becomes a tab beside it, in front; its tab
@@ -7114,7 +8338,7 @@ fn the_panel_layout_is_saved_and_comes_back_on_the_next_launch(cx: &mut TestAppC
     visual.update(|_, cx| {
         let ws = again.read(cx);
         assert_eq!(ws.dock_group_of(PanelId::Composition, cx), vec![PanelId::Composition, PanelId::Align]);
-        assert_eq!(ws.dock_group_of(PanelId::Properties, cx), vec![PanelId::Properties]);
+        assert_eq!(ws.dock_group_of(PanelId::Properties, cx), vec![PanelId::Properties, PanelId::Mixer]);
         assert!(ws.showing(PanelId::Align), "with the same tab in front");
     });
 }
@@ -7153,7 +8377,7 @@ fn a_saved_layout_with_old_panel_names_or_from_another_version_still_shows_every
     use crate::workspace::PanelId;
     cx.update(|cx| {
         gpui_kit::init(cx);
-        crate::theme::apply(crate::theme::ThemeName::Dark, crate::theme::Accent::Violet, cx);
+        crate::theme::apply(crate::theme::ThemeName::Obsidian, crate::theme::Accent::Violet, cx);
         crate::workspace::bind_keys(cx);
     });
     // Saved before the side panel was one panel (Project and Libraries as tabs of their own,
@@ -7246,7 +8470,7 @@ fn named_workspaces_are_saved_switched_updated_and_deleted(cx: &mut TestAppConte
     let viewer = dock_content(visual, "Composition");
     drag_tab(visual, "Align", viewer.center());
     save_workspace_as(visual, "Color");
-    assert_eq!(workspace_menu_names(), vec!["Standard".to_owned(), "✓Color".to_owned()]);
+    assert_eq!(workspace_menu_names(), ["Standard", "Color Correction", "Audio Editing", "✓Color"].map(String::from));
     assert_eq!(crate::app_settings::load().current_workspace.as_deref(), Some("Color"));
     // A name already in use is refused, and the dialog stays open.
     save_workspace_as(visual, "color");
@@ -7283,7 +8507,7 @@ fn named_workspaces_are_saved_switched_updated_and_deleted(cx: &mut TestAppConte
     click_label(visual, "Delete");
     render(visual);
     assert!(crate::app_settings::load().saved_workspaces.is_empty());
-    assert_eq!(workspace_menu_names(), vec!["✓Standard".to_owned()]);
+    assert_eq!(workspace_menu_names(), ["✓Standard", "Color Correction", "Audio Editing"].map(String::from));
     assert_eq!(group(visual, PanelId::Composition), vec![PanelId::Composition, PanelId::Align], "panels stay where they are");
     // Standard can't be updated or deleted: the menu items are off.
     let window_menu = crate::workspace::menus().into_iter().find(|menu| menu.name == "Window").unwrap();
@@ -7303,7 +8527,7 @@ fn named_workspaces_and_the_pick_last_between_launches_and_unreadable_ones_fall_
 
     // The next launch remembers Color, picked, with its layout on screen.
     let (again, visual) = open_window(cx, false);
-    assert_eq!(workspace_menu_names(), vec!["Standard".to_owned(), "✓Color".to_owned()]);
+    assert_eq!(workspace_menu_names(), ["Standard", "Color Correction", "Audio Editing", "✓Color"].map(String::from));
     visual.update(|_, cx| assert_eq!(again.read(cx).dock_group_of(PanelId::Composition, cx), vec![PanelId::Composition, PanelId::Align]));
 
     // A saved workspace from a newer Studio (or damaged) can't be read: switching to it shows
@@ -7318,4 +8542,1197 @@ fn named_workspaces_and_the_pick_last_between_launches_and_unreadable_ones_fall_
     switch_workspace(visual, Some("Future"));
     visual.update(|_, cx| assert_eq!(again.read(cx).dock_group_of(PanelId::Align, cx), vec![PanelId::Align], "Standard shown"));
     assert_eq!(crate::app_settings::load().current_workspace, None);
+}
+
+#[gpui_kit::test]
+fn a_tabs_grip_opens_the_panel_menu_on_a_click_and_moves_the_panel_on_a_drag(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
+    let (workspace, visual) = open(cx);
+    let grip = |panel: &str| ElementId::Name(format!("dock-tab-menu:{panel}").into());
+
+    // A click on the grip opens the menu; Maximize Panel gives the timeline the whole dock.
+    let before = dock_content(visual, "Timeline");
+    visual.update(|window, cx| window.click(grip("Timeline"), cx));
+    render(visual);
+    click_label(visual, "Maximize Panel");
+    render(visual);
+    let maximized = dock_content(visual, "Timeline");
+    assert!(maximized.size.height > before.size.height + px(100.0), "the timeline grew: {before:?} to {maximized:?}");
+
+    // The same menu puts it back.
+    visual.update(|window, cx| window.click(grip("Timeline"), cx));
+    render(visual);
+    click_label(visual, "Restore Panel Size");
+    render(visual);
+    assert_eq!(dock_content(visual, "Timeline").size.height, before.size.height);
+
+    // Dragging the grip carries the panel, like the rest of the tab: dropped on the left part
+    // of the timeline, Align now sits to its left.
+    let from = center_of(visual, grip("Align"));
+    let timeline = dock_content(visual, "Timeline");
+    visual.update(|window, cx| window.drag(from, point(timeline.origin.x + timeline.size.width * 0.1, timeline.center().y), cx));
+    render(visual);
+    visual.update(|_, cx| assert_eq!(workspace.read(cx).dock_group_of(PanelId::Align, cx), vec![PanelId::Align], "a group of its own"));
+    let (align, timeline) = (dock_content(visual, "Align"), dock_content(visual, "Timeline"));
+    assert!(align.right() <= timeline.left() + px(1.0), "left of the timeline: {align:?} {timeline:?}");
+}
+
+#[gpui_kit::test]
+fn a_saved_split_that_was_never_measured_reopens_with_its_panels_sharing_the_space(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::theme::apply(crate::theme::ThemeName::Obsidian, crate::theme::Accent::Lime, cx);
+        crate::workspace::bind_keys(cx);
+    });
+    let tabs = |name: &str| {
+        serde_json::json!({"panel_name": "TabPanel", "info": {"tabs": {"active_index": 0}},
+            "children": [{"panel_name": name, "children": [], "info": {"panel": null}}]})
+    };
+    let split = |axis: usize, sizes: [f64; 2], children: [serde_json::Value; 2]| {
+        serde_json::json!({"panel_name": "StackPanel", "info": {"stack": {"sizes": sizes, "axis": axis}}, "children": children})
+    };
+    // The viewer and the side panel were put side by side and saved before the dock had
+    // measured the new split, so both are recorded at the dock's placeholder width.
+    let unmeasured = split(0, [100.0, 100.0], [tabs("Composition"), tabs("Side")]);
+    let right = split(1, [383.5, 383.5], [unmeasured, tabs("Timeline")]);
+    let layout = serde_json::json!({"version": crate::panels::dock::LAYOUT_VERSION, "center": split(0, [389.0, 1061.0], [tabs("Properties"), right])});
+    crate::app_settings::update(|settings| settings.workspace_layout = Some(layout));
+    let (_, visual) = open_window(cx, false);
+    let (viewer, side) = (dock_content(visual, "Composition"), dock_content(visual, "Side"));
+    assert!((viewer.size.width - side.size.width).abs() < px(4.0), "equal widths: {viewer:?} {side:?}");
+}
+
+#[gpui_kit::test]
+fn a_panel_moved_into_a_new_split_is_saved_at_its_measured_size(cx: &mut TestAppContext) {
+    let (_, visual) = open(cx);
+    // Align dropped on the lower part of the viewer makes a new split of the two.
+    let viewer = dock_content(visual, "Composition");
+    drag_tab(visual, "Align", point(viewer.center().x, viewer.origin.y + viewer.size.height * 0.9));
+    render(visual);
+    // No saved split holds the dock's placeholder size for every panel in it.
+    fn splits(state: &serde_json::Value, found: &mut Vec<Vec<f64>>) {
+        if let Some(sizes) = state["info"]["stack"]["sizes"].as_array() {
+            found.push(sizes.iter().filter_map(serde_json::Value::as_f64).collect());
+        }
+        for child in state["children"].as_array().into_iter().flatten() {
+            splits(child, found);
+        }
+    }
+    let saved = crate::app_settings::load().workspace_layout.expect("the move was saved");
+    let mut found = Vec::new();
+    splits(&saved["center"], &mut found);
+    assert!(!found.iter().any(|sizes| sizes.iter().all(|size| *size == 100.0)), "no split left at the placeholder size: {found:?}");
+}
+
+#[gpui_kit::test]
+fn the_color_and_audio_workspaces_rearrange_the_panels_and_cannot_be_changed(cx: &mut TestAppContext) {
+    use crate::workspace::PanelId;
+    let (workspace, visual) = open(cx);
+    let standard = (dock_content(visual, "Composition"), dock_content(visual, "Timeline"));
+
+    // Color Correction: a bigger viewer over a shorter timeline, and Properties on its Color tab.
+    switch_workspace(visual, Some("Color Correction"));
+    let (viewer, timeline) = (dock_content(visual, "Composition"), dock_content(visual, "Timeline"));
+    assert!(viewer.size.height > standard.0.size.height && timeline.size.height < standard.1.size.height, "{viewer:?} {timeline:?}");
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        assert_eq!(ws.ui.tab(PanelId::Properties), 2, "the Color tab");
+        assert_eq!(ws.dock_group_of(PanelId::Properties, cx), vec![PanelId::Properties, PanelId::Align, PanelId::Mixer]);
+    });
+    assert!(workspace_menu_names().contains(&"✓Color Correction".to_owned()));
+    assert_eq!(crate::app_settings::load().workspace_layout, None, "a built-in arrangement isn't saved as the user's own");
+
+    // Audio Editing: the timeline is taller than the viewer.
+    switch_workspace(visual, Some("Audio Editing"));
+    let (viewer, timeline) = (dock_content(visual, "Composition"), dock_content(visual, "Timeline"));
+    assert!(timeline.size.height > viewer.size.height * 1.5, "{viewer:?} {timeline:?}");
+    assert!(workspace_menu_names().contains(&"✓Audio Editing".to_owned()));
+
+    // Built-in workspaces can't be updated: the saved list stays empty, and it says why.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::UpdateWorkspace), cx));
+    render(visual);
+    assert!(visual.update(|window, cx| !window.notifications(cx).is_empty()), "it says why not");
+    assert!(crate::app_settings::load().saved_workspaces.is_empty());
+
+    // A new window opens in the same built-in workspace.
+    let (_, visual) = open_window(cx, false);
+    let (viewer, timeline) = (dock_content(visual, "Composition"), dock_content(visual, "Timeline"));
+    assert!(timeline.size.height > viewer.size.height * 1.5, "still Audio Editing: {viewer:?} {timeline:?}");
+}
+
+#[gpui_kit::test]
+fn a_new_project_files_its_composition_in_exports_and_colors_its_folders(cx: &mut TestAppContext) {
+    use studio_core::model::{LabelColor, ProjectItemKind};
+    let (workspace, visual) = open(cx);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.new_project(&["Footage".to_owned(), "Music".to_owned()], Default::default())));
+    visual.update(|_, cx| {
+        let project = &workspace.read(cx).state.project;
+        let exports = studio_core::folders::top_folder(project, studio_core::folders::EXPORTS_FOLDER).expect("an Exports folder");
+        let comp = project.items.iter().find(|item| item.kind == ProjectItemKind::Composition).expect("the first composition");
+        assert_eq!(comp.parent, Some(exports), "the composition is in Exports");
+        assert_eq!(comp.label, project.item(exports).unwrap().label, "in its color");
+        let mut labels: Vec<LabelColor> = project.items.iter().filter(|item| item.kind == ProjectItemKind::Folder).map(|folder| folder.label).collect();
+        assert!(!labels.contains(&LabelColor::None));
+        let count = labels.len();
+        labels.sort_by_key(|label| label.name());
+        labels.dedup();
+        assert_eq!(labels.len(), count, "every folder a different color");
+    });
+}
+
+#[gpui_kit::test]
+fn a_selected_layer_whose_position_moves_shows_its_motion_path_in_the_viewer(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let path = |layer: Id| ("motion-path", layer.0 as usize);
+    // Nothing selected: no path, though the title's position is animated.
+    assert!(visual.update(|window, _| window.try_find(path(TITLE))).is_none());
+
+    // The title, which moves between two position keyframes, shows its path once selected
+    // (with the playhead on it, as for its other handles).
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_current_frame(60);
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find(path(TITLE))).is_some(), "the selected title's motion path is drawn");
+
+    // A selected layer that stays put shows none.
+    let still = visual.update(|_, cx| workspace.read(cx).state.composition().layers.iter().find(|layer| layer.transform.as_ref().is_some_and(|transform| !transform.position.is_animated())).map(|layer| layer.id)).expect("a layer that doesn't move");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(still, false);
+        cx.notify();
+    }));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find(path(TITLE))).is_none() && visual.update(|window, _| window.try_find(path(still))).is_none());
+}
+
+#[gpui_kit::test]
+fn composition_tabs_switch_close_and_make_new_ones(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let main = visual.update(|_, cx| workspace.read(cx).state.active_comp);
+    // The + makes a new composition, which opens in a tab of its own.
+    visual.update(|window, cx| window.click("comp-tab-new", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("comp-settings-ok", cx));
+    render(visual);
+    let made = visual.update(|_, cx| workspace.read(cx).state.active_comp);
+    assert_ne!(made, main);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.tabs()), vec![main, made]);
+    // Clicking the first tab shows that composition again.
+    visual.update(|window, cx| window.click(gpui_kit::ElementId::Name(format!("comp-tab:{}", main.0).into()), cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.active_comp), main);
+    // Its × closes it; the new composition shows, and stays the only tab, with no × to close it.
+    visual.update(|window, cx| window.click(gpui_kit::ElementId::Name(format!("comp-tab-close:{}", main.0).into()), cx));
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!((state.active_comp, state.tabs()), (made, vec![made]));
+        assert!(state.project.composition(main).is_some(), "the closed tab's composition is still in the project");
+    });
+    assert!(visual.update(|window, _| window.try_find(gpui_kit::ElementId::Name(format!("comp-tab-close:{}", made.0).into())).is_none()), "the last tab can't be closed");
+}
+
+#[gpui_kit::test]
+fn asking_to_animate_the_current_layer_animates_the_selected_one_even_a_full_frame_one(cx: &mut TestAppContext) {
+    use studio_core::animation::Vec2;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // A design with a headline under a full-frame panel, which is selected.
+    let (headline, panel) = visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let settings = studio_core::edit::CompositionSettings { name: "Poster".into(), width: 1080, height: 1920, frame_rate: studio_core::time::FrameRate::new(30, 1), duration_frames: 300, background: studio_core::model::Rgba::hex(0x222222) };
+        ws.state.create_composition(&settings).unwrap();
+        let comp = ws.state.composition().id;
+        let headline = ws.state.add_text_layer("Half Off", Vec2::new(540.0, 600.0)).unwrap();
+        let style = studio_core::model::ShapeStyle::new(studio_core::model::ShapeKind::Rectangle);
+        let panel = studio_core::edit::add_shape_layer(&mut ws.state.project, comp, style, Vec2::new(1080.0, 1920.0), Vec2::new(540.0, 960.0), 0).unwrap();
+        ws.state.select_layer(panel, false);
+        (headline, panel)
+    }));
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.simulate_input("animate the current layer");
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    let reply = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().map(|message| message.text.clone()).unwrap_or_default());
+    assert!(reply.starts_with("Done: I animated the selection, 1 layer"), "{reply}");
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert!(state.composition().layer(panel).unwrap().animation.enter.is_some(), "the selected panel comes in");
+        assert!(state.composition().layer(headline).unwrap().animation.is_none(), "nothing else is touched");
+    });
+}
+
+#[gpui_kit::test]
+fn iris_settings_set_her_usual_feel_and_open_from_her_panel(cx: &mut TestAppContext) {
+    use studio_core::animation::Vec2;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let settings = studio_core::edit::CompositionSettings { name: "Poster".into(), width: 1080, height: 1920, frame_rate: studio_core::time::FrameRate::new(30, 1), duration_frames: 300, background: studio_core::model::Rgba::hex(0x222222) };
+        ws.state.create_composition(&settings).unwrap();
+        ws.state.add_text_layer("Big News", Vec2::new(540.0, 600.0)).unwrap();
+        ws.state.clear_selection();
+    }));
+    // Her panel's gear shows "All Iris Settings…", which opens Settings on her page.
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("assistant-settings", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("assistant-all-settings", cx));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("settings-assistant-name").is_some()), "Settings opened on Iris's page");
+    // Her usual feel, picked from its menu, is remembered.
+    visual.update(|window, cx| window.click("assistant-page-style", cx));
+    render(visual);
+    click_label(visual, "Bouncy");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.settings.assistant_style), studio_core::auto_animate::Style::Bouncy);
+    assert_eq!(crate::app_settings::load().assistant_style, studio_core::auto_animate::Style::Bouncy);
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    // Asked to animate without saying how, she uses it.
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.simulate_input("animate this");
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    let reply = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().map(|message| message.text.clone()).unwrap_or_default());
+    assert!(reply.contains("in a bouncy style"), "{reply}");
+}
+
+#[gpui_kit::test]
+fn iris_follows_timing_and_motion_instructions_typed_in_everyday_words(cx: &mut TestAppContext) {
+    use studio_core::animation::Vec2;
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let title = visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let settings = studio_core::edit::CompositionSettings { name: "Promo".into(), width: 1920, height: 1080, frame_rate: studio_core::time::FrameRate::new(30, 1), duration_frames: 300, background: studio_core::model::Rgba::hex(0x222222) };
+        ws.state.create_composition(&settings).unwrap();
+        let title = ws.state.add_text_layer("Half Off", Vec2::new(960.0, 540.0)).unwrap();
+        ws.state.select_layer(title, false);
+        title
+    }));
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    let ask = |visual: &mut VisualTestContext, message: &str| {
+        visual.update(|window, cx| window.click("assistant-ask", cx));
+        visual.simulate_input(message);
+        visual.update(|window, cx| window.press("enter", cx));
+        render(visual);
+        visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().map(|message| message.text.clone()).unwrap_or_default())
+    };
+    let reply = ask(visual, "I want this layer to start at 5s and last for 2 seconds. I want it to fade in.");
+    assert_eq!(reply, "Done: “Half Off” now starts at 5s and lasts 2s (until 7s) and fades in over 0.6s. I put “Half Off” on a track of its own, so the main track's clips stay packed together. The playhead is at its start, and one Undo takes it all back.");
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let layer = state.composition().layer(title).unwrap();
+        assert_eq!((layer.in_frame, layer.out_frame), (150, 210));
+        assert!(layer.animation.enter.is_some());
+        assert_eq!(state.current_frame, 150, "the playhead waits at its start");
+    });
+    // More in other words: a way out, a slide and a cut.
+    let reply = ask(visual, "slide it out to the right over half a second");
+    assert!(reply.contains("slides out to the right over 0.5s"), "{reply}");
+    let reply = ask(visual, "cut it at 6s");
+    assert!(reply.contains("cut in two at 6s"), "{reply}");
+    // One Undo takes back the last instruction.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Undo), cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), 1, "the cut is undone");
+    // A question about it is answered as a question, not done.
+    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layer(title).unwrap().clone());
+    ask(visual, "how do I fade in?");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(title).unwrap().clone()), before);
+}
+
+/// Opens Iris's panel on a 20-second, 30 fps composition of its own holding a badge (a small
+/// ellipse) under a title (text), with the title selected. Returns the title and the badge.
+fn iris_scene(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> (Id, Id) {
+    use studio_core::animation::Vec2;
+    tall_window(visual);
+    let layers = visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let settings = studio_core::edit::CompositionSettings { name: "Promo".into(), width: 1920, height: 1080, frame_rate: studio_core::time::FrameRate::new(30, 1), duration_frames: 600, background: studio_core::model::Rgba::hex(0x222222) };
+        ws.state.create_composition(&settings).unwrap();
+        let comp = ws.state.composition().id;
+        let style = studio_core::model::ShapeStyle::new(studio_core::model::ShapeKind::Ellipse);
+        let badge = studio_core::edit::add_shape_layer(&mut ws.state.project, comp, style, Vec2::new(100.0, 100.0), Vec2::new(400.0, 300.0), 0).unwrap();
+        ws.state.project.composition_mut(comp).unwrap().layer_mut(badge).unwrap().name = "Badge".into();
+        let title = ws.state.add_text_layer("Half Off", Vec2::new(960.0, 540.0)).unwrap();
+        ws.state.select_layer(title, false);
+        (title, badge)
+    }));
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    layers
+}
+
+/// Types `message` to Iris and returns the text of her last reply.
+fn tell_iris(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, message: &str) -> String {
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.simulate_input(message);
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().map(|message| message.text.clone()).unwrap_or_default())
+}
+
+#[gpui_kit::test]
+fn iris_does_housekeeping_and_several_steps_as_one_undo_step(cx: &mut TestAppContext) {
+    use studio_core::model::{LayerContent, Rgba};
+    let (workspace, visual) = open(cx);
+    let (title, badge) = iris_scene(&workspace, visual);
+    let layers = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    let fill = |visual: &mut VisualTestContext, layer: Id| visual.update(|_, cx| match &workspace.read(cx).state.composition().layer(layer).unwrap().content {
+        LayerContent::Text { style, .. } => style.fill,
+        _ => None,
+    });
+    let original = fill(visual, title);
+
+    // Three steps in one message: the copy is made, recolored and placed, each answered in turn.
+    let before = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.len());
+    let reply = tell_iris(&workspace, visual, "duplicate it then make it red; put it in the top right corner");
+    assert!(reply.starts_with("Done: “Half Off” is in the top right corner"), "{reply}");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.len()), before + 4, "the message and an answer to each step");
+    assert_eq!(layers(visual), 3);
+    let copy = visual.update(|_, cx| workspace.read(cx).state.selected_layers.clone());
+    assert!(copy.len() == 1 && copy[0] != title, "the copy is selected, so “it” means it");
+    assert_eq!(fill(visual, copy[0]), Some(Rgba::hex(0xe53935)));
+    assert_eq!(fill(visual, title), original, "the original is as it was");
+    let bounds = visual.update(|_, cx| studio_core::align::layer_bounds(workspace.read(cx).state.composition(), copy[0], 0).unwrap());
+    assert!((bounds.max.x - 1920.0).abs() < 0.5 && bounds.min.y.abs() < 0.5, "{bounds:?}");
+    // One Undo takes the whole message back.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Undo), cx));
+    render(visual);
+    assert_eq!(layers(visual), 2);
+
+    // Housekeeping and an instruction in one breath: the copy fades in, not the original.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.select_layer(title, false)));
+    let reply = tell_iris(&workspace, visual, "duplicate it and fade it in");
+    assert!(reply.starts_with("Done: “Half Off” fades in over 0.6s"), "{reply}");
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        let copy = state.composition().layer(state.selected_layers[0]).unwrap();
+        assert!(copy.id != title && copy.animation.enter.is_some());
+        assert!(state.composition().layer(title).unwrap().animation.enter.is_none());
+    });
+
+    // A step that can't be done stops the ones after it, which are named rather than run.
+    let count = layers(visual);
+    let reply = tell_iris(&workspace, visual, "hide the “Nope” layer then delete it");
+    assert_eq!(reply, "I stopped there, so this wasn't run: “delete it”.");
+    assert_eq!(layers(visual), count);
+    // Layers of a kind are meant together, and locked ones are let go of.
+    let reply = tell_iris(&workspace, visual, "select all shapes");
+    assert!(reply.contains("“Badge” is selected"), "{reply}");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.selected_layers.clone()), vec![badge]);
+    tell_iris(&workspace, visual, "lock it");
+    assert!(visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        state.composition().layer(badge).unwrap().switches.locked && state.selected_layers.is_empty()
+    }));
+    // Unlocking everything reaches the locked layer, and only counts the ones that never were.
+    let reply = tell_iris(&workspace, visual, "unlock everything");
+    assert!(reply.contains("is unlocked") && reply.contains("were already unlocked"), "{reply}");
+    assert!(!visual.update(|_, cx| workspace.read(cx).state.composition().layer(badge).unwrap().switches.locked));
+}
+
+#[gpui_kit::test]
+fn iris_understands_replies_that_refer_back(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let (title, badge) = iris_scene(&workspace, visual);
+    let scale = |visual: &mut VisualTestContext, layer: Id| visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().transform.as_ref().unwrap().scale.value.x);
+    let replies = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().unwrap().replies.clone());
+
+    assert!(tell_iris(&workspace, visual, "again").contains("nothing to repeat"));
+    assert!(tell_iris(&workspace, visual, "too much").contains("nothing of mine"));
+    tell_iris(&workspace, visual, "make it bigger");
+    assert_eq!(scale(visual, title), 120.0);
+    assert_eq!(replies(visual), ["Undo that", "More", "Less"]);
+    // More goes further the same way; too much takes that back and goes half as far.
+    tell_iris(&workspace, visual, "more");
+    assert_eq!(scale(visual, title), 144.0);
+    let reply = tell_iris(&workspace, visual, "too much");
+    assert!(reply.starts_with("I took that back and went half as far."), "{reply}");
+    assert_eq!(scale(visual, title), 132.0);
+    // Undo and redo are the app's own, and say what they took back.
+    assert!(tell_iris(&workspace, visual, "undo that").starts_with("Undone"));
+    assert_eq!(scale(visual, title), 120.0);
+    assert!(tell_iris(&workspace, visual, "redo").starts_with("Redone"));
+    assert_eq!(scale(visual, title), 132.0);
+    // The same for another layer, by its name.
+    let reply = tell_iris(&workspace, visual, "same for the badge");
+    assert!(reply.contains("“Badge”"), "{reply}");
+    assert!((scale(visual, badge) - 110.0).abs() < 0.01, "what was last done, half as far, now to the badge");
+    assert!(tell_iris(&workspace, visual, "same for the Nope").contains("couldn't find"));
+    // A short reply offered under the answer sends its words when clicked. (The conversation is
+    // cleared first, so the answer is in view without scrolling.)
+    tell_iris(&workspace, visual, "/clear");
+    tell_iris(&workspace, visual, "make it bigger");
+    assert_eq!(scale(visual, title), 158.4);
+    assert!(visual.update(|window, _| window.try_find("assistant-replies").is_some()));
+    visual.update(|window, cx| window.click(ElementId::Name("assistant-reply-0".into()), cx));
+    render(visual);
+    assert_eq!(scale(visual, title), 132.0, "“Undo that” undid it");
+    // After a change made by hand, too much leaves things alone rather than undo the wrong thing.
+    tell_iris(&workspace, visual, "make it bigger");
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.rename_layer(title, "Renamed by hand")));
+    render(visual);
+    assert!(tell_iris(&workspace, visual, "too much").starts_with("Something has changed since"));
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(title).unwrap().name.clone()), "Renamed by hand");
+}
+
+#[gpui_kit::test]
+fn iris_learns_recipes_and_comes_with_some(cx: &mut TestAppContext) {
+    use studio_core::model::LayerContent;
+    use studio_core::presets::Motion;
+    let (workspace, visual) = open(cx);
+    let (title, _) = iris_scene(&workspace, visual);
+    let taught = || iris::recipes::load(&crate::app_settings::folder().join("iris"), iris::App::Studio);
+    let animation = |visual: &mut VisualTestContext, layer: Id| visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().animation);
+
+    // Taught in a sentence, kept on disk, and run by its name.
+    let reply = tell_iris(&workspace, visual, "teach intro: fade in over a second, then make it pulse");
+    assert!(reply.starts_with("Got it.") && reply.contains("2. make it pulse"), "{reply}");
+    assert_eq!(taught().len(), 1, "saved for next time, in the tests' own folder");
+    tell_iris(&workspace, visual, "intro");
+    assert_eq!(animation(visual, title).enter, Some((Motion::Fade, 1.0)));
+    assert!(animation(visual, title).looping.is_some());
+    assert!(tell_iris(&workspace, visual, "/help").contains("/recipes"));
+    let listed = tell_iris(&workspace, visual, "/recipes");
+    assert!(["intro", "tidy up", "quick title", "social cut", "watch"].iter().all(|name| listed.contains(name)), "{listed}");
+    assert!(tell_iris(&workspace, visual, "teach clear: fade in").contains("already one of my commands"));
+    assert!(tell_iris(&workspace, visual, "forget intro").starts_with("Forgotten"));
+    assert!(taught().is_empty());
+    // A sum is answered on the way, with the composition's frame rate.
+    assert_eq!(tell_iris(&workspace, visual, "2 seconds in frames"), "2 seconds is 60 frames.");
+
+    // Quick title: a text layer that comes in word by word and fades out.
+    let before = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    tell_iris(&workspace, visual, "quick title");
+    let made = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.composition().layers.len(), before + 1);
+        let made = state.composition().layer(state.selected_layers[0]).unwrap();
+        assert!(matches!(&made.content, LayerContent::Text { text, .. } if text == "Title"));
+        made.id
+    });
+    assert!(animation(visual, made).text_in.is_some());
+    assert_eq!(animation(visual, made).exit, Some((Motion::Fade, 0.5)));
+    // The whole recipe is one step for Undo.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Undo), cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), before);
+
+    // Tidy up: gaps are closed on the selected layer's track, and the safe fixes made.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        ws.state.select_layer(title, false);
+        ws.state.composition_mut_for_test().layer_mut(title).unwrap().shift_in_time(45);
+    }));
+    render(visual);
+    tell_iris(&workspace, visual, "tidy up");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(title).unwrap().in_frame), 0);
+
+    // Watch: from the start, playing; and it stops when asked.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.set_current_frame(90)));
+    let reply = tell_iris(&workspace, visual, "watch");
+    assert!(reply.starts_with("Playing from 0:00:00:00"), "{reply}");
+    assert!(visual.update(|_, cx| workspace.read(cx).state.is_playing()));
+    assert!(tell_iris(&workspace, visual, "pause").starts_with("Paused"));
+    assert!(!visual.update(|_, cx| workspace.read(cx).state.is_playing()));
+
+    // Social cut: a vertical copy, with the work area on its first fifteen seconds.
+    let (original, compositions) = visual.update(|_, cx| (workspace.read(cx).state.active_comp, workspace.read(cx).state.project.compositions.len()));
+    tell_iris(&workspace, visual, "social cut");
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.project.compositions.len(), compositions + 1);
+        assert!(state.active_comp != original && (state.composition().width, state.composition().height) == (1080, 1920));
+        assert_eq!((state.work_area.start, state.work_area.end), (0.0, 450.0));
+    });
+    // With Magic Resize switched off the first step fails, so the second isn't run.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        ws.state.open_composition(original);
+        ws.ui.settings.set_feature(crate::features::Feature::MagicResize, false);
+    }));
+    render(visual);
+    let reply = tell_iris(&workspace, visual, "social cut");
+    assert!(reply.starts_with("I stopped there") && reply.contains("set the work area"), "{reply}");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.work_area.end), 600.0);
+}
+
+#[gpui_kit::test]
+fn iris_moves_the_playhead_and_changes_the_composition_when_asked(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    iris_scene(&workspace, visual);
+    let frame = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.current_frame);
+    assert!(tell_iris(&workspace, visual, "go to 5s").contains("frame 150"));
+    assert_eq!(frame(visual), 150);
+    // Several chores in a row, and “again” repeats the last one.
+    tell_iris(&workspace, visual, "add a marker called Chorus, then go to the start; go to the next marker");
+    assert_eq!(frame(visual), 150);
+    tell_iris(&workspace, visual, "forward 10 frames");
+    tell_iris(&workspace, visual, "again");
+    assert_eq!(frame(visual), 170);
+    // The composition's own settings, in one undo step each.
+    let reply = tell_iris(&workspace, visual, "make the composition 10 seconds long");
+    assert!(reply.contains("10 seconds long (300 frames)"), "{reply}");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().duration_frames), 300);
+    assert!(tell_iris(&workspace, visual, "undo that").starts_with("Undone"));
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().duration_frames), 600);
+    // Lining layers up and matching their lengths are done as instructions for each.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.select_all_layers()));
+    let reply = tell_iris(&workspace, visual, "line them all up at 2s");
+    assert!(reply.starts_with("Done. Each of") && reply.contains("now starts at 2s"), "{reply}");
+    assert!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.iter().all(|layer| layer.in_frame == 60)));
+    // The check before exporting answers without changing anything.
+    let before = visual.update(|_, cx| workspace.read(cx).state.project.clone());
+    let reply = tell_iris(&workspace, visual, "am I ready to export?");
+    assert!(reply.contains("Fine:") || reply.contains("Worth a look:"), "{reply}");
+    assert!(visual.update(|_, cx| workspace.read(cx).state.project == before));
+}
+
+#[gpui_kit::test]
+fn iris_runs_commands_by_name_puts_typos_right_and_says_when_she_does_not_know(cx: &mut TestAppContext) {
+    use crate::features::Feature;
+    let (workspace, visual) = open(cx);
+    iris_scene(&workspace, visual);
+    let guides = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.guides);
+    let replies = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().unwrap().replies.clone());
+
+    // A command asked for by its name is run, with its key in the reply.
+    assert!(!guides(visual));
+    let reply = tell_iris(&workspace, visual, "guides");
+    assert!(reply.starts_with("Running “Show or hide guides” ("), "{reply}");
+    assert!(guides(visual));
+    tell_iris(&workspace, visual, "show or hide guides");
+    assert!(!guides(visual));
+    // Switched off in Settings, it is explained instead of run.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.settings.set_feature(Feature::Guides, false)));
+    assert_eq!(tell_iris(&workspace, visual, "guides"), "Guides is turned off in Settings ▸ Tools & Features. Turn it on and ask me again.");
+    assert!(!guides(visual));
+    // Commands that put the project or the app away are left to the person.
+    assert!(tell_iris(&workspace, visual, "quit omina motion").starts_with("I leave “Quit Omina Motion”"));
+    assert!(tell_iris(&workspace, visual, "close project").starts_with("I leave “Close project”"));
+    assert!(visual.update(|_, cx| workspace.read(cx).ui.start_screen.is_none()), "the project is still open");
+    // Several that fit equally are offered as replies.
+    assert_eq!(tell_iris(&workspace, visual, "zoom the viewer"), "Which one do you mean?");
+    assert_eq!(replies(visual), ["Zoom the viewer in", "Zoom the viewer out"]);
+
+    // A mistyped request is carried out, saying how it was read.
+    let layers = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    let reply = tell_iris(&workspace, visual, "duplcate it");
+    assert!(reply.starts_with("(I read “duplcate” as “duplicate”.)\nDone:"), "{reply}");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), layers + 1);
+    let reply = tell_iris(&workspace, visual, "make it biger");
+    assert!(reply.starts_with("(I read “biger” as “bigger”.)") && reply.contains("20% bigger"), "{reply}");
+
+    // What nothing understands is said to be unknown, with the nearest help offered.
+    let reply = tell_iris(&workspace, visual, "xylophone marmalade");
+    assert!(reply.starts_with("I don't know that one.") && replies(visual).is_empty(), "{reply}");
+    tell_iris(&workspace, visual, "/clear");
+    let reply = tell_iris(&workspace, visual, "zebra browsers");
+    assert!(reply.starts_with("I don't know that one."), "{reply}");
+    let nearest = replies(visual);
+    assert!(nearest.first().is_some_and(|reply| reply.starts_with("How to: ")), "{nearest:?}");
+    visual.update(|window, cx| window.click(ElementId::Name("assistant-reply-0".into()), cx));
+    render(visual);
+    let answer = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().unwrap().text.clone());
+    assert!(answer.starts_with(nearest[0].trim_start_matches("How to: ")), "{answer}");
+}
+
+#[gpui_kit::test]
+fn iris_reads_requests_joined_by_and_and_carries_the_layer_from_step_to_step(cx: &mut TestAppContext) {
+    use studio_core::model::{LayerContent, Rgba};
+    let (workspace, visual) = open(cx);
+    let (title, badge) = iris_scene(&workspace, visual);
+    let layer = |visual: &mut VisualTestContext, id: Id| visual.update(|_, cx| workspace.read(cx).state.composition().layer(id).unwrap().clone());
+    let select = |visual: &mut VisualTestContext, id: Id| visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.select_layer(id, false)));
+    let replies_since = |visual: &mut VisualTestContext, before: usize| visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.len()) - before - 1;
+    let count = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.len());
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.rename_layer(title, "Headline")));
+
+    // Two readers, two layers: each part goes to the reader that understands it.
+    let before = count(visual);
+    tell_iris(&workspace, visual, "hide the badge and fade the headline layer in");
+    assert_eq!(replies_since(visual, before), 2, "an answer to each part");
+    assert!(!layer(visual, badge).switches.visible && layer(visual, title).animation.enter.is_some());
+    // The step before decides what a step that names no layer means, ahead of the selection:
+    // the badge is selected, but it is the title that is started later and then fades out.
+    select(visual, badge);
+    tell_iris(&workspace, visual, "start the headline layer at 2s and make it red and fade out");
+    let (is_title, is_badge) = (layer(visual, title), layer(visual, badge));
+    assert_eq!(is_title.in_frame, 60);
+    assert!(matches!(&is_title.content, LayerContent::Text { style, .. } if style.fill == Some(Rgba::hex(0xe53935))));
+    assert!(is_title.animation.exit.is_some() && is_badge.animation.exit.is_none() && is_badge.in_frame == 0);
+    // The same with "then" between the steps.
+    select(visual, badge);
+    tell_iris(&workspace, visual, "show the badge then select the headline layer then rotate it 15 degrees");
+    let turn = |visual: &mut VisualTestContext, id: Id| layer(visual, id).transform.as_ref().unwrap().rotation.value;
+    assert_eq!((turn(visual, title), turn(visual, badge)), (15.0, 0.0));
+    // One reader's own list stays one request with one answer, as before.
+    select(visual, title);
+    let before = count(visual);
+    tell_iris(&workspace, visual, "start at 1s and last 2 seconds and fade in");
+    assert_eq!(replies_since(visual, before), 1);
+    assert_eq!((layer(visual, title).in_frame, layer(visual, title).out_frame), (30, 90));
+    let before = count(visual);
+    tell_iris(&workspace, visual, "make it blue and bigger and put it in the top right corner");
+    assert!(matches!(&layer(visual, title).content, LayerContent::Text { style, .. } if style.fill == Some(Rgba::hex(0x1e88e5))));
+    assert_eq!(layer(visual, title).transform.as_ref().unwrap().scale.value.x, 120.0);
+    assert!(replies_since(visual, before) >= 1);
+    // A name with an "and" of its own stays whole, unless what follows plainly asks for something.
+    tell_iris(&workspace, visual, "rename it to Salt and Pepper");
+    assert_eq!(layer(visual, title).name, "Salt and Pepper");
+    tell_iris(&workspace, visual, "rename it to Hero and lock it");
+    assert!(layer(visual, title).name == "Hero" && layer(visual, title).switches.locked);
+    // Two questions are both answered, and a part nothing understands leaves the request whole.
+    let before = count(visual);
+    tell_iris(&workspace, visual, "how long is the video and what is the frame rate?");
+    assert_eq!(replies_since(visual, before), 2);
+    // The whole message is one step for Undo, however it was joined.
+    tell_iris(&workspace, visual, "unlock everything");
+    select(visual, title);
+    let layers = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    tell_iris(&workspace, visual, "duplicate it and make it 50% opacity and move it later");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), layers + 1);
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Undo), cx));
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), layers);
+}
+
+#[gpui_kit::test]
+fn iris_takes_a_stated_step_when_no_amount_is_said(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let (title, _) = iris_scene(&workspace, visual);
+    let span = |visual: &mut VisualTestContext| visual.update(|_, cx| {
+        let layer = workspace.read(cx).state.composition().layer(title).unwrap().clone();
+        (layer.in_frame, layer.out_frame)
+    });
+    let replies = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().unwrap().replies.clone());
+    tell_iris(&workspace, visual, "start at 2s and last 4 seconds");
+    assert_eq!(span(visual), (60, 180));
+
+    // Longer and shorter by a second, said in the reply, with more and less going on from there.
+    let reply = tell_iris(&workspace, visual, "make it longer");
+    assert!(reply.contains("now lasts 5s") && reply.contains("That is 1 second longer than it was."), "{reply}");
+    assert_eq!((span(visual), replies(visual)), ((60, 210), vec!["Undo that".to_owned(), "More".to_owned(), "Less".to_owned()]));
+    tell_iris(&workspace, visual, "more");
+    assert_eq!(span(visual), (60, 240));
+    let reply = tell_iris(&workspace, visual, "too much");
+    assert!(reply.starts_with("I took that back and went half as far."), "{reply}");
+    assert_eq!(span(visual), (60, 225));
+    tell_iris(&workspace, visual, "make it 15 frames shorter");
+    assert_eq!(span(visual), (60, 210));
+    // Later and earlier by half a second.
+    let reply = tell_iris(&workspace, visual, "move it later");
+    assert!(reply.contains("0.5 seconds later"), "{reply}");
+    assert_eq!(span(visual), (75, 225));
+    tell_iris(&workspace, visual, "a bit earlier");
+    assert_eq!(span(visual), (69, 219));
+    // The way in, slower and faster, from the time it takes now.
+    tell_iris(&workspace, visual, "fade in over a second");
+    let enter = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(title).unwrap().animation.enter.map(|(_, seconds)| seconds));
+    let reply = tell_iris(&workspace, visual, "make the fade slower");
+    assert!(reply.contains("takes 1.50s instead of 1.00s"), "{reply}");
+    assert_eq!(enter(visual), Some(1.5));
+    tell_iris(&workspace, visual, "less");
+    assert_eq!(enter(visual), Some(1.25));
+    assert!(tell_iris(&workspace, visual, "make the outro faster").contains("no way out"));
+    // The composition, by a second when no amount is said.
+    let reply = tell_iris(&workspace, visual, "make the composition longer");
+    assert!(reply.contains("21 seconds long") && reply.contains("1 second longer"), "{reply}");
+    tell_iris(&workspace, visual, "shorten the comp by 2 seconds");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().duration_frames), 570);
+    // A layer's start and end can be gone to by its name.
+    assert!(tell_iris(&workspace, visual, "go to the end of “Half Off”").contains("frame 218"));
+    tell_iris(&workspace, visual, "jump to the start of it");
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.current_frame), 69);
+    // Vague about what, rather than how much: a question with the likely meanings to pick from.
+    let reply = tell_iris(&workspace, visual, "make it more dramatic");
+    assert!(reply.starts_with("More dramatic in which way?"), "{reply}");
+    assert!(replies(visual).contains(&"Make it pulse".to_owned()));
+    assert_eq!(span(visual), (69, 219), "nothing was guessed at");
+    // Speed is a video clip's; for anything else the reply says what to ask instead.
+    assert!(tell_iris(&workspace, visual, "slow it down").contains("make the fade slower"));
+}
+
+#[gpui_kit::test]
+fn iris_gives_each_part_of_a_request_to_the_reader_that_understands_it(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|window, cx| window.click("rail-assistant", cx));
+    render(visual);
+    // The sample project: a clip with sound is selected, and the title is named in the request.
+    let clip = visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        let clip = ws.state.composition().layers.iter().find(|layer| ws.state.has_sound(layer.id) && layer.switches.audio).expect("the sample has sound").id;
+        ws.state.select_layer(clip, false);
+        clip
+    }));
+    let layer = |visual: &mut VisualTestContext, id: Id| visual.update(|_, cx| workspace.read(cx).state.composition().layer(id).unwrap().clone());
+    tell_iris(&workspace, visual, "mute it and fade the title layer in");
+    assert!(!layer(visual, clip).switches.audio, "the sound chore took its part");
+    assert!(layer(visual, TITLE).animation.enter.is_some(), "and the instruction its own");
+    // "It" after duplicating is the copy: the copy is the one heard again, not the original.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.select_layer(clip, false)));
+    let reply = tell_iris(&workspace, visual, "duplicate it and unmute it");
+    assert!(reply.contains("heard again"), "{reply}");
+    let copy = visual.update(|_, cx| workspace.read(cx).state.selected_layers[0]);
+    assert!(copy != clip && layer(visual, copy).switches.audio && !layer(visual, clip).switches.audio);
+    // Two layers named, one reader: each is done to its own layer.
+    tell_iris(&workspace, visual, "hide the logo and lock the title");
+    let logo = visual.update(|_, cx| workspace.read(cx).state.composition().layers.iter().find(|layer| layer.name == "logo.png").unwrap().id);
+    assert!(!layer(visual, logo).switches.visible && !layer(visual, logo).switches.locked);
+    assert!(layer(visual, TITLE).switches.locked && layer(visual, TITLE).switches.visible);
+}
+
+/// Lets the exports Iris queued run to their end, as the editor's checks on them would.
+fn finish_exports(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) {
+    let started = std::time::Instant::now();
+    while visual.update(|_, cx| workspace.read(cx).ui.export_queue.running) {
+        assert!(started.elapsed().as_secs() < 120, "the exports never finished");
+        wait_for_export(workspace, visual);
+        visual.executor().advance_clock(std::time::Duration::from_millis(100));
+        visual.run_until_parked();
+    }
+    render(visual);
+}
+
+#[gpui_kit::test]
+fn iris_exports_straight_away_when_the_request_says_enough(cx: &mut TestAppContext) {
+    let folder = scratch_folder("iris-export");
+    let (workspace, visual) = open(cx);
+    iris_scene(&workspace, visual);
+    // A saved project, so exports go to the Exports folder beside it; short and small, so
+    // the test is quick.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        ws.state.mark_saved(folder.join("Promo.studio"), false);
+        for composition in &mut ws.state.project.compositions {
+            (composition.width, composition.height, composition.duration_frames) = (320, 180, 12);
+        }
+        let whole = ws.state.composition_settings();
+        ws.state.update_composition(&whole).unwrap();
+        ws.state.set_work_area(studio_core::time::FrameRange::new(0.0, 6.0));
+    }));
+    let exports = folder.join(studio_core::folders::EXPORTS_FOLDER);
+    let last = |visual: &mut VisualTestContext| visual.update(|_, cx| {
+        let message = workspace.read(cx).ui.assistant.messages.last().unwrap();
+        (message.text.clone(), message.replies.clone())
+    });
+
+    // Plain "export" opens the Export dialog, as the command does.
+    assert!(tell_iris(&workspace, visual, "export").starts_with("Running “Export”"));
+    visual.update(|window, cx| {
+        assert!(window.has_active_dialog(cx));
+        window.close_dialog(cx);
+    });
+    render(visual);
+    assert!(!exports.exists(), "nothing is written by opening the dialog");
+
+    // A format is enough to start one: the reply says where it will land, and the conversation
+    // hears when the file is there.
+    let gif = exports.join("Promo.gif");
+    let reply = tell_iris(&workspace, visual, "export as gif");
+    assert!(reply.starts_with("Exporting Promo as Animated GIF, the work area") && reply.contains(&gif.display().to_string()), "{reply}");
+    assert!(!gif.exists(), "it is only said to be written once it is");
+    finish_exports(&workspace, visual);
+    assert_eq!(last(visual), (format!("Written: {}", gif.display()), vec!["Show it in the Finder".to_owned()]));
+    assert!(std::fs::metadata(&gif).is_ok_and(|file| file.len() > 0));
+    // Asked again, the first file is kept and the new one gets a number.
+    let first = std::fs::read(&gif).unwrap();
+    tell_iris(&workspace, visual, "export the whole composition as a gif and as a png sequence");
+    finish_exports(&workspace, visual);
+    assert_eq!(std::fs::read(&gif).unwrap(), first, "never written over");
+    assert!(exports.join("Promo 2.gif").exists());
+    assert_eq!(std::fs::read_dir(exports.join("Promo")).unwrap().count(), 12, "a picture for each frame of the whole composition");
+
+    // One frame as a picture.
+    let reply = tell_iris(&workspace, visual, "save this frame as a PNG");
+    let picture = exports.join("Promo frame 0.png");
+    assert!(reply.contains(&picture.display().to_string()), "{reply}");
+    visual.run_until_parked();
+    render(visual);
+    assert_eq!(last(visual).0, format!("Written: {}", picture.display()));
+    assert_eq!(image::image_dimensions(&picture).unwrap(), (320, 180));
+
+    // Every composition at once: the count and the folder are said, and each file is written.
+    let compositions = visual.update(|_, cx| workspace.read(cx).state.project.compositions.iter().map(|composition| composition.name.clone()).collect::<Vec<_>>());
+    assert!(compositions.len() >= 2);
+    let reply = tell_iris(&workspace, visual, "export all compositions as gif");
+    assert!(reply.starts_with(&format!("Exporting {} compositions, each whole: {} files into {}", compositions.len(), compositions.len(), exports.display())), "{reply}");
+    finish_exports(&workspace, visual);
+    assert!(exports.join("Promo 3.gif").exists() && compositions.iter().filter(|name| *name != "Promo").all(|name| exports.join(format!("{name}.gif")).exists()));
+
+    // Switched off in Settings, exporting is explained instead; and nothing has been revealed
+    // without being asked.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.settings.set_feature(crate::features::Feature::Export, false)));
+    assert!(tell_iris(&workspace, visual, "export as mp4").starts_with("Export is turned off in Settings"));
+    assert!(!exports.join("Promo.mp4").exists());
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// The value in Iris's chat field.
+fn iris_field(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) -> String {
+    visual.update(|_, cx| workspace.read(cx).ui.assistant.ask.as_ref().map(|(input, _)| input.read(cx).value().to_string()).unwrap_or_default())
+}
+
+/// Iris's messages since `before`, joined, to look for what she said.
+fn iris_said_since(workspace: &Entity<Workspace>, visual: &mut VisualTestContext, before: usize) -> String {
+    visual.update(|_, cx| workspace.read(cx).ui.assistant.messages[before..].iter().filter(|message| !message.from_person).map(|message| message.text.clone()).collect::<Vec<_>>().join("\n"))
+}
+
+/// A small picture file in `folder`, for importing and handing over.
+fn small_picture(folder: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = folder.join(name);
+    image::RgbImage::from_pixel(8, 6, image::Rgb([200, 40, 40])).save(&path).unwrap();
+    path
+}
+
+#[gpui_kit::test]
+fn iris_runs_recipes_from_a_shortcut_a_button_and_a_dry_run_changes_nothing(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let (title, _) = iris_scene(&workspace, visual);
+    let looping = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().layer(title).unwrap().animation.looping.is_some());
+    let count = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.len());
+
+    tell_iris(&workspace, visual, "teach glow: make it pulse");
+    // Asked what it would do, it lists the steps and does nothing.
+    let reply = tell_iris(&workspace, visual, "what would glow do?");
+    assert!(reply.contains("make it pulse") && !looping(visual), "{reply}");
+    // A shortcut that is one of Motion's own is refused; another is bound at once.
+    assert!(tell_iris(&workspace, visual, "give glow the shortcut ⌘S").to_lowercase().contains("already"));
+    let reply = tell_iris(&workspace, visual, "give glow the shortcut command shift G");
+    assert!(reply.contains("⇧⌘G"), "{reply}");
+    let before = count(visual);
+    visual.update(|window, cx| window.press("shift-cmd-g", cx));
+    render(visual);
+    assert!(looping(visual), "the shortcut ran it");
+    assert!(iris_said_since(&workspace, visual, before).starts_with("Running “glow”, from its shortcut ⇧⌘G."));
+    // One Undo takes back what the shortcut did.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Undo), cx));
+    render(visual);
+    assert!(!looping(visual));
+    // A button at the top of the chat runs it too.
+    assert!(visual.update(|window, _| window.try_find("assistant-recipe-buttons").is_none()));
+    tell_iris(&workspace, visual, "put glow on the toolbar");
+    render(visual);
+    visual.update(|window, cx| window.click(("assistant-recipe-button", 0_usize), cx));
+    render(visual);
+    assert!(looping(visual), "the button ran it");
+    // Forgotten, its shortcut stops working.
+    tell_iris(&workspace, visual, "forget glow");
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Undo), cx));
+    render(visual);
+    visual.update(|window, cx| window.press("shift-cmd-g", cx));
+    render(visual);
+    assert!(!looping(visual), "an unbound shortcut does nothing");
+
+    // A recipe Motion comes with that takes a value: the value arrives whole, even with an "and".
+    let layers = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    tell_iris(&workspace, visual, "lower third Salt and Pepper");
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.composition().layers.len(), layers + 1);
+        let made = state.composition().layer(state.selected_layers[0]).unwrap();
+        assert!(matches!(&made.content, LayerContent::Text { text, .. } if text == "Salt and Pepper"));
+        assert!(made.animation.enter.is_some(), "it slides in");
+    });
+}
+
+#[gpui_kit::test]
+fn iris_runs_recipes_at_the_moments_they_are_set_for(cx: &mut TestAppContext) {
+    let folder = scratch_folder("iris-moments");
+    let (workspace, visual) = open(cx);
+    iris_scene(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.mark_saved(folder.join("Promo.studio"), false)));
+    let markers = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.composition().markers.iter().map(|marker| marker.label.clone()).collect::<Vec<_>>());
+    let count = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.len());
+    let exports = folder.join(studio_core::folders::EXPORTS_FOLDER);
+
+    // Before each export: the recipe runs first, and its own export doesn't set it off again.
+    tell_iris(&workspace, visual, "teach stamp: add a marker called Shipped at 1s, then save this frame as a PNG");
+    tell_iris(&workspace, visual, "run stamp before export");
+    let before = count(visual);
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::SaveFrame), cx));
+    visual.run_until_parked();
+    render(visual);
+    assert_eq!(markers(visual), ["Shipped"]);
+    assert!(iris_said_since(&workspace, visual, before).contains("Running “stamp”, from before each export."));
+    let pictures = std::fs::read_dir(&exports).unwrap().count();
+    assert_eq!(pictures, 2, "the frame asked for, and the recipe's own, once");
+    // Its changes are one step for Undo of their own.
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Undo), cx));
+    render(visual);
+    assert!(markers(visual).is_empty());
+    tell_iris(&workspace, visual, "forget stamp");
+
+    // A step that fails is said, and the export still goes ahead.
+    tell_iris(&workspace, visual, "teach look out: hide the “Nope” layer");
+    tell_iris(&workspace, visual, "run look out before export");
+    let before = count(visual);
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::SaveFrame), cx));
+    visual.run_until_parked();
+    assert!(iris_said_since(&workspace, visual, before).contains("“look out” didn't finish. The export goes ahead all the same."));
+    assert_eq!(std::fs::read_dir(&exports).unwrap().count(), pictures + 1, "the frame was saved all the same");
+    tell_iris(&workspace, visual, "forget look out");
+
+    // Before each save, what the recipe changes is in the file.
+    tell_iris(&workspace, visual, "teach saved mark: add a marker called Saved at 2s");
+    tell_iris(&workspace, visual, "run saved mark before saving");
+    visual.update(|window, cx| window.dispatch_action(Box::new(crate::workspace::Save), cx));
+    visual.run_until_parked();
+    let written = std::fs::read_to_string(folder.join("Promo.studio")).unwrap();
+    assert!(written.contains("\"Saved\""), "the marker was saved");
+    tell_iris(&workspace, visual, "forget saved mark");
+
+    // When something is opened, and after an import.
+    tell_iris(&workspace, visual, "teach opened: go to the end");
+    tell_iris(&workspace, visual, "run opened when I open a project");
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.open_file(folder.join("Promo.studio"), window, cx)));
+    render(visual);
+    let end = visual.update(|_, cx| workspace.read(cx).state.composition().duration_frames - 1);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.current_frame), end, "it ran on opening");
+    tell_iris(&workspace, visual, "teach brought in: add a marker called Imported at 0");
+    tell_iris(&workspace, visual, "run brought in after import");
+    let picture = small_picture(&folder, "Swatch.png");
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| ws.import_paths(vec![picture], None, window, cx)));
+    visual.run_until_parked();
+    render(visual);
+    assert!(markers(visual).contains(&"Imported".to_owned()), "it ran after the import");
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
+fn iris_completes_what_is_typed_recalls_it_and_keeps_the_conversation(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    iris_scene(&workspace, visual);
+    let shows = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.try_find(id).is_some());
+
+    // Half a command is offered as it is typed; Tab takes the first.
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.simulate_input("/rec");
+    render(visual);
+    assert!(shows(visual, "assistant-completions"));
+    visual.update(|window, cx| window.press("tab", cx));
+    render(visual);
+    assert_eq!(iris_field(&workspace, visual), "/recipes");
+    assert!(!shows(visual, "assistant-completions"));
+    // A recipe is offered by its name too.
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.simulate_input("lower");
+    render(visual);
+    visual.update(|window, cx| window.click(("assistant-completion", 0_usize), cx));
+    render(visual);
+    assert_eq!(iris_field(&workspace, visual), "lower third ", "ready for the value it takes");
+    let input = visual.update(|_, cx| workspace.read(cx).ui.assistant.ask.as_ref().unwrap().0.clone());
+    visual.update(|window, cx| input.update(cx, |input, cx| input.set_value("", window, cx)));
+
+    // Up and down go back through what was sent, only from an empty or recalled field.
+    tell_iris(&workspace, visual, "hello");
+    tell_iris(&workspace, visual, "go to 2s");
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    for (key, expected) in [("up", "go to 2s"), ("up", "hello"), ("down", "go to 2s"), ("down", "")] {
+        visual.update(|window, cx| window.press(key, cx));
+        render(visual);
+        assert_eq!(iris_field(&workspace, visual), expected, "after {key}");
+    }
+    visual.simulate_input("fade");
+    visual.update(|window, cx| window.press("up", cx));
+    render(visual);
+    assert_eq!(iris_field(&workspace, visual), "fade", "text being written keeps the arrow for its cursor");
+
+    // The conversation is kept: built again (as on the next launch), it comes back above an
+    // "Earlier" line, and the arrows still know what was typed.
+    let kept = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.iter().map(|message| message.text.clone()).collect::<Vec<_>>());
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.ui.assistant = Default::default();
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.assistant.chat_chosen = Some(true)));
+    render(visual);
+    let restored = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.iter().map(|message| message.text.clone()).collect::<Vec<_>>());
+    assert_eq!(restored, kept);
+    assert!(!shows(visual, "assistant-earlier"), "nothing new yet");
+    tell_iris(&workspace, visual, "how long is the video?");
+    assert!(shows(visual, "assistant-earlier"));
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.update(|window, cx| window.press("up", cx));
+    render(visual);
+    assert_eq!(iris_field(&workspace, visual), "how long is the video?");
+    // /clear clears what is kept too. (Down first, back to the empty draft.)
+    visual.update(|window, cx| window.press("down", cx));
+    tell_iris(&workspace, visual, "/clear");
+    let saved = iris::conversation::load(&crate::panels::assistant::shared_folder().unwrap(), iris::App::Studio);
+    assert!(saved.lines.is_empty(), "{:?}", saved.lines);
+}
+
+#[gpui_kit::test]
+fn the_recipes_page_in_settings_changes_moves_deletes_exports_and_imports_recipes(cx: &mut TestAppContext) {
+    let folder = scratch_folder("recipes-page");
+    let (workspace, visual) = open(cx);
+    let (title, _) = iris_scene(&workspace, visual);
+    tell_iris(&workspace, visual, "teach first: make it pulse");
+    tell_iris(&workspace, visual, "teach second: make it red");
+    let taught = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.update(cx, |ws, _| crate::panels::assistant::memory(ws).taught.clone()));
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| crate::panels::settings::open_recipes(ws, window, cx)));
+    render(visual);
+    let over_page = visual.update(|window, _| window.find("recipes-export").bounds().center());
+    let click = |visual: &mut VisualTestContext, id: &str| click_in_settings(visual, over_page, id);
+
+    // Edit: a new name, two steps and a shortcut, bound at once.
+    click(visual, "recipe-edit:0");
+    click(visual, "recipe-name-field");
+    visual.update(|window, cx| window.press("cmd-a", cx));
+    visual.simulate_input("glow up");
+    click(visual, "recipe-steps-field");
+    visual.update(|window, cx| window.press("cmd-a", cx));
+    visual.simulate_input("make it spin in; then make it bigger");
+    // Return in Settings' fields never closes it: Done does.
+    visual.update(|window, cx| window.press("enter", cx));
+    render(visual);
+    visual.update(|window, cx| assert!(window.has_active_dialog(cx), "Settings stays open"));
+    click(visual, "recipe-key-field");
+    visual.simulate_input("ctrl alt p");
+    click(visual, "recipe-save:0");
+    let edited = taught(visual)[0].clone();
+    assert_eq!((edited.name.as_str(), edited.steps.clone(), edited.key.as_deref()), ("glow up", vec!["make it spin in".to_owned(), "make it bigger".to_owned()], Some("ctrl-alt-p")));
+    visual.update(|window, cx| window.close_dialog(cx));
+    render(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.select_layer(title, false)));
+    visual.update(|window, cx| window.click("assistant-ask", cx));
+    visual.update(|window, cx| window.press("ctrl-alt-p", cx));
+    render(visual);
+    // (The spin keyframes its size, so the replies say what the steps did.)
+    let said = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.iter().rev().take(3).map(|message| message.text.clone()).collect::<Vec<_>>().join("\n"));
+    assert!(said.contains("Running “glow up”, from its shortcut ⌃⌥P.") && said.contains("spins in") && said.contains("20% bigger"), "{said}");
+    assert!(visual.update(|_, cx| workspace.read(cx).state.composition().layer(title).unwrap().animation.enter.is_some()));
+
+    // A button and a moment are a click each; order and deleting, with Undo.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| crate::panels::settings::open_recipes(ws, window, cx)));
+    render(visual);
+    click(visual, "recipe-button:1");
+    click(visual, "recipe-when-0:1");
+    let second = taught(visual)[1].clone();
+    assert!(second.button && second.when == [iris::recipes::Trigger::BeforeExport]);
+    click(visual, "recipe-up:1");
+    assert_eq!(taught(visual).iter().map(|recipe| recipe.name.as_str()).collect::<Vec<_>>(), ["second", "glow up"]);
+    click(visual, "recipe-delete:0");
+    assert_eq!(taught(visual).len(), 1);
+    click(visual, "recipe-undo");
+    assert_eq!(taught(visual)[0].name, "second", "back where it was");
+    // Saved to disk after each change.
+    let kept = iris::recipes::load(&crate::panels::assistant::shared_folder().unwrap(), iris::App::Studio);
+    assert_eq!(kept.len(), 2);
+
+    // Export writes every recipe; Import brings new ones in and says what was added.
+    let exported = folder.join("recipes.json");
+    click(visual, "recipes-export");
+    visual.simulate_new_path_selection(|_| Some(exported.clone()));
+    visual.run_until_parked();
+    let text = std::fs::read_to_string(&exported).unwrap();
+    assert!(text.contains("glow up") && text.contains("lower third"));
+    let incoming = folder.join("from a friend.json");
+    std::fs::write(&incoming, iris::recipes::share_text(iris::App::Studio, &[iris::recipes::Recipe::new("spin it", ["make it spin in"])])).unwrap();
+    click(visual, "recipes-import");
+    visual.simulate_path_prompt_response(|_| Some(vec![incoming.clone()]));
+    visual.run_until_parked();
+    render(visual);
+    assert!(taught(visual).iter().any(|recipe| recipe.name == "spin it"));
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
+fn iris_exports_with_presets_by_name_and_the_export_window_lists_them(cx: &mut TestAppContext) {
+    use studio_export::ExportFormat;
+    let folder = scratch_folder("iris-presets");
+    let (workspace, visual) = open(cx);
+    iris_scene(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, _| {
+        ws.state.mark_saved(folder.join("Promo.studio"), false);
+        for composition in &mut ws.state.project.compositions {
+            (composition.width, composition.height, composition.duration_frames) = (320, 180, 12);
+        }
+        let whole = ws.state.composition_settings();
+        ws.state.update_composition(&whole).unwrap();
+    }));
+    let exports = folder.join(studio_core::folders::EXPORTS_FOLDER);
+
+    // The Export window's choices kept under a name, listed, and used by name.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.export_choice = crate::panels::export::ExportChoice { format: ExportFormat::Gif, scale: 0.5, work_area_only: false, ..Default::default() }));
+    let reply = tell_iris(&workspace, visual, "save these export settings as Tiny");
+    assert!(reply.starts_with("Saved the export preset “Tiny”: Animated GIF, 50% size"), "{reply}");
+    let listed = tell_iris(&workspace, visual, "list export presets");
+    assert!(listed.contains("• Tiny") && listed.contains("Instagram Reel (comes with the app)"), "{listed}");
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.export_choice = Default::default()));
+    let reply = tell_iris(&workspace, visual, "export for tiny");
+    assert!(reply.starts_with("With the “Tiny” preset") && reply.contains(&exports.join("Promo.gif").display().to_string()), "{reply}");
+    finish_exports(&workspace, visual);
+    let (width, _) = image::image_dimensions(exports.join("Promo.gif")).unwrap();
+    assert_eq!(width, 160, "at half size, as the preset says");
+    // A preset made for another frame shape exports a copy at that size.
+    let reply = tell_iris(&workspace, visual, "export for Instagram Reel");
+    assert!(reply.contains("1080 × 1920 copy") && reply.contains("Promo Instagram Reel.mp4"), "{reply}");
+    assert_eq!(visual.update(|_, cx| (workspace.read(cx).state.composition().width, workspace.read(cx).state.composition().height)), (1080, 1920));
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).ui.export_queue.items.last().unwrap().request.format), ExportFormat::Movie(studio_media::MovieFormat::H264));
+    finish_exports(&workspace, visual);
+    assert!(exports.join("Promo Instagram Reel.mp4").exists());
+    assert!(tell_iris(&workspace, visual, "forget the YouTube export preset").contains("comes with"));
+    assert!(tell_iris(&workspace, visual, "forget the Tiny export preset").starts_with("Forgotten"));
+
+    // The Export window has the presets, and saves the choices under a typed name.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| crate::panels::export_dialog::open(ws, window, cx)));
+    render(visual);
+    assert!(visual.update(|window, _| window.try_find("export-preset").is_some()));
+    visual.update(|window, cx| window.click("export-preset-name", cx));
+    visual.simulate_input("Mine");
+    visual.update(|window, cx| window.click("export-preset-save", cx));
+    render(visual);
+    assert!(crate::panels::export_presets::find("mine").is_some());
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[gpui_kit::test]
+fn iris_hands_frames_to_the_other_apps_and_brings_in_what_they_send(cx: &mut TestAppContext) {
+    let folder = scratch_folder("iris-handoff");
+    let (workspace, visual) = open(cx);
+    iris_scene(&workspace, visual);
+    let root = crate::panels::assistant::shared_folder().unwrap();
+
+    // Sent: the frame is saved, then handed over in a package for the app named.
+    let reply = tell_iris(&workspace, visual, "send this frame to Edit");
+    assert!(reply.starts_with("Saving frame 0 of “Promo” to send to Omina Edit."), "{reply}");
+    visual.run_until_parked();
+    render(visual);
+    let last = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().unwrap().text.clone());
+    assert_eq!(last, "Sent frame 0 of “Promo” to Omina Edit, and opened it there.");
+    let packages = iris::handoff::take_ready(&root, iris::App::Canvas);
+    assert_eq!(packages.len(), 1);
+    assert_eq!(image::image_dimensions(&packages[0].files[0]).unwrap(), (1920, 1080));
+    assert!(iris::handoff::take_ready(&root, iris::App::Develop).is_empty());
+    assert!(tell_iris(&workspace, visual, "send this frame to Motion").starts_with("This frame is already in Omina Motion"));
+
+    // Received: a photo from Develop comes into the project and onto the composition at the
+    // playhead, and the chat says so.
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.set_current_frame(30)));
+    let photo = small_picture(&folder, "Beach.png");
+    iris::handoff::send(&root, iris::App::Develop, iris::App::Studio, "the photo “Beach”", &[photo]).unwrap();
+    let layers = visual.update(|_, cx| workspace.read(cx).state.composition().layers.len());
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| crate::panels::assistant_automation::bring_in_handoffs(ws, window, cx)));
+    visual.run_until_parked();
+    render(visual);
+    visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        assert_eq!(state.composition().layers.len(), layers + 1);
+        let added = state.composition().layer(state.selected_layers[0]).unwrap();
+        assert!(matches!(added.content, LayerContent::Image { .. }) && added.in_frame == 30, "a picture layer from the playhead");
+    });
+    let said = visual.update(|_, cx| workspace.read(cx).ui.assistant.messages.last().unwrap().text.clone());
+    assert!(said.starts_with("Brought in the photo “Beach” from Omina Develop: on Promo as a layer from 0:00:01:00"), "{said}");
+    // Each package comes in once.
+    visual.update(|window, cx| workspace.update(cx, |ws, cx| crate::panels::assistant_automation::bring_in_handoffs(ws, window, cx)));
+    visual.run_until_parked();
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), layers + 1);
+    std::fs::remove_dir_all(&folder).unwrap();
 }

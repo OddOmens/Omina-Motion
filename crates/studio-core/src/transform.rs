@@ -3,7 +3,7 @@
 //! The renderer draws with these, and hit-testing, bounds and viewer dragging use them.
 
 use crate::animation::Vec2;
-use crate::model::{Composition, Id, Layer};
+use crate::model::{Composition, Id, Layer, LayerContent};
 
 /// A 2D affine matrix mapping (x, y) to (a·x + c·y + tx, b·x + d·y + ty).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -114,21 +114,72 @@ pub fn parent_space(composition: &Composition, layer_id: Id, frame: f64) -> Affi
         .unwrap_or(Affine::IDENTITY)
 }
 
-/// Whether composition point `point` lies on the layer's source rectangle at `frame`.
+/// The rectangle a layer's content covers at `frame`, in the layer's own pixels: its top-left
+/// and bottom-right corners. For most layers that is the layer's box. A pen path whose outline
+/// is keyframed keeps one box for all its keyframes, and the outline moves inside and beyond
+/// it, so for a path the rectangle is fitted around the outline as it is drawn at `frame`.
+pub fn layer_box(layer: &Layer, frame: f64) -> (Vec2, Vec2) {
+    let whole = (Vec2::new(0.0, 0.0), layer.size);
+    if !matches!(layer.content, LayerContent::Shape { path: Some(_), .. }) {
+        return whole;
+    }
+    let size = layer.size;
+    let in_pixels = |v: Vec2| Vec2::new(v.x * size.x, v.y * size.y);
+    layer.shape_path_at(frame).and_then(|path| path.bounds()).map_or(whole, |(min, max)| (in_pixels(min), in_pixels(max)))
+}
+
+/// Whether composition point `point` lies on the layer's rectangle (see `layer_box`) at `frame`.
 pub fn layer_contains(composition: &Composition, layer_id: Id, point: Vec2, frame: f64) -> bool {
     let Some(layer) = composition.layer(layer_id) else { return false };
     let Some(local) = world_transform(composition, layer_id, frame).and_then(Affine::inverse).map(|inv| inv.apply(point)) else {
         return false;
     };
-    (0.0..=layer.size.x).contains(&local.x) && (0.0..=layer.size.y).contains(&local.y)
+    let (min, max) = layer_box(layer, frame);
+    (min.x..=max.x).contains(&local.x) && (min.y..=max.y).contains(&local.y)
 }
 
-/// The four corners of the layer's source rectangle in composition pixels, clockwise from top-left.
+/// The four corners of the layer's rectangle (see `layer_box`) in composition pixels,
+/// clockwise from top-left.
 pub fn layer_corners(composition: &Composition, layer_id: Id, frame: f64) -> Option<[Vec2; 4]> {
     let layer = composition.layer(layer_id)?;
     let world = world_transform(composition, layer_id, frame)?;
-    let (w, h) = (layer.size.x, layer.size.y);
-    Some([Vec2::new(0.0, 0.0), Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)].map(|corner| world.apply(corner)))
+    let (min, max) = layer_box(layer, frame);
+    Some([min, Vec2::new(max.x, min.y), max, Vec2::new(min.x, max.y)].map(|corner| world.apply(corner)))
+}
+
+/// The path a layer travels across the composition while its position is animated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MotionPath {
+    /// Where the layer is, in composition pixels, at steps from its first position keyframe to
+    /// its last. Joined up, they draw the path, curved wherever easing or a moving parent bends it.
+    pub points: Vec<Vec2>,
+    /// Where the layer is at each of its position keyframes.
+    pub keyframes: Vec<Vec2>,
+}
+
+/// The most steps a motion path is sampled at, however long the move lasts.
+const MOTION_PATH_STEPS: i64 = 200;
+
+/// The motion path of a layer whose position has at least two keyframes and actually moves
+/// between them. The layer's place is taken at its anchor point, parents included. `None` for
+/// a layer that stays put.
+pub fn motion_path(composition: &Composition, layer_id: Id) -> Option<MotionPath> {
+    let transform = composition.layer(layer_id)?.transform.as_ref()?;
+    let frames = transform.position.keyframe_frames();
+    let (first, last) = (*frames.first()?, *frames.last()?);
+    if frames.len() < 2 {
+        return None;
+    }
+    let place = |frame: f64| world_transform(composition, layer_id, frame).map(|world| world.apply(transform.anchor_point.value_at(frame)));
+    // Every frame of a short move; a long one in equal steps, ending exactly on the last keyframe.
+    let steps = (last - first).min(MOTION_PATH_STEPS);
+    let points: Vec<Vec2> = (0..=steps).filter_map(|step| place(first as f64 + (last - first) as f64 * step as f64 / steps as f64)).collect();
+    let start = *points.first()?;
+    if points.iter().all(|point| (*point - start).length() < 0.5) {
+        return None;
+    }
+    let keyframes = frames.iter().filter_map(|frame| place(*frame as f64)).collect();
+    Some(MotionPath { points, keyframes })
 }
 
 #[cfg(test)]
@@ -192,5 +243,21 @@ mod tests {
         comp.layer_mut(a).unwrap().parent = Some(b);
         comp.layer_mut(b).unwrap().parent = Some(a);
         assert!(world_transform(&comp, a, 0.0).is_some());
+    }
+
+    #[test]
+    fn a_layer_with_a_moving_position_has_a_motion_path_through_its_keyframes() {
+        let project = sample_project();
+        let composition = project.composition(ids::MAIN_COMP).unwrap();
+        // The title moves up from (960, 620) at frame 24 to (960, 540) at frame 48.
+        let path = motion_path(composition, Id(100)).expect("the title moves");
+        assert_eq!(path.points.len(), 25, "one point for each frame of the move");
+        assert!(close(path.keyframes[0], Vec2::new(960.0, 620.0)) && close(path.keyframes[1], Vec2::new(960.0, 540.0)));
+        assert!(close(path.points[0], path.keyframes[0]) && close(*path.points.last().unwrap(), path.keyframes[1]));
+        // A layer that isn't animated, or whose keyframes all hold one place, has none.
+        assert_eq!(motion_path(composition, Id(105)), None);
+        let mut still = composition.clone();
+        still.layer_mut(Id(100)).unwrap().transform.as_mut().unwrap().position.map_values(|_| Vec2::new(10.0, 10.0));
+        assert_eq!(motion_path(&still, Id(100)), None);
     }
 }

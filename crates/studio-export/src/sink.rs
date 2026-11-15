@@ -127,7 +127,7 @@ pub fn discard(temporary: &Path) {
 }
 
 /// BGRA pixels as RGBA.
-fn to_rgba(bgra: &[u8]) -> Vec<u8> {
+pub(crate) fn to_rgba(bgra: &[u8]) -> Vec<u8> {
     bgra.as_chunks::<4>().0.iter().flat_map(|&[blue, green, red, alpha]| [red, green, blue, alpha]).collect()
 }
 

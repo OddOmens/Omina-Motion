@@ -21,7 +21,15 @@ export MACOSX_DEPLOYMENT_TARGET=13.0
 
 # x264, pinned to one commit of its stable branch so release builds are reproducible.
 x264_commit=b35605ace3ddf7c1a5d67a2eb553f034aef41d55
-deps="$root/target/static-deps"
+# x264's and FFmpeg's build tools break on paths with spaces, and this repository usually lives in
+# one ("Omina Studio/Omina Motion"), so the release is compiled in a folder without any and the
+# finished binary is copied back into target/release for packaging.
+build_root="${STUDIO_BUILD_DIR:-$HOME/Library/Caches/omina-motion-release}"
+case "$build_root" in
+    *[[:space:]]*) echo "error: STUDIO_BUILD_DIR must not contain spaces: $build_root" >&2; exit 1 ;;
+esac
+export CARGO_TARGET_DIR="$build_root/target"
+deps="$build_root/static-deps"
 if [ ! -f "$deps/lib/libx264.a" ] || [ "$(cat "$deps/x264-commit" 2>/dev/null)" != "$x264_commit" ]; then
     echo "Building x264 (static)…"
     rm -rf "$deps/src/x264"
@@ -93,6 +101,8 @@ fi
 
 echo "Building Studio with FFmpeg built in…"
 cargo build --release -p studio --features bundled-ffmpeg
+mkdir -p target/release
+cp "$CARGO_TARGET_DIR/release/studio" target/release/studio
 
 # The app must not reach for libraries that only exist on this Mac.
 if otool -L target/release/studio | grep -E '/opt/homebrew|/usr/local|@rpath' >/dev/null; then
@@ -105,11 +115,11 @@ fi
 python3 scripts/third-party-notices.py
 
 echo "Packaging…"
-cargo packager --release -p studio --formats app,dmg
+CARGO_TARGET_DIR="$root/target" cargo packager --release -p studio --formats app,dmg
 
 # The GPL asks that the source of a release be available: record exactly which FFmpeg, x264,
 # libvpx and Opus went into it, beside the release.
-ffmpeg_source="$(find target/release/build -maxdepth 3 -type d -path '*ffmpeg-sys-next-*/out/ffmpeg-*' | head -n 1)"
+ffmpeg_source="$(find "$CARGO_TARGET_DIR/release/build" -maxdepth 3 -type d -path '*ffmpeg-sys-next-*/out/ffmpeg-*' | head -n 1)"
 {
     echo "Studio $(cargo pkgid -p studio | sed 's/.*[#@]//') for macOS"
     echo "Studio source: this repository at commit $(git rev-parse HEAD)"

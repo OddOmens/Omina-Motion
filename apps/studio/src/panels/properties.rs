@@ -19,7 +19,7 @@ use studio_core::subtitles::SubtitleFormat;
 
 use super::chrome::{CardHeading, card, card_list, divider, heading_button, hint, icon_button, info_button, list_row, panel, section};
 use super::color_picker;
-use super::fields::{FieldTarget, property_row, value_field};
+use super::fields::{FieldTarget, NAME_INDENT, grid_row, property_row, value_field};
 use crate::features::Feature;
 use crate::state::{AudioSetting, ColorTarget, PaintSlot, ShapeSetting, Switch, TextSetting};
 use crate::theme::{color, hsla, size};
@@ -78,15 +78,16 @@ pub(super) fn choice_menu<T: Clone + 'static>(
     })
 }
 
-/// A labeled control in a section: its name on the left, the control filling the rest.
+/// A labeled control in a section, on the same columns as the property rows: its name, then
+/// the control filling the rest.
 pub(super) fn labeled_row(label: &'static str, control: impl IntoElement) -> Div {
-    div()
-        .h(px(30.0))
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(div().w(px(96.0)).flex_none().text_color(hsla(color::MUTED)).child(label))
-        .child(div().flex_1().min_w_0().child(control))
+    setting_row(label, None, control)
+}
+
+/// Something in a section that isn't a named row (a checkbox with its own label, a button, a
+/// list), moved in to start where the rows' names do.
+pub(super) fn indented(content: impl IntoElement) -> Div {
+    div().pl(px(NAME_INDENT)).child(content)
 }
 
 /// The Mask row: which other layer shows (or hides) this one where it draws, and which of the
@@ -153,6 +154,7 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             .flex()
             .gap_4()
             .py_1()
+            .pl(px(NAME_INDENT))
             .child(switch("layer-solo", "Solo", layer.switches.solo, Switch::Solo, cx))
             .when(layer.content.has_picture(), |row| row.child(switch("layer-effects", "Effects", layer.switches.effects_enabled, Switch::EffectsEnabled, cx)))
             // Adjustment layers have nothing of their own to move, so motion blur isn't offered.
@@ -169,7 +171,7 @@ fn layer_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     .when(workspace.state.caption_source(id).is_some() && workspace.ui.settings.ai.captions, |rows| {
         let busy = workspace.ui.caption_job.is_some();
         rows.child(
-            div().py_1().child(
+            div().py_1().pl(px(NAME_INDENT)).child(
                 Button::new("generate-captions")
                     .outline()
                     .small()
@@ -223,7 +225,7 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
             }
             cx.notify();
         }));
-    section = section.child(div().py_1().flex().gap_1().child(paint).child(clear_frame));
+    section = section.child(div().py_1().pl(px(NAME_INDENT)).flex().gap_1().child(paint).child(clear_frame));
     let modes = [("Keep Object", false), ("Remove Object", true)].map(|(label, remove)| (label.to_owned(), remove == cut.remove, remove)).to_vec();
     let mode_label = if cut.remove { "Remove Object" } else { "Keep Object" };
     section = section.child(labeled_row("Matte", choice_menu("cutout-mode", mode_label.to_owned(), modes, move |this, remove| this.state.set_cutout_remove(id, remove), target)));
@@ -241,7 +243,7 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
     if is_video {
         let busy = job.is_some();
         section = section.child(
-            div().py_1().child(
+            div().py_1().pl(px(NAME_INDENT)).child(
                 Button::new("cutout-track")
                     .outline()
                     .small()
@@ -254,7 +256,7 @@ fn cutout_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspa
     }
     // Refine Edge: Feather, Contrast and Shift Edge show at once; Reduce Chatter and Refine
     // Detail shape the masks as they are made.
-    section = section.child(div().pt_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Refine Edge"));
+    section = section.child(div().pt_1().pl(px(NAME_INDENT)).text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Refine Edge"));
     for setting in super::fields::MatteEdgeSetting::ALL {
         let field = super::fields::value_field(super::fields::FieldTarget::MatteEdge { layer: id, setting }, workspace, cx);
         section = section.child(labeled_row(setting.label(), field));
@@ -285,7 +287,7 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
     let speed = crate::panels::fields::property_row(id, studio_core::property::PropertyPath::Speed, None, workspace, cx);
     let unramp = ramped.then(|| {
         let back_to = layer.time.speed_before_ramp.unwrap_or(100.0);
-        div().py_1().child(
+        div().py_1().pl(px(NAME_INDENT)).child(
             Button::new("speed-unramp")
                 .ghost()
                 .xsmall()
@@ -314,7 +316,7 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             }, target.clone()),
         ))
         .child(
-            div().py_1().child(Checkbox::new("speed-reverse").label("Play backwards").checked(layer.time.reverse).on_click(cx.listener(move |this, checked: &bool, _, cx| {
+            div().py_1().pl(px(NAME_INDENT)).child(Checkbox::new("speed-reverse").label("Play backwards").checked(layer.time.reverse).on_click(cx.listener(move |this, checked: &bool, _, cx| {
                 this.state.set_reverse(id, *checked);
                 cx.notify();
             }))),
@@ -323,7 +325,7 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
             section_div
                 .child(divider())
                 .child(section("Auto Reframe", Some(info_button("reframe-info", REFRAME_INFO))))
-                .child(div().py_1().child(if busy {
+                .child(div().py_1().pl(px(NAME_INDENT)).child(if busy {
                     div().text_color(hsla(color::MUTED)).child("Another analysis is running.").into_any_element()
                 } else {
                     reframe_menu(id, cx).into_any_element()
@@ -437,10 +439,10 @@ fn enhance_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Worksp
         status_line("Waiting for another clip to finish…")
     };
     div()
-        .child(div().py_0p5().child(toggle("enhance-on", "On", settings.on, |settings, on| settings.on = on, cx)))
+        .child(div().py_0p5().pl(px(NAME_INDENT)).child(toggle("enhance-on", "On", settings.on, |settings, on| settings.on = on, cx)))
         .child(labeled_row("Noise removal", choice_menu("enhance-model", model_name.to_owned(), model_choices, move |this, model| { this.state.edit_enhance(id, |settings| settings.model = model); }, target.clone())))
         .child(labeled_row("Strength", choice_menu("enhance-strength", format!("{}%", settings.strength), strengths, move |this, strength| { this.state.edit_enhance(id, |settings| settings.strength = strength); }, target.clone())))
-        .child(div().flex().flex_col().gap_1().py_1()
+        .child(div().flex().flex_col().gap_1().py_1().pl(px(NAME_INDENT))
             .child(toggle("enhance-hum", "Remove hum", settings.remove_hum, |settings, on| settings.remove_hum = on, cx))
             .child(toggle("enhance-eq", "Voice EQ", settings.voice_eq, |settings, on| settings.voice_eq = on, cx))
             .child(toggle("enhance-deess", "Soften harsh \"s\" sounds", settings.de_ess, |settings, on| settings.de_ess = on, cx))
@@ -450,6 +452,17 @@ fn enhance_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Worksp
 
 /// A layer's sound: whether its picture shows and its sound plays (separately), its volume and
 /// fades, and for a video clip, moving its sound onto a clip of its own.
+/// The Volume or Pan row: with a stopwatch and keyframe buttons where the layer's sound can be
+/// keyframed, and as a plain field where it can't.
+fn keyable_audio_row(layer: &Layer, property: studio_core::property::AudioProperty, label: &'static str, setting: AudioSetting, workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let path = PropertyPath::Audio(property);
+    if layer.property(path, workspace.state.current_frame).is_some() {
+        super::fields::property_row(layer.id, path, None, workspace, cx)
+    } else {
+        labeled_row(label, value_field(FieldTarget::Audio { layer: layer.id, setting }, workspace, cx)).into_any_element()
+    }
+}
+
 fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
     let id = layer.id;
     let field = |setting: AudioSetting, cx: &mut Context<Workspace>| value_field(FieldTarget::Audio { layer: id, setting }, workspace, cx);
@@ -471,18 +484,23 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
                 .flex()
                 .gap_4()
                 .py_1()
+                .pl(px(NAME_INDENT))
                 .when(is_video, |row| row.child(toggle("layer-show-video", "Show video", layer.switches.visible, Switch::Visible, cx)))
                 .child(toggle("layer-play-audio", "Play audio", layer.switches.audio, Switch::Audio, cx)),
         )
-        .child(labeled_row("Volume", field(AudioSetting::Volume, cx)))
+        // Volume and pan can be keyframed on a clip that plays a file of its own, so there
+        // they get a stopwatch like any animated property; a nested composition has plain fields.
+        .child(keyable_audio_row(layer, studio_core::property::AudioProperty::Volume, "Volume", AudioSetting::Volume, workspace, cx))
         .child(labeled_row("Fade In", field(AudioSetting::FadeIn, cx)))
         .child(labeled_row("Fade Out", field(AudioSetting::FadeOut, cx)))
+        .child(keyable_audio_row(layer, studio_core::property::AudioProperty::Pan, "Pan", AudioSetting::Pan, workspace, cx))
         .child(labeled_row("Noise Gate", field(AudioSetting::NoiseGate, cx)))
         .child(duck_row(layer, workspace, cx))
         .when(layer.audio.duck_under.is_some(), |section| section.child(labeled_row("Duck By", field(AudioSetting::DuckAmount, cx))))
         .child(
             div()
                 .py_1()
+                .pl(px(NAME_INDENT))
                 .flex()
                 .flex_wrap()
                 .gap_2()
@@ -513,7 +531,7 @@ fn audio_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
         )
         .when(is_video, |section| {
             section.child(
-                div().py_1().child(
+                div().py_1().pl(px(NAME_INDENT)).child(
                     Button::new("separate-audio")
                         .outline()
                         .small()
@@ -562,10 +580,48 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
     let fps = workspace.state.composition().frame_rate.fps();
     let start_frame = layer.start_frame;
     let mut transcript = div().flex().flex_col().gap_1();
+    // The words picked in this layer's transcript, as a range of word numbers.
+    let picked = match workspace.ui.transcript_selection {
+        Some((layer, anchor, head)) if layer == id && anchor.max(head) < words.len() => anchor.min(head)..anchor.max(head) + 1,
+        _ => 0..0,
+    };
+    let fillers = workspace.state.filler_word_count(id);
+    let locked = layer.switches.locked;
+    let cut_label = match picked.len() {
+        0 => "Cut Words".to_owned(),
+        1 => "Cut 1 Word".to_owned(),
+        count => format!("Cut {count} Words"),
+    };
+    let cut_range = picked.clone();
+    let cut_button = Button::new("transcript-cut")
+        .outline()
+        .small()
+        .icon(Icon::new(IconName::Scissors))
+        .label(cut_label)
+        .tooltip("Cut the picked words out of the video: every unlocked layer loses that moment and the rest closes up. Click a word to pick it, shift-click to pick a run.")
+        .disabled(picked.is_empty() || locked)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.ui.transcript_selection = None;
+            match this.state.cut_caption_words(id, cut_range.clone()) {
+                Some(frames) => window.push_notification(format!("Cut {frames} frames from the video.").as_str(), cx),
+                None => window.push_notification("Those words couldn't be cut.", cx),
+            }
+            cx.notify();
+        }));
+    let fillers_button = Button::new("transcript-fillers")
+        .outline()
+        .small()
+        .label(if fillers == 0 { "No Filler Words".to_owned() } else { format!("Remove {fillers} Filler Words") })
+        .tooltip("Cut every \"um\" and \"uh\" in this transcript out of the video")
+        .disabled(fillers == 0 || locked)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.ui.transcript_selection = None;
+            let cut = this.state.cut_filler_words(id);
+            window.push_notification(format!("Cut {cut} filler words from the video.").as_str(), cx);
+            cx.notify();
+        }));
     for range in studio_core::captions::phrases(words, style.words_per_phrase, fps) {
         let text = words[range.clone()].iter().map(|word| word.text.as_str()).collect::<Vec<_>>().join(" ");
-        // When it shows, sync included.
-        let at = start_frame + style.offset + words[range.start].start;
         let editing = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::CaptionText(id, range.start, range.end)).and_then(|editing| editing.input.line());
         // Its start and end, each typed or dragged to retime it.
         let edge = |start: bool| FieldTarget::CaptionPhrase { layer: id, first: range.start, end: range.end, start };
@@ -579,30 +635,56 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
             .child(value_field(edge(true), workspace, cx))
             .child("–")
             .child(value_field(edge(false), workspace, cx));
-        let row = div()
-            .id(("caption-phrase", range.start))
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_1()
-            .py_0p5()
-            .rounded(px(4.0))
-            .hover(|style| style.bg(hsla(color::HOVER)));
+        let row = div().id(("caption-phrase", range.start)).flex().flex_wrap().items_center().gap_x_1().px_1().py_0p5().rounded(px(4.0)).hover(|style| style.bg(hsla(color::HOVER)));
+        // A double-click on the row beside its words edits the phrase too.
+        let row = {
+            let (first, end, current) = (range.start, range.end, text.clone());
+            row.on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                if event.click_count() >= 2 {
+                    this.ui.transcript_selection = None;
+                    this.begin_edit(EditTarget::CaptionText(id, first, end), current.clone(), window, cx);
+                }
+            }))
+        };
         let row = match editing {
             Some(input) => row.child(div().flex_1().child(Input::new(input).xsmall())).into_any_element(),
             None => {
-                let (start, end, current) = (range.start, range.end, text.clone());
-                row.cursor_pointer()
-                    .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
-                        if event.click_count() >= 2 {
-                            this.begin_edit(EditTarget::CaptionText(id, start, end), current.clone(), window, cx);
-                        } else {
-                            this.go_to(at, cx);
-                        }
-                    }))
-                    .child(div().flex_1().min_w_0().child(text))
-                    .test_support()
-                    .into_any_element()
+                // Each word is its own target: a click picks it (shift-click picks the run from
+                // the last one picked) and moves the playhead to it; a double-click edits the
+                // phrase's text.
+                let (phrase_start, phrase_end, current) = (range.start, range.end, text.clone());
+                row.children(range.clone().map(|index| {
+                    let word = &words[index];
+                    let word_at = start_frame + style.offset + word.start;
+                    let current = current.clone();
+                    div()
+                        .id(("caption-word", index))
+                        .px_0p5()
+                        .rounded(px(3.0))
+                        .cursor_pointer()
+                        .when(picked.contains(&index), |chip| chip.bg(hsla(color::ACCENT).opacity(0.35)))
+                        // Filler sounds are dimmed, so what Remove Filler Words would cut can be seen.
+                        .when(studio_core::transcript::is_filler(&word.text), |chip| chip.text_color(hsla(color::MUTED)))
+                        .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
+                            // The word handles the click, so the row behind it doesn't as well.
+                            cx.stop_propagation();
+                            if event.click_count() >= 2 {
+                                this.ui.transcript_selection = None;
+                                this.begin_edit(EditTarget::CaptionText(id, phrase_start, phrase_end), current.clone(), window, cx);
+                                return;
+                            }
+                            let anchor = match this.ui.transcript_selection {
+                                Some((layer, anchor, _)) if layer == id && event.modifiers().shift => anchor,
+                                _ => index,
+                            };
+                            this.ui.transcript_selection = Some((id, anchor, index));
+                            this.go_to(word_at, cx);
+                        }))
+                        .child(word.text.clone())
+                        .test_support()
+                }))
+                .test_support()
+                .into_any_element()
             }
         };
         transcript = transcript.child(div().flex().flex_col().child(times).child(row));
@@ -611,17 +693,18 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
     div()
         .child(labeled_row("Animation", choice_menu("captions-animation", style.animation.name().to_owned(), animations, move |this, animation| this.state.edit_captions(id, |style| style.animation = animation), weak.clone())))
         .child(labeled_row("Words at once", choice_menu("captions-words", format!("{}", style.words_per_phrase), per_phrase, move |this, count| this.state.edit_captions(id, |style| style.words_per_phrase = count), weak.clone())))
-        .child(div().py_1().child(uppercase))
-        .child(div().h(px(30.0)).child(choice_menu("captions-font-family", style.text.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
-        .child(div().h(px(30.0)).child(choice_menu("captions-font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
-        .child(div().grid().grid_cols(2).gap_x_3().child(setting_field(IconName::ALargeSmall, "Size", id, TextSetting::FontSize, workspace, cx)).child(setting_field(IconName::MoveHorizontal, "Tracking", id, TextSetting::Tracking, workspace, cx)))
+        .child(indented(uppercase).py_1())
+        .child(labeled_row("Font", choice_menu("captions-font-family", style.text.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
+        .child(labeled_row("Weight", choice_menu("captions-font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
+        .child(labeled_row("Size", value_field(FieldTarget::Text { layer: id, setting: TextSetting::FontSize }, workspace, cx)))
+        .child(labeled_row("Tracking", value_field(FieldTarget::Text { layer: id, setting: TextSetting::Tracking }, workspace, cx)))
         .child(paint_row("fill", "Fill", style.text.fill, ColorTarget::TextFill(id), move |this, fill| this.state.set_text_fill(id, fill), cx))
         .child(paint_row("stroke", "Stroke", style.text.stroke.map(|(color, _)| color), ColorTarget::TextStroke(id), move |this, color| this.state.set_text_stroke(id, color.map(|color| (color, stroke_width))), cx))
         .child(labeled_row("Spoken word", color_picker::swatch("captions-highlight", ColorTarget::CaptionHighlight(id), Some(style.highlight), cx)))
-        .child(labeled_row("Background", div().flex().items_center().gap_2().child(background_on).child(color_picker::swatch("captions-background", ColorTarget::CaptionBackground(id), style.background, cx))))
+        .child(setting_row("Background", Some(background_on.into_any_element()), div().flex().child(color_picker::swatch("captions-background", ColorTarget::CaptionBackground(id), style.background, cx))))
         .child(labeled_row("Sync", div().flex().items_center().gap_2().child(value_field(FieldTarget::CaptionSync { layer: id }, workspace, cx)).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("+ later, − earlier"))))
         // Saving the captions as a subtitle file, timed as they show in the composition.
-        .when(workspace.has(Feature::CaptionFiles), |rows| rows.child(div().py_1().flex().flex_wrap().gap_2().children(SubtitleFormat::ALL.map(|format| {
+        .when(workspace.has(Feature::CaptionFiles), |rows| rows.child(div().py_1().pl(px(NAME_INDENT)).flex().flex_wrap().gap_2().children(SubtitleFormat::ALL.map(|format| {
             Button::new(gpui_kit::ElementId::Name(format!("captions-export-{}", format.extension()).into()))
                 .outline()
                 .small()
@@ -631,11 +714,13 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         }))))
         .child(divider())
         .child(section(format!("Transcript · {} words", words.len()), None))
-        .child(transcript)
+        .child(div().py_1().pl(px(NAME_INDENT)).flex().flex_wrap().gap_2().child(cut_button).child(fillers_button))
+        .child(indented(transcript))
 }
 
 /// What each section is for, shown by the info button on its heading.
 const TRANSFORM_INFO: &str = "Where the layer sits, its size, turn and opacity. Pick a corner, an edge or the center for the anchor point, or drag the anchor in the viewer.";
+const SHAPE_INFO: &str = "The shape's outline, size, fill and stroke. Turn on the Path stopwatch to animate the outline and size: move the playhead, then change the size, or double-click the shape in the viewer and drag its points. A drawn shape becomes a path when it is animated, which keeps its look. Turn on the Fill & Stroke stopwatch to animate the colors, the stroke width and Trim the same way. Trim draws only part of the stroke, from its first value to its second in percent of the outline: animate it to draw a line on.";
 const SPEED_INFO: &str = "A steady speed changes the clip's length; a ramp keeps it. Sound is silent while a clip ramps or plays backwards.";
 const REFRAME_INFO: &str = "Makes a new composition in another shape, moving the clip to keep its subject in frame. An Object Matte's strokes pick the subject; otherwise it follows the middle.";
 const TRACK_INFO: &str = "Pins this layer to something moving in a video: its position follows the point you click.";
@@ -648,8 +733,14 @@ pub(crate) fn add_note() -> Div {
     status_line("Click + to add this to your layer.")
 }
 
-/// A short line of muted status text inside a section, such as what a job is doing.
+/// A short line of muted status text inside a section, such as what a job is doing, starting
+/// where the section's row names do.
 pub(crate) fn status_line(text: impl Into<gpui_kit::SharedString>) -> Div {
+    plain_status_line(text).pl(px(NAME_INDENT))
+}
+
+/// The same muted status text without the indent, for lists that have no stopwatch column.
+pub(crate) fn plain_status_line(text: impl Into<gpui_kit::SharedString>) -> Div {
     div().py_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(text.into())
 }
 
@@ -770,6 +861,13 @@ fn transform_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Work
     rows
 }
 
+/// A setting that isn't animated, on the same columns as the property rows around it: the
+/// stopwatch column is left empty, and `extra` is a small control (a link, a checkbox) between
+/// the name and the values.
+pub(super) fn setting_row(name: &'static str, extra: Option<AnyElement>, values: impl IntoElement) -> Div {
+    grid_row(None, name, extra, values)
+}
+
 /// The Size row of a video or image layer, laid out like the property rows around it: width and
 /// height in pixels with a link to keep their proportions. Size isn't animated, so the stopwatch
 /// column is empty.
@@ -780,15 +878,7 @@ fn media_size_row(id: Id, workspace: &Workspace, cx: &mut Context<Workspace>) ->
         cx.notify();
     }));
     let field = |side: usize, cx: &mut Context<Workspace>| value_field(FieldTarget::MediaSize { layer: id, side }, workspace, cx);
-    div()
-        .h(px(26.0))
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(div().w(px(18.0)).flex_none())
-        .child(div().w(px(104.0)).flex_none().truncate().child("Size"))
-        .child(div().w(px(18.0)).flex_none().child(link))
-        .child(div().flex().gap_3().child(field(0, cx)).child(field(1, cx)))
+    setting_row("Size", Some(link.into_any_element()), div().flex().gap_3().child(field(0, cx)).child(field(1, cx)))
 }
 
 /// Nine buttons in the layout of the layer's box (corners, edge middles, center): pressing one
@@ -836,19 +926,7 @@ fn anchor_grid(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspace>
         .child(grid)
 }
 
-/// A labeled row with an icon and a text-setting field, as in the character grid.
-fn setting_field(icon: IconName, tooltip: &'static str, layer: Id, setting: TextSetting, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(px(26.0))
-        .child(div().w(px(18.0)).flex().justify_center().child(Icon::new(icon).size(px(14.0)).text_color(hsla(color::MUTED))))
-        .child(div().w(px(56.0)).text_color(hsla(color::MUTED)).child(tooltip))
-        .child(value_field(FieldTarget::Text { layer, setting }, workspace, cx))
-}
-
-/// A text fill or stroke row: an on/off checkbox, its color (which opens the color wheel), and its label.
+/// A text fill or stroke row: its name, an on/off checkbox, and its color (which opens the color wheel).
 fn paint_row(
     id: &'static str,
     label: &'static str,
@@ -868,14 +946,7 @@ fn paint_row(
             })
             .ok();
     });
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(px(30.0))
-        .child(toggle)
-        .child(color_picker::swatch(ElementId::Name(format!("{id}-color").into()), target, paint, cx))
-        .child(div().child(label))
+    setting_row(label, Some(toggle.into_any_element()), div().flex().child(color_picker::swatch(ElementId::Name(format!("{id}-color").into()), target, paint, cx)))
 }
 
 fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
@@ -918,33 +989,29 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
         }))
     };
     let stroke_width = style.stroke.map_or(2.0, |(_, width)| width);
+    let text_field = |setting: TextSetting, cx: &mut Context<Workspace>| value_field(FieldTarget::Text { layer: id, setting }, workspace, cx);
 
     div()
-        .child(div().flex().items_center().gap_2().h(px(28.0)).child(div().w(px(56.0)).child("Source")).child(source_text))
-        .child(div().h(px(30.0)).child(choice_menu("font-family", style.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
-        .child(div().h(px(30.0)).child(choice_menu("font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
-        .child(
-            div()
-                .grid()
-                .grid_cols(2)
-                .gap_x_3()
-                .child(setting_field(IconName::ALargeSmall, "Size", id, TextSetting::FontSize, workspace, cx))
-                .child(setting_field(IconName::ArrowUpDown, "Leading", id, TextSetting::Leading, workspace, cx))
-                .child(setting_field(IconName::MoveHorizontal, "Tracking", id, TextSetting::Tracking, workspace, cx))
-                .children(style.stroke.is_some().then(|| setting_field(IconName::PenLine, "Stroke", id, TextSetting::StrokeWidth, workspace, cx))),
-        )
+        .child(labeled_row("Source", source_text))
+        .child(labeled_row("Font", choice_menu("font-family", style.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
+        .child(labeled_row("Weight", choice_menu("font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
+        .child(labeled_row("Size", text_field(TextSetting::FontSize, cx)))
+        .child(labeled_row("Leading", text_field(TextSetting::Leading, cx)))
+        .child(labeled_row("Tracking", text_field(TextSetting::Tracking, cx)))
         .child(paint_row("fill", "Fill", style.fill, ColorTarget::TextFill(id), move |this, fill| this.state.set_text_fill(id, fill), cx))
         .child(paint_row("stroke", "Stroke", style.stroke.map(|(color, _)| color), ColorTarget::TextStroke(id), move |this, color| this.state.set_text_stroke(id, color.map(|color| (color, stroke_width))), cx))
+        .when(style.stroke.is_some(), |rows| rows.child(labeled_row("Stroke Width", text_field(TextSetting::StrokeWidth, cx))))
         .child(divider())
         .child(section("Paragraph", None))
-        .child(
+        .child(labeled_row(
+            "Align",
             div()
                 .flex()
                 .gap_1()
                 .child(align_button("align-text-left", IconName::TextAlignStart, "Left Align Text", TextAlign::Left, cx))
                 .child(align_button("align-text-center", IconName::TextAlignCenter, "Center Text", TextAlign::Center, cx))
                 .child(align_button("align-text-right", IconName::TextAlignEnd, "Right Align Text", TextAlign::Right, cx)),
-        )
+        ))
         .child(text_path_rows(layer, workspace, cx))
 }
 
@@ -1002,31 +1069,28 @@ fn shape_paint_rows(id: Id, slot: PaintSlot, paint: Option<Paint>, workspace: &W
         },
         weak,
     );
-    let mut rows = div().child(labeled_row(label, div().flex().items_center().gap_2().child(toggle).child(div().flex_1().child(menu))));
+    // A solid paint's color sits beside its menu; a gradient's colors are in the editor below.
+    let swatch = paint.filter(|paint| paint.gradient().is_none()).map(|paint| {
+        let target = ColorTarget::Shape { layer: id, slot, stop: 0 };
+        color_picker::swatch(ElementId::Name(format!("shape-{key}-color:0").into()), target, paint.colors().first().copied(), cx)
+    });
+    let mut rows = div().child(setting_row(label, Some(toggle.into_any_element()), div().flex().items_center().gap_2().children(swatch).child(div().flex_1().min_w_0().child(menu))));
     if let Some(paint) = paint {
-        let mut controls = div().flex().items_center().gap_1p5();
-        match paint.gradient() {
-            // A gradient gets the stop editor; a solid its one color.
-            // Taller than a labeled row, so it gets a row of its own, lined up with the values.
-            Some(gradient) => {
-                let editor = super::gradient_editor::editor(id, slot, gradient, workspace, cx);
-                rows = rows.child(div().flex().gap_2().py_1().child(div().w(px(96.0)).flex_none()).child(div().flex_1().min_w_0().child(editor)));
-            }
-            None => {
-                let target = ColorTarget::Shape { layer: id, slot, stop: 0 };
-                controls = controls.child(color_picker::swatch(ElementId::Name(format!("shape-{key}-color:0").into()), target, paint.colors().first().copied(), cx));
-            }
+        if let Some(gradient) = paint.gradient() {
+            // The stop editor is wider than a value, so it gets a row of its own that starts
+            // under the names.
+            let editor = super::gradient_editor::editor(id, slot, gradient, workspace, cx);
+            rows = rows.child(indented(editor).py_1());
         }
         if paint.kind() == PaintKind::Linear {
-            controls = controls.child(div().pl_2().text_color(hsla(color::MUTED)).child("Angle")).child(value_field(FieldTarget::Shape { layer: id, setting: angle }, workspace, cx));
+            rows = rows.child(setting_row(if slot == PaintSlot::Fill { "Fill Angle" } else { "Stroke Angle" }, None, value_field(FieldTarget::Shape { layer: id, setting: angle }, workspace, cx)));
         }
         if slot == PaintSlot::Stroke {
-            controls = controls.child(div().pl_2().text_color(hsla(color::MUTED)).child("Width")).child(value_field(FieldTarget::Shape { layer: id, setting: ShapeSetting::StrokeWidth }, workspace, cx));
-        }
-        // A radial gradient fill has nothing more to show.
-        let has_controls = paint.gradient().is_none() || paint.kind() == PaintKind::Linear || slot == PaintSlot::Stroke;
-        if has_controls {
-            rows = rows.child(labeled_row("", controls));
+            let field = |setting: ShapeSetting, cx: &mut Context<Workspace>| value_field(FieldTarget::Shape { layer: id, setting }, workspace, cx);
+            rows = rows.child(setting_row("Stroke Width", None, field(ShapeSetting::StrokeWidth, cx)));
+            // Trim Paths: how much of the stroke is drawn, and where along the outline.
+            rows = rows.child(setting_row("Trim", None, div().flex().gap_3().child(field(ShapeSetting::TrimStart, cx)).child(field(ShapeSetting::TrimEnd, cx))));
+            rows = rows.child(setting_row("Trim Offset", None, field(ShapeSetting::TrimOffset, cx)));
         }
     }
     rows
@@ -1045,18 +1109,8 @@ fn shape_section(layer: &Layer, style: &ShapeStyle, workspace: &Workspace, cx: &
         this.state.shape_size_linked = !this.state.shape_size_linked;
         cx.notify();
     }));
-    let size_row = labeled_row(
-        "Size",
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(muted_label("W"))
-            .child(field(ShapeSetting::Width, cx))
-            .child(link)
-            .child(muted_label("H"))
-            .child(field(ShapeSetting::Height, cx)),
-    );
+    // Width and height with the link between the name and the values, as on the Scale row.
+    let size_row = setting_row("Size", Some(link.into_any_element()), div().flex().gap_3().child(field(ShapeSetting::Width, cx)).child(field(ShapeSetting::Height, cx)));
     // Polygons and stars are sized by radius, as in After Effects.
     let radial = style.kind.has_points();
     let is_path = style.kind == ShapeKind::Path;
@@ -1065,30 +1119,25 @@ fn shape_section(layer: &Layer, style: &ShapeStyle, workspace: &Workspace, cx: &
         _ => true,
     };
     div()
+        .child(super::morph::path_row("shape", layer, workspace, cx))
         // A pen path keeps its own outline; the drawn shapes can switch between each other.
-        .when(!is_path, |section| section.child(labeled_row("Shape", choice_menu("shape-kind", style.kind.name().to_owned(), kinds, move |this, kind| this.state.set_shape_kind(id, kind), weak))))
+        .when(!is_path, |section| section.child(setting_row("Shape", None, choice_menu("shape-kind", style.kind.name().to_owned(), kinds, move |this, kind| this.state.set_shape_kind(id, kind), weak))))
         .when(is_path, |section| {
-            section.child(labeled_row(
-                "Path",
-                Checkbox::new("path-closed").label("Closed").checked(closed).on_click(cx.listener(move |this, _, _, cx| {
-                    this.state.set_path_closed(id, !closed);
-                    cx.notify();
-                })),
-            ))
+            let toggle = Checkbox::new("path-closed").label("Closed").checked(closed).on_click(cx.listener(move |this, _, _, cx| {
+                this.state.set_path_closed(id, !closed);
+                cx.notify();
+            }));
+            section.child(indented(toggle).py_1())
         })
         .when(!radial, |section| section.child(size_row))
-        .when(radial, |section| section.child(labeled_row("Outer Radius", field(ShapeSetting::OuterRadius, cx))))
-        .when(style.kind == ShapeKind::Star, |section| section.child(labeled_row("Inner Radius", field(ShapeSetting::InnerRadius, cx))))
-        .when(radial, |section| section.child(labeled_row(points_label, field(ShapeSetting::Points, cx))))
-        .when(style.kind.has_corners(), |section| section.child(labeled_row("Corner Radius", field(ShapeSetting::CornerRadius, cx))))
+        .when(radial, |section| section.child(setting_row("Outer Radius", None, field(ShapeSetting::OuterRadius, cx))))
+        .when(style.kind == ShapeKind::Star, |section| section.child(setting_row("Inner Radius", None, field(ShapeSetting::InnerRadius, cx))))
+        .when(radial, |section| section.child(setting_row(points_label, None, field(ShapeSetting::Points, cx))))
+        .when(style.kind.has_corners(), |section| section.child(setting_row("Corner Radius", None, field(ShapeSetting::CornerRadius, cx))))
+        .child(super::morph::style_row("shape", layer, workspace, cx))
         // An open path is a line: it has nothing inside to fill.
         .when(closed, |section| section.child(shape_paint_rows(id, PaintSlot::Fill, style.fill, workspace, cx)))
         .child(shape_paint_rows(id, PaintSlot::Stroke, style.stroke.map(|stroke| stroke.paint), workspace, cx))
-}
-
-/// A small muted label beside a field, such as "W" or "H".
-fn muted_label(text: &'static str) -> Div {
-    div().text_color(hsla(color::MUTED)).child(text)
 }
 
 fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
@@ -1106,7 +1155,11 @@ fn properties_body(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyEle
     };
     let text = match &layer.content {
         LayerContent::Text { text, style } => Some(fold("text", "Text", None, [None, None], workspace, cx, |cx| text_section(layer, text, style, workspace, cx))),
-        LayerContent::Shape { style, .. } => Some(fold("shape", "Shape", None, [None, None], workspace, cx, |cx| shape_section(layer, style, workspace, cx))),
+        LayerContent::Shape { style, .. } => {
+            // The style as drawn at the playhead, which differs from the layer's own while its fill and stroke are keyframed.
+            let shown = workspace.state.shape_style_now(id).unwrap_or(*style);
+            Some(fold("shape", "Shape", Some(SHAPE_INFO), [None, None], workspace, cx, |cx| shape_section(layer, &shown, workspace, cx)))
+        }
         LayerContent::Captions { words, style } => Some(fold("captions", "Captions", None, [None, None], workspace, cx, |cx| captions_section(layer, style, words, workspace, cx))),
         _ => None,
     };
@@ -1185,6 +1238,7 @@ fn section_icon(key: &str) -> IconName {
         "cutout" => IconName::Eraser,
         "audio" => IconName::Volume2,
         "enhance" => IconName::AudioLines,
+        "scopes" => IconName::ChartColumn,
         _ => IconName::Settings,
     }
 }

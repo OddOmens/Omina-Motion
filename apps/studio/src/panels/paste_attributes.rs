@@ -30,7 +30,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
     }
     let chosen = Rc::new(Cell::new(Attributes::default()));
     let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, _| {
         // One checkbox per attribute, each flipping its own field of the shared choice.
         let option = |id: &'static str, label: &'static str, get: fn(&Attributes) -> bool, set: fn(&mut Attributes, bool)| {
             let chosen = chosen.clone();

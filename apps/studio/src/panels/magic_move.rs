@@ -40,7 +40,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
     let eased = Rc::new(Cell::new(true));
     let input = cx.new(|cx| InputState::new(window, cx).default_value(format!("{DEFAULT_SECONDS}")));
     let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, _| {
         let chosen_name = targets.iter().find(|(id, _)| *id == chosen.get()).map_or_else(String::new, |(_, name)| name.clone());
         let picker = {
             let (targets, chosen) = (targets.clone(), chosen.clone());

@@ -104,7 +104,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyE
     let step = workspace.ui.onboarding?;
     let settings = &workspace.ui.settings;
     let (title, about, body) = match step {
-        Step::Look => ("Welcome to Studio", "Let's set it up the way you like. First, pick a theme and an accent color.", look_page(settings, cx).into_any_element()),
+        Step::Look => ("Welcome to Omina Motion", "Let's set it up the way you like. First, pick a theme and an accent color.", look_page(settings, cx).into_any_element()),
         Step::Features => (
             "What will you make?",
             "Start from a set that fits, then fine-tune. What you turn off is hidden everywhere: tools, panels, menus and shortcuts.",
@@ -112,7 +112,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyE
         ),
         Step::Ai => (
             "Local AI, if you want it",
-            "A few features use AI models. They run entirely on this Mac, and nothing you make is uploaded. AI isn't for everyone, so Studio works fully without it.",
+            "A few features use AI models. They run entirely on this Mac, and nothing you make is uploaded. AI isn't for everyone, so Omina Motion works fully without it.",
             ai_page(settings, cx).into_any_element(),
         ),
         Step::Done => ("You're all set", "Everything here can be changed later in Settings.", done_page(settings).into_any_element()),
@@ -170,7 +170,7 @@ fn side_panel(step: Step, cx: &mut Context<Workspace>) -> impl IntoElement {
             .text_size(px(size::SMALL_TEXT))
             .font_weight(gpui_kit::FontWeight::SEMIBOLD)
             .map(|badge| match (done, current) {
-                (true, _) => badge.bg(hsla(color::ACCENT)).child(Icon::new(IconName::Check).size(px(13.0)).text_color(gpui_kit::white())),
+                (true, _) => badge.bg(hsla(color::ACCENT)).child(Icon::new(IconName::Check).size(px(13.0)).text_color(crate::theme::on_accent())),
                 (_, true) => badge.border_2().border_color(hsla(color::ACCENT)).text_color(hsla(color::TEXT)).child((each.index() + 1).to_string()),
                 _ => badge.border_1().border_color(hsla(color::MUTED).opacity(0.5)).text_color(hsla(color::MUTED)).child((each.index() + 1).to_string()),
             });
@@ -222,7 +222,7 @@ fn side_panel(step: Step, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .items_center()
                 .gap_3()
                 .child(super::start_screen::brand_mark(40.0))
-                .child(div().flex().flex_col().child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Studio")).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Setup"))),
+                .child(div().flex().flex_col().child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Omina Motion")).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Setup"))),
         )
         .child(div().pt_8().flex().flex_col().gap_1().children(steps))
         .child(div().flex_1())
@@ -446,7 +446,7 @@ fn ai_page(settings: &AppSettings, cx: &mut Context<Workspace>) -> impl IntoElem
         .flex()
         .gap_3()
         .child(
-            choice_card("onboarding-ai-on", Some(IconName::Sparkles), "Use local AI", "Captions from speech, background removal, auto reframe and voice cleanup.", using)
+            choice_card("onboarding-ai-on", Some(IconName::Sparkles), "Use local AI", "Captions, Object Matte, Auto Reframe and Enhance Speech.", using)
                 .on_click(cx.listener(|this, _, _, cx| change(this, cx, |settings| settings.ai = crate::app_settings::AiFeatures::all(true))))
                 .test_support(),
         )
@@ -477,7 +477,7 @@ fn ai_page(settings: &AppSettings, cx: &mut Context<Workspace>) -> impl IntoElem
                     .bg(hsla(color::PANEL))
                     .text_size(px(size::SMALL_TEXT))
                     .text_color(hsla(color::MUTED))
-                    .child("Captions use Whisper (about 150 MB), and Object Matte and Auto Reframe use MobileSAM (about 40 MB). Each is downloaded once from huggingface.co, and Studio asks first, the first time it's needed. Enhance Speech's models come built in."),
+                    .child("Captions use Whisper (about 150 MB), and Object Matte and Auto Reframe use MobileSAM (about 40 MB). Each is downloaded once from huggingface.co, and Omina Motion asks first, the first time it's needed. Enhance Speech's models come built in."),
             )
     })
 }

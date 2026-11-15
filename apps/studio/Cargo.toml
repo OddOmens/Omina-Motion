@@ -10,6 +10,8 @@ authors.workspace = true
 
 [dependencies]
 studio-core.workspace = true
+# Iris, the assistant shared with Canvas and Develop: her help, matching and shared settings.
+iris.workspace = true
 studio-render = { path = "../../crates/studio-render" }
 studio-media = { path = "../../crates/studio-media" }
 studio-export = { path = "../../crates/studio-export" }
@@ -33,10 +35,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # FFmpeg built into the app, for releases (see studio-media's feature of the same name).
 bundled-ffmpeg = ["studio-media/bundled-ffmpeg"]
 
-# Packaging into Studio.app and Studio.dmg with cargo-packager; scripts/release-macos.sh builds the
+# Packaging into Omina Motion.app and Omina Motion.dmg with cargo-packager; scripts/release-macos.sh builds the
 # release binary (with FFmpeg built in) first, then runs it. Paths are relative to this folder.
 [package.metadata.packager]
-product-name = "Studio"
+product-name = "Omina Motion"
 identifier = "com.oddomens.studio"
 publisher = "Odd Omens LLC"
 category = "Video"
@@ -51,6 +53,8 @@ resources = ["../../LICENSE", "../../THIRD_PARTY_NOTICES.md"]
 
 [package.metadata.packager.macos]
 minimum-system-version = "13.0"
+# Extra Info.plist keys: why Studio asks for the microphone (voiceover recording).
+info-plist-path = "Info.plist"
 # For signed releases: your Developer ID certificate's name, as Keychain Access shows it.
 # signing-identity = "Developer ID Application: Odd Omens LLC (TEAMID)"
 

@@ -100,7 +100,8 @@ pub fn missing_note(project_name: &str, missing: &[PathBuf]) -> String {
 /// and spaces at either end are dropped. A name left empty becomes `fallback`.
 pub fn safe_file_name(name: &str, fallback: &str) -> String {
     let cleaned: String = name.chars().map(|c| if matches!(c, '/' | ':' | '\\') || c.is_control() { '-' } else { c }).collect();
-    let cleaned = cleaned.trim().trim_start_matches('.').trim();
+    // Dots and spaces are dropped in turn until none lead, so ". .." can't become "..".
+    let cleaned = cleaned.trim_start_matches(|c: char| c == '.' || c.is_whitespace()).trim_end();
     if cleaned.is_empty() { fallback.to_owned() } else { cleaned.to_owned() }
 }
 
@@ -287,6 +288,7 @@ mod tests {
         assert_eq!(safe_file_name("  ..hidden ", "Folder"), "hidden");
         assert_eq!(safe_file_name(" / ", "Untitled"), "-");
         assert_eq!(safe_file_name("..", "Untitled"), "Untitled");
+        assert_eq!(safe_file_name(". ..", "Folder"), "Folder", "never a name that climbs out of the package");
         let mut project = sample_project();
         let odd = crate::folders::add_folder(&mut project, "Day 1/2", Some(ids::FOOTAGE_FOLDER));
         link(&mut project, ids::A_CAM, "/shoot/a.mov");

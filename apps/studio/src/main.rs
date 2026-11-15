@@ -3,6 +3,7 @@
 
 mod app_settings;
 mod assets;
+mod canvas_inbox;
 mod crash_log;
 mod download;
 mod features;
@@ -13,7 +14,11 @@ mod package_writer;
 mod panels;
 mod preview_cache;
 mod project_files;
+mod project_thumbnails;
+mod scopes;
 mod sound;
+mod stock;
+mod template_photos;
 mod state;
 mod theme;
 mod updates;
@@ -46,11 +51,11 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(window_bounds),
             window_min_size: Some(size(px(1100.0), px(680.0))),
-            titlebar: Some(TitlebarOptions { title: Some("Untitled — Studio".into()), ..Default::default() }),
+            titlebar: Some(TitlebarOptions { title: Some("Untitled — Omina Motion".into()), ..Default::default() }),
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| workspace::Workspace::new(window, cx)))
-            .expect("failed to open the Studio window");
+            .expect("failed to open the Omina Motion window");
         cx.activate(true);
     });
 }

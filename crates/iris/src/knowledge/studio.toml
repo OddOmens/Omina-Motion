@@ -1,0 +1,273 @@
+# Iris's help about Omina Motion (`studio` in `apps`). See `shared.toml` for how topics are
+# written. Command ids are Motion's own (its `commands.rs`).
+
+[[topic]]
+title = "Animate the whole design for you"
+body = "Ask me: \"animate this\", \"animate for me\" or /animate. I give every layer a way in that suits it, one after another in reading order, and leave backgrounds and anything you've animated yourself alone. Add \"bouncy\" or \"snappy\" for another feel, select layers to animate only those, and Undo takes it all back."
+keywords = "auto automatic animate design everything whole for me quick fast motion move"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Tell me when a layer comes and goes"
+body = "Select the layer (or name it) and tell me in your own words: \"start at 5s and last 2 seconds\", \"fade in over a second\", \"slide in from the left\", \"fade out at 8s\", \"cut it at the playhead\", \"delay it by half a second\", \"bring the words in word by word\", \"make it pulse\" or \"50% opacity\". I move, trim and animate it, say what I did, and one Undo takes it back."
+keywords = "time timing start end last duration seconds fade in out slide enter exit appear disappear cut trim delay intro outro tell instruct"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Animate a property"
+body = "In Properties, click the stopwatch beside the property. Then move the playhead and change the value: each change from then on adds a keyframe."
+keywords = "keyframe add make create stopwatch move motion animation start"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "See a clip's keyframes"
+body = "Select the clip and press {key:show-all-keyframes} for every keyframe, or {key:show-position-keyframes}, {key:show-rotation-keyframes} or {key:show-scale-keyframes} for only position, rotation or scale. The same key again puts them away."
+keywords = "show reveal find timeline rows position rotation scale where"
+apps = ["studio"]
+command = "show-all-keyframes"
+tip = true
+
+[[topic]]
+title = "Make motion smoother"
+body = "Select the keyframes and use Easy Ease: the move then starts and ends gently instead of at full speed. I also suggest it whenever I notice motion with no easing."
+keywords = "smooth ease easing gentle curve robotic stiff linear"
+apps = ["studio"]
+command = "easy-ease"
+tip = true
+
+[[topic]]
+title = "Cut a clip in two"
+body = "Put the playhead where the cut should be, select the clip and split it. The Cut tool cuts wherever you click instead."
+keywords = "split divide razor slice trim"
+apps = ["studio"]
+command = "split-layer"
+tip = true
+
+[[topic]]
+title = "Hide the outlines around selected layers"
+body = "This hides the box and handles in the viewer so nothing is in the way of the picture. The same command brings them back."
+keywords = "bounding box selection lines handles hide show viewer"
+apps = ["studio"]
+command = "toggle-layer-controls"
+tip = true
+
+[[topic]]
+title = "Change the volume over time"
+body = "Select the clip and, under Audio in Properties, click the stopwatch beside Volume or Pan. Then move the playhead and change the value: each change adds a keyframe, so the sound rises, falls or moves across between them."
+keywords = "audio sound volume pan keyframe fade louder quieter ride automation level music"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Reshape a path"
+body = "Double-click a pen path in the viewer to show its points, then drag them."
+keywords = "edit points shape pen vector curve move"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Bring in an SVG"
+body = "Import it like any other file. Omina Motion asks whether you want it as one layer, or as a composition with every shape as a layer of its own."
+keywords = "svg vector import shapes illustrator canvas layer composition"
+apps = ["studio"]
+command = "import"
+tip = true
+
+[[topic]]
+title = "Change a keyboard shortcut"
+body = "Settings ▸ Keyboard Shortcuts lists every command with its key. You can also start from After Effects' or Premiere Pro's keys there."
+keywords = "shortcut key keys hotkey rebind after effects premiere preset"
+apps = ["studio"]
+command = "open-settings"
+tip = true
+
+[[topic]]
+title = "Hide tools and panels you don't use"
+body = "Settings ▸ Tools & Features has a switch for each one. What you turn off is hidden everywhere: tools, panels, menus and shortcuts."
+keywords = "turn off disable remove simplify features clutter"
+apps = ["studio"]
+command = "open-settings"
+tip = true
+
+[[topic]]
+title = "What I look for"
+body = "Motion: no easing, moves that are too fast, keyframes that do nothing or sit a frame off. Editing: tiny gaps, slivers of clips and jump cuts. Audio: abrupt starts, music as loud as a voice, and sound boosted too far. Text shown too briefly or off the frame, and pictures scaled up. The gear at the top chooses which."
+keywords = "you rules suggest suggestions notice check assistant help what"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Work on several compositions at once"
+body = "Every composition you open gets a tab at the top of the viewer, as documents do in Omina Edit. Click a tab to switch: each keeps its own playhead and zoom. Its × closes the tab (the composition stays in the project), and + makes a new composition."
+keywords = "tabs tab switch open several multiple compositions comps documents canvases close new"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Add film grain or an old-film look"
+body = "In Effects, under Noise & Grain: Film Grain for fine moving grain, Paper Texture for a printed feel, and Old Film for dust, scratches and flicker. Put one on an adjustment layer to cover everything below it."
+keywords = "grain noise film texture paper vintage retro old dust scratches flicker analog effect"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Make colors mix as they do in Omina Edit"
+body = "Composition Settings ({key:composition-settings}) ▸ Color Mixing. Blending in linear light is truer to light; turning it off mixes colors the way design apps and browsers do, so Multiply, Screen and see-through layers match Omina Edit exactly. Designs brought in from Omina Edit start with it off."
+keywords = "color mixing linear light blend blending multiply screen match canvas omina edit lottie look different darker"
+apps = ["studio"]
+command = "composition-settings"
+
+[[topic]]
+title = "Start from a sample project"
+body = "The start screen shows sample projects made from templates, filled with photos; click one to open it as a new project. All the templates are one click further, with every photo spot ready for your own pictures."
+keywords = "sample samples example start begin template templates new project photos start screen"
+apps = ["studio"]
+
+[[topic]]
+title = "Change my name and how I work"
+body = "Settings ▸ Iris has my name (Omina Edit and Omina Develop use it too), my blinking, whether I wait in the viewer, the feel I animate in when you don't say, and whether I answer questions about the other apps. Settings ▸ Suggestions chooses what I look for. The gear in my panel has a shortcut to both."
+keywords = "rename name call assistant blink face settings feel style bouncy snappy smooth default customize iris"
+apps = ["studio"]
+command = "open-settings"
+tip = true
+
+
+[[topic]]
+title = "Tidy layers by asking me"
+body = "Tell me in your own words: \"hide the logo layer\", \"lock all text layers\", \"duplicate it\", \"delete it\", \"rename it to Hero\", \"bring it to the front\", \"send it backward\", \"put it in the top right corner\", \"center it\", \"flip it\", \"make it red\", \"a bit bigger\" or \"select every image\". \"It\" is the selected layer, or the one I last made or changed. Text, shapes and solids take a color; the stacking order changes by moving the layer to a track of its own. I say what I did, and one Undo takes it back."
+keywords = "housekeeping hide show unhide lock unlock duplicate copy delete remove rename front back forward backward order stack corner center place align flip mirror color recolor bigger smaller select layers ask tell"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Move the playhead and play by asking me"
+body = "Say \"go to 5s\", \"jump to frame 120\", \"go to the start\" or \"the end\", \"back 10 frames\", \"next marker\", \"previous keyframe\", \"go to the Chorus marker\", \"go to the start of the title layer\" or \"go to the end of the work area\", and \"play\", \"play from the start\" or \"pause\". Next and previous keyframe look at the selected layers, or at every layer when none is selected."
+keywords = "playhead go jump skip seek scrub time frame timecode next previous marker keyframe play pause stop playback rewind forward back"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Change the composition's length, frame rate or size by asking me"
+body = "Say \"make the composition 10 seconds long\", \"set the frame rate to 30\" or \"set the size to 1080x1920\". These change the open composition itself, as Composition Settings ({key:composition-settings}) does: a new frame rate keeps the length in seconds while layers keep their frame numbers, and a new size leaves layers where they are, measured from the top left. For a copy rearranged to fit another shape, say \"make a vertical version\" instead."
+keywords = "composition comp duration length long longer shorter extend shorten frame rate fps size width height resolution dimensions set change"
+apps = ["studio"]
+command = "composition-settings"
+
+[[topic]]
+title = "Set the work area by asking me"
+body = "Say \"set the work area from 2s to 6s\", \"start the work area at the playhead\", \"end the work area here\", \"set the work area to the selected layers\" or \"reset the work area\". \"Trim the composition to the work area\" cuts the composition down to it: everything moves earlier, layers that ended before it are removed, and I say how many."
+keywords = "work area preview range render region in out start end trim crop cut composition whole reset"
+apps = ["studio"]
+
+[[topic]]
+title = "Stagger, sequence and line up layers by asking me"
+body = "Select the layers in the order they should play, then say \"stagger them by 5 frames\" (or \"cascade them 0.2s apart\"), \"sequence them\" to play one after another, \"line them all up at the playhead\", \"make them all the same length\", \"reverse their order\" or \"close the gaps\". Without a selection, say which: \"stagger all text layers by 3 frames\". A layer that would land on another clip moves to a track of its own."
+keywords = "stagger cascade offset sequence one after another back to back line up align time same length duration reverse order swap close gaps arrange selected layers"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Mute, set the volume and fade sound by asking me"
+body = "Select the clip (or name it) and say \"mute it\", \"unmute it\", \"set the volume to 50%\", \"volume to -6 dB\", \"a bit louder\", \"turn the music down\", \"fade the audio in over 1s\" or \"fade the music out over 2 seconds\". 100% is the sound as recorded. With one layer that has sound, I know which you mean. \"Duck Music under Voice\" turns the music down while the voice is sounding; I also do it when my music-under-a-voice rule has found the pair."
+keywords = "mute unmute silence volume louder quieter loud quiet level gain decibels db percent fade audio sound music voice duck ducking under"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Add and find markers by asking me"
+body = "Say \"add a marker here\", \"add a marker at 3s\" or \"add a marker called Chorus\". \"Rename this marker to Verse\" names the one under the playhead, \"remove the marker here\" takes it away and \"clear all markers\" removes every one. To move between them: \"next marker\", \"previous marker\" or \"go to the Chorus marker\"."
+keywords = "marker markers add put drop mark name label called rename remove delete clear next previous go beat cue"
+apps = ["studio"]
+command = "toggle-marker"
+
+[[topic]]
+title = "Make text, solids and shapes by asking me"
+body = "Say \"add a text layer saying “Hello”\", \"add a red solid\", \"add a blue circle\" (or a square, rectangle, triangle, star or polygon), \"add a white background\", \"add a null object\" or \"add an adjustment layer\". Each starts at the playhead in the middle of the frame and is selected, so you can carry on: \"make it bigger\", \"put it at the top\", \"bring it in word by word\"."
+keywords = "add create make new insert text title headline heading solid shape circle square rectangle triangle star polygon background null adjustment layer write saying"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Change a clip's speed by asking me"
+body = "Select a video clip and say \"make it twice as fast\", \"half speed\", \"50% speed\", \"set the speed to 150%\", \"slow motion\", \"reverse it\", \"back to normal speed\" or \"freeze frame here\". \"Speed it up\" and \"slow it down\" change it by a quarter from the speed it has. A faster clip gets shorter and a slower one longer, and I say its new length. Only video clips have a speed; a freeze frame holds the frame under the playhead for two seconds and moves what follows on its track later."
+keywords = "speed fast faster slow slower slow motion twice double half percent reverse backwards freeze frame hold normal clip footage video time"
+apps = ["studio"]
+
+[[topic]]
+title = "Check the project before you export"
+body = "Ask \"am I ready to export?\" or type /ready. I check that every file the project uses is where it should be, whether the composition runs empty at its end, where the work area is and whether the export is set to it, what I've noticed that is still open, and what is hidden, then give a plain verdict with replies to fix things or open Export. Nothing is changed by asking."
+keywords = "ready export render deliver check preflight before missing media files offline unused work area final verdict"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Ask for several things at once, and refer back"
+body = "Join requests with \"and\" or \"then\", or put each on a line of its own: \"duplicate it and mute it\", \"hide the logo and lock the title\", \"start the title layer at 5s, make it red and fade it in\". A step that names no layer means the one the step before it was about, ahead of whatever is selected. Everything one message changes is a single Undo. If a step can't be done I stop there and say which were not run. A name or text with an \"and\" of its own is safest in quotes. Afterwards, \"again\" repeats it, \"more\" goes further, \"too much\" takes it back and goes half as far where it can, \"undo that\" and \"redo\" step through the history, and \"same for the logo\" does the last thing to another layer."
+keywords = "several steps and then script many once again repeat more less too much undo redo same for another layer follow up refer back"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Teach me a recipe"
+body = "A recipe is a name for things you ask me often: \"teach intro: fade in over a second, then make it pulse\", and from then on just say \"intro\". Or do something and say \"save that as intro\". /recipes lists them and \"forget intro\" drops one. I come with a few: \"tidy up\" closes gaps and makes the safe fixes, \"quick title\" adds a title that comes in word by word and fades out, \"social cut\" makes a vertical copy with the work area on its first 15 seconds, and \"watch\" plays from the start."
+keywords = "recipe recipes teach learn macro automate shortcut save that as forget list tidy up quick title social cut watch custom command"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Run a menu command by its name"
+body = "Type a command's name and I run it and tell you its key: \"export\" (which opens the Export window), \"open settings\", \"split at the playhead\", \"show or hide guides\", \"easy ease\", \"save\". When several fit I offer them rather than choose. A command whose tool is turned off in Settings ▸ Tools & Features is explained instead, and I leave quitting and closing the project to you."
+keywords = "command menu run name shortcut key do it open launch tool"
+apps = ["studio"]
+
+[[topic]]
+title = "Ask me without saying how much"
+body = "When you don't give an amount I take a moderate step, say exactly what it came to, and offer More, Less and Undo: \"make it longer\" or \"shorter\" changes a layer by a second, \"move it later\" or \"earlier\" by half a second, \"make the fade slower\" or \"faster\" by half its time, \"speed it up\" or \"slow it down\" by a quarter, \"make the composition longer\" by a second, and \"louder\" or \"quieter\" by 3 dB. \"A bit\" and \"a lot\" make the step smaller or larger, and \"make it 10 frames shorter\" or \"shorten the comp by 2 seconds\" say it outright. When it isn't clear what you want changed (\"more subtle\", \"more dramatic\") I ask, with the likely meanings to pick from."
+keywords = "vague amount how much longer shorter later earlier slower faster louder quieter bit lot more less step default subtle dramatic"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Export straight away by asking me"
+body = "Say what you want and I start it without the Export window: \"export as mp4\", \"export the work area as a gif\", \"export as a png sequence\", \"export now\" (the format the Export window is set to), \"export it as mp4 and gif\", \"export all compositions\", \"export a vertical version\" or \"save this frame as a PNG\". I know MP4 (H.264 or H.265), MOV (ProRes, with transparency if you say so), WebM, GIF, PNG sequence, Lottie, dotLottie and SVG. Files go to the Exports folder beside the saved project (a Studio Exports folder in Movies until it is saved) and never replace one that is there: a taken name gets a number. They run one after another through the export queue; I say where each will land, and say again here when it is written or if it failed, with a reply to show it in the Finder. Plain \"export\" opens the Export window ({key:export}), where every setting is."
+keywords = "export render now straight away direct mp4 mov gif png sequence webm lottie svg prores all compositions frame still batch queue finder folder written file format"
+apps = ["studio"]
+command = "export"
+tip = true
+
+[[topic]]
+title = "Run a recipe from a shortcut, a button or a moment"
+body = "Say \"give tidy up the shortcut ⌘⇧T\" and the shortcut runs it anywhere in Omina Motion, even with my chat closed; Omina Motion's own shortcuts are kept for themselves. \"Put tidy up on the toolbar\" gives it a button at the top of my chat. \"Run tidy up before export\" runs it before each export (also \"when I open a project\", \"before saving\" and \"after importing\"), saying here what it did; if a step fails, the export or save still goes ahead and I say what failed. What a recipe changes is one Undo. \"What would tidy up do?\" lists its steps without running them, and \"lower third Jane Doe\" runs a recipe that takes words."
+keywords = "recipe shortcut key button toolbar trigger before export open save import moment automatic run dry what would lower third value"
+apps = ["studio"]
+tip = true
+
+[[topic]]
+title = "Change your recipes in Settings"
+body = "Settings ▸ Recipes lists every recipe I know, the ones you taught and the ones I come with, with their steps, shortcut, button and moments. Edit renames a taught recipe and changes its steps (joined with \"then\" or \";\", as in a message) and its shortcut; a click sets its button or a moment. Up and Down reorder them, Delete takes one away (with Undo), and Export All… and Import… save them to a file and read one back, so they can go to another Mac. The Recipes… button under my gear opens the page."
+keywords = "recipes settings page edit rename steps shortcut button moments reorder delete undo export import file share"
+apps = ["studio"]
+command = "open-settings"
+
+[[topic]]
+title = "Type faster in my chat"
+body = "As you type a slash command or the start of a recipe's name, the ways it could finish show above the field: click one, or press Tab for the first. With the field empty, the up arrow brings back what you typed before, and down goes forward again. The conversation is kept when Omina Motion closes and comes back next time above an \"Earlier\" line; /clear empties it."
+keywords = "chat type complete completion tab history up arrow down previous recall conversation keep saved earlier clear"
+apps = ["studio"]
+
+[[topic]]
+title = "Export for Instagram, YouTube or Slack by name"
+body = "Say \"export for Instagram Reel\" (H.264 at 30 fps, 1080 × 1920), \"export for YouTube\" (H.264, 1920 × 1080), \"export for GIF for Slack\" (a half-size GIF at 15 fps) or \"export for ProRes Master\" (ProRes 422 HQ). A composition of another shape is copied at the preset's size first. \"Save these export settings as Print\" keeps the Export window's choices as a preset of your own, \"list export presets\" lists them, and \"forget the Print export preset\" drops one. In the Export window ({key:export}), the Preset menu puts one's choices in place, and Save as Preset keeps the ones you made."
+keywords = "export preset presets instagram reel youtube gif slack prores master save settings list forget format"
+apps = ["studio"]
+command = "export"
+tip = true
+
+[[topic]]
+title = "Send a frame to Omina Edit or Omina Develop"
+body = "Say \"send this frame to Edit\" or \"open this frame in Develop\": I save the frame under the playhead as a picture, hand it to that app and open it. Things the other apps send here (\"put this photo in Motion\") come into the project and onto the open composition from the playhead, and I say so in my chat."
+keywords = "send hand off handoff frame picture edit canvas develop photo open other app receive bring in motion"
+apps = ["studio"]

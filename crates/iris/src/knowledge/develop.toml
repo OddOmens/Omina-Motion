@@ -1,0 +1,355 @@
+# Iris's help about Omina Develop (`develop` in `apps`). See `shared.toml` for how topics are
+# written. Command ids are Develop's own (its `keymap.rs`).
+
+[[topic]]
+title = "Crop and straighten a photo"
+body = "Press {key:crop-tool} for Crop & Straighten. Drag a corner or edge to crop, drag inside the box to move it, and drag outside it to turn the photo until the horizon is level (hold Shift to turn in whole degrees). The bar above the photo holds the aspect ratio, the angle, Level, rotate and flip. Level (also in the Photo menu) straightens the photo by its own horizon or uprights when they are clear, and says so when they aren't. Press Enter or {key:crop-tool} again when you're done. The crop never cuts the original: change it any time."
+keywords = "crop cut trim frame straighten level auto horizon tilt angle aspect ratio square portrait landscape"
+apps = ["develop"]
+command = "crop-tool"
+tip = true
+
+[[topic]]
+title = "Fix a color cast"
+body = "Press {key:white-balance-tool} for the White Balance Selector and click something in the photo that should be neutral gray or white, like a wall, a cloud or a shirt: Temperature and Tint are set so it comes out gray. You can also move Temperature and Tint under Basic, or let me fix it: I point out casts I notice."
+keywords = "white balance color cast yellow orange blue green magenta tint temperature warm cool neutral gray"
+apps = ["develop"]
+command = "white-balance-tool"
+tip = true
+
+[[topic]]
+title = "Recover blown highlights"
+body = "Lower Highlights first, then Whites if the brightest parts are still pure white. Press {key:clipping} to paint everything clipped to white in red, so you can see when it's gone. Exposure darkens the whole photo, so it's the last resort for a bright patch."
+keywords = "blown overexposed bright white sky highlights clipping recover detail too bright burnt"
+apps = ["develop"]
+command = "clipping"
+tip = true
+
+[[topic]]
+title = "Bring out detail in the shadows"
+body = "Raise Shadows to open up the dark areas, and Blacks if the darkest parts are still pure black. Pushed a long way, shadows show noise: a little Luminance noise reduction under Detail smooths it. I'll suggest it when shadows are lifted far."
+keywords = "dark shadows underexposed lift open detail black crushed too dark brighten"
+apps = ["develop"]
+
+[[topic]]
+title = "Darken a bright sky"
+body = "Press {key:linear-mask-tool} for a Linear Gradient mask and drag down from the top of the sky to the horizon: it's full strength where you start and fades out where you stop. Then lower Exposure and Highlights in the mask's settings. I offer to add one when I notice a sky much brighter than the land."
+keywords = "sky bright graduated filter gradient linear mask darken top horizon landscape"
+apps = ["develop"]
+command = "linear-mask-tool"
+tip = true
+
+[[topic]]
+title = "Adjust just one part of a photo"
+body = "Press {key:radial-mask-tool} for a Radial Gradient mask and drag out an ellipse over the part to change, then move its sliders: Exposure to light a face, say. Tick Invert to change everything outside it instead. Feather softens the edge; drag the pin to move it and the side handles to resize it. Each photo can have many masks."
+keywords = "mask local radial circle ellipse spot area face subject one part brighten invert feather"
+apps = ["develop"]
+command = "radial-mask-tool"
+
+[[topic]]
+title = "Compare before and after"
+body = "Press {key:before} to see the photo as it came in place of your edit, and again to go back. {key:split} shows them side by side: before on the left, after on the right, with a divider you can drag."
+keywords = "before after compare original split side by side difference toggle"
+apps = ["develop"]
+command = "split"
+tip = true
+
+[[topic]]
+title = "See where highlights and shadows clip"
+body = "Press {key:clipping}, or click either small square in the top corners of the histogram: parts clipped to pure white are painted red and parts clipped to pure black blue. The squares light up whenever something is clipping."
+keywords = "clipping warning red blue histogram pure white black lost detail"
+apps = ["develop"]
+command = "clipping"
+
+[[topic]]
+title = "Try a preset"
+body = "Open Presets on the rail. Each shows this photo in its look: rest the pointer on one to see it on the photo, and click to apply it. A preset sets only its own groups of settings (most leave the white balance alone), and Undo takes it back."
+keywords = "preset look style filter vivid moody film black white apply try hover"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Save your own preset"
+body = "Press {key:new-preset} (or the + at the foot of Presets), name it and tick the groups of settings it should set. It's listed under User Presets in every photo. Right-click it to delete it."
+keywords = "create save make own preset user custom look"
+apps = ["develop"]
+command = "new-preset"
+
+[[topic]]
+title = "Give several photos the same look"
+body = "Press {key:copy-settings} on the photo you've edited, switch to another photo's tab and press {key:paste-settings}. Every Develop setting and mask comes across; the crop stays each photo's own. To bring the crop too, ask me: \"paste settings with the crop\" carries it over in proportion to the photo's size. To do every open photo at once, say \"sync to the others\"."
+keywords = "copy paste settings sync batch same look series match several many"
+apps = ["develop"]
+command = "copy-settings"
+tip = true
+
+[[topic]]
+title = "Keep a version of an edit"
+body = "Press {key:new-snapshot} to keep the edit as it is now in Snapshots (on the rail), then try something else. Click a snapshot to go back to it, double-click to rename it, and update it to the current edit with its arrow button. Snapshots are saved with the project."
+keywords = "snapshot version keep save state compare alternative variation"
+apps = ["develop"]
+command = "new-snapshot"
+tip = true
+
+[[topic]]
+title = "Go back to an earlier step"
+body = "Press {key:undo} to undo and {key:redo} to redo, or open History on the rail and click any step to go straight back to it. Each photo keeps its own history."
+keywords = "undo redo history step back mistake earlier revert"
+apps = ["develop"]
+command = "undo"
+
+[[topic]]
+title = "Open several photos at once"
+body = "Press {key:open} and pick as many photos as you like, or drop them on the window: each opens in a tab of its own, and nothing already open is replaced. {key:next-photo} goes to the next tab. Each photo keeps its own edit, history and file."
+keywords = "open import several many multiple photos tabs batch at once switch next"
+apps = ["develop"]
+command = "open"
+tip = true
+
+[[topic]]
+title = "Save your edit"
+body = "Press {key:save}. The project (a .develop file) holds the original photo byte for byte and your settings, crop, masks and snapshots, so you can change any of it later. The photo itself is never altered."
+keywords = "save project file keep original non-destructive develop"
+apps = ["develop"]
+command = "save"
+
+[[topic]]
+title = "Export a finished photo"
+body = "Press {key:export} and pick JPEG, PNG, TIFF, WebP or BMP, the size (full size or a long edge like 2048 pixels) and, for JPEG, the quality. The photo is developed from the original at full resolution."
+keywords = "export save jpeg jpg png tiff share output resize size quality finished render"
+apps = ["develop"]
+command = "export"
+
+[[topic]]
+title = "Make a photo black and white"
+body = "Pull Saturation all the way down under Basic, or try the Black & White presets. Then shape it with Contrast, Whites and Blacks, or the tone curve. (The Color Mixer works on colors, so it has nothing to change once Saturation is at -100.) You can also just ask me: \"black and white\", or \"dramatic black and white\" for more contrast and a vignette."
+keywords = "black white monochrome grayscale greyscale mono desaturate"
+apps = ["develop"]
+
+[[topic]]
+title = "Let Omina Develop set the light"
+body = "Press {key:auto}, or Auto beside Tone: Exposure, Contrast, Highlights, Shadows, Whites and Blacks are set from the photo's histogram. It's a starting point; adjust from there."
+keywords = "auto automatic tone exposure quick fix one click"
+apps = ["develop"]
+command = "auto"
+
+[[topic]]
+title = "Start over on a photo"
+body = "Press {key:reset-all} to put everything back as it came: settings, crop and masks. The reset button on the Histogram card resets only the Develop settings. Undo brings either back."
+keywords = "reset start over clear remove all edits original default"
+apps = ["develop"]
+command = "reset-all"
+
+[[topic]]
+title = "Rotate or flip a photo"
+body = "Press {key:rotate-left} or {key:rotate-right} to turn a quarter turn. Flip Horizontal and Flip Vertical are in the Photo menu, and in the bar above the photo while cropping."
+keywords = "rotate turn flip mirror sideways upside quarter"
+apps = ["develop"]
+command = "rotate-right"
+
+[[topic]]
+title = "Shape tones with the tone curve"
+body = "In the Tone Curve card, click the curve to add a point and drag it: up brightens those tones, down darkens them. An S shape adds contrast. Pick Red, Green or Blue to curve one color. Double-click a point to remove it."
+keywords = "tone curve curves points s-curve contrast rgb channel"
+apps = ["develop"]
+
+[[topic]]
+title = "Change one color"
+body = "In the Color Mixer, pick Hue, Saturation or Luminance and move that color's slider: Blue's Luminance down for a deeper sky, Orange's Saturation down to calm skin, Green's Hue to turn foliage warmer."
+keywords = "color mixer hsl hue saturation luminance one single color sky skin green foliage"
+apps = ["develop"]
+
+[[topic]]
+title = "Tint the shadows and highlights"
+body = "In Color Grading, give Shadows, Midtones and Highlights each a hue and strength: cool shadows and warm highlights is the classic film look. Blending sets how much they overlap, Balance which gets more of the photo."
+keywords = "color grading split toning tint shadows highlights midtones film cinematic teal orange"
+apps = ["develop"]
+
+[[topic]]
+title = "Sharpen or reduce noise"
+body = "Under Detail, Sharpening crisps edges (Radius sets how fine) and Noise Reduction smooths grain: Luminance for speckle in brightness, Color for colored blotches. Zoom to 100% ({key:actual-size}) to judge them."
+keywords = "sharpen sharpening noise reduction grain grainy speckle detail crisp soft blurry"
+apps = ["develop"]
+command = "actual-size"
+
+[[topic]]
+title = "Add a vignette or film grain"
+body = "Under Effects, Vignette darkens (or lightens) the corners of the cropped photo, so it follows the crop; Midpoint and Feather shape it. Grain adds film-like texture."
+keywords = "vignette corners dark edges grain film texture effects"
+apps = ["develop"]
+
+[[topic]]
+title = "Zoom in to check detail"
+body = "Press {key:toggle-zoom}, or double-click the photo, to switch between fitting it in the window and 100%. Scroll with the mouse wheel to zoom around the pointer, and drag to move around. {key:fit} fits it again."
+keywords = "zoom in out 100 percent fit detail magnify pan move around"
+apps = ["develop"]
+command = "toggle-zoom"
+
+[[topic]]
+title = "What I look for in a photo"
+body = "I check the finished photo for things like overexposure, blown highlights, crushed shadows, harsh or flat contrast, colors too strong or dull, a color cast, a bright sky and noisy lifted shadows. Each suggestion says what I measured; rest the pointer on its fix to see it on the photo, and click to make it. Settings ({key:settings}) ▸ Iris switches each rule off."
+keywords = "iris assistant suggestions rules check problems fix all what look notice"
+apps = ["develop"]
+command = "settings"
+tip = true
+
+[[topic]]
+title = "Ask me for several photo edits in one message"
+body = "List them with commas or \"and\": \"shadows +30, highlights -20 and a bit warmer\". I make them together as one step in History, so one Undo takes them all back, and I say what each came to. Different kinds of request can be joined the same way: \"warmer and crop to square\", \"sharpen and save a snapshot called Sharp\", \"auto and export as JPEG\". A number with a sign moves a slider from where it is (\"shadows +30\"); \"to\" or \"set\" puts it exactly there (\"set exposure to 0.5\"); words work too (\"raise the shadows a lot\", \"reset clarity\"). If I follow only part of a list of edits I change nothing and say which part I missed. Temperature runs from -100 to +100 here, not in kelvin."
+keywords = "several many multiple edits at once list comma and sliders set value number plus minus exposure contrast shadows highlights kelvin iris ask type"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Tell me a photo edit was too much or not enough"
+body = "After I change sliders, say \"more\" and I make the same move again from where the photo is now. Say \"less\" or \"too much\" and I take the change back and make it again at half strength (once more halves what is left). \"Undo that\" takes it back and names what it undid, \"redo\" puts it back, and \"again\" repeats the last request that changed something. The same replies are offered as small buttons under my answer."
+keywords = "more less too much not enough stronger weaker undo that redo again repeat follow up tune halve half iris"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Ask me for a look by a word"
+body = "Say \"make it moody\", \"bright and airy\", \"punchy\", \"a soft look\", \"matte\", \"cinematic\", \"vintage\", \"warm sunset\", \"a cool look\", \"high-key\", \"low-key\" or \"dramatic black and white\". Each is a handful of slider moves made from where the photo is now, so your corrections stay, and I list every slider that moved so you can tune it. \"A bit\" halves it and \"very\" doubles it; \"less moody\" eases it back. /looks lists them. A preset of the same name (\"try Moody\") sets whole groups of settings instead."
+keywords = "look looks style mood moody airy punchy soft dreamy matte faded cinematic vintage retro sunset golden hour cool high key low key dramatic black white word iris"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Ask me to change one color in a photo"
+body = "Name the color, or what is that color: \"make the sky bluer\", \"deeper blues\", \"greener grass\", \"desaturate the oranges\", \"darken the blues\", \"softer skin tones\". I move that color's Saturation or Luminance in the Color Mixer and say which. The sky is read as Blue, grass as Green and Yellow, skin as Orange, water as Aqua and Blue. For an exact value, name the slider: \"blue saturation -20\". Darkening a sky this way reaches only what is blue; a pale sky needs a Linear Gradient mask. \"Too blue\" on its own is about the white balance, so that warms the photo."
+keywords = "one color sky bluer blues grass greener skin tones oranges desaturate darken deepen lighten color mixer hsl saturation luminance ask iris"
+apps = ["develop"]
+
+[[topic]]
+title = "Ask me to sharpen, reduce noise or add a vignette"
+body = "Say \"sharpen\", \"reduce the noise\", \"dehaze a bit\", \"more texture\", \"add a vignette\", \"darken the corners\", \"add film grain\", or give an amount: \"sharpening 60\", \"noise reduction 40\". \"Remove the vignette\" and \"no grain\" put them back to none. A vignette that darkens the corners is a negative amount, so \"add a vignette\" sets it below zero. These need the Detail and Effects cards turned on in Settings ▸ Tools & Features."
+keywords = "sharpen sharper noise reduce denoise grain grainy vignette corners dehaze haze hazy texture clarity finishing detail effects ask iris"
+apps = ["develop"]
+
+[[topic]]
+title = "Ask me to crop a photo to a shape"
+body = "Say \"crop to 16:9\", \"crop square\", \"crop to 4 by 5\" or \"crop to the original ratio\": the crop takes that shape, as big as fits, centered where it was. The first number is the width, so 4:5 stands upright and 5:4 lies on its side; \"swap the crop\" turns it. The shapes are the ones in the crop bar. \"Crop it tighter\" takes a tenth off each way about the crop's middle (\"a bit\" is 5%, or say \"crop in by 20%\"), and \"more\" or \"less\" go on from there. \"Straighten it\" levels the photo by its own horizon or uprights (see Level a tilted photo); \"straighten 1.5 degrees\" sets the angle yourself, and \"reset the crop\" removes both."
+keywords = "crop ratio aspect 16:9 square 4x5 4:5 3:2 original portrait landscape swap tighter closer looser edges percent straighten degrees angle level horizon reset ask iris"
+apps = ["develop"]
+command = "crop-tool"
+
+[[topic]]
+title = "Give every open photo the same edit by asking me"
+body = "With several photos open, say \"sync to the others\" (or \"apply this to all open photos\") and I copy this photo's Develop settings, masks and crop onto the rest. A crop is carried over in proportion: the same shape, the same place and the same straighten angle on each photo's own size, turned a quarter for a photo that stands the other way (I name those). A photo that isn't cropped leaves the others' crops alone. Narrow it with \"sync only the white balance\", \"sync only the crop\" or \"sync everything but the crop\". Or make a change here and say \"same for all the others\" (or \"same for the next one\"): it is read afresh for each photo, so \"a bit brighter\" is a bit brighter than that photo was, and \"straighten it\" levels each by its own horizon. \"Auto all photos\" and \"reset all photos\" work the same way. I always say how many photos will change and wait for a yes. Each photo keeps its own history, so {key:undo} only takes it back on the one showing: say \"undo that\" straight afterwards and I take it back on all of them."
+keywords = "sync synchronize all photos others batch same for every each apply copy settings crop white balance masks auto reset many several at once iris"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Move between open photos by asking me"
+body = "Say \"next photo\" or \"previous photo\" ({key:next-photo} and {key:previous-photo}), \"photo 3\", or \"go to\" and a photo's name. \"Which photos are open?\" lists them."
+keywords = "next previous photo switch go to tab open photos which list move between iris ask"
+apps = ["develop"]
+command = "next-photo"
+
+[[topic]]
+title = "Ask me to export a photo with your choices"
+body = "Name a format and I export without the sheet: \"export as JPEG at 80% quality, 2048 pixels wide\" writes the file and tells you its full path. \"Export now\" uses the choices from last time; \"export all\" (or \"export every open photo as PNG\") writes each open photo with its own edit; \"export as JPEG and TIFF\" writes both. Sizes are by the long edge, or by width or height if you say \"wide\" or \"tall\", worked out for each photo's own shape. Files go to the folder your last export went to, or else to an Exports folder beside the photo's project. A name already there is never written over: the new file gets a number. I say when the files are written, and name any photo that failed. A plain \"export\" opens Export ({key:export}) as the menu does, and so does a first export with nowhere known to put it."
+keywords = "export jpeg jpg png tiff webp quality percent pixels wide long edge size full 4k ask iris all photos every batch now folder exports web overwrite"
+apps = ["develop"]
+command = "export"
+
+[[topic]]
+title = "Keep and bring back a photo's look by asking me"
+body = "\"Save a snapshot called Before crop\" keeps the edit as it is now; \"go back to the snapshot Before crop\" (or \"restore the last snapshot\") brings it back, and \"what's different from the last snapshot?\" lists each slider that has moved since. \"Save this as a preset called Golden\" makes a preset of your own from this photo's settings (everything but the white balance), and \"try Golden\" applies it. \"Copy these settings\" and \"paste settings\" carry a look to another photo."
+keywords = "snapshot save restore go back different compare preset called named save as copy paste settings look keep ask iris"
+apps = ["develop"]
+
+[[topic]]
+title = "Check a photo is ready to export"
+body = "Ask me \"is this ready?\" (or type /ready). I answer once from what I measured: how much is clipped to white and black, any color cast, the sharpening and noise reduction, the crop and size it will export at, and whether it has unsaved changes, then give a plain verdict with buttons to fix what I found, export or save."
+keywords = "ready finished done preflight final check before export verdict clipping cast unsaved iris"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Ask me about a photo's settings and measurements"
+body = "\"What did I change?\" lists every slider moved from where it starts. \"What's the white balance?\" gives Temperature and Tint and which way the photo's grays lean now. \"How much are the highlights clipping?\" gives the share of the photo at pure white and black. \"What is the contrast at?\" gives one slider's value and range, and \"how big is it?\" its size in pixels, as it came and as cropped."
+keywords = "what did i change changed edits white balance clipping how much value slider at size numbers measurements questions iris ask"
+apps = ["develop"]
+
+[[topic]]
+title = "Recipes that come with Omina Develop"
+body = "Say \"portrait finish\" (softer skin, a little less texture, a subtle vignette, a touch of sharpening), \"landscape finish\" (highlights down, shadows up, less haze, a bluer sky, greener grass, sharpening), \"mono finish\" (dramatic black and white with a little grain), \"fresh start\" (reset, then Auto), \"tidy frame\" (level it if a clear line shows the tilt, then crop 5% off the edges) or \"web export\" (exports a JPEG at quality 80, 2048 pixels on the long edge). Each is only messages I already understand, said in a row, and its changes are one step in History. Teach me your own: \"teach glow: a bit warmer, then add a subtle vignette\". /recipes lists them all."
+keywords = "recipe recipes built in portrait finish landscape finish mono fresh start tidy frame web export teach macro automate steps iris"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Run one of Omina Develop's commands by asking me"
+body = "Type a command's name as its menu shows it: \"zoom in\", \"fit on screen\", \"show clipping\", \"white balance selector\", \"show history\", \"open settings\", \"save\". I run it and say its key. If two fit (\"zoom\") I ask which. Commands whose tool or feature is turned off in Settings ▸ Tools & Features aren't run, and I never quit or hide the app for you."
+keywords = "command menu run by name zoom fit clipping settings save open tool panel history presets ask iris type"
+apps = ["develop"]
+
+[[topic]]
+title = "Level a tilted photo"
+body = "In Crop & Straighten ({key:crop-tool}), press Level in the bar above the photo, or choose Photo ▸ Level, or ask me: \"straighten it\". The photo's edges are measured for a line close to level or plumb (a horizon, a shoreline, the side of a building), and when one clearly stands out, within ten degrees, the photo is straightened by exactly that. When no line is clear enough nothing is changed: a wrong guess is worse than none, so straighten it by eye or give me the angle (\"straighten 1.5 degrees\")."
+keywords = "level auto straighten horizon tilt tilted crooked angle upright plumb automatic photo menu button iris"
+apps = ["develop"]
+command = "level"
+tip = true
+
+[[topic]]
+title = "Tell me roughly what you want from a photo"
+body = "You don't have to name sliders. \"Make it look good\" (or \"fix it\", \"improve this\") runs Auto for the light, unless you've set it yourself, then every fix I'd suggest, and lists what it did. \"Make it pop\" is more contrast, clarity and color; \"more dramatic\" more contrast and clarity with deeper blacks; \"softer\" and \"flatter\" less contrast; \"more subtle\" takes every slider you've moved a quarter of the way back. \"Fix the light\" is Auto alone, \"fix the colors\" the fix for a cast or color problem I measured, and \"clean it up\" less noise and a little sharpening. Complaints work too: \"too dark\", \"too yellow\", \"too flat\", \"too noisy\", \"too harsh\". Each time I say what it came to, and \"more\", \"less\" and \"undo that\" go on from there. If you only say \"change it\", I ask what to change."
+keywords = "vague roughly look good better improve fix it pop dramatic subtle softer flatter clean up too dark yellow flat noisy harsh default guess iris"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Do the same to every photo in a folder"
+body = "Ask me with the folder: \"apply portrait finish to every photo in this folder and export\", \"auto every photo in ~/Pictures/Trip\", \"export everything in this folder as JPEG\". \"This folder\" is the one the photo showing came from; any other is named from \"~/\" or \"/\" (in quotes if its name has spaces). The photos aren't opened as tabs. Each edit is kept the way Omina Develop keeps any edit, in a project beside the photo: a photo with its own project there (Beach.develop) is changed in that project, any other gets a new one, and the photo files themselves are never written to. An export alone writes no projects, and exports go to the folder your last export went to, or else an Exports folder inside this one. I say how many photos it is and wait for a yes, because Undo can't take it back. I keep a progress line in the chat (\"12 of 40 done\") and stop after the photo I'm on when you say \"stop\". Photos open in a tab are left out (use \"sync to the others\" for those), and so are files that aren't photos. Recipes set to run before an export don't run for a folder."
+keywords = "folder batch every photo all photos directory many files apply recipe auto export without opening projects sidecar stop progress iris"
+apps = ["develop"]
+tip = true
+
+[[topic]]
+title = "Change a keyboard shortcut in Omina Develop"
+body = "Open Settings ({key:settings}) ▸ Keyboard Shortcuts. Every command is listed with its key; press Change and then the new key (Esc cancels). A key another command had moves to this one, and the page says which lost it. Reset puts a command's own key back, the ✕ leaves it without one, and Put Them All Back returns every key to Lightroom's. A key one of Iris's recipes runs on can't be taken: change the recipe's key under Settings ▸ Recipes first. Iris names the keys you set, and never gives a recipe one of them."
+keywords = "keyboard shortcut shortcuts key keys change customize custom rebind hotkey reset lightroom record"
+apps = ["develop"]
+command = "settings"
+
+[[topic]]
+title = "Give a recipe a key, a button or a moment"
+body = "Say \"give portrait finish the shortcut ⌃⌥P\", \"put mono finish on the toolbar\" or \"run tidy frame before export\", or set them in Settings ▸ Recipes. A recipe's key works anywhere in the editor, with the chat closed; its button sits at the top of Iris's chat. Moments are before each export (from the Export sheet or from me), whenever a photo is opened, before each save, and after an import (opening a photo file rather than a project, or a picture another app sends). A recipe run at a moment says what it did in the chat and is one Undo of its own; if a step fails, the export or save goes ahead anyway. Nothing runs with no photo open."
+keywords = "recipe key shortcut button toolbar trigger moment before export on open before save after import automatic run by itself"
+apps = ["develop"]
+
+[[topic]]
+title = "Manage recipes in Settings"
+body = "Settings ({key:settings}) ▸ Recipes lists the recipes you've taught me and the ones Omina Develop comes with, each with its steps, key, button and moments. Edit a recipe of your own (its name, and its steps one per line), move it up or down, or delete it (Undo Delete brings it back). Record Key takes the next key pressed. Export… writes all your recipes to a file to keep or share, and Import… adds the recipes from one, saying how many it added. One Omina Develop comes with can be given a key, a button or moments, and Reset takes them off again."
+keywords = "recipes settings edit rename steps reorder delete undo export import share file json key button moments"
+apps = ["develop"]
+command = "settings"
+
+[[topic]]
+title = "Recipes that take a value"
+body = "A recipe can leave a gap for a value: when you teach it, write a word for the gap between curly brackets after the recipe's name and wherever it goes in the steps (/help shows one). Then run it with the value after its name. Omina Develop comes with \"proof\", which takes a name: \"proof Warm and Soft\" saves a snapshot called Warm and Soft and exports a small JPEG proof (quality 70, 1200 pixels on the long edge). A value can't hold curly brackets itself. A recipe that takes a value can't have a key or a button, since it needs the value each time."
+keywords = "recipe value gap slot curly brackets braces name text proof teach run with"
+apps = ["develop"]
+
+[[topic]]
+title = "Export with a preset"
+body = "Say \"export for Web\" (JPEG at quality 80, 2048 pixels on the long edge), \"export for Instagram\" (JPEG at quality 90, 1080 pixels wide; it sets the size only, so crop to 4:5 or square first if you want Instagram's shape), \"export for Print\" (TIFF at full size) or \"export for Email\" (JPEG at quality 70, 1200 pixels on the long edge). The file is written straight away, as with \"export as JPEG\". \"Save these export settings as Proofs\" keeps the choices Export last used under a name; \"list export presets\" lists them and \"forget the Proofs export preset\" drops one. The Export sheet ({key:export}) has the same presets under Preset, and Save as Preset… beside them."
+keywords = "export preset presets web instagram print email save these export settings list forget sheet jpeg tiff"
+apps = ["develop"]
+command = "export"
+
+[[topic]]
+title = "Send a photo to Omina Edit or Omina Motion"
+body = "Ask me: \"open this photo in Edit\", \"send this to Omina Edit\" or \"put this photo in Motion\". The photo is developed with all your edits at full size and sent as a PNG, so nothing is lost on the way, and the other app opens and brings it in. Pictures Omina Edit sends (\"develop this picture\") and frames Omina Motion sends (\"send this frame to Develop\") open here as new photo tabs, and I say so in the chat."
+keywords = "send open in edit motion canvas studio hand off handoff transfer move photo picture frame between apps omina"
+apps = ["develop"]
+
+[[topic]]
+title = "Type to Iris faster"
+body = "As you type, Iris's commands and recipes that start that way are listed above the field: click one, or press Tab to take the first. The up and down arrows go back through what you've typed before, while the field is empty (once you start writing, they move the cursor as usual). What was said is still there after Omina Develop restarts, above a line marked Earlier; /clear forgets it."
+keywords = "type typing complete completion tab arrow up down history recall earlier restart conversation kept clear chat field"
+apps = ["develop"]
+

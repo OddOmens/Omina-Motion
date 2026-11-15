@@ -224,34 +224,6 @@ fn visible_rows<'a>(items: &'a [ProjectItem], is_open: &dyn Fn(Id) -> bool) -> V
     rows
 }
 
-/// While the project has no footage, pictures or sound: how to bring some in.
-fn no_media_hint(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl IntoElement + use<>> {
-    use gpui_kit::component::button::Button;
-    use gpui_kit::component::Sizable as _;
-    let has_media = workspace.state.project.items.iter().any(|item| matches!(item.kind, ProjectItemKind::Footage | ProjectItemKind::Image | ProjectItemKind::Audio));
-    if has_media {
-        return None;
-    }
-    let import = crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Import", "import");
-    Some(
-        div()
-            .id("project-empty-hint")
-            .mx_2()
-            .my_2()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(hsla(color::HAIRLINE))
-            .text_color(hsla(color::MUTED))
-            .child("No footage, pictures or sound yet. Drag files here from the Finder, or import them. After Effects projects and Lottie files come in as compositions.")
-            .child(Button::new("project-empty-import").outline().small().icon(Icon::new(IconName::FileInput)).label(import).on_click(cx.listener(|this, _, window, cx| this.import(window, cx))))
-            .test_support(),
-    )
-}
-
 /// Where a dragged project item would go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropPlace {
@@ -567,7 +539,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                     .gap_1p5()
                     .pl(px(8.0 + depth as f32 * 14.0))
                     // An expanded folder shows as open, as in Finder.
-                    .child(Icon::new(if is_folder && is_open { IconName::FolderOpen } else { kind_icon(item.kind) }).size(px(14.0)).text_color(hsla(color::MUTED)))
+                    // A folder's icon is drawn in its label color, so folders tell apart at a glance.
+                    .child(Icon::new(if is_folder && is_open { IconName::FolderOpen } else { kind_icon(item.kind) }).size(px(14.0)).text_color(if is_folder && item.label != LabelColor::None { gpui_kit::rgba(item.label.color().to_rgba_u32()).into() } else { hsla(color::MUTED) }))
                     .child(item_name(item, workspace, cx)),
             )
             .when(columns.kind, |row| row.child(div().w(px(TYPE_WIDTH)).pl_2().truncate().text_color(hsla(color::MUTED)).child(type_label(item, workspace))))
@@ -611,8 +584,8 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
     })
     .collect::<Vec<_>>();
 
-    // Import and New Comp live on the left rail (always in view), so the footer keeps to what
-    // acts on this list: a new folder, and deleting the selection.
+    // The footer acts on this list: a new folder, importing files into it, and deleting the
+    // selection.
     let footer = div()
         .flex()
         .items_center()
@@ -622,6 +595,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             this.state.new_folder();
             cx.notify();
         })))
+        .child(icon_button("project-import", IconName::FileInput, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Import", "import"), false, cx.listener(|this, _, window, cx| this.import(window, cx))))
         .child(div().flex_1())
         .child(icon_button("delete-item", IconName::Trash, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Delete", "delete"), false, |_, window, cx| {
             window.dispatch_action(Box::new(crate::workspace::Delete), cx);
@@ -643,7 +617,6 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
             }))
             .child(preview)
             .child(column_header)
-            .children(no_media_hint(workspace, cx))
             .child(
                 div()
                     .id("project-items")

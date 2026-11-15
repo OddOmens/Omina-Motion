@@ -17,7 +17,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
     let keeping = workspace.ui.settings.versions;
     let now = crate::app_settings::now_seconds();
     let target = cx.weak_entity();
-    window.open_dialog(cx, move |dialog, _, _| {
+    crate::panels::chrome::open_dialog(window, cx, move |dialog, _, _| {
         let rows: Vec<AnyElement> = versions
             .iter()
             .enumerate()

@@ -88,7 +88,7 @@ impl Default for TrackMedia {
 
 impl TrackMedia {
     /// The GPU image for a decoded thumbnail, made once.
-    fn image(&self, frame: &Arc<VideoFrame>) -> Arc<RenderImage> {
+    pub(crate) fn image(&self, frame: &Arc<VideoFrame>) -> Arc<RenderImage> {
         let key = Arc::as_ptr(frame) as usize;
         let mut cache = self.images.borrow_mut();
         if let Some((_, image)) = cache.images.get(&key) {
@@ -139,6 +139,16 @@ pub(super) fn animated_properties(layer: &Layer) -> Vec<(PropertyPath, String, V
         .collect()
 }
 
+/// The keyframe rows an expanded clip shows: every animated property, or just the one picked
+/// with the P, R or S key (no rows when that one isn't animated).
+fn shown_properties(workspace: &Workspace, layer: &Layer) -> Vec<(PropertyPath, String, Vec<i64>)> {
+    let mut properties = animated_properties(layer);
+    if let Some(only) = workspace.ui.timeline.only_property.get(&layer.id) {
+        properties.retain(|(path, ..)| path == only);
+    }
+    properties
+}
+
 /// Every row top to bottom with its height: a track's own height plus room for the keyframe
 /// rows of any expanded clip on it.
 fn layout(workspace: &Workspace) -> Vec<(i32, f32)> {
@@ -151,12 +161,17 @@ fn layout(workspace: &Workspace) -> Vec<(i32, f32)> {
                 .layers
                 .iter()
                 .filter(|layer| layer.track == track && expanded.contains(&layer.id))
-                .map(|layer| animated_properties(layer).len().max(1))
+                .map(|layer| shown_properties(workspace, layer).len().max(1))
                 .max()
                 .unwrap_or(0);
             (track, base_height(track, workspace.ui.settings.compact_timeline) + rows as f32 * PROPERTY_ROW)
         })
         .collect()
+}
+
+/// Height of the top track's row.
+pub(super) fn first_row_height(workspace: &Workspace) -> f32 {
+    layout(workspace).first().map_or(base_height(0, workspace.ui.settings.compact_timeline), |(_, height)| *height)
 }
 
 /// The track under window y position `y`. Above the top row is a new track above it; below
@@ -260,7 +275,7 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             cx.notify();
         })))
         .when(workspace.has(crate::features::Feature::RenderAndPlay), |bar| bar.child(icon_button("tracks-render-play", IconName::Film, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Render & Play: render the work area, then play it smoothly", "render-and-play"), workspace.ui.render_then_play, cx.listener(|this, _, window, cx| this.render_and_play(window, cx)))))
-        .child(div().pl_2().font_family(crate::theme::MONO_FONT).text_size(px(13.0)).text_color(hsla(color::TIME)).child(format_timecode(state.current_frame, rate)))
+        .child(div().pl_2().font_family(crate::theme::MONO_FONT).text_size(px(13.0)).text_color(hsla(color::ACCENT)).child(format_timecode(state.current_frame, rate)))
         .children(render_progress(workspace, cx));
     let right = side()
         .justify_end()
@@ -428,6 +443,8 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
             cx.notify();
         }))
         .children(rows)
+        // Under the lines below, so the playhead is never hidden behind the hint.
+        .children(super::empty_hint(workspace))
         .child(work_line(work_start))
         .child(work_line(work_end))
         .child(div().absolute().top_0().bottom_0().left(relative(playhead)).w(px(1.0)).bg(hsla(color::PLAYHEAD)))
@@ -726,6 +743,8 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
                 .cursor(gpui_kit::CursorStyle::Arrow)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| {
+                    // The chevron always opens to every animated property.
+                    this.ui.timeline.only_property.remove(&id);
                     let expanded = &mut this.ui.timeline.expanded_clips;
                     if !expanded.remove(&id) {
                         expanded.insert(id);
@@ -874,13 +893,19 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
     let state = &workspace.state;
     let view = state.view_range;
     let id = layer.id;
-    let properties = animated_properties(layer);
+    let properties = shown_properties(workspace, layer);
+    // What to say when there is nothing to show: the one property asked for has no keyframes,
+    // or nothing on the layer is animated.
+    let nothing = match workspace.ui.timeline.only_property.get(&id).and_then(|&path| layer.property(path, 0)) {
+        Some(property) => format!("No {} keyframes yet: animate it in Properties", property.name),
+        None => "No keyframes yet: animate a property in Properties".to_owned(),
+    };
     // Keyframe positions are fractions of the visible range; inside this box they are measured
     // from its left edge, so convert.
     let local = move |frame: i64| (fraction(frame as f64, view) - left) / width.max(1e-6);
     let tint = |alpha: u32| -> gpui_kit::Hsla { rgba((head << 8) | alpha).into() };
     let rows: Vec<AnyElement> = if properties.is_empty() {
-        vec![div().h(px(PROPERTY_ROW)).flex().items_center().px_2().text_size(px(11.0)).text_color(hsla(color::MUTED)).child("No keyframes yet: animate a property in Properties").into_any_element()]
+        vec![div().h(px(PROPERTY_ROW)).flex().items_center().px_2().text_size(px(11.0)).text_color(hsla(color::MUTED)).child(nothing).into_any_element()]
     } else {
         properties
             .into_iter()
