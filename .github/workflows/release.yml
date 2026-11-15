@@ -37,6 +37,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: Omina Motion
+          # Keep the compiled code even when packaging fails, so a retry doesn't rebuild it all.
+          cache-on-failure: true
       - name: Install cargo-packager
         run: cargo install cargo-packager --locked --version 0.11.8
 
@@ -86,12 +88,14 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           # The installer carries FFmpeg's DLLs beside studio.exe, so the packaging settings from
-          # Cargo.toml are written out with them added as resources. The package is named in the
-          # file because cargo-packager otherwise fails looking for it from the file's path.
+          # Cargo.toml are written out with them added as resources. The name, version and authors
+          # that cargo-packager would take from Cargo.toml are copied in too, since it doesn't fill
+          # them in for a config passed with --config.
           dlls="$(cygpath -m "$FFMPEG_DIR")/bin/*.dll"
           cargo metadata --no-deps --format-version 1 \
-            | jq --arg dlls "$dlls" '.packages[] | select(.name == "studio") | .metadata.packager
-                | .name = "studio" | .resources += [{"src": $dlls, "target": "."}]' > apps/studio/Packager.json
+            | jq --arg dlls "$dlls" '.packages[] | select(.name == "studio") as $package | $package.metadata.packager
+                | .name = $package.name | .version = $package.version | .authors = $package.authors
+                | .resources += [{"src": $dlls, "target": "."}]' > apps/studio/Packager.json
           cargo packager -p studio -c apps/studio/Packager.json --formats nsis
       - name: Collect the installer under its download name
         run: |
