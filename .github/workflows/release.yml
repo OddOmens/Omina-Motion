@@ -86,11 +86,12 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           # The installer carries FFmpeg's DLLs beside studio.exe, so the packaging settings from
-          # Cargo.toml are written out with them added as resources.
+          # Cargo.toml are written out with them added as resources. The package is named in the
+          # file because cargo-packager otherwise fails looking for it from the file's path.
           dlls="$(cygpath -m "$FFMPEG_DIR")/bin/*.dll"
           cargo metadata --no-deps --format-version 1 \
             | jq --arg dlls "$dlls" '.packages[] | select(.name == "studio") | .metadata.packager
-                | .resources += [{"src": $dlls, "target": "."}]' > apps/studio/Packager.json
+                | .name = "studio" | .resources += [{"src": $dlls, "target": "."}]' > apps/studio/Packager.json
           cargo packager -p studio -c apps/studio/Packager.json --formats nsis
       - name: Collect the installer under its download name
         run: |
