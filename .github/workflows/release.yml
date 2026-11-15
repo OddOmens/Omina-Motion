@@ -62,6 +62,9 @@ jobs:
             curl -fsSL -o "$RUNNER_TEMP/ffmpeg.zip" "$base/ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip"
             7z x -y "$RUNNER_TEMP/ffmpeg.zip" -o"$RUNNER_TEMP" > /dev/null
             echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+            # Generating FFmpeg's bindings recurses deeply and overflows Windows' default 1 MB
+            # stack, so programs built here, the build scripts included, get 16 MB.
+            echo "RUSTFLAGS=-C link-arg=/STACK:16777216" >> "$GITHUB_ENV"
           else
             curl -fsSL "$base/ffmpeg-n9.0-latest-linux64-gpl-shared-9.0.tar.xz" | tar xJ -C "$RUNNER_TEMP"
           fi
