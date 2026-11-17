@@ -10,7 +10,7 @@
 # Signing and notarizing (so the app opens without Gatekeeper warnings) use your Apple Developer ID:
 # put its name in apps/studio/Cargo.toml (`signing-identity` under [package.metadata.packager.macos]),
 # and for notarizing set APPLE_ID, APPLE_PASSWORD (an app-specific password) and APPLE_TEAM_ID.
-# Without them the app is built unsigned, which is fine for testing on this Mac.
+# Without them the app gets an ad-hoc signature, which opens after a one-time approval.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -115,7 +115,9 @@ fi
 python3 scripts/third-party-notices.py
 
 echo "Packaging…"
-CARGO_TARGET_DIR="$root/target" cargo packager --release -p studio --formats app,dmg
+CARGO_TARGET_DIR="$root/target" cargo packager --release -p studio --formats app
+# The disk image is made separately so the whole app is signed first; see that script.
+./scripts/package-macos-dmg.sh "Omina Motion"
 
 # The GPL asks that the source of a release be available: record exactly which FFmpeg, x264,
 # libvpx and Opus went into it, beside the release.
