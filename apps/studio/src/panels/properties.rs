@@ -78,6 +78,41 @@ pub(super) fn choice_menu<T: Clone + 'static>(
     })
 }
 
+/// How large a font's name is drawn in the font menu's list, so each typeface is easy to tell apart.
+const FONT_PREVIEW_SIZE: f32 = 15.0;
+
+/// A dropdown of font families. The button shows the current family in its own typeface, a size
+/// up from the other controls, and each family in the list is drawn in itself, so fonts can be
+/// compared without trying them on the layer. `choices` are (family, is current, value) as in
+/// `choice_menu`.
+pub(super) fn font_menu(
+    id: impl Into<ElementId>,
+    current: String,
+    choices: Vec<(String, bool, String)>,
+    choose: impl Fn(&mut Workspace, String) + 'static,
+    workspace: WeakEntity<Workspace>,
+) -> impl IntoElement {
+    let choose = std::rc::Rc::new(choose);
+    let choices = std::rc::Rc::new(choices);
+    let shown = div().min_w_0().text_ellipsis().text_size(px(14.0)).font_family(current.clone()).child(current);
+    Button::new(id).outline().child(shown).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+        let menu = menu.scrollable(true).max_h(px(420.0));
+        choices.iter().fold(menu, |menu, (family, checked, value)| {
+            let (workspace, choose, value) = (workspace.clone(), choose.clone(), value.clone());
+            let preview = family.clone();
+            let item = PopupMenuItem::element(move |_, _| div().text_size(px(FONT_PREVIEW_SIZE)).font_family(preview.clone()).child(preview.clone()));
+            menu.item(item.checked(*checked).on_click(move |_, _, cx: &mut App| {
+                workspace
+                    .update(cx, |this, cx| {
+                        choose(this, value.clone());
+                        cx.notify();
+                    })
+                    .ok();
+            }))
+        })
+    })
+}
+
 /// A labeled control in a section, on the same columns as the property rows: its name, then
 /// the control filling the rest.
 pub(super) fn labeled_row(label: &'static str, control: impl IntoElement) -> Div {
@@ -694,7 +729,7 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         .child(labeled_row("Animation", choice_menu("captions-animation", style.animation.name().to_owned(), animations, move |this, animation| this.state.edit_captions(id, |style| style.animation = animation), weak.clone())))
         .child(labeled_row("Words at once", choice_menu("captions-words", format!("{}", style.words_per_phrase), per_phrase, move |this, count| this.state.edit_captions(id, |style| style.words_per_phrase = count), weak.clone())))
         .child(indented(uppercase).py_1())
-        .child(labeled_row("Font", choice_menu("captions-font-family", style.text.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
+        .child(labeled_row("Font", font_menu("captions-font-family", style.text.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
         .child(labeled_row("Weight", choice_menu("captions-font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
         .child(labeled_row("Size", value_field(FieldTarget::Text { layer: id, setting: TextSetting::FontSize }, workspace, cx)))
         .child(labeled_row("Tracking", value_field(FieldTarget::Text { layer: id, setting: TextSetting::Tracking }, workspace, cx)))
@@ -993,7 +1028,7 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
 
     div()
         .child(labeled_row("Source", source_text))
-        .child(labeled_row("Font", choice_menu("font-family", style.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
+        .child(labeled_row("Font", font_menu("font-family", style.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
         .child(labeled_row("Weight", choice_menu("font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
         .child(labeled_row("Size", text_field(TextSetting::FontSize, cx)))
         .child(labeled_row("Leading", text_field(TextSetting::Leading, cx)))
