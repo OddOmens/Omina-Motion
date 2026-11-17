@@ -36,16 +36,9 @@ ditto "$app" "$staging/$product_name.app"
 ln -s /Applications "$staging/Applications"
 
 rm -f "$packages"/*.dmg
-# hdiutil now and then fails with "Resource busy" on build machines, so it gets a few tries.
-for attempt in 1 2 3 4 5; do
-    if hdiutil create -volname "$product_name" -srcfolder "$staging" -ov -format UDZO "$dmg"; then
-        break
-    fi
-    if [ "$attempt" -eq 5 ]; then
-        echo "error: hdiutil couldn't create $dmg" >&2
-        exit 1
-    fi
-    echo "hdiutil failed (attempt $attempt); trying again…" >&2
-    sleep 5
-done
+# hdiutil's own guess at how big the image must be can come out too small for a large app
+# ("No space left on device"), so the size is given: what the files take up, plus a fifth and
+# 20 MB for the file system's own bookkeeping. The compressed image ends up much smaller.
+size_mb=$(( $(du -sm "$staging" | cut -f1) * 6 / 5 + 20 ))
+hdiutil create -volname "$product_name" -srcfolder "$staging" -size "${size_mb}m" -ov -format UDZO "$dmg"
 echo "Done: $dmg"
