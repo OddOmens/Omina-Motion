@@ -36,5 +36,16 @@ ditto "$app" "$staging/$product_name.app"
 ln -s /Applications "$staging/Applications"
 
 rm -f "$packages"/*.dmg
-hdiutil create -volname "$product_name" -srcfolder "$staging" -ov -format UDZO "$dmg" -quiet
+# hdiutil now and then fails with "Resource busy" on build machines, so it gets a few tries.
+for attempt in 1 2 3 4 5; do
+    if hdiutil create -volname "$product_name" -srcfolder "$staging" -ov -format UDZO "$dmg"; then
+        break
+    fi
+    if [ "$attempt" -eq 5 ]; then
+        echo "error: hdiutil couldn't create $dmg" >&2
+        exit 1
+    fi
+    echo "hdiutil failed (attempt $attempt); trying again…" >&2
+    sleep 5
+done
 echo "Done: $dmg"
