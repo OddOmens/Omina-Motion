@@ -11,7 +11,6 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::Sizable as _;
 use gpui_kit::{AppContext as _, Context, InteractiveElement as _, ParentElement, Styled, TestSupportExt as _, Window, div, px};
 use studio_core::animation::Easing;
 use studio_core::model::Id;
@@ -44,7 +43,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
         let chosen_name = targets.iter().find(|(id, _)| *id == chosen.get()).map_or_else(String::new, |(_, name)| name.clone());
         let picker = {
             let (targets, chosen) = (targets.clone(), chosen.clone());
-            Button::new("magic-move-target").outline().small().label(chosen_name.clone()).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+            crate::panels::chrome::dropdown("magic-move-target", chosen_name.clone()).w_full().dropdown_menu(move |menu, _, _| {
                 targets.iter().fold(menu, |menu, (id, name)| {
                     let (id, chosen) = (*id, chosen.clone());
                     menu.item(PopupMenuItem::new(name.clone()).checked(chosen.get() == id).on_click(move |_, window, _| {
@@ -71,7 +70,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .text_size(px(size::TEXT + 1.0))
+                    .text_size(px(size::LARGE_TEXT))
                     .child(div().flex().items_center().gap_3().child(div().flex_none().child(format!("Move “{from_name}” into:"))).child(div().flex_1().child(picker)))
                     .child(div().flex().items_center().gap_3().child(div().flex_none().child("Length (seconds):")).child(div().id("magic-move-length").w(px(100.0)).child(Input::new(&input)).test_support()))
                     .child(ease_box)

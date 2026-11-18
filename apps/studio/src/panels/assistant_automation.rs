@@ -129,7 +129,7 @@ pub fn recipe_buttons(workspace: &Workspace, cx: &mut Context<Workspace>) -> Opt
         .enumerate()
         .map(|(index, name)| {
             let label = name.clone();
-            Button::new(("assistant-recipe-button", index)).outline().xsmall().label(label).tooltip(format!("Run the recipe “{name}”")).on_click(cx.listener(move |this, _, window, cx| {
+            Button::new(("assistant-recipe-button", index)).outline().small().label(label).tooltip(format!("Run the recipe “{name}”")).on_click(cx.listener(move |this, _, window, cx| {
                 this.ui.assistant.chat_chosen = Some(true);
                 run_recipe(this, &name, "its button", window, cx);
                 cx.notify();
@@ -342,7 +342,7 @@ pub fn completions(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option
                 .test_support()
         })
         .collect();
-    let hint = div().px_2().text_size(px(10.5)).text_color(hsla(color::MUTED)).child("Tab takes the first");
+    let hint = div().px_2().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).child("Tab takes the first");
     Some(div().id("assistant-completions").mx_2().p_1().flex().flex_col().rounded(px(8.0)).bg(hsla(color::RAISED)).border_1().border_color(hsla(color::HAIRLINE)).children(rows).child(hint).test_support().into_any_element())
 }
 
@@ -384,7 +384,7 @@ pub fn forget(workspace: &mut Workspace) {
 /// The quiet line drawn between the messages brought back from last time and the new ones.
 pub fn earlier_divider() -> AnyElement {
     let line = || div().flex_1().h(px(1.0)).bg(hsla(color::HAIRLINE));
-    div().id("assistant-earlier").px_3().flex().items_center().gap_2().text_size(px(10.5)).text_color(hsla(color::MUTED)).child(line()).child("Earlier").child(line()).test_support().into_any_element()
+    div().id("assistant-earlier").px_3().flex().items_center().gap_2().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).child(line()).child("Earlier").child(line()).test_support().into_any_element()
 }
 
 // Hand-offs between the apps ----------------------------------------------------------------------

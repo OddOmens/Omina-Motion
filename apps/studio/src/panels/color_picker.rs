@@ -403,7 +403,7 @@ fn color_row(key: &'static str, colors: Vec<Rgba>, cx: &mut Context<Workspace>) 
 /// "Save to library": adds the picker's color to a brand and links the target to it.
 fn save_to_library(brands: Vec<(LinkId, String)>, cx: &mut Context<Workspace>) -> AnyElement {
     let workspace = cx.weak_entity();
-    Button::new("color-save-to-library").ghost().xsmall().icon(Icon::new(IconName::Plus)).label("Save to library").dropdown_menu(move |menu, _, _| {
+    Button::new("color-save-to-library").ghost().small().icon(Icon::new(IconName::Plus)).label("Save to library").dropdown_menu(move |menu, _, _| {
         brands.iter().fold(menu, |menu, (brand, name)| {
             let (workspace, brand) = (workspace.clone(), *brand);
             menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
@@ -535,7 +535,7 @@ fn custom_tab(workspace: &Workspace, picker: &Picker, cx: &mut Context<Workspace
                 .text_color(hsla(color::MUTED))
                 .child(div().flex_1().child("Picked and saved"))
                 .child(
-                    Button::new("color-save-swatch").ghost().xsmall().icon(Icon::new(IconName::Plus)).label("Swatch").tooltip("Save this color with your swatches").on_click(cx.listener(|this, _, _, cx| {
+                    Button::new("color-save-swatch").ghost().small().icon(Icon::new(IconName::Plus)).label("Swatch").tooltip("Save this color with your swatches").on_click(cx.listener(|this, _, _, cx| {
                         if let Some(color) = this.ui.color_picker.as_ref().map(Picker::color) {
                             this.state.save_swatch(color);
                         }

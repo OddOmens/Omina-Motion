@@ -55,8 +55,31 @@ pub mod size {
     pub const PANEL_HEADER_HEIGHT: f32 = 30.0;
     pub const PANEL_FOOTER_HEIGHT: f32 = 28.0;
     pub const ROW_HEIGHT: f32 = 22.0;
-    pub const TEXT: f32 = 12.0;
+    // The type scale. Every piece of text in all three apps uses one of these sizes, so
+    // labels, values and menu items of the same kind come out the same size everywhere.
+    /// Tiny notes: sizes under thumbnails, badges, tick labels.
+    pub const CAPTION_TEXT: f32 = 10.0;
+    /// Secondary text: property names, hints, details in a list.
     pub const SMALL_TEXT: f32 = 11.0;
+    /// The standard size: values, buttons, dropdowns, menu items and text fields.
+    pub const TEXT: f32 = 12.0;
+    /// Setting names and the body of dialogs, one step up so they read as the main line.
+    pub const LARGE_TEXT: f32 = 13.0;
+    /// Small headings, such as a category over a row of cards.
+    pub const HEADING_TEXT: f32 = 14.0;
+    /// The app's name beside its icon, and other short titles.
+    pub const TITLE_TEXT: f32 = 16.0;
+    /// Page and dialog titles: a settings section, a start screen heading.
+    pub const PAGE_TITLE_TEXT: f32 = 20.0;
+    /// The big title of a welcome step.
+    pub const DISPLAY_TEXT: f32 = 26.0;
+    /// The start screen's headline.
+    pub const HERO_TEXT: f32 = 52.0;
+    /// The component library (buttons, dropdowns, menus, text fields) sizes its text and
+    /// controls in rems, its text mostly at seven eighths of a rem. At 14 px a rem, that text
+    /// is 12.25 px, which matches `TEXT`, and the controls land on whole pixels: a small
+    /// button or dropdown is 21 px tall, a compact one 17.5 px.
+    pub const REM: f32 = 14.0;
     pub const GUTTER: f32 = 6.0;
     /// Corner radius of panels: barely rounded, enough to soften each panel's corners
     /// without making it look like a card.
@@ -284,7 +307,7 @@ pub fn apply(theme: ThemeName, accent: Accent, cx: &mut App) {
     theme.colors.window_border = hsla(color::BORDER);
     theme.colors.scrollbar = hsla(color::PANEL);
     theme.colors.scrollbar_thumb = hsla(color::HAIRLINE);
-    theme.font_size = px(size::TEXT);
+    theme.font_size = px(size::REM);
     theme.radius_lg = px(size::POPUP_RADIUS);
 }
 

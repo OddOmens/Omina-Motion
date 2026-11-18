@@ -114,7 +114,7 @@ pub fn status(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl
             .gap_2()
             .child(div().text_color(hsla(color::MUTED)).child(format!("{} · {}%", job.label, percent as i64)))
             .child(div().w(px(100.0)).child(Progress::new("analysis-progress").value(percent)))
-            .child(Button::new("analysis-cancel").ghost().xsmall().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
+            .child(Button::new("analysis-cancel").ghost().small().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
                 if let Some(job) = this.ui.analysis_job.take() {
                     job.cancel.store(true, Ordering::Relaxed);
                 }

@@ -23,6 +23,7 @@ pub mod effects;
 pub mod elements;
 pub mod enhance;
 pub mod folders;
+pub mod frame_snap;
 pub mod gradient;
 pub mod grade;
 pub mod housekeeping;

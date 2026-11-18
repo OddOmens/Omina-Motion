@@ -52,7 +52,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .text_size(px(size::TEXT + 1.0))
+                    .text_size(px(size::LARGE_TEXT))
                     .child(div().text_color(hsla(color::MUTED)).child(format!("From “{source_name}” onto {onto}:")))
                     .child(option("paste-attr-motion", "Motion (position, scale, rotation, anchor)", |a| a.motion, |a, on| a.motion = on))
                     .child(option("paste-attr-opacity", "Opacity", |a| a.opacity, |a, on| a.opacity = on))

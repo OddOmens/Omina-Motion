@@ -61,6 +61,10 @@ actions!(studio, [
     SequenceLayers,
     StaggerLayers,
     ToggleGuides,
+    ToggleLayoutGrid,
+    ToggleSnapToGrid,
+    ToggleSnapToCenter,
+    ToggleSnapToDeadCenter,
     ToggleLayerControls,
     ShowPositionKeyframes,
     ShowRotationKeyframes,
@@ -172,6 +176,16 @@ pub fn refresh_menus(cx: &mut App) {
     cx.set_menus(menus());
 }
 
+/// Turns one of the View menu's on-or-off choices over, saves it, and updates the menu's
+/// check marks. `field` picks the choice out of the settings.
+pub fn toggle_setting(this: &mut Workspace, cx: &mut Context<Workspace>, field: fn(&mut crate::app_settings::AppSettings) -> &mut bool) {
+    let on = !*field(&mut this.ui.settings);
+    *field(&mut this.ui.settings) = on;
+    crate::app_settings::update(|settings| *field(settings) = on);
+    refresh_menus(cx);
+    cx.notify();
+}
+
 /// The menu bar. Shortcuts shown in it come from the key bindings above. Items for features
 /// turned off in Settings ▸ Features are left out.
 pub fn menus() -> Vec<gpui_kit::Menu> {
@@ -275,6 +289,11 @@ pub fn menus() -> Vec<gpui_kit::Menu> {
             Some(MenuItem::separator()),
             gated(Feature::Guides, MenuItem::action("Show Guides", ToggleGuides)),
             Some(MenuItem::action("Show or Hide Layer Outlines", ToggleLayerControls)),
+            Some(MenuItem::action("Layout Grid", ToggleLayoutGrid).checked(settings.show_grid)),
+            Some(MenuItem::separator()),
+            Some(MenuItem::action("Snap to Grid", ToggleSnapToGrid).checked(settings.snap_to_grid)),
+            Some(MenuItem::action("Snap to Center Lines", ToggleSnapToCenter).checked(settings.snap_to_center)),
+            Some(MenuItem::action("Snap to Dead Center", ToggleSnapToDeadCenter).checked(settings.snap_to_dead_center)),
         ])),
         Menu::new("Window").items([
             MenuItem::action("Minimize", MinimizeWindow),
@@ -678,7 +697,7 @@ pub struct UiState {
     /// picked for; it no longer applies once the selection changes.
     pub segment_focus: Option<(Vec<crate::state::KeyframeRef>, crate::panels::graph_editor::SegmentFocus)>,
     /// Font families offered in the Text section, looked up once at startup.
-    pub font_families: Vec<&'static str>,
+    pub font_families: Vec<String>,
     /// The Templates panel's chosen shape and category, and the pictures made of templates.
     pub template_format: studio_core::templates::Format,
     pub template_category: Option<studio_core::templates::Category>,
@@ -2188,6 +2207,10 @@ impl Render for Workspace {
                     this.ui.guides = !this.ui.guides;
                     cx.notify();
                 }))
+                .on_action(cx.listener(|this, _: &ToggleLayoutGrid, _, cx| toggle_setting(this, cx, |settings| &mut settings.show_grid)))
+                .on_action(cx.listener(|this, _: &ToggleSnapToGrid, _, cx| toggle_setting(this, cx, |settings| &mut settings.snap_to_grid)))
+                .on_action(cx.listener(|this, _: &ToggleSnapToCenter, _, cx| toggle_setting(this, cx, |settings| &mut settings.snap_to_center)))
+                .on_action(cx.listener(|this, _: &ToggleSnapToDeadCenter, _, cx| toggle_setting(this, cx, |settings| &mut settings.snap_to_dead_center)))
                 .on_action(cx.listener(|this, _: &ShowPositionKeyframes, _, cx| this.show_keyframe_rows(Some(studio_core::property::TransformProperty::Position), cx)))
                 .on_action(cx.listener(|this, _: &ShowRotationKeyframes, _, cx| this.show_keyframe_rows(Some(studio_core::property::TransformProperty::Rotation), cx)))
                 .on_action(cx.listener(|this, _: &ShowScaleKeyframes, _, cx| this.show_keyframe_rows(Some(studio_core::property::TransformProperty::Scale), cx)))

@@ -73,7 +73,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .text_size(px(size::TEXT + 1.0))
+                    .text_size(px(size::LARGE_TEXT))
                     .child(div().child(format!("“{from_name}” turns into “{to_name}”, starting at the playhead.")))
                     .child(div().flex().items_center().gap_3().child(div().flex_none().child("Length (seconds):")).child(div().id("morph-length").w(px(100.0)).child(Input::new(&input)).test_support()))
                     .child(ease_box)

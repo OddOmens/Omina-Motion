@@ -262,6 +262,14 @@ pub struct EditorState {
     pub media_size_linked: bool,
     /// Whether anchor points snap to their layer's corners, edge middles and center in the viewer.
     pub viewer_snapping: bool,
+    /// What a layer moved in the viewer snaps to (the layout grid, the center lines, dead
+    /// center), set by the viewer from the View menu's choices before each drag step.
+    pub frame_snap: studio_core::frame_snap::SnapOptions,
+    /// How near, in composition pixels, a line must be to pull a moved layer onto it. The
+    /// viewer sets it from the zoom, so the pull is the same few screen points at any size.
+    pub frame_snap_reach: f32,
+    /// Where the move in progress snapped, for drawing guide lines; empty when it didn't.
+    pub frame_snapped: studio_core::frame_snap::Snapped,
     /// Which folder imported files go into, by kind (from Settings).
     pub import_folders: crate::app_settings::ImportFolders,
     /// The pen path being drawn with the Pen tool, in composition pixels, until it is finished.
@@ -337,6 +345,9 @@ impl EditorState {
             media_size_linked: true,
             shape_size_linked: false,
             viewer_snapping: settings.anchor_snapping,
+            frame_snap: studio_core::frame_snap::SnapOptions::default(),
+            frame_snap_reach: 0.0,
+            frame_snapped: studio_core::frame_snap::Snapped::default(),
             // Tests import into the top level unless they say otherwise.
             import_folders: if cfg!(test) { crate::app_settings::ImportFolders { video: None, image: None, audio: None } } else { settings.import_folders.clone() },
             pen: None,

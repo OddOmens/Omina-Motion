@@ -187,7 +187,7 @@ pub fn status(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl
             .gap_2()
             .child(div().text_color(hsla(color::MUTED)).child(format!("Captions: {} · {}%", job.stage, percent as i64)))
             .child(div().w(px(100.0)).child(Progress::new("captions-progress").value(percent)))
-            .child(Button::new("captions-cancel").ghost().xsmall().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
+            .child(Button::new("captions-cancel").ghost().small().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
                 if let Some(job) = this.ui.caption_job.as_ref() {
                     job.cancel.store(true, Ordering::Relaxed);
                 }
@@ -271,13 +271,13 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                             .flex()
                             .font_family(style.text.font_family.clone())
                             .font_weight(gpui_kit::FontWeight(f32::from(style.text.font_weight)))
-                            .text_size(px(15.0))
+                            .text_size(px(size::HEADING_TEXT))
                             .child(div().text_color(rgb(fill)).child(first.to_owned()))
                             .child(div().text_color(rgb(highlight)).child(second.to_owned())),
                     ),
             )
             .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).child(name))
-            .child(div().text_size(px(10.0)).text_color(hsla(color::MUTED)).child(style.animation.name()))
+            .child(div().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).child(style.animation.name()))
             .test_support()
     });
     let body = div()

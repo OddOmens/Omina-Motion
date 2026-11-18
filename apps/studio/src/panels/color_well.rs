@@ -57,11 +57,7 @@ fn save_to_library(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option
     }
     let weak = cx.weak_entity();
     Some(
-        Button::new("well-save-library")
-            .outline()
-            .small()
-            .label("Save to Library")
-            .dropdown_caret(true)
+        crate::panels::chrome::dropdown("well-save-library", "Save to Library")
             .dropdown_menu(move |menu, _, _| {
                 brands.iter().fold(menu, |menu, (brand, name)| {
                     let (weak, brand) = (weak.clone(), *brand);

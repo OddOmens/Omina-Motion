@@ -53,7 +53,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .text_size(px(size::TEXT + 1.0))
+                    .text_size(px(size::LARGE_TEXT))
                     .child(div().flex().items_center().gap_3().child(div().flex_none().child("New composition name:")).child(div().flex_1().child(Input::new(&input))))
                     .child(div().text_color(hsla(color::MUTED)).child(format!("Moves {what} into a new composition, with all their attributes, and puts it in their place.")))
                     .child(trim_box)

@@ -468,7 +468,7 @@ pub fn status(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl
             .gap_2()
             .child(div().text_color(hsla(color::MUTED)).child(label))
             .when(job.tracking, |row| row.child(div().w(px(100.0)).child(Progress::new("cutout-progress").value(percent))))
-            .child(Button::new("cutout-cancel").ghost().xsmall().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
+            .child(Button::new("cutout-cancel").ghost().small().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
                 cancel(this);
                 cx.notify();
             }))),

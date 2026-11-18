@@ -275,7 +275,7 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             cx.notify();
         })))
         .when(workspace.has(crate::features::Feature::RenderAndPlay), |bar| bar.child(icon_button("tracks-render-play", IconName::Film, crate::keymap::with_key(&workspace.ui.settings.shortcuts, "Render & Play: render the work area, then play it smoothly", "render-and-play"), workspace.ui.render_then_play, cx.listener(|this, _, window, cx| this.render_and_play(window, cx)))))
-        .child(div().pl_2().font_family(crate::theme::MONO_FONT).text_size(px(13.0)).text_color(hsla(color::ACCENT)).child(format_timecode(state.current_frame, rate)))
+        .child(div().pl_2().font_family(crate::theme::MONO_FONT).text_size(px(crate::theme::size::LARGE_TEXT)).text_color(hsla(color::ACCENT)).child(format_timecode(state.current_frame, rate)))
         .children(render_progress(workspace, cx));
     let right = side()
         .justify_end()
@@ -319,7 +319,7 @@ fn render_progress(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option
             .items_center()
             .gap_1()
             .pl_2()
-            .text_size(px(12.0))
+            .text_size(px(crate::theme::size::TEXT))
             .text_color(hsla(color::MUTED))
             .child(div().id("render-play-progress").child(format!("Rendering {percent}%")).test_support())
             .child(icon_button("render-play-cancel", IconName::X, "Cancel", false, cx.listener(|this, _, _, cx| {
@@ -480,7 +480,7 @@ pub fn headers(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                             .w(px(20.0))
                             .flex_none()
                             .font_family(crate::theme::MONO_FONT)
-                            .text_size(px(11.0))
+                            .text_size(px(crate::theme::size::SMALL_TEXT))
                             .text_color(hsla(color::MUTED))
                             .child(track_number(index))
                             .test_support(),
@@ -550,7 +550,7 @@ pub fn headers_top(workspace: &Workspace, height: f32, bottom_row: f32, cx: &mut
                 .items_center()
                 .gap_0p5()
                 .px_1p5()
-                .child(div().w(px(20.0)).flex_none().text_size(px(10.0)).text_color(hsla(color::MUTED)).child("All"))
+                .child(div().w(px(20.0)).flex_none().text_size(px(crate::theme::size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).child("All"))
                 .child(track_toggle(state, None, Switch::Visible, cx))
                 .child(track_toggle(state, None, Switch::Audio, cx)),
         )
@@ -663,7 +663,7 @@ fn clip(layer: &Layer, track: i32, workspace: &Workspace, cx: &mut Context<Works
             inside.push(waveform(layer, peaks, media_height, head, workspace));
         }
         LayerContent::Text { text, .. } => {
-            inside.push(div().px_1p5().truncate().text_size(px(11.0)).text_color(rgba(0xffffffcc)).child(text.lines().next().unwrap_or_default().to_owned()).into_any_element());
+            inside.push(div().px_1p5().truncate().text_size(px(crate::theme::size::SMALL_TEXT)).text_color(rgba(0xffffffcc)).child(text.lines().next().unwrap_or_default().to_owned()).into_any_element());
         }
         _ => {}
     }
@@ -905,7 +905,7 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
     let local = move |frame: i64| (fraction(frame as f64, view) - left) / width.max(1e-6);
     let tint = |alpha: u32| -> gpui_kit::Hsla { rgba((head << 8) | alpha).into() };
     let rows: Vec<AnyElement> = if properties.is_empty() {
-        vec![div().h(px(PROPERTY_ROW)).flex().items_center().px_2().text_size(px(11.0)).text_color(hsla(color::MUTED)).child(nothing).into_any_element()]
+        vec![div().h(px(PROPERTY_ROW)).flex().items_center().px_2().text_size(px(crate::theme::size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(nothing).into_any_element()]
     } else {
         properties
             .into_iter()
@@ -989,7 +989,7 @@ fn property_rows(layer: &Layer, left: f32, width: f32, top: f32, head: u32, work
                             .left(px(8.0))
                             .top(px(2.0))
                             .h(px(13.0))
-                            .text_size(px(10.0))
+                            .text_size(px(crate::theme::size::CAPTION_TEXT))
                             .line_height(px(13.0))
                             .text_color(tint(0xee))
                             .child(name)

@@ -107,7 +107,7 @@ fn card(index: usize, device: Device, workspace: &Workspace, cx: &mut Context<Wo
                 .child(div().absolute().top(px(6.0)).right(px(6.0)).child(add_button(index, device, workspace, cx))),
         )
         .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).child(device.name()))
-        .child(div().text_size(px(10.0)).text_color(hsla(color::MUTED)).child(format!("Screen {w} × {h}")))
+        .child(div().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).child(format!("Screen {w} × {h}")))
         .test_support()
         .into_any_element()
 }

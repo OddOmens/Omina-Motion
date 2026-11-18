@@ -530,14 +530,14 @@ fn tile(workspace: &Workspace, index: usize, item: &StockItem, cx: &mut Context<
                         .child(star_button(workspace, index, item, cx)),
                 )
                 // Which site it came from, in the picture's top corner.
-                .child(div().absolute().left(px(3.0)).top(px(3.0)).max_w(px(TILE_WIDTH - 8.0)).px_1().rounded(px(3.0)).bg(gpui_kit::black().opacity(0.65)).text_size(px(9.5)).text_color(gpui_kit::white()).truncate().child(item.origin.clone()))
+                .child(div().absolute().left(px(3.0)).top(px(3.0)).max_w(px(TILE_WIDTH - 8.0)).px_1().rounded(px(3.0)).bg(gpui_kit::black().opacity(0.65)).text_size(px(size::CAPTION_TEXT)).text_color(gpui_kit::white()).truncate().child(item.origin.clone()))
                 // Downloading or added, said over the picture's bottom edge.
                 .children(badge(workspace, item).map(|badge| {
-                    div().absolute().left_0().right_0().bottom_0().px_1().py_0p5().bg(gpui_kit::black().opacity(0.65)).text_size(px(10.5)).text_color(gpui_kit::white()).child(badge)
+                    div().absolute().left_0().right_0().bottom_0().px_1().py_0p5().bg(gpui_kit::black().opacity(0.65)).text_size(px(size::CAPTION_TEXT)).text_color(gpui_kit::white()).child(badge)
                 })),
         )
         .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).truncate().child(item.title.clone()))
-        .child(div().text_size(px(10.5)).text_color(hsla(color::MUTED)).truncate().child(item.summary()))
+        .child(div().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).truncate().child(item.summary()))
         .test_support()
         .into_any_element()
 }
@@ -565,9 +565,9 @@ fn sound_row(workspace: &Workspace, index: usize, item: &StockItem, cx: &mut Con
                 .min_w_0()
                 .child(div().truncate().text_color(hsla(color::TEXT)).child(item.title.clone()))
                 // Which site it came from, then its facts.
-                .child(div().truncate().text_size(px(10.5)).text_color(hsla(color::MUTED)).child(format!("{} · {}", item.origin, item.summary()))),
+                .child(div().truncate().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).child(format!("{} · {}", item.origin, item.summary()))),
         )
-        .children(badge(workspace, item).map(|badge| div().flex_none().text_size(px(10.5)).text_color(hsla(color::MUTED)).child(badge)))
+        .children(badge(workspace, item).map(|badge| div().flex_none().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).child(badge)))
         .child(star_button(workspace, index, item, cx))
         .test_support()
         .into_any_element()

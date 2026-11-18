@@ -170,7 +170,7 @@ pub fn lut_chooser(layer: Id, effect: Id, workspace: &Workspace, cx: &mut Contex
     let label = current.as_ref().map_or_else(|| "Choose a LUT…".to_owned(), LutSource::name);
     let weak = cx.weak_entity();
     let chosen = current.clone();
-    let menu = Button::new(ElementId::Name(format!("lut-menu:{}", effect.0).into())).outline().small().label(label).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+    let menu = crate::panels::chrome::dropdown(ElementId::Name(format!("lut-menu:{}", effect.0).into()), label).w_full().dropdown_menu(move |menu, _, _| {
         let choose = |menu: gpui_kit::component::menu::PopupMenu, name: String, source: LutSource| {
             let weak = weak.clone();
             let checked = chosen.as_ref() == Some(&source);

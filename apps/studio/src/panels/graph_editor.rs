@@ -449,12 +449,8 @@ fn segment_picker(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<
     let weak = cx.weak_entity();
     let menu_segments = segments.clone();
     let menu_labels = labels.clone();
-    let menu = Button::new("easing-segment-menu")
-        .outline()
-        .small()
+    let menu = crate::panels::chrome::dropdown("easing-segment-menu", current.map_or_else(|| "All segments".to_owned(), |index| labels[index].clone()))
         .w_full()
-        .label(current.map_or_else(|| "All segments".to_owned(), |index| labels[index].clone()))
-        .dropdown_caret(true)
         .dropdown_menu(move |mut menu, _, _| {
             menu = menu.scrollable(true).max_h(px(360.0));
             for (index, (key, label)) in menu_segments.iter().zip(&menu_labels).enumerate() {

@@ -125,11 +125,7 @@ impl<T> MenuEntry<T> {
 /// A dropdown in the dialog whose choices set the workspace's export choice.
 fn choice_menu<T: Clone + 'static>(id: &'static str, label: String, entries: Vec<MenuEntry<T>>, set: fn(&mut ExportChoice, T), target: WeakEntity<Workspace>) -> AnyElement {
     let entries = std::rc::Rc::new(entries);
-    Button::new(id)
-        .outline()
-        .small()
-        .label(label)
-        .dropdown_caret(true)
+    crate::panels::chrome::dropdown(id, label)
         .dropdown_menu(move |menu, _, _| {
             entries.iter().fold(menu, |menu: PopupMenu, entry| match entry {
                 MenuEntry::Heading(title) => menu.label(*title),
@@ -231,7 +227,7 @@ fn body(workspace: &Entity<Workspace>, target: &WeakEntity<Workspace>, window: &
     div()
         .flex()
         .gap_5()
-        .text_size(px(size::TEXT + 1.0))
+        .text_size(px(size::LARGE_TEXT))
         .child(
             div()
                 .w(px(PREVIEW_WIDTH))

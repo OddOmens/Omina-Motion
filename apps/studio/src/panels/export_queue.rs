@@ -146,7 +146,7 @@ pub fn open(_workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wo
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .text_size(px(size::TEXT + 1.0))
+                    .text_size(px(size::LARGE_TEXT))
                     .children(rows)
                     .when(queue.items.is_empty(), |list| {
                         list.child(div().py_2().text_color(hsla(color::MUTED)).child("Nothing queued. In the Export dialog (⌘M), Add to Queue… saves an export to run here later."))
@@ -196,7 +196,7 @@ fn row(index: usize, item: &QueuedExport, target: &WeakEntity<Workspace>) -> imp
         .border_color(hsla(color::HAIRLINE))
         .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().child(item.composition.clone())).child(div().truncate().text_color(hsla(color::MUTED)).child(file)))
         .child(div().flex_none().max_w(px(200.0)).truncate().text_color(hsla(tint)).child(status))
-        .child(Button::new(("export-queue-remove", index)).ghost().xsmall().label("Remove").disabled(item.status == QueueStatus::Exporting).on_click(move |_, window, cx| {
+        .child(Button::new(("export-queue-remove", index)).ghost().small().label("Remove").disabled(item.status == QueueStatus::Exporting).on_click(move |_, window, cx| {
             remove
                 .update(cx, |this, cx| {
                     remove_item(this, index);

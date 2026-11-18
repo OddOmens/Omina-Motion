@@ -77,7 +77,7 @@ pub fn save_as_new(_: &mut Workspace, window: &mut Window, cx: &mut Context<Work
                     .flex()
                     .items_center()
                     .gap_3()
-                    .text_size(px(size::TEXT + 1.0))
+                    .text_size(px(size::LARGE_TEXT))
                     .child(div().flex_none().child("Name:"))
                     .child(div().id("workspace-name").flex_1().child(Input::new(&input)).test_support()),
             )

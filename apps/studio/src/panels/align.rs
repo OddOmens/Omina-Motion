@@ -2,9 +2,8 @@
 //! other, and spaces three or more evenly.
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::{Disableable as _, Sizable as _};
+use gpui_kit::component::Disableable as _;
 use gpui_kit::{Context, IntoElement, ParentElement, Styled, div, px};
 use studio_core::align::{AlignTarget, Alignment, Distribution};
 
@@ -42,7 +41,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
     let selected = workspace.state.selected_layers.len();
     let weak = cx.weak_entity();
 
-    let target_menu = Button::new("align-target").outline().small().label(target_label(target)).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+    let target_menu = crate::panels::chrome::dropdown("align-target", target_label(target)).dropdown_menu(move |menu, _, _| {
         [AlignTarget::Composition, AlignTarget::Selection].into_iter().fold(menu, |menu, option| {
             let weak = weak.clone();
             menu.item(PopupMenuItem::new(target_label(option)).checked(option == target).on_click(move |_, _, cx| {

@@ -249,7 +249,7 @@ pub fn value_field(target: FieldTarget, workspace: &Workspace, cx: &mut Context<
     let Some((value, format)) = target.read(&workspace.state) else { return div().into_any_element() };
 
     if let Some(input) = workspace.ui.editing.as_ref().filter(|editing| editing.target == EditTarget::Number(target)).and_then(|editing| editing.input.line()) {
-        return div().w(px(76.0)).child(Input::new(input).xsmall()).into_any_element();
+        return div().w(px(76.0)).child(Input::new(input).small()).into_any_element();
     }
 
     div()

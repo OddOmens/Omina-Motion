@@ -29,7 +29,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
     let target = cx.weak_entity();
 
     crate::panels::chrome::open_dialog(window, cx, move |dialog, _, _| {
-        let mut list = div().flex().flex_col().gap_2().text_size(px(size::TEXT + 1.0));
+        let mut list = div().flex().flex_col().gap_2().text_size(px(size::LARGE_TEXT));
         for (index, &(name, width, height)) in SIZES.iter().enumerate() {
             let same = (width, height) == current;
             let ticked = chosen.borrow().contains(&index);

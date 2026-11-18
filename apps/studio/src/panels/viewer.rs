@@ -3,7 +3,6 @@
 //! Paused frames render at full display resolution; playback renders at half
 //! resolution on high-density screens to keep up (After Effects' "Auto" resolution).
 
-use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::{
@@ -20,7 +19,7 @@ use studio_core::transform::layer_corners;
 use studio_media::{FrameServer, ProxyManager};
 use studio_render::Renderer;
 
-use super::chrome::{EmptyDragView, icon_button, panel};
+use super::chrome::{EmptyDragView, panel};
 use crate::state::ScaleHandle;
 use crate::theme::{color, hsla, size};
 use crate::workspace::{EditTarget, EffectDrag, PanelId, ProjectItemDrag, Tool, Workspace};
@@ -396,8 +395,6 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
 
 /// The magnification menu: Fit, or a fixed zoom. It shows the zoom in use.
 fn zoom_menu(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
-    use gpui_kit::component::Sizable as _;
-    use gpui_kit::component::button::{Button, ButtonVariants as _};
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     let current = workspace.ui.viewer_zoom;
     let label = match current {
@@ -405,7 +402,7 @@ fn zoom_menu(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         Some(_) => zoom_label(current),
     };
     let target = cx.weak_entity();
-    Button::new("viewer-zoom").ghost().xsmall().label(label).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+    crate::panels::chrome::bar_dropdown("viewer-zoom", label).dropdown_menu(move |menu, _, _| {
         std::iter::once(None).chain(ZOOM_LEVELS.iter().copied().filter(|&level| level >= 0.125).map(Some)).fold(menu, |menu, zoom| {
             let target = target.clone();
             menu.item(PopupMenuItem::new(zoom_label(zoom)).checked(zoom == current).on_click(move |_, _, cx| {
@@ -424,12 +421,10 @@ fn zoom_menu(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
 /// playing. Paused frames are always full quality.
 fn quality_menu(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     use crate::app_settings::PlaybackQuality;
-    use gpui_kit::component::Sizable as _;
-    use gpui_kit::component::button::{Button, ButtonVariants as _};
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     let current = workspace.ui.settings.playback_quality;
     let target = cx.weak_entity();
-    Button::new("viewer-quality").ghost().xsmall().label(current.name()).dropdown_caret(true).tooltip("Quality while playing").dropdown_menu(move |menu, _, _| {
+    crate::panels::chrome::bar_dropdown("viewer-quality", current.name()).tooltip("Quality while playing").dropdown_menu(move |menu, _, _| {
         PlaybackQuality::ALL.into_iter().fold(menu, |menu, quality| {
             let target = target.clone();
             menu.item(PopupMenuItem::new(quality.name()).checked(quality == current).on_click(move |_, _, cx| {
@@ -466,13 +461,96 @@ fn transport(workspace: &Workspace, scale: f32, cx: &mut Context<Workspace>) -> 
         .child(quality_menu(workspace, cx))
         .child(zoom_menu(workspace, scale, cx))
         .child(format!("{} × {}", composition.width, composition.height))
-        .child(icon_button("viewer-snapping", IconName::Magnet, "Snap anchor points to corners, edges and center", workspace.state.viewer_snapping, cx.listener(|this, _, _, cx| {
-            this.state.viewer_snapping = !this.state.viewer_snapping;
-            cx.notify();
-        })))
+        .child(snapping_menu(workspace, cx))
         .when(workspace.has(crate::features::Feature::Guides), |bar| bar.child(super::guides::guides_menu(workspace, cx)))
         .children(key_view_switch(workspace, cx))
 }
+
+/// The Snapping dropdown under the viewer: the layout grid, what moved layers snap to, and
+/// whether anchor points snap. The View menu holds the same choices, except anchor points.
+fn snapping_menu(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
+    use crate::app_settings::AppSettings;
+    use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+    type Field = fn(&mut AppSettings) -> &mut bool;
+    let settings = &workspace.ui.settings;
+    let choices: [(&'static str, &'static str, bool, Field); 4] = [
+        ("snap-layout-grid", "Layout Grid", settings.show_grid, |settings| &mut settings.show_grid),
+        ("snap-to-grid", "Snap to Grid", settings.snap_to_grid, |settings| &mut settings.snap_to_grid),
+        ("snap-to-center", "Snap to Center Lines", settings.snap_to_center, |settings| &mut settings.snap_to_center),
+        ("snap-to-dead-center", "Snap to Dead Center", settings.snap_to_dead_center, |settings| &mut settings.snap_to_dead_center),
+    ];
+    let anchors = workspace.state.viewer_snapping;
+    let target = cx.weak_entity();
+    super::chrome::bar_dropdown("viewer-snapping", "Snapping").tooltip("Layout grid and snapping (hold ⌘ while dragging to move freely)").dropdown_menu(move |menu, _, _| {
+        let menu = choices.iter().enumerate().fold(menu, |menu, (index, &(id, name, on, field))| {
+            // The grid itself comes first, apart from what snaps.
+            let menu = if index == 1 { menu.separator() } else { menu };
+            let target = target.clone();
+            menu.item(PopupMenuItem::element(move |_, _| super::chrome::menu_row(id, name)).checked(on).on_click(move |_, _, cx| {
+                target.update(cx, |this, cx| crate::workspace::toggle_setting(this, cx, field)).ok();
+            }))
+        });
+        let target = target.clone();
+        menu.item(PopupMenuItem::element(|_, _| super::chrome::menu_row("snap-anchor-points", "Snap Anchor Points")).checked(anchors).on_click(move |_, _, cx| {
+            target
+                .update(cx, |this, cx| {
+                    this.state.viewer_snapping = !this.state.viewer_snapping;
+                    cx.notify();
+                })
+                .ok();
+        }))
+    })
+}
+
+/// The layout grid over the frame, unless its lines would crowd closer than a few screen points.
+fn layout_grid_overlay(workspace: &Workspace) -> Option<impl IntoElement + use<>> {
+    let settings = &workspace.ui.settings;
+    let spacing = settings.grid_size as f32;
+    if !settings.show_grid || spacing <= 0.0 || spacing * viewer_scale(workspace) < SMALLEST_GRID_GAP {
+        return None;
+    }
+    let composition = workspace.state.composition();
+    let (width, height) = (composition.width as f32, composition.height as f32);
+    let line = gpui_kit::rgba(0x8080804d);
+    let mut grid = div().id("viewer-layout-grid").absolute().size_full().overflow_hidden();
+    let mut x = spacing;
+    while x < width {
+        grid = grid.child(div().absolute().top_0().bottom_0().left(gpui_kit::relative(x / width)).w(px(1.0)).bg(line));
+        x += spacing;
+    }
+    let mut y = spacing;
+    while y < height {
+        grid = grid.child(div().absolute().left_0().right_0().top(gpui_kit::relative(y / height)).h(px(1.0)).bg(line));
+        y += spacing;
+    }
+    Some(grid.test_support())
+}
+
+/// While a moved layer is snapped, the lines it landed on, across the whole frame.
+fn snap_guides_overlay(workspace: &Workspace) -> Option<impl IntoElement + use<>> {
+    let snapped = workspace.state.frame_snapped;
+    if snapped.vertical.is_none() && snapped.horizontal.is_none() {
+        return None;
+    }
+    let composition = workspace.state.composition();
+    let (width, height) = (composition.width as f32, composition.height as f32);
+    let line = hsla(color::ACCENT);
+    Some(
+        div()
+            .id("viewer-snap-guides")
+            .absolute()
+            .size_full()
+            .children(snapped.vertical.map(|x| div().absolute().top_0().bottom_0().left(gpui_kit::relative(x / width)).w(px(1.0)).bg(line)))
+            .children(snapped.horizontal.map(|y| div().absolute().left_0().right_0().top(gpui_kit::relative(y / height)).h(px(1.0)).bg(line)))
+            .test_support(),
+    )
+}
+
+/// How near, in screen points, a moved layer must come to a grid or center line to snap to it.
+const SNAP_REACH: f32 = 8.0;
+/// The layout grid is hidden when zoomed out so far that its lines would be closer than this,
+/// in screen points.
+const SMALLEST_GRID_GAP: f32 = 4.0;
 
 /// Viewer drags: moving the selection, or scaling from a corner handle.
 #[derive(Clone, Copy, Debug)]
@@ -724,7 +802,7 @@ fn picking_hint(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<An
         }
     };
     let brush_button = |id: &'static str, label: &'static str, grow: bool, cx: &mut Context<Workspace>| {
-        Button::new(id).ghost().xsmall().label(label).tooltip(if grow { "Bigger brush" } else { "Smaller brush" }).on_click(cx.listener(move |this, _, _, cx| {
+        Button::new(id).ghost().small().label(label).tooltip(if grow { "Bigger brush" } else { "Smaller brush" }).on_click(cx.listener(move |this, _, _, cx| {
             resize_brush(this, grow);
             cx.notify();
         }))
@@ -747,7 +825,7 @@ fn picking_hint(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<An
             .child(div().text_color(gpui_kit::rgba(0xffffffaa)).child(format!("Brush {:.0}", workspace.ui.matte_brush)))
             .child(brush_button("viewer-brush-bigger", "+", true, cx))
             .child(div().text_color(gpui_kit::rgba(0xffffffaa)).child(progress))
-            .child(Button::new("viewer-picking-done").primary().xsmall().label("Done").on_click(cx.listener(move |this, _, _, cx| {
+            .child(Button::new("viewer-picking-done").primary().small().label("Done").on_click(cx.listener(move |this, _, _, cx| {
                 super::cutout::toggle_picking(this, layer);
                 cx.notify();
             })))
@@ -799,7 +877,7 @@ fn key_view_switch(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option
         ("viewer-key-matte", "Matte", Some(KeyView::Matte), "Show the key in black and white: white is kept, black is removed"),
     ];
     Some(choices.into_iter().fold(div().flex().items_center().gap_0p5().pl_1().border_l_1().border_color(hsla(color::BORDER)), |row, (id, label, view, tip)| {
-        row.child(Button::new(id).ghost().xsmall().label(label).tooltip(tip).selected(current == view).on_click(cx.listener(move |this, _, _, cx| {
+        row.child(Button::new(id).ghost().small().label(label).tooltip(tip).selected(current == view).on_click(cx.listener(move |this, _, _, cx| {
             this.ui.key_view = view;
             cx.notify();
         })))
@@ -1687,6 +1765,8 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
                 .child(format!("Preview: {}", lut.name()))
         }))
         .children((workspace.ui.guides && workspace.has(crate::features::Feature::Guides)).then(|| super::guides::guides_overlay(workspace)))
+        .children(layout_grid_overlay(workspace))
+        .children(snap_guides_overlay(workspace))
         .children(selection_overlay(workspace, cx))
         .children(pen_draft_overlay(workspace))
         .children(matte_strokes_overlay(workspace))
@@ -1855,6 +1935,9 @@ pub fn render(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<W
             let scale = viewer_scale(this).max(f32::EPSILON);
             let position = event.event.position;
             let delta = Vec2::new((f32::from(position.x) - x) / scale, (f32::from(position.y) - y) / scale);
+            // Holding ⌘ moves layers freely, without snapping.
+            this.state.frame_snap = if event.event.modifiers.platform { Default::default() } else { this.ui.settings.snap_options() };
+            this.state.frame_snap_reach = SNAP_REACH / scale;
             this.state.drag_in_viewer(delta, event.event.modifiers.shift);
             cx.notify();
         }))

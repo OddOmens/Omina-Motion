@@ -219,7 +219,7 @@ pub fn status(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl
             .gap_2()
             .child(div().text_color(hsla(color::MUTED)).child(format!("Enhancing {name}: {} · {}%", job.stage, percent as i64)))
             .child(div().w(px(100.0)).child(Progress::new("enhance-progress").value(percent)))
-            .child(Button::new("enhance-cancel").ghost().xsmall().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
+            .child(Button::new("enhance-cancel").ghost().small().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
                 cancel(this);
                 cx.notify();
             }))),

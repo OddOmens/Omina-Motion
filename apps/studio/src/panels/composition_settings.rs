@@ -236,7 +236,7 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
 
         let preset_menu = {
             let fields = fields.clone();
-            Button::new("comp-preset").outline().small().label(preset_label).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+            crate::panels::chrome::dropdown("comp-preset", preset_label).w_full().dropdown_menu(move |menu, _, _| {
                 PRESETS.iter().fold(menu, |menu, &(name, width, height, fps)| {
                     let fields = fields.clone();
                     menu.item(PopupMenuItem::new(format!("{name} · {width}×{height} · {fps} fps")).on_click(move |_, window, cx| {
@@ -297,7 +297,7 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
         let background = fields.background.get();
         let background_menu = {
             let fields = fields.clone();
-            Button::new("comp-background").outline().small().label(background_name(background)).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+            crate::panels::chrome::dropdown("comp-background", background_name(background)).dropdown_menu(move |menu, _, _| {
                 let transparent = {
                     let fields = fields.clone();
                     PopupMenuItem::new("Transparent").checked(fields.background.get().a <= 0.0).on_click(move |_, window, _| {
@@ -338,7 +338,7 @@ pub fn open(workspace: &mut Workspace, create: bool, window: &mut Window, cx: &m
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .text_size(px(size::TEXT + 1.0))
+                    .text_size(px(size::LARGE_TEXT))
                     .child(row("Composition Name", div().flex_1().child(Input::new(&fields.name))))
                     .child(rule())
                     .child(row("Preset", div().flex_1().child(preset_menu)))

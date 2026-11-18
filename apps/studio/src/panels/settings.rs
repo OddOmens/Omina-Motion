@@ -203,6 +203,8 @@ fn change(shown: &SharedShown, workspace: &WeakEntity<Workspace>, window: &mut W
     if settings.shortcuts != before.shortcuts || settings.features_off != before.features_off || settings.ai != before.ai {
         crate::keymap::apply(&settings, cx);
     }
+    // The View menu shows some of these settings (the layout grid, snapping) with check marks.
+    crate::workspace::refresh_menus(cx);
     workspace
         .update(cx, |this, cx| {
             this.use_settings(settings);
@@ -221,7 +223,7 @@ fn page(section: Section) -> gpui_kit::Div {
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_size(px(18.0)).text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(section.name()))
+        .child(div().text_size(px(size::PAGE_TITLE_TEXT)).text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(section.name()))
         .child(div().text_size(px(size::TEXT)).text_color(hsla(color::MUTED)).child(section.about()))
 }
 
@@ -257,7 +259,7 @@ fn setting(name: impl Into<SharedString>, about: impl Into<SharedString>, contro
                 .flex()
                 .flex_col()
                 .gap_0p5()
-                .child(div().text_size(px(size::TEXT + 1.0)).text_color(hsla(color::TEXT)).child(name.into()))
+                .child(div().text_size(px(size::LARGE_TEXT)).text_color(hsla(color::TEXT)).child(name.into()))
                 .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(about.into())),
         )
         .child(div().flex_none().flex().items_center().gap_1p5().child(control))
@@ -277,7 +279,7 @@ fn switch(id: &'static str, on: bool, shown: &SharedShown, workspace: &WeakEntit
 fn menu<T: Clone + PartialEq + 'static>(id: &'static str, choices: Vec<(String, T)>, current: T, shown: &SharedShown, workspace: &WeakEntity<Workspace>, set: fn(&mut AppSettings, T)) -> impl IntoElement {
     let label = choices.iter().find(|(_, value)| *value == current).map_or_else(|| "Custom".to_owned(), |(label, _)| label.clone());
     let (shown, workspace) = (shown.clone(), workspace.clone());
-    Button::new(id).outline().small().label(label).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+    crate::panels::chrome::dropdown(id, label).dropdown_menu(move |menu, _, _| {
         choices.iter().fold(menu, |menu, (label, value)| {
             let (shown, workspace, value) = (shown.clone(), workspace.clone(), value.clone());
             let checked = value == current;
@@ -448,6 +450,7 @@ fn playback(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit:
 fn timeline(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Div {
     let now = shown.borrow().settings.clone();
     let backgrounds = Transparency::ALL.iter().map(|&choice| (choice.name().to_owned(), choice)).collect();
+    let grid_sizes: Vec<(String, u32)> = crate::app_settings::GRID_SIZES.into_iter().map(|size| (format!("{size} px"), size)).collect();
     div()
         .child(page(Section::Timeline))
         .child(group_title("Timeline"))
@@ -461,7 +464,15 @@ fn timeline(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit:
         .child(group_title("Viewer"))
         .child(card(vec![
             setting("Behind transparency", "What shows where a composition has nothing.", menu("viewer-transparency", backgrounds, now.transparency, shown, workspace, |settings, choice| settings.transparency = choice)),
-            setting("Anchor points snap", "Dragged anchor points snap to a layer's corners, edges and middle. Applies from the next start; the magnet under the viewer changes it now.", switch("viewer-anchor-snapping", now.anchor_snapping, shown, workspace, |settings, on| settings.anchor_snapping = on)),
+            setting("Anchor points snap", "Dragged anchor points snap to a layer's corners, edges and middle. Applies from the next start; the Snapping menu under the viewer changes it now.", switch("viewer-anchor-snapping", now.anchor_snapping, shown, workspace, |settings, on| settings.anchor_snapping = on)),
+        ]))
+        .child(group_title("Layout grid and snapping"))
+        .child(card(vec![
+            setting("Layout grid", "Lines across the frame to line layers up with (⌘').", switch("viewer-show-grid", now.show_grid, shown, workspace, |settings, on| settings.show_grid = on)),
+            setting("Grid size", "How far apart the grid's lines are.", menu("viewer-grid-size", grid_sizes, now.grid_size, shown, workspace, |settings, size| settings.grid_size = size)),
+            setting("Snap to grid", "Layers moved in the viewer line up with the grid while it shows.", switch("viewer-snap-grid", now.snap_to_grid, shown, workspace, |settings, on| settings.snap_to_grid = on)),
+            setting("Snap to center lines", "Moved layers center across or down the frame.", switch("viewer-snap-center", now.snap_to_center, shown, workspace, |settings, on| settings.snap_to_center = on)),
+            setting("Snap to dead center", "Moved layers settle in the exact middle of the frame. Hold ⌘ while dragging to move without snapping.", switch("viewer-snap-dead-center", now.snap_to_dead_center, shown, workspace, |settings, on| settings.snap_to_dead_center = on)),
         ]))
 }
 
@@ -512,7 +523,7 @@ fn assistant_number(id: &'static str, value: i64, range: (i64, i64), shown: &Sha
     let step = |suffix: &'static str, by: i64, text: &'static str| {
         let (shown, workspace) = (shown.clone(), workspace.clone());
         let next = (value + by).clamp(range.0, range.1);
-        Button::new(gpui_kit::ElementId::Name(format!("{id}-{suffix}").into())).outline().xsmall().label(text).disabled(next == value).on_click(move |_, window, cx| {
+        Button::new(gpui_kit::ElementId::Name(format!("{id}-{suffix}").into())).outline().small().label(text).disabled(next == value).on_click(move |_, window, cx| {
             change(&shown, &workspace, window, cx, |settings| {
                 set(&mut settings.assistant, next);
                 settings.assistant = settings.assistant.sound();
@@ -544,7 +555,7 @@ fn iris_page(shown: &SharedShown, workspace: &WeakEntity<Workspace>, name: &Enti
                 .flex()
                 .flex_col()
                 .gap_0p5()
-                .child(div().id("settings-assistant-name").text_size(px(16.0)).text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(super::assistant::name(&now)).test_support())
+                .child(div().id("settings-assistant-name").text_size(px(size::TITLE_TEXT)).text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(super::assistant::name(&now)).test_support())
                 .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Reads the open composition (its motion, cuts, sound, text and pictures), suggests fixes you can make in a click, animates designs when asked, and answers questions from ready-written help. Rules and word matching, not AI.")),
         )
         .into_any_element();
@@ -721,7 +732,7 @@ fn import_folder_menu(id: &'static str, shown: &SharedShown, workspace: &WeakEnt
     let current = pick(&mut copy).clone();
     let label = current.clone().unwrap_or_else(|| "Top level".to_owned());
     let (shown, workspace) = (shown.clone(), workspace.clone());
-    Button::new(id).outline().small().label(label).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+    crate::panels::chrome::dropdown(id, label).dropdown_menu(move |menu, _, _| {
         let choices = std::iter::once(None).chain(settings.default_folders.iter().cloned().map(Some));
         choices.fold(menu, |menu, folder| {
             let (shown, workspace) = (shown.clone(), workspace.clone());
@@ -846,7 +857,7 @@ fn media_cache(shown: &SharedShown, workspace: &WeakEntity<Workspace>, cx: &App)
     let limit_menu = {
         let (shown, proxies, workspace) = (shown.clone(), proxies.clone(), workspace.clone());
         let limit = now.settings.proxy_cache_limit_gb;
-        Button::new("cache-limit").outline().small().label(limit_label(limit)).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+        crate::panels::chrome::dropdown("cache-limit", limit_label(limit)).dropdown_menu(move |menu, _, _| {
             CACHE_LIMITS.iter().fold(menu, |menu, &choice| {
                 let (shown, proxies, workspace) = (shown.clone(), proxies.clone(), workspace.clone());
                 menu.item(PopupMenuItem::new(limit_label(choice)).checked(choice == limit).on_click(move |_, window, cx| {
@@ -1227,7 +1238,7 @@ fn about(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::Di
                 .items_center()
                 .gap_3()
                 .child(div().size(px(44.0)).rounded(px(10.0)).bg(hsla(color::ACCENT)).flex().items_center().justify_center().child(Icon::new(IconName::Clapperboard).size(px(22.0)).text_color(crate::theme::on_accent())))
-                .child(div().flex().flex_col().gap_0p5().child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Omina Motion")).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))),
+                .child(div().flex().flex_col().gap_0p5().child(div().text_size(px(size::TITLE_TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Omina Motion")).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(format!("Version {}", env!("CARGO_PKG_VERSION"))))),
         )
         .child(group_title("Where Omina Motion keeps things"))
         .child(card(vec![
@@ -1257,7 +1268,7 @@ fn section_menu(shown: &SharedShown) -> gpui_kit::Div {
     let mut menu = div().w(px(196.0)).flex_none().flex().flex_col().pr_3().border_r_1().border_color(hsla(color::HAIRLINE));
     let mut index: usize = 0;
     for (group, sections) in Section::GROUPS {
-        menu = menu.child(div().pt_2().pb_1().px_2().text_size(px(10.5)).text_color(hsla(color::MUTED)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(group.to_uppercase()));
+        menu = menu.child(div().pt_2().pb_1().px_2().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(group.to_uppercase()));
         for &section in sections {
             let shown = shown.clone();
             let selected = section == current;
@@ -1271,7 +1282,7 @@ fn section_menu(shown: &SharedShown) -> gpui_kit::Div {
                     .gap_2()
                     .rounded(px(6.0))
                     .cursor_pointer()
-                    .text_size(px(size::TEXT + 0.5))
+                    .text_size(px(size::LARGE_TEXT))
                     .text_color(hsla(if selected { color::TEXT } else { color::MUTED }))
                     .when(selected, |item| item.bg(hsla(color::ROW_SELECTED)))
                     .hover(|style| style.bg(hsla(color::HOVER)).text_color(hsla(color::TEXT)))

@@ -86,7 +86,7 @@ fn easing_block(layer: &Layer, phase: Phase, cx: &mut Context<Workspace>) -> Div
     let shown = studio_core::presets::motion_easing(&layer.animation, phase).unwrap_or(Easing::Linear);
     let choice = |name: &'static str, easing: Option<Easing>, cx: &mut Context<Workspace>| {
         Button::new(ElementId::Name(format!("motion-{key}-ease-{name}").into()))
-            .xsmall()
+            .small()
             .label(name)
             .map(|button| if picked == easing { button.primary() } else { button.ghost() })
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -218,7 +218,7 @@ fn text_animator_block(id: Id, phase: studio_core::presets::Phase, title: &'stat
     // By: one segmented switch for the three kinds of piece.
     let units = div().flex().gap_0p5().p_0p5().rounded(px(6.0)).bg(hsla(color::INSET)).children(TextUnit::ALL.map(|unit| {
         Button::new(ElementId::Name(format!("text-animation-{key}-unit-{}", unit.name()).into()))
-            .xsmall()
+            .small()
             .label(unit.name())
             .flex_1()
             .map(|button| if unit == animator.unit { button.primary() } else { button.ghost() })

@@ -223,6 +223,25 @@ pub fn icon_button(
         .on_click(on_click)
 }
 
+/// A dropdown that shows the current choice: an outlined button with the choice's name and a
+/// caret. Every dropdown in panels, dialogs and settings starts here, so they share one
+/// height, one text size and one look. Add `.dropdown_menu(...)` for its choices.
+pub fn dropdown(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    Button::new(id).outline().small().label(label.into()).dropdown_caret(true)
+}
+
+/// A row of a dropdown menu with a test id, for menus whose items are checked on and off.
+pub fn menu_row(id: &'static str, label: &'static str) -> impl IntoElement {
+    div().id(id).child(label).test_support()
+}
+
+/// The same dropdown without an outline, for the bars above and below the canvas, where
+/// outlines would crowd the zoom and view controls. It keeps the height and text size of
+/// `dropdown`.
+pub fn bar_dropdown(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    Button::new(id).ghost().small().label(label.into()).dropdown_caret(true)
+}
+
 /// The text field a name turns into while it is renamed (a Project item, a clip), with its text
 /// at `text_size` so it stays the size of the name it replaces. (The input's own size presets
 /// draw smaller text than the rows around them.)
@@ -286,7 +305,7 @@ impl MeasuredBounds {
 /// The look every floating surface shares, so popups read as part of the editor: a panel's
 /// own color, the hairline border panels are divided by, and slightly rounded corners.
 pub fn popup_surface<E: Styled>(surface: E) -> E {
-    surface.bg(hsla(color::PANEL)).border_1().border_color(hsla(color::HAIRLINE)).rounded(px(size::POPUP_RADIUS)).shadow_lg()
+    surface.text_size(px(size::TEXT)).bg(hsla(color::PANEL)).border_1().border_color(hsla(color::HAIRLINE)).rounded(px(size::POPUP_RADIUS)).shadow_lg()
 }
 
 /// A dimmed layer over the whole window with `card` in its middle, for popups Studio draws

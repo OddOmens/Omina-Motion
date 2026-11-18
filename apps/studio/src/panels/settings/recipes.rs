@@ -74,7 +74,7 @@ fn recipe_card(index: usize, recipe: &Recipe, built_in: bool, taught_count: usiz
         .flex()
         .items_center()
         .gap_2()
-        .child(div().text_size(px(size::TEXT + 1.0)).text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::MEDIUM).child(recipe.name.clone()))
+        .child(div().text_size(px(crate::theme::size::LARGE_TEXT)).text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::MEDIUM).child(recipe.name.clone()))
         .when(built_in, |row| row.child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("comes with Omina Motion")))
         .when(!extras.is_empty(), |row| row.child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::VALUE)).child(extras)))
         .child(div().flex_1());
@@ -83,7 +83,7 @@ fn recipe_card(index: usize, recipe: &Recipe, built_in: bool, taught_count: usiz
     let mover = |up: bool| {
         let (workspace, name) = (workspace.clone(), name.clone());
         let disabled = position.is_none_or(|at| if up { at == 0 } else { at + 1 >= taught_count });
-        Button::new(id(if up { "up" } else { "down" })).ghost().xsmall().label(if up { "Up" } else { "Down" }).tooltip(if up { "Move up the list" } else { "Move down the list" }).disabled(disabled).on_click(
+        Button::new(id(if up { "up" } else { "down" })).ghost().small().label(if up { "Up" } else { "Down" }).tooltip(if up { "Move up the list" } else { "Move down the list" }).disabled(disabled).on_click(
             move |_, window, cx| {
                 workspace.update(cx, |this, cx| automation::move_recipe(this, &name, up, cx)).ok();
                 window.refresh();
@@ -93,7 +93,7 @@ fn recipe_card(index: usize, recipe: &Recipe, built_in: bool, taught_count: usiz
     let edit = {
         let (shown, name, fields) = (shown.clone(), name.clone(), (fields.name.clone(), fields.steps.clone(), fields.key.clone()));
         let (steps, key) = (recipe.steps.join("; then "), recipe.key.as_deref().map(iris::recipes::key_label).unwrap_or_default());
-        Button::new(id("edit")).ghost().xsmall().label(if editing { "Close" } else { "Edit" }).on_click(move |_, window, cx| {
+        Button::new(id("edit")).ghost().small().label(if editing { "Close" } else { "Edit" }).on_click(move |_, window, cx| {
             let opening = shown.borrow().recipe_editing.as_deref() != Some(name.as_str());
             shown.borrow_mut().recipe_editing = opening.then(|| name.clone());
             shown.borrow_mut().note = None;
@@ -109,7 +109,7 @@ fn recipe_card(index: usize, recipe: &Recipe, built_in: bool, taught_count: usiz
         let (shown, workspace, name) = (shown.clone(), workspace.clone(), name.clone());
         let label = if built_in { "Reset" } else { "Delete" };
         let in_taught = !built_in || !extras_empty(recipe);
-        Button::new(id("delete")).ghost().xsmall().label(label).disabled(!in_taught).on_click(move |_, window, cx| {
+        Button::new(id("delete")).ghost().small().label(label).disabled(!in_taught).on_click(move |_, window, cx| {
             let removed = workspace.update(cx, |this, cx| automation::delete_recipe(this, &name, cx)).ok().flatten();
             let said = if built_in { format!("“{name}” has no shortcut, button or moments now.") } else { format!("Deleted “{name}”.") };
             shown.borrow_mut().recipe_undo = removed;

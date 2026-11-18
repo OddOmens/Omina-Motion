@@ -73,7 +73,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
                         .hover(|style| style.border_color(hsla(color::ACCENT)))
                         .children(picture.map(|picture| img(ImageSource::Render(picture)).size_full())),
                 )
-                .child(div().text_size(px(10.5)).text_color(hsla(color::MUTED)).truncate().child(element.name))
+                .child(div().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).truncate().child(element.name))
                 .test_support()
         });
         list = list.child(div().pt_2().pb_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(group.name())).child(div().flex().flex_wrap().gap_1p5().children(tiles));

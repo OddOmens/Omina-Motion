@@ -3275,6 +3275,29 @@ fn an_expanded_folder_shows_as_open(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_snapping_menu_shows_the_layout_grid_and_turns_snapping_choices_off(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let settings = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).ui.settings.clone());
+    assert!(!settings(visual).show_grid && settings(visual).snap_to_center);
+    visual.update(|window, _| assert!(window.try_find("viewer-layout-grid").is_none()));
+
+    visual.update(|window, cx| window.click("viewer-snapping", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("snap-layout-grid", cx));
+    render(visual);
+    assert!(settings(visual).show_grid);
+    visual.update(|window, _| assert!(window.try_find("viewer-layout-grid").is_some(), "the grid shows over the frame"));
+    assert!(crate::app_settings::load().show_grid, "the choice is kept for next time");
+
+    visual.update(|window, cx| window.click("viewer-snapping", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("snap-to-center", cx));
+    render(visual);
+    assert!(!settings(visual).snap_to_center);
+    assert!(!visual.update(|_, cx| workspace.read(cx).ui.settings.snap_options().center_lines));
+}
+
+#[gpui_kit::test]
 fn the_viewer_bar_lines_up_with_the_project_footer(cx: &mut TestAppContext) {
     let (_workspace, visual) = open(cx);
     let bounds = |visual: &mut VisualTestContext, id: &'static str| visual.update(|window, _| window.find(id).bounds());
@@ -3644,8 +3667,10 @@ fn the_anchor_drags_in_the_viewer_and_snaps_to_corners_unless_turned_off(cx: &mu
     for (a, b) in corners.iter().zip(after) {
         assert!((a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01, "the shape stays where it was: {corners:?} vs {after:?}");
     }
-    // With snapping off, it lands where it is dropped.
+    // With snapping off (from the Snapping menu under the viewer), it lands where it is dropped.
     visual.update(|window, cx| window.click("viewer-snapping", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("snap-anchor-points", cx));
     render(visual);
     let from = center_of(visual, handle);
     let inside = screen_point(&workspace, visual, corners[0] + Vec2::new(40.0, 30.0));
@@ -8015,7 +8040,11 @@ fn tools_and_features_turned_off_are_hidden_everywhere(cx: &mut TestAppContext) 
     assert!(!file.iter().any(|name| name.starts_with("Export")), "{file:?}");
     assert!(file.contains(&"Import…".to_owned()) && file.contains(&"Package…".to_owned()));
     assert!(!menu_names("Edit").contains(&"Close Gaps".to_owned()));
-    assert_eq!(menu_names("View"), ["Zoom In", "Zoom Out", "-", "Show or Hide Layer Outlines"], "Show Guides is gone; the layer outlines toggle is always there");
+    assert_eq!(
+        menu_names("View"),
+        ["Zoom In", "Zoom Out", "-", "Show or Hide Layer Outlines", "Layout Grid", "-", "Snap to Grid", "Snap to Center Lines", "Snap to Dead Center"],
+        "Show Guides is gone; the layer outlines toggle and the layout grid and snapping are always there"
+    );
     // And from a clip's right-click menu: no Close Gaps in Time, and a text layer has nothing
     // else there, so the submenu goes.
     visual.update(|window, cx| window.right_click(("clip-body", TITLE.0 as usize), cx));

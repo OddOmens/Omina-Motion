@@ -123,7 +123,7 @@ pub fn open(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Wor
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .text_size(px(size::TEXT + 1.0))
+                    .text_size(px(size::LARGE_TEXT))
                     .child(row("Project name:").child(div().flex_1().child(Input::new(&input))))
                     .child(
                         row("Save to:")
@@ -305,7 +305,7 @@ pub fn status(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<impl
             .gap_2()
             .child(div().text_color(hsla(color::MUTED)).child(format!("Packaging {} · {}%", job.file_name, percent as i64)))
             .child(div().w(px(120.0)).child(Progress::new("package-progress").value(percent)))
-            .child(Button::new("package-cancel").ghost().xsmall().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
+            .child(Button::new("package-cancel").ghost().small().label("Cancel").on_click(cx.listener(|this, _, _, cx| {
                 cancel(this);
                 cx.notify();
             }))),

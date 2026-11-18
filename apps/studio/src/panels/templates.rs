@@ -153,8 +153,6 @@ fn branded(workspace: &Workspace, index: usize) -> studio_core::templates::Templ
 fn brand_menu(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     use gpui_kit::assets::IconName;
     use gpui_kit::component::Icon;
-    use gpui_kit::component::Sizable as _;
-    use gpui_kit::component::button::Button;
     use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
     use studio_core::templates::LOOKS;
     let current = workspace.ui.template_look;
@@ -165,7 +163,7 @@ fn brand_menu(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
         TemplateLook::Brand(id) => brands.iter().find(|(brand, _)| *brand == id).map_or_else(|| "Template colors".to_owned(), |(_, name)| name.clone()),
     };
     let target = cx.weak_entity();
-    Button::new("template-brand").outline().xsmall().label(label).dropdown_caret(true).dropdown_menu(move |menu, _, _| {
+    crate::panels::chrome::dropdown("template-brand", label).dropdown_menu(move |menu, _, _| {
         let pick = |look: TemplateLook| {
             let target = target.clone();
             move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
@@ -334,7 +332,7 @@ fn card(workspace: &Workspace, index: usize, width: f32, place: CardPlace, cx: &
                 .child(div().absolute().top(px(6.0)).right(px(6.0)).child(add_button(index, place, cx))),
         )
         .child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::TEXT)).truncate().child(template.name))
-        .child(div().text_size(px(10.0)).text_color(hsla(color::MUTED)).child(format!("{} · {:.0}s", template.category.name(), template.seconds)))
+        .child(div().text_size(px(size::CAPTION_TEXT)).text_color(hsla(color::MUTED)).child(format!("{} · {:.0}s", template.category.name(), template.seconds)))
         .test_support()
 }
 
@@ -378,7 +376,7 @@ pub fn gallery(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<gpu
                 .flex()
                 .items_baseline()
                 .gap_2()
-                .child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("All Templates"))
+                .child(div().text_size(px(size::TITLE_TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("All Templates"))
                 .child(div().text_color(hsla(color::MUTED)).child(format!("{} templates", shown.len()))),
         )
         .child(div().flex().items_center().gap_2().child(format_chips(workspace, "gallery-format", cx)).child(brand_menu(workspace, cx)).child(close));
@@ -525,7 +523,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEl
     let view_all = {
         use gpui_kit::component::Sizable as _;
         use gpui_kit::component::button::{Button, ButtonVariants as _};
-        Button::new("templates-view-all").ghost().xsmall().label("View All Templates").on_click(cx.listener(|this, _, _, cx| {
+        Button::new("templates-view-all").ghost().small().label("View All Templates").on_click(cx.listener(|this, _, _, cx| {
             this.ui.template_gallery = true;
             cx.notify();
         }))

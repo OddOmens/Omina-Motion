@@ -25,12 +25,6 @@ use crate::state::{AudioSetting, ColorTarget, PaintSlot, ShapeSetting, Switch, T
 use crate::theme::{color, hsla, size};
 use crate::workspace::{EditTarget, PanelId, Workspace};
 
-/// Font families offered in the Text section, shown only if installed. The layer's own font is always listed.
-const FONT_FAMILIES: &[&str] = &[
-    "Inter", "SF Pro Display", "Helvetica Neue", "Helvetica", "Arial", "Avenir Next", "Futura", "Gill Sans",
-    "Georgia", "Times New Roman", "Baskerville", "Didot", "Menlo", "Courier New", "Impact",
-];
-
 const FONT_WEIGHTS: &[(u16, &str)] = &[
     (100, "Thin"),
     (200, "Extra Light"),
@@ -43,10 +37,14 @@ const FONT_WEIGHTS: &[(u16, &str)] = &[
     (900, "Black"),
 ];
 
-/// The offered font families that are installed. Asking the OS is slow, so this runs once at startup.
-pub fn installed_font_families(cx: &App) -> Vec<&'static str> {
-    let installed = cx.text_system().all_font_names();
-    FONT_FAMILIES.iter().copied().filter(|family| installed.iter().any(|name| name == family)).collect()
+/// Every installed font family, in alphabetical order (ignoring case), for the font menus. The
+/// system's hidden fonts, whose names start with a dot, are left out. Asking the OS is slow, so
+/// this runs once at startup.
+pub fn installed_font_families(cx: &App) -> Vec<String> {
+    let mut families: Vec<String> = cx.text_system().all_font_names().into_iter().filter(|name| !name.starts_with('.')).collect();
+    families.sort_by_key(|name| name.to_lowercase());
+    families.dedup();
+    families
 }
 
 fn weight_name(weight: u16) -> &'static str {
@@ -63,7 +61,7 @@ pub(super) fn choice_menu<T: Clone + 'static>(
 ) -> impl IntoElement {
     let choose = std::rc::Rc::new(choose);
     let choices = std::rc::Rc::new(choices);
-    Button::new(id).outline().small().label(label).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+    crate::panels::chrome::dropdown(id, label).w_full().dropdown_menu(move |menu, _, _| {
         choices.iter().fold(menu, |menu, (label, checked, value)| {
             let (workspace, choose, value) = (workspace.clone(), choose.clone(), value.clone());
             menu.item(PopupMenuItem::new(label.clone()).checked(*checked).on_click(move |_, _, cx: &mut App| {
@@ -78,29 +76,57 @@ pub(super) fn choice_menu<T: Clone + 'static>(
     })
 }
 
-/// How large a font's name is drawn in the font menu's list, so each typeface is easy to tell apart.
-const FONT_PREVIEW_SIZE: f32 = 15.0;
+/// How large a font's name is drawn in the font menu's list, a step above menu text so each
+/// typeface is easy to tell apart.
+const FONT_PREVIEW_SIZE: f32 = size::HEADING_TEXT;
+/// How large the chosen font's name is drawn on the button, in its own typeface: a step above
+/// the other dropdowns' text, on a button of the same height.
+const FONT_BUTTON_TEXT: f32 = size::LARGE_TEXT;
+/// The height of each row in the font and weight menus, the same as other menu rows. Fonts
+/// differ in how tall their letters stand, so a fixed height keeps the list evenly spaced.
+const FONT_ROW_HEIGHT: f32 = 26.0;
+/// The font menu's width: wide enough for most family names, which are cut short with an
+/// ellipsis past it, rather than growing to fit the longest one.
+const FONT_MENU_WIDTH: f32 = 280.0;
 
-/// A dropdown of font families. The button shows the current family in its own typeface, a size
-/// up from the other controls, and each family in the list is drawn in itself, so fonts can be
-/// compared without trying them on the layer. `choices` are (family, is current, value) as in
-/// `choice_menu`.
-pub(super) fn font_menu(
+/// A row in the font or weight menu: `label` drawn in `family` at `weight`, on one line, cut
+/// short with an ellipsis if it doesn't fit.
+fn font_row(label: String, family: String, weight: u16) -> Div {
+    div()
+        .h(px(FONT_ROW_HEIGHT))
+        .min_w_0()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_size(px(FONT_PREVIEW_SIZE))
+        .font_family(family)
+        .font_weight(gpui_kit::FontWeight(f32::from(weight)))
+        .child(label)
+}
+
+/// A dropdown whose rows are drawn by `preview` (given each choice's label) rather than as plain
+/// text; the button shows `shown`. Used by the font and weight menus. `choices` are (label, is
+/// current, value) as in `choice_menu`.
+fn preview_menu<T: Clone + 'static>(
     id: impl Into<ElementId>,
-    current: String,
-    choices: Vec<(String, bool, String)>,
-    choose: impl Fn(&mut Workspace, String) + 'static,
+    shown: Div,
+    width: f32,
+    choices: Vec<(String, bool, T)>,
+    preview: impl Fn(&str, &T) -> Div + 'static,
+    choose: impl Fn(&mut Workspace, T) + 'static,
     workspace: WeakEntity<Workspace>,
 ) -> impl IntoElement {
     let choose = std::rc::Rc::new(choose);
+    let preview = std::rc::Rc::new(preview);
     let choices = std::rc::Rc::new(choices);
-    let shown = div().min_w_0().text_ellipsis().text_size(px(14.0)).font_family(current.clone()).child(current);
-    Button::new(id).outline().child(shown).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
-        let menu = menu.scrollable(true).max_h(px(420.0));
-        choices.iter().fold(menu, |menu, (family, checked, value)| {
+    Button::new(id).outline().small().child(shown).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+        let menu = menu.scrollable(true).max_h(px(420.0)).min_w(px(width)).max_w(px(FONT_MENU_WIDTH));
+        choices.iter().fold(menu, |menu, (label, checked, value)| {
             let (workspace, choose, value) = (workspace.clone(), choose.clone(), value.clone());
-            let preview = family.clone();
-            let item = PopupMenuItem::element(move |_, _| div().text_size(px(FONT_PREVIEW_SIZE)).font_family(preview.clone()).child(preview.clone()));
+            let (preview, label, shown_value) = (preview.clone(), label.clone(), value.clone());
+            let item = PopupMenuItem::element(move |_, _| preview(&label, &shown_value));
             menu.item(item.checked(*checked).on_click(move |_, _, cx: &mut App| {
                 workspace
                     .update(cx, |this, cx| {
@@ -111,6 +137,34 @@ pub(super) fn font_menu(
             }))
         })
     })
+}
+
+/// A dropdown of font families, in alphabetical order. The button shows the current family in its
+/// own typeface, a size up from the other dropdowns' text, and each family in the list is drawn in
+/// itself, so fonts can be compared without trying them on the layer.
+pub(super) fn font_menu(
+    id: impl Into<ElementId>,
+    current: String,
+    choices: Vec<(String, bool, String)>,
+    choose: impl Fn(&mut Workspace, String) + 'static,
+    workspace: WeakEntity<Workspace>,
+) -> impl IntoElement {
+    let shown = div().min_w_0().text_ellipsis().text_size(px(FONT_BUTTON_TEXT)).font_family(current.clone()).child(current);
+    preview_menu(id, shown, FONT_MENU_WIDTH, choices, |family, _| font_row(family.to_owned(), family.to_owned(), 400), choose, workspace)
+}
+
+/// A dropdown of font weights, each drawn in `family` at that weight, so the difference between
+/// them shows before one is picked.
+pub(super) fn weight_menu(
+    id: impl Into<ElementId>,
+    family: String,
+    current: u16,
+    choose: impl Fn(&mut Workspace, u16) + 'static,
+    workspace: WeakEntity<Workspace>,
+) -> impl IntoElement {
+    let choices = FONT_WEIGHTS.iter().map(|(value, name)| ((*name).to_owned(), *value == current, *value)).collect();
+    let shown = div().min_w_0().text_ellipsis().child(weight_name(current));
+    preview_menu(id, shown, 200.0, choices, move |name, weight| font_row(name.to_owned(), family.clone(), *weight), choose, workspace)
 }
 
 /// A labeled control in a section, on the same columns as the property rows: its name, then
@@ -325,7 +379,7 @@ fn speed_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Workspac
         div().py_1().pl(px(NAME_INDENT)).child(
             Button::new("speed-unramp")
                 .ghost()
-                .xsmall()
+                .small()
                 .icon(Icon::new(IconName::RotateCcw))
                 .label("Remove Speed Changes")
                 .tooltip(format!("Back to a steady {back_to:.0}%, as before"))
@@ -401,7 +455,7 @@ fn stabilize_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Work
 /// already measured, which is instant.
 fn smoothness_menu(id: Id, current: f32, cx: &mut Context<Workspace>) -> impl IntoElement {
     let target = cx.weak_entity();
-    Button::new("stabilize-smoothness").outline().small().label(format!("{current:.0}%")).dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+    crate::panels::chrome::dropdown("stabilize-smoothness", format!("{current:.0}%")).w_full().dropdown_menu(move |menu, _, _| {
         studio_core::stabilize::SMOOTHNESS_CHOICES.into_iter().fold(menu, |menu, smoothness| {
             let target = target.clone();
             menu.item(PopupMenuItem::new(format!("{smoothness:.0}%")).checked(smoothness == current).on_click(move |_, window, cx: &mut App| {
@@ -423,7 +477,7 @@ fn smoothness_menu(id: Id, current: f32, cx: &mut Context<Workspace>) -> impl In
 /// The Auto Reframe menu: one shape per item; choosing one starts the job.
 fn reframe_menu(id: Id, cx: &mut Context<Workspace>) -> impl IntoElement {
     let target = cx.weak_entity();
-    Button::new("auto-reframe").outline().small().label("Reframe to…").dropdown_caret(true).w_full().dropdown_menu(move |menu, _, _| {
+    crate::panels::chrome::dropdown("auto-reframe", "Reframe to…").w_full().dropdown_menu(move |menu, _, _| {
         studio_core::templates::Format::ALL.into_iter().fold(menu, |menu, format| {
             let target = target.clone();
             menu.item(PopupMenuItem::new(format!("{} ({}×{})", format.label(), format.size().0, format.size().1)).on_click(move |_, window, cx: &mut App| {
@@ -466,7 +520,7 @@ fn enhance_section(layer: &Layer, workspace: &Workspace, cx: &mut Context<Worksp
     } else if let Some(job) = job {
         status_line(format!("{} · {}%", job.stage, (job.fraction * 100.0) as i64))
     } else if skipped {
-        div().flex().items_center().gap_2().child(status_line("Not cleaned (stopped or failed).")).child(Button::new("enhance-retry").ghost().xsmall().label("Try Again").on_click(cx.listener(move |this, _, _, cx| {
+        div().flex().items_center().gap_2().child(status_line("Not cleaned (stopped or failed).")).child(Button::new("enhance-retry").ghost().small().label("Try Again").on_click(cx.listener(move |this, _, _, cx| {
             this.ui.enhance_skipped.retain(|(layer, _)| *layer != id);
             cx.notify();
         })))
@@ -602,13 +656,12 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         this.state.edit_captions(id, |style| style.background = checked.then(|| Rgba::hex(0x000000).with_alpha(0.7)));
         cx.notify();
     }));
-    let mut families: Vec<&str> = workspace.ui.font_families.clone();
+    let mut families: Vec<&str> = workspace.ui.font_families.iter().map(String::as_str).collect();
     if !families.contains(&style.text.font_family.as_str()) {
         families.insert(0, style.text.font_family.as_str());
     }
     let weight = style.text.font_weight;
     let family_choices = families.iter().map(|family| ((*family).to_owned(), *family == style.text.font_family, (*family).to_owned())).collect();
-    let weight_choices = FONT_WEIGHTS.iter().map(|(value, name)| ((*name).to_owned(), *value == weight, *value)).collect();
     let current_family = style.text.font_family.clone();
     let stroke_width = style.text.stroke.map_or(4.0, |(_, width)| width);
 
@@ -682,7 +735,7 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
             }))
         };
         let row = match editing {
-            Some(input) => row.child(div().flex_1().child(Input::new(input).xsmall())).into_any_element(),
+            Some(input) => row.child(div().flex_1().child(Input::new(input).small())).into_any_element(),
             None => {
                 // Each word is its own target: a click picks it (shift-click picks the run from
                 // the last one picked) and moves the playhead to it; a double-click edits the
@@ -730,7 +783,7 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         .child(labeled_row("Words at once", choice_menu("captions-words", format!("{}", style.words_per_phrase), per_phrase, move |this, count| this.state.edit_captions(id, |style| style.words_per_phrase = count), weak.clone())))
         .child(indented(uppercase).py_1())
         .child(labeled_row("Font", font_menu("captions-font-family", style.text.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
-        .child(labeled_row("Weight", choice_menu("captions-font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
+        .child(labeled_row("Weight", weight_menu("captions-font-weight", current_family.clone(), weight, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
         .child(labeled_row("Size", value_field(FieldTarget::Text { layer: id, setting: TextSetting::FontSize }, workspace, cx)))
         .child(labeled_row("Tracking", value_field(FieldTarget::Text { layer: id, setting: TextSetting::Tracking }, workspace, cx)))
         .child(paint_row("fill", "Fill", style.text.fill, ColorTarget::TextFill(id), move |this, fill| this.state.set_text_fill(id, fill), cx))
@@ -988,13 +1041,12 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
     let id = layer.id;
     let weak = cx.weak_entity();
 
-    let mut families: Vec<&str> = workspace.ui.font_families.clone();
+    let mut families: Vec<&str> = workspace.ui.font_families.iter().map(String::as_str).collect();
     if !families.contains(&style.font_family.as_str()) {
         families.insert(0, style.font_family.as_str());
     }
     let weight = style.font_weight;
     let family_choices = families.iter().map(|family| ((*family).to_owned(), *family == style.font_family, (*family).to_owned())).collect();
-    let weight_choices = FONT_WEIGHTS.iter().map(|(value, name)| ((*name).to_owned(), *value == weight, *value)).collect();
     let current_family = style.font_family.clone();
 
     let source_text = if let Some(editing) = workspace.ui.editing.as_ref().filter(|e| e.target == EditTarget::SourceText(id) && !e.in_viewer) {
@@ -1029,7 +1081,7 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
     div()
         .child(labeled_row("Source", source_text))
         .child(labeled_row("Font", font_menu("font-family", style.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
-        .child(labeled_row("Weight", choice_menu("font-weight", weight_name(weight).to_owned(), weight_choices, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
+        .child(labeled_row("Weight", weight_menu("font-weight", current_family.clone(), weight, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
         .child(labeled_row("Size", text_field(TextSetting::FontSize, cx)))
         .child(labeled_row("Leading", text_field(TextSetting::Leading, cx)))
         .child(labeled_row("Tracking", text_field(TextSetting::Tracking, cx)))

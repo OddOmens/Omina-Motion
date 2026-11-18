@@ -4,7 +4,8 @@
 
 use studio_core::animation::{Animated, Vec2};
 use studio_core::edit;
-use studio_core::transform::{Affine, layer_contains, parent_space, world_transform};
+use studio_core::frame_snap::{Snapped, snap_box};
+use studio_core::transform::{Affine, layer_contains, layer_corners, parent_space, world_transform};
 use studio_core::edit::PathPart;
 use studio_core::model::{Id, ShapeKind, ShapeStyle};
 use studio_core::path::{PathPoint, ShapePath};
@@ -24,8 +25,10 @@ pub enum ScaleHandle {
 #[derive(Clone, Debug)]
 pub(super) enum ViewerDrag {
     /// Moving the selected layers: each with its starting position and the transform from
-    /// composition pixels into the space its position lives in (its parent's).
-    Move(Vec<(Id, Vec2, Affine)>),
+    /// composition pixels into the space its position lives in (its parent's), and the box
+    /// around them all before the move, as (top left, bottom right) in composition pixels, for
+    /// snapping.
+    Move { layers: Vec<(Id, Vec2, Affine)>, bounds: Option<(Vec2, Vec2)> },
     /// Scaling one layer: its starting scale, the grabbed corner's offset from the anchor in source
     /// pixels, and the transform from composition pixels into the layer's source pixels.
     Scale { layer: Id, scale: Vec2, reach: Vec2, to_local: Affine },
@@ -106,7 +109,7 @@ impl EditorState {
     /// Starts moving the selected layers (locked ones stay put).
     pub fn begin_move(&mut self) {
         let frame = self.current_frame as f64;
-        let starts = self
+        let starts: Vec<(Id, Vec2, Affine)> = self
             .selected_layers
             .iter()
             .filter(|&&id| self.composition().layer(id).is_some_and(|layer| !layer.switches.locked))
@@ -115,7 +118,8 @@ impl EditorState {
                 Some((id, position, parent_space(self.composition(), id, frame)))
             })
             .collect();
-        self.viewer_drag = Some(ViewerDrag::Move(starts));
+        let bounds = self.selection_box(&starts);
+        self.viewer_drag = Some(ViewerDrag::Move { layers: starts, bounds });
     }
 
     /// Starts scaling `layer` from `handle`.
@@ -273,15 +277,22 @@ impl EditorState {
         let frame = self.current_frame;
         let Some(drag) = self.viewer_drag.clone() else { return };
         match drag {
-            ViewerDrag::Move(starts) => {
-                let delta = if !constrain {
+            ViewerDrag::Move { layers, bounds } => {
+                let mut delta = if !constrain {
                     delta
                 } else if delta.x.abs() >= delta.y.abs() {
                     Vec2::new(delta.x, 0.0)
                 } else {
                     Vec2::new(0.0, delta.y)
                 };
-                for (id, start, to_parent) in starts {
+                self.frame_snapped = Snapped::default();
+                if let Some((min, max)) = bounds {
+                    let size = Vec2::new(self.composition().width as f32, self.composition().height as f32);
+                    let snapped = keep_on_line(snap_box(min + delta, max + delta, size, self.frame_snap, self.frame_snap_reach), delta, constrain);
+                    delta = delta + snapped.nudge;
+                    self.frame_snapped = snapped;
+                }
+                for (id, start, to_parent) in layers {
                     if let Some(layer) = self.composition_mut().layer_mut(id) {
                         layer.set_property(POSITION, frame, PropertyValue::Pair(start + to_parent.apply_vector(delta)));
                     }
@@ -366,6 +377,33 @@ impl EditorState {
             self.set_shape_box(layer, start - half, start + half);
         }
         self.viewer_drag = None;
+        self.frame_snapped = Snapped::default();
+    }
+
+    /// The box around the layers being moved, as (top left, bottom right) in composition
+    /// pixels, from each layer's real (rotated, parented) corners at the playhead.
+    fn selection_box(&self, layers: &[(Id, Vec2, Affine)]) -> Option<(Vec2, Vec2)> {
+        let frame = self.current_frame as f64;
+        let corners = layers.iter().filter_map(|(id, _, _)| layer_corners(self.composition(), *id, frame)).flatten();
+        corners.fold(None, |found, corner| match found {
+            None => Some((corner, corner)),
+            Some((min, max)) => Some((Vec2::new(min.x.min(corner.x), min.y.min(corner.y)), Vec2::new(max.x.max(corner.x), max.y.max(corner.y)))),
+        })
+    }
+}
+
+/// With Shift held the move stays on its straight line (across or down), so only the axis it
+/// runs along may snap. Without Shift, `snapped` is kept as it is.
+fn keep_on_line(snapped: Snapped, delta: Vec2, constrained: bool) -> Snapped {
+    if !constrained {
+        return snapped;
+    }
+    let across = delta.y == 0.0;
+    Snapped {
+        nudge: if across { Vec2::new(snapped.nudge.x, 0.0) } else { Vec2::new(0.0, snapped.nudge.y) },
+        vertical: snapped.vertical.filter(|_| across),
+        horizontal: snapped.horizontal.filter(|_| !across),
+        dead_center: false,
     }
 }
 
@@ -554,6 +592,36 @@ mod tests {
         state.toggle_switch(grade, super::super::Switch::Visible);
         assert_eq!(state.layer_at(Vec2::new(960.0, 300.0)), Some(logo));
         assert_ne!(state.layer_at(Vec2::new(100.0, 1000.0)), Some(logo));
+    }
+
+    #[test]
+    fn moved_layers_snap_to_dead_center_and_shift_keeps_to_one_axis() {
+        use studio_core::frame_snap::{SnapOptions, Snapped};
+        let mut state = EditorState::new();
+        let layer = state.begin_shape_draw(ShapeKind::Rectangle, Vec2::new(500.0, 500.0)).unwrap();
+        state.end_viewer_drag();
+        state.select_layer(layer, false);
+        state.frame_snap = SnapOptions { grid: None, center_lines: true, dead_center: true };
+        state.frame_snap_reach = 8.0;
+        let middle = |state: &EditorState| {
+            let corners = layer_corners(state.composition(), layer, 0.0).unwrap();
+            (corners[0] + corners[2]) * 0.5
+        };
+        let center = Vec2::new(state.composition().width as f32, state.composition().height as f32) * 0.5;
+        let start = middle(&state);
+        let close = |a: Vec2, b: Vec2| (a - b).length() < 0.01;
+
+        state.begin_move();
+        state.drag_in_viewer(center - start + Vec2::new(-3.0, 4.0), false);
+        assert!(close(middle(&state), center), "dead center: {:?}", middle(&state));
+        assert!(state.frame_snapped.dead_center);
+
+        // With Shift the move stays straight across, so only the vertical center line pulls.
+        state.drag_in_viewer(Vec2::new(center.x - start.x - 3.0, 1.0), true);
+        assert!(close(middle(&state), Vec2::new(center.x, start.y)), "across only: {:?}", middle(&state));
+        assert_eq!((state.frame_snapped.vertical, state.frame_snapped.horizontal), (Some(center.x), None));
+        state.end_viewer_drag();
+        assert_eq!(state.frame_snapped, Snapped::default(), "the guides go when the drag ends");
     }
 
     #[test]

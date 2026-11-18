@@ -118,6 +118,16 @@ pub struct AppSettings {
     pub snapping: bool,
     /// Whether the viewer's anchor points start snapping to their layer's corners and middle.
     pub anchor_snapping: bool,
+    /// Show the layout grid over the composition (View ▸ Layout Grid).
+    pub show_grid: bool,
+    /// The layout grid's spacing, in composition pixels.
+    pub grid_size: u32,
+    /// Whether layers moved in the viewer snap to the layout grid's lines while it is shown.
+    pub snap_to_grid: bool,
+    /// Whether layers moved in the viewer snap to the frame's vertical and horizontal center lines.
+    pub snap_to_center: bool,
+    /// Whether layers moved in the viewer snap to the frame's exact center, on both axes at once.
+    pub snap_to_dead_center: bool,
     /// What shows behind the transparent parts of a composition in the viewer.
     pub transparency: Transparency,
     /// Pictures and waveforms drawn on timeline clips.
@@ -373,6 +383,25 @@ impl Transparency {
     }
 }
 
+/// The layout grid's spacing until another is picked, in composition pixels. At 60, grid lines
+/// run through the middle of the common frame sizes (1920 × 1080, 1080 × 1080, 1080 × 1920).
+pub const DEFAULT_GRID_SIZE: u32 = 60;
+
+/// The grid spacings offered in Settings, in composition pixels.
+pub const GRID_SIZES: [u32; 8] = [8, 10, 20, 30, 40, 60, 100, 120];
+
+impl AppSettings {
+    /// What a layer moved in the viewer snaps to, from the View menu's choices. The grid only
+    /// pulls while it is shown, so a layer never jumps to lines that can't be seen.
+    pub fn snap_options(&self) -> studio_core::frame_snap::SnapOptions {
+        studio_core::frame_snap::SnapOptions {
+            grid: (self.show_grid && self.snap_to_grid && self.grid_size > 0).then_some(self.grid_size as f32),
+            center_lines: self.snap_to_center,
+            dead_center: self.snap_to_dead_center,
+        }
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -397,6 +426,11 @@ impl Default for AppSettings {
             loop_playback: true,
             snapping: true,
             anchor_snapping: true,
+            show_grid: false,
+            grid_size: DEFAULT_GRID_SIZE,
+            snap_to_grid: true,
+            snap_to_center: true,
+            snap_to_dead_center: true,
             transparency: Transparency::default(),
             clip_thumbnails: true,
             clip_waveforms: true,

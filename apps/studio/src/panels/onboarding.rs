@@ -132,7 +132,7 @@ pub fn render(workspace: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyE
                 .flex_col()
                 .gap_2()
                 .child(step_dots(step))
-                .child(div().id("onboarding-title").text_size(px(26.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title).test_support())
+                .child(div().id("onboarding-title").text_size(px(size::DISPLAY_TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child(title).test_support())
                 .child(div().text_color(hsla(color::MUTED)).child(about)),
         )
         .child(div().id("onboarding-body").flex_1().min_h_0().overflow_y_scroll().pb_4().child(body))
@@ -222,7 +222,7 @@ fn side_panel(step: Step, cx: &mut Context<Workspace>) -> impl IntoElement {
                 .items_center()
                 .gap_3()
                 .child(super::start_screen::brand_mark(40.0))
-                .child(div().flex().flex_col().child(div().text_size(px(16.0)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Omina Motion")).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Setup"))),
+                .child(div().flex().flex_col().child(div().text_size(px(size::TITLE_TEXT)).font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Omina Motion")).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("Setup"))),
         )
         .child(div().pt_8().flex().flex_col().gap_1().children(steps))
         .child(div().flex_1())
