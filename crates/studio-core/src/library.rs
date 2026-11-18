@@ -21,6 +21,10 @@ pub struct Libraries {
     /// The user's effect presets, shown under My Presets in the Effects panel.
     #[serde(default)]
     pub presets: Vec<EffectPreset>,
+    /// Font families marked as favorites in the font menus of both apps, in the order they
+    /// were added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorite_fonts: Vec<String>,
     next_id: u64,
 }
 
@@ -54,6 +58,9 @@ pub struct Brand {
     pub name: String,
     pub colors: Vec<LibraryColor>,
     pub text_styles: Vec<TextTemplate>,
+    /// Font families saved to the brand, listed in the font menus of both apps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fonts: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -97,6 +104,26 @@ impl TextTemplate {
     }
 }
 
+/// The most fonts kept as favorites, and in one brand.
+pub const MAX_FONTS: usize = 500;
+
+/// The longest font family name kept, in characters.
+const MAX_FAMILY: usize = 200;
+
+/// A font family name as the library keeps it: trimmed, without control characters, and at
+/// most `MAX_FAMILY` characters. `None` when nothing is left.
+fn clean_family(family: &str) -> Option<String> {
+    let family: String = family.trim().chars().filter(|c| !c.is_control()).take(MAX_FAMILY).collect();
+    (!family.is_empty()).then_some(family)
+}
+
+/// Cleans a list of font families read from disk: unusable and repeated names are dropped, and
+/// the list is cut to `MAX_FONTS`.
+fn clean_families(families: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    *families = families.iter().filter_map(|family| clean_family(family)).filter(|family| seen.insert(family.clone())).take(MAX_FONTS).collect();
+}
+
 /// Keeps a name usable: trimmed, not empty, and at most `MAX_NAME` characters.
 fn clean_name(name: &str, fallback: &str) -> String {
     let name: String = name.trim().chars().filter(|c| !c.is_control()).take(MAX_NAME).collect();
@@ -131,7 +158,7 @@ impl Libraries {
     pub fn add_brand(&mut self, name: &str) -> LinkId {
         let id = self.allocate();
         let name = clean_name(name, "New Brand");
-        self.brands.push(Brand { id, name, colors: Vec::new(), text_styles: Vec::new() });
+        self.brands.push(Brand { id, name, colors: Vec::new(), text_styles: Vec::new(), fonts: Vec::new() });
         id
     }
 
@@ -237,6 +264,46 @@ impl Libraries {
         false
     }
 
+    /// Whether `family` is one of the favorite fonts.
+    pub fn is_favorite_font(&self, family: &str) -> bool {
+        self.favorite_fonts.iter().any(|favorite| favorite == family)
+    }
+
+    /// Makes `family` a favorite font, or stops it being one if it already is. Returns whether
+    /// it is a favorite now.
+    pub fn toggle_favorite_font(&mut self, family: &str) -> bool {
+        let Some(family) = clean_family(family) else { return false };
+        if let Some(at) = self.favorite_fonts.iter().position(|favorite| *favorite == family) {
+            self.favorite_fonts.remove(at);
+            return false;
+        }
+        if self.favorite_fonts.len() >= MAX_FONTS {
+            return false;
+        }
+        self.favorite_fonts.push(family);
+        true
+    }
+
+    /// Adds `family` to a brand's fonts. Returns whether it was added: not when there is no
+    /// such brand, the brand already has it, or the brand is full.
+    pub fn add_font(&mut self, brand: LinkId, family: &str) -> bool {
+        let Some(family) = clean_family(family) else { return false };
+        let Some(brand) = self.brand_mut(brand) else { return false };
+        if brand.fonts.contains(&family) || brand.fonts.len() >= MAX_FONTS {
+            return false;
+        }
+        brand.fonts.push(family);
+        true
+    }
+
+    /// Takes `family` out of a brand's fonts. Returns whether it was there.
+    pub fn remove_font(&mut self, brand: LinkId, family: &str) -> bool {
+        let Some(brand) = self.brand_mut(brand) else { return false };
+        let before = brand.fonts.len();
+        brand.fonts.retain(|font| font != family);
+        brand.fonts.len() != before
+    }
+
     /// Deletes a brand with everything in it, a single color or text style, or a preset.
     /// Projects that used it keep what they had; they just stop following it.
     pub fn delete(&mut self, id: LinkId) -> bool {
@@ -262,6 +329,7 @@ impl Libraries {
         let mut highest = 0;
         for brand in &mut self.brands {
             brand.name = clean_name(&brand.name, "Brand");
+            clean_families(&mut brand.fonts);
             let ids = std::iter::once(brand.id).chain(brand.colors.iter().map(|c| c.id)).chain(brand.text_styles.iter().map(|s| s.id));
             for id in ids.collect::<Vec<_>>() {
                 if !seen.insert(id) {
@@ -295,6 +363,7 @@ impl Libraries {
             preset.effects.iter_mut().for_each(crate::effects::restore_info);
         }
         self.presets.retain(|preset| !preset.effects.is_empty());
+        clean_families(&mut self.favorite_fonts);
         self.next_id = self.next_id.max(highest);
         Ok(self)
     }
@@ -511,5 +580,31 @@ mod tests {
         let duplicate = twins.brands[0].colors[0].clone();
         twins.brands[0].colors.push(duplicate);
         assert!(twins.validated().is_err());
+    }
+
+    #[test]
+    fn fonts_can_be_favorites_and_saved_to_a_brand() {
+        let mut libraries = Libraries::default();
+        let brand = libraries.add_brand("Acme");
+        assert!(libraries.toggle_favorite_font(" Komika Axis "));
+        assert!(libraries.is_favorite_font("Komika Axis"));
+        assert!(!libraries.toggle_favorite_font("Komika Axis"), "a second press takes it off");
+        assert!(libraries.favorite_fonts.is_empty());
+        assert!(libraries.add_font(brand, "Inter"));
+        assert!(!libraries.add_font(brand, "Inter"), "a brand lists a font once");
+        assert!(!libraries.add_font(LinkId(u64::MAX), "Inter"), "no such brand");
+        libraries.toggle_favorite_font("Inter");
+
+        // Both survive the file, and a hand-edited file is tidied on the way in.
+        let json = serde_json::to_string(&libraries).expect("written");
+        let read: Libraries = serde_json::from_str::<Libraries>(&json).expect("read").validated().expect("valid");
+        assert_eq!(read.brand(brand).map(|brand| brand.fonts.clone()), Some(vec!["Inter".to_owned()]));
+        assert_eq!(read.favorite_fonts, ["Inter"]);
+        let mut messy = read.clone();
+        messy.favorite_fonts = vec!["Inter".into(), " Inter ".into(), "  ".into()];
+        assert_eq!(messy.validated().expect("valid").favorite_fonts, ["Inter"]);
+
+        assert!(libraries.remove_font(brand, "Inter"));
+        assert!(!libraries.remove_font(brand, "Inter"));
     }
 }

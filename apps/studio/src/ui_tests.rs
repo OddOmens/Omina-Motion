@@ -3593,6 +3593,66 @@ fn the_pickers_libraries_tab_links_a_color(cx: &mut TestAppContext) {
     assert_eq!(fill.link, None);
 }
 
+/// The star in the font menu makes a font a favorite without choosing it; favorites and a
+/// brand's fonts are listed above all the others; and a brand's font, clicked in the Libraries
+/// panel, goes on the selected text.
+#[gpui_kit::test]
+fn favorite_and_brand_fonts_come_first_in_the_font_menu(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let brand = make_brand(&workspace, visual, "Brand A");
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    let font = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().1.font_family.clone());
+    let libraries = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.libraries.clone());
+    let showing = |visual: &mut VisualTestContext, id: String| visual.update(|window, _| window.try_find(ElementId::Name(id.into())).is_some());
+    let current = font(visual);
+    // The test window lists no installed fonts, so it is given two.
+    let other = if current == "Courier" { "Georgia" } else { "Courier" }.to_owned();
+    visual.update(|_, cx| workspace.update(cx, |ws, _| ws.ui.font_families = vec![current.clone(), other.clone()]));
+
+    visual.update(|window, cx| window.click("font-family", cx));
+    render(visual);
+    assert!(!showing(visual, format!("font-favorite-{other}")), "no favorites yet");
+    visual.update(|window, cx| window.click(ElementId::Name(format!("font-{other}-star").into()), cx));
+    render(visual);
+    assert_eq!(libraries(visual).favorite_fonts, [other.clone()], "the star made it a favorite");
+    assert_eq!(font(visual), current, "the star doesn't choose the font");
+
+    // Reopened, the menu lists it under Favorites, and choosing it there sets the font.
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("font-family", cx));
+    render(visual);
+    assert!(showing(visual, format!("font-favorite-{other}")));
+    visual.update(|window, cx| window.click(ElementId::Name(format!("font-favorite-{other}").into()), cx));
+    render(visual);
+    assert_eq!(font(visual), other);
+
+    // The brand's + adds the selected text's font, which the menu then lists under the brand.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("library-add-font:{}", brand.0).into()), cx));
+    render(visual);
+    assert_eq!(libraries(visual).brand(brand).map(|brand| brand.fonts.clone()), Some(vec![other.clone()]));
+    visual.update(|window, cx| window.click("font-family", cx));
+    render(visual);
+    assert!(showing(visual, format!("font-brand-{}-{other}", brand.0)));
+    visual.update(|window, cx| window.press("escape", cx));
+    render(visual);
+
+    // Clicking the brand's font in the Libraries panel puts it on the selected text.
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_font(TITLE, &current, 400);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name(format!("library-font:{}:{other}", brand.0).into()), cx));
+    render(visual);
+    assert_eq!(font(visual), other);
+}
+
 #[gpui_kit::test]
 fn text_styles_save_from_a_layer_and_apply_to_another(cx: &mut TestAppContext) {
     let (workspace, visual) = open(cx);

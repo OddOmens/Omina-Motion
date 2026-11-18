@@ -76,6 +76,41 @@ impl EditorState {
         Some(id)
     }
 
+    /// Makes `family` a favorite font, or stops it being one. Returns whether it is one now.
+    pub fn toggle_favorite_font(&mut self, family: &str) -> bool {
+        let favorite = self.libraries.toggle_favorite_font(family);
+        self.library_changed();
+        favorite
+    }
+
+    /// Adds `family` to a brand's fonts. Returns whether it was added.
+    pub fn add_brand_font(&mut self, brand: LinkId, family: &str) -> bool {
+        let added = self.libraries.add_font(brand, family);
+        if added {
+            self.library_changed();
+        }
+        added
+    }
+
+    /// Takes `family` out of a brand's fonts.
+    pub fn remove_brand_font(&mut self, brand: LinkId, family: &str) {
+        if self.libraries.remove_font(brand, family) {
+            self.library_changed();
+        }
+    }
+
+    /// Sets the font of those of `layers` that are text to `family`, keeping their weights.
+    /// Returns how many were text.
+    pub fn set_font_of(&mut self, layers: &[Id], family: &str) -> usize {
+        let mut count = 0;
+        for &layer in layers {
+            let Some(weight) = self.text_of(layer).map(|(_, style)| style.font_weight) else { continue };
+            self.set_font(layer, family, weight);
+            count += 1;
+        }
+        count
+    }
+
     pub fn rename_library_item(&mut self, id: LinkId, name: &str) {
         if self.libraries.rename(id, name) {
             self.library_changed();

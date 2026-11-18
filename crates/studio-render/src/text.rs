@@ -2,6 +2,8 @@
 //! tracking and alignment), rasterized on the CPU into a straight-alpha sRGB image.
 //! Stroke is drawn around the glyphs from a distance map, so it is evenly thick.
 
+use std::collections::HashMap;
+
 use cosmic_text::{Attrs, Buffer, Command, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
 use studio_core::animation::Vec2;
 use studio_core::model::{Rgba, TextAlign, TextStyle};
@@ -89,6 +91,22 @@ pub struct GlyphPath {
 
 /// A glyph's outline commands (y up, from its origin) as closed contours in the text's pixels
 /// (y down), placed at `origin`. Quadratic curves become the equivalent cubic ones.
+/// Whether the face at `index` of a font file is a variable font (has an "fvar" table). A
+/// collection ("ttcf") is looked up at that face's own table directory.
+fn is_variable(data: &[u8], index: u32) -> bool {
+    let read_u32 = |at: usize| data.get(at..at + 4).map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    let start = if data.get(..4) == Some(b"ttcf".as_slice()) {
+        match read_u32(12 + index as usize * 4) {
+            Some(offset) => offset as usize,
+            None => return false,
+        }
+    } else {
+        0
+    };
+    let tables = data.get(start + 4..start + 6).map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]) as usize);
+    (0..tables).any(|table| data.get(start + 12 + table * 16..start + 16 + table * 16) == Some(b"fvar".as_slice()))
+}
+
 fn contours(commands: &[Command], origin: Vec2) -> Vec<ShapePath> {
     let place = |x: f32, y: f32| Vec2::new(origin.x + x, origin.y - y);
     let mut contours: Vec<ShapePath> = Vec::new();
@@ -135,6 +153,9 @@ fn contours(commands: &[Command], origin: Vec2) -> Vec<ShapePath> {
 pub struct TextRenderer {
     fonts: FontSystem,
     glyphs: SwashCache,
+    /// The weight each (family, asked-for weight) is drawn at, so fonts are only looked through
+    /// once for each.
+    drawn_weights: HashMap<(String, u16), u16>,
 }
 
 impl Default for TextRenderer {
@@ -146,7 +167,29 @@ impl Default for TextRenderer {
 impl TextRenderer {
     /// Loads the system's fonts. This takes a moment, so it is done once.
     pub fn new() -> Self {
-        Self { fonts: FontSystem::new(), glyphs: SwashCache::new() }
+        Self { fonts: FontSystem::new(), glyphs: SwashCache::new(), drawn_weights: HashMap::new() }
+    }
+
+    /// The weight `family` is drawn at when `wanted` is asked for: `wanted` itself when the family
+    /// has it (or is a variable font, which can make any weight in its range), otherwise the
+    /// family's nearest weight, the heavier one on a tie. Without this, asking for a weight a
+    /// family doesn't come in (bold, in a font made only in regular) would make the layout pass
+    /// the family over and draw the text in the system font instead.
+    pub fn nearest_weight(&mut self, family: &str, wanted: u16) -> u16 {
+        let wanted = wanted.clamp(100, 900);
+        let key = (family.to_owned(), wanted);
+        if let Some(weight) = self.drawn_weights.get(&key) {
+            return *weight;
+        }
+        let db = self.fonts.db();
+        let faces: Vec<_> = db.faces().filter(|face| face.families.iter().any(|(name, _)| name == family)).collect();
+        let weight = if faces.is_empty() || faces.iter().any(|face| face.weight.0 == wanted) || faces.iter().any(|face| db.with_face_data(face.id, is_variable) == Some(true)) {
+            wanted
+        } else {
+            faces.iter().map(|face| face.weight.0).min_by_key(|weight| (weight.abs_diff(wanted), std::cmp::Reverse(*weight))).unwrap_or(wanted)
+        };
+        self.drawn_weights.insert(key, weight);
+        weight
     }
 
     /// Shapes `text` at `scale` × its font size. Returns the buffer and its box (unscaled).
@@ -155,10 +198,11 @@ impl TextRenderer {
         // stops the layout, and a negative one never finishes.
         let (font_size, line_height) = (style.font_size.clamp(1.0, 2000.0), style.line_height.clamp(1.0, 4000.0));
         let metrics = Metrics::new(font_size * scale, line_height * scale);
+        let weight = self.nearest_weight(&style.font_family, style.font_weight);
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
             .family(Family::Name(&style.font_family))
-            .weight(Weight(style.font_weight))
+            .weight(Weight(weight))
             // Tracking is in thousandths of an em; cosmic-text letter spacing is in ems.
             .letter_spacing(style.tracking / 1000.0);
         let align = match style.align {
@@ -445,6 +489,29 @@ mod tests {
 
     fn style() -> TextStyle {
         TextStyle { font_family: "Helvetica".into(), ..TextStyle::default() }
+    }
+
+    #[test]
+    fn a_weight_the_font_lacks_draws_its_nearest_weight_not_another_font() {
+        let mut text = TextRenderer::new();
+        // Any installed family made only in regular that draws Latin letters itself; with none,
+        // there is nothing to check.
+        let mut families: Vec<String> = text.fonts.db().faces().filter_map(|face| face.families.first().map(|(name, _)| name.clone())).collect();
+        families.sort();
+        families.dedup();
+        let in_family = |text: &mut TextRenderer, family: &str, weight: u16| {
+            let style = TextStyle { font_family: family.to_owned(), font_weight: weight, ..TextStyle::default() };
+            let (buffer, _) = text.layout("Tide", &style, 1.0);
+            let ids: Vec<_> = buffer.layout_runs().flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_id).collect::<Vec<_>>()).collect();
+            !ids.is_empty() && ids.iter().all(|id| text.fonts.db().face(*id).is_some_and(|face| face.families.iter().any(|(name, _)| name == family)))
+        };
+        let single = families.into_iter().find(|family| {
+            let weights: Vec<u16> = text.fonts.db().faces().filter(|face| face.families.iter().any(|(name, _)| name == family)).map(|face| face.weight.0).collect();
+            weights.iter().all(|weight| *weight == 400) && !weights.is_empty() && in_family(&mut text, family, 400)
+        });
+        let Some(family) = single else { return };
+        assert_eq!(text.nearest_weight(&family, 700), 400);
+        assert!(in_family(&mut text, &family, 700), "bold {family} is drawn in {family}, not the system font");
     }
 
     #[test]
