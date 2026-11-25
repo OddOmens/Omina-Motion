@@ -297,6 +297,9 @@ pub fn apply(theme: ThemeName, accent: Accent, cx: &mut App) {
     theme.colors.muted = hsla(color::INSET);
     theme.colors.secondary = hsla(color::RAISED);
     theme.colors.secondary_hover = hsla(color::HOVER);
+    // Ghost buttons that are switched on (snapping, loop, compact tracks…) sit on a tint of the
+    // accent, so on and off are easy to tell apart.
+    theme.colors.secondary_active = hsla(color::ROW_SELECTED);
     theme.colors.button = hsla(color::RAISED);
     theme.colors.button_hover = hsla(color::HOVER);
     theme.colors.list = hsla(color::PANEL);

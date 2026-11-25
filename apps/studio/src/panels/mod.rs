@@ -8,6 +8,7 @@ pub mod dock;
 pub mod chrome;
 pub mod color_grade;
 pub mod color_picker;
+pub mod curves;
 pub mod color_well;
 pub mod comp_tabs;
 pub mod composition_settings;

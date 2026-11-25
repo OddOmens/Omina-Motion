@@ -13,7 +13,17 @@ use studio_core::media::VideoFrame;
 use studio_core::time::FrameRate;
 
 /// What a scaler was set up for: pixel format, width, height, YUV formula and full range.
-type ScalerSource = (Pixel, u32, u32, ffmpeg::util::color::Space, bool);
+/// What a scaler was made for: the source's format, size, YUV formula and range, and its HDR
+/// curve (an HDR source is scaled to 16-bit RGB and tone-mapped, see `hdr`).
+type ScalerSource = (Pixel, u32, u32, ffmpeg::util::color::Space, bool, Option<crate::hdr::Transfer>);
+
+/// What HDR pictures are scaled to before tone-mapping: 16-bit YUV with full-resolution colour,
+/// in this machine's byte order. The YUV-to-RGB step is the tone mapper's own (FFmpeg's scaler
+/// gets BT.2020's colours wrong when it writes 16-bit RGB: greens come out far too low).
+#[cfg(target_endian = "little")]
+const YUV16: Pixel = Pixel::YUV444P16LE;
+#[cfg(target_endian = "big")]
+const YUV16: Pixel = Pixel::YUV444P16BE;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaError(pub String);
@@ -120,6 +130,8 @@ pub struct VideoDecoder {
     /// arrive as NV12 or P010 only after download).
     /// The RGBA scaler, and the source it was made for (format, size, YUV formula, full range).
     scaler: Option<(scaling::Context, ScalerSource)>,
+    /// For HDR sources, the tone mapper for the source's curve and colours (made with the scaler).
+    tone: Option<crate::hdr::ToneMapper>,
     output_size: (u32, u32),
     /// Kept alive while the decoder uses it.
     hardware: Option<crate::hardware::HardwareDevice>,
@@ -184,6 +196,7 @@ impl VideoDecoder {
             stream_index,
             decoder,
             scaler: None,
+            tone: None,
             output_size: (out_width, out_height),
             hardware,
             time_base,
@@ -372,25 +385,37 @@ impl VideoDecoder {
         let (width, height) = self.output_size;
         let matrix = crate::color::matrix(decoded.color_space(), decoded.height());
         let full_range = crate::color::is_full_range(decoded.format(), decoded.color_range());
-        let source = (decoded.format(), decoded.width(), decoded.height(), matrix, full_range);
+        let hdr = crate::hdr::Transfer::of(decoded.color_transfer_characteristic());
+        let source = (decoded.format(), decoded.width(), decoded.height(), matrix, full_range, hdr);
         let stale = self.scaler.as_ref().is_none_or(|(_, made_for)| *made_for != source);
         if stale {
             // Full-resolution chroma: FFmpeg's faster default shifts colors by a few levels on
             // 10-bit 4:2:2 footage (such as ProRes).
             let flags = scaling::Flags::BILINEAR | scaling::Flags::FULL_CHR_H_INT;
-            let mut scaler = scaling::Context::get(source.0, source.1, source.2, Pixel::RGBA, width, height, flags)?;
-            crate::color::set_source_colors(&mut scaler, matrix, full_range, true);
+            let target = if hdr.is_some() { YUV16 } else { Pixel::RGBA };
+            let mut scaler = scaling::Context::get(source.0, source.1, source.2, target, width, height, flags)?;
+            // HDR is only resized here, keeping its YUV range; ordinary video becomes full-range RGBA.
+            crate::color::set_source_colors(&mut scaler, matrix, full_range, hdr.is_none() || full_range);
             self.scaler = Some((scaler, source));
+            self.tone = hdr.map(|transfer| crate::hdr::ToneMapper::new(transfer, decoded.color_primaries(), matrix, full_range));
         }
         let (scaler, _) = self.scaler.as_mut().expect("created above");
-        let mut rgba = ffmpeg::frame::Video::empty();
-        scaler.run(&decoded, &mut rgba)?;
-        let stride = rgba.stride(0);
-        let row = width as usize * 4;
-        let mut pixels = Vec::with_capacity(row * height as usize);
-        for y in 0..height as usize {
-            pixels.extend_from_slice(&rgba.data(0)[y * stride..y * stride + row]);
-        }
+        let mut scaled = ffmpeg::frame::Video::empty();
+        scaler.run(&decoded, &mut scaled)?;
+        let stride = scaled.stride(0);
+        let pixels = if let Some(tone) = &self.tone {
+            // HDR: shown as ordinary video, as QuickTime shows it on a normal screen.
+            let planes = [scaled.data(0), scaled.data(1), scaled.data(2)];
+            let strides = [scaled.stride(0), scaled.stride(1), scaled.stride(2)];
+            tone.convert(planes, strides, width as usize, height as usize)
+        } else {
+            let row = width as usize * 4;
+            let mut pixels = Vec::with_capacity(row * height as usize);
+            for y in 0..height as usize {
+                pixels.extend_from_slice(&scaled.data(0)[y * stride..y * stride + row]);
+            }
+            pixels
+        };
         // Pixel formats with an alpha component have four components (or two, for gray).
         let has_alpha = matches!(source.0.descriptor().map(|format| format.nb_components()), Some(2 | 4));
         Ok(VideoFrame { width, height, index, rgba: pixels, from_proxy: false, has_alpha })

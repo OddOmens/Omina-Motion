@@ -2,6 +2,7 @@
 //! `workspace`, its state in `state`, and each panel in `panels`.
 
 mod app_settings;
+mod auto_save;
 mod assets;
 mod canvas_inbox;
 mod crash_log;
@@ -10,6 +11,7 @@ mod features;
 mod keymap;
 mod library_store;
 mod lut_library;
+mod opened_files;
 mod package_writer;
 mod panels;
 mod preview_cache;
@@ -32,7 +34,10 @@ use gpui_kit::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, Wind
 fn main() {
     // First, so a crash anywhere after this leaves a report.
     crash_log::install();
-    gpui_kit::application().with_assets(assets::StudioAssets).run(|cx: &mut App| {
+    let app = gpui_kit::application().with_assets(assets::StudioAssets);
+    // Projects double-clicked in Finder, at launch or later.
+    opened_files::listen(&app);
+    app.run(|cx: &mut App| {
         // Must run before any component is used.
         gpui_kit::init(cx);
         let settings = app_settings::load();

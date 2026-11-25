@@ -13,7 +13,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, div, prelude::FluentBuilder as _, px,
 };
 use studio_core::captions::{CaptionAnimation, CaptionStyle, CaptionWord};
-use studio_core::model::{BlendMode, Id, Layer, LayerContent, LayerMask, MaskMode, TextPath, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, TextAlign, TextStyle, TrackMatte};
+use studio_core::model::{BlendMode, Id, Layer, LayerContent, LayerMask, MaskMode, TextPath, Paint, PaintKind, Rgba, ShapeKind, ShapeStyle, StrokeCap, StrokeJoin, StrokePosition, TextAlign, TextStyle, TrackMatte};
 use studio_core::property::{PropertyPath, TransformProperty};
 use studio_core::subtitles::SubtitleFormat;
 
@@ -49,6 +49,54 @@ pub fn installed_font_families(cx: &App) -> Vec<String> {
 
 fn weight_name(weight: u16) -> &'static str {
     FONT_WEIGHTS.iter().min_by_key(|(candidate, _)| candidate.abs_diff(weight)).map_or("Regular", |(_, name)| name)
+}
+
+/// The rows for a text or caption layer's stroke, shown while it has one: its width, where it
+/// sits on the letters' edges, its corners, dashes, and whether it goes over the fill.
+/// `key` keeps the controls' ids apart between text and captions.
+fn stroke_option_rows(key: &'static str, id: Id, style: &TextStyle, workspace: &Workspace, cx: &mut Context<Workspace>) -> Div {
+    if style.stroke.is_none() {
+        return div();
+    }
+    let options = style.stroke_options;
+    let weak = cx.entity().downgrade();
+    let field = |setting: TextSetting, cx: &mut Context<Workspace>| value_field(FieldTarget::Text { layer: id, setting }, workspace, cx);
+    let positions = [(StrokePosition::Inside, "Inside"), (StrokePosition::Center, "Center"), (StrokePosition::Outside, "Outside")];
+    let joins = [(StrokeJoin::Round, "Round"), (StrokeJoin::Miter, "Sharp"), (StrokeJoin::Bevel, "Beveled")];
+    let caps = [(StrokeCap::Butt, "Flat"), (StrokeCap::Round, "Round"), (StrokeCap::Square, "Square")];
+    /// The name shown for the current choice, and the menu's entries with it checked.
+    fn label_of<T: PartialEq>(choices: &[(T, &'static str)], current: T) -> String {
+        choices.iter().find(|(value, _)| *value == current).map_or("", |(_, name)| *name).to_owned()
+    }
+    fn menu_choices<T: Copy + PartialEq>(choices: &[(T, &'static str)], current: T) -> Vec<(String, bool, T)> {
+        choices.iter().map(|&(value, name)| (name.to_owned(), value == current, value)).collect()
+    }
+    let dashed = Checkbox::new(ElementId::Name(format!("{key}-stroke-dashed").into())).label("Dashed").checked(options.dashed()).on_click(cx.listener(move |this, checked: &bool, _, cx| {
+        let checked = *checked;
+        let width = this.state.text_style_of(id).and_then(|style| style.stroke).map_or(4.0, |(_, width)| width);
+        this.state.edit_text_stroke_options(id, |options| {
+            // Dashes start in proportion to the stroke, and come back as they were.
+            (options.dash, options.gap) = if checked { ((width * 3.0).max(1.0), (width * 2.0).max(1.0)) } else { (0.0, options.gap) };
+        });
+        cx.notify();
+    }));
+    let over_fill = Checkbox::new(ElementId::Name(format!("{key}-stroke-over-fill").into())).label("Stroke over fill").checked(options.over_fill).on_click(cx.listener(move |this, checked: &bool, _, cx| {
+        let checked = *checked;
+        this.state.edit_text_stroke_options(id, |options| options.over_fill = checked);
+        cx.notify();
+    }));
+    div()
+        .child(labeled_row("Stroke Width", field(TextSetting::StrokeWidth, cx)))
+        .child(labeled_row("Position", choice_menu(format!("{key}-stroke-position"), label_of(&positions, options.position), menu_choices(&positions, options.position), move |this, position| this.state.edit_text_stroke_options(id, |options| options.position = position), weak.clone())))
+        .child(labeled_row("Corners", choice_menu(format!("{key}-stroke-join"), label_of(&joins, options.join), menu_choices(&joins, options.join), move |this, join| this.state.edit_text_stroke_options(id, |options| options.join = join), weak.clone())))
+        .when(options.join == StrokeJoin::Miter, |rows| rows.child(labeled_row("Miter Limit", field(TextSetting::StrokeMiter, cx))))
+        .child(indented(dashed).py_1())
+        .when(options.dashed(), |rows| {
+            rows.child(labeled_row("Dash", field(TextSetting::StrokeDash, cx)))
+                .child(labeled_row("Gap", field(TextSetting::StrokeGap, cx)))
+                .child(labeled_row("Dash Ends", choice_menu(format!("{key}-stroke-cap"), label_of(&caps, options.cap), menu_choices(&caps, options.cap), move |this, cap| this.state.edit_text_stroke_options(id, |options| options.cap = cap), weak.clone())))
+        })
+        .child(indented(over_fill).py_1())
 }
 
 /// A dropdown whose choices run `choose` on the workspace.
@@ -268,16 +316,42 @@ fn favorite_star(id: String, family: &str, favorite: bool, workspace: WeakEntity
 
 /// A dropdown of font weights, each drawn in `family` at that weight, so the difference between
 /// them shows before one is picked.
+/// The Weight menu lists the weights `family` comes in (all of them when that can't be told),
+/// plus the text's own weight if the family lacks it, so the menu always shows what is set.
 pub(super) fn weight_menu(
     id: impl Into<ElementId>,
     family: String,
     current: u16,
+    available: Vec<u16>,
     choose: impl Fn(&mut Workspace, u16) + 'static,
     workspace: WeakEntity<Workspace>,
 ) -> impl IntoElement {
-    let choices = FONT_WEIGHTS.iter().map(|(value, name)| ((*name).to_owned(), *value == current, *value)).collect();
+    let mut weights = if available.is_empty() { FONT_WEIGHTS.iter().map(|(value, _)| *value).collect() } else { available };
+    if !weights.contains(&current) {
+        weights.push(current);
+        weights.sort_unstable();
+    }
+    let choices = weights.into_iter().map(|value| (weight_name(value).to_owned(), value == current, value)).collect();
     let shown = div().min_w_0().text_ellipsis().child(weight_name(current));
     preview_menu(id, shown, 200.0, choices, move |name, weight| font_row(name.to_owned(), family.clone(), *weight), choose, workspace)
+}
+
+/// Sets layer `id`'s font to `family`. A font that doesn't come in the text's `weight` moves the
+/// text to the nearest weight it does, so the Weight menu shows the weight actually drawn.
+pub(super) fn choose_font(workspace: &mut Workspace, id: Id, family: &str, weight: u16) {
+    let weight = workspace.render.nearest_weight(family, weight);
+    workspace.state.set_font(id, family, weight);
+}
+
+/// `choose_font` for those of `layers` that are text. Returns how many were text.
+pub(super) fn choose_font_of(workspace: &mut Workspace, layers: &[Id], family: &str) -> usize {
+    let mut count = 0;
+    for &layer in layers {
+        let Some(weight) = workspace.state.text_of(layer).map(|(_, style)| style.font_weight) else { continue };
+        choose_font(workspace, layer, family, weight);
+        count += 1;
+    }
+    count
 }
 
 /// A labeled control in a section, on the same columns as the property rows: its name, then
@@ -891,12 +965,13 @@ fn captions_section(layer: &Layer, style: &CaptionStyle, words: &[CaptionWord], 
         .child(labeled_row("Animation", choice_menu("captions-animation", style.animation.name().to_owned(), animations, move |this, animation| this.state.edit_captions(id, |style| style.animation = animation), weak.clone())))
         .child(labeled_row("Words at once", choice_menu("captions-words", format!("{}", style.words_per_phrase), per_phrase, move |this, count| this.state.edit_captions(id, |style| style.words_per_phrase = count), weak.clone())))
         .child(indented(uppercase).py_1())
-        .child(labeled_row("Font", font_menu("captions-font-family", style.text.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
-        .child(labeled_row("Weight", weight_menu("captions-font-weight", current_family.clone(), weight, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
+        .child(labeled_row("Font", font_menu("captions-font-family", style.text.font_family.clone(), family_choices, move |this, family: String| choose_font(this, id, &family, weight), weak.clone())))
+        .child(labeled_row("Weight", weight_menu("captions-font-weight", current_family.clone(), weight, workspace.render.font_weights(&current_family), move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
         .child(labeled_row("Size", value_field(FieldTarget::Text { layer: id, setting: TextSetting::FontSize }, workspace, cx)))
         .child(labeled_row("Tracking", value_field(FieldTarget::Text { layer: id, setting: TextSetting::Tracking }, workspace, cx)))
         .child(paint_row("fill", "Fill", style.text.fill, ColorTarget::TextFill(id), move |this, fill| this.state.set_text_fill(id, fill), cx))
         .child(paint_row("stroke", "Stroke", style.text.stroke.map(|(color, _)| color), ColorTarget::TextStroke(id), move |this, color| this.state.set_text_stroke(id, color.map(|color| (color, stroke_width))), cx))
+        .child(stroke_option_rows("captions", id, &style.text, workspace, cx))
         .child(labeled_row("Spoken word", color_picker::swatch("captions-highlight", ColorTarget::CaptionHighlight(id), Some(style.highlight), cx)))
         .child(setting_row("Background", Some(background_on.into_any_element()), div().flex().child(color_picker::swatch("captions-background", ColorTarget::CaptionBackground(id), style.background, cx))))
         .child(labeled_row("Sync", div().flex().items_center().gap_2().child(value_field(FieldTarget::CaptionSync { layer: id }, workspace, cx)).child(div().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child("+ later, − earlier"))))
@@ -1185,14 +1260,14 @@ fn text_section(layer: &Layer, text: &str, style: &TextStyle, workspace: &Worksp
 
     div()
         .child(labeled_row("Source", source_text))
-        .child(labeled_row("Font", font_menu("font-family", style.font_family.clone(), family_choices, move |this, family: String| this.state.set_font(id, &family, weight), weak.clone())))
-        .child(labeled_row("Weight", weight_menu("font-weight", current_family.clone(), weight, move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
+        .child(labeled_row("Font", font_menu("font-family", style.font_family.clone(), family_choices, move |this, family: String| choose_font(this, id, &family, weight), weak.clone())))
+        .child(labeled_row("Weight", weight_menu("font-weight", current_family.clone(), weight, workspace.render.font_weights(&current_family), move |this, weight: u16| this.state.set_font(id, &current_family, weight), weak)))
         .child(labeled_row("Size", text_field(TextSetting::FontSize, cx)))
         .child(labeled_row("Leading", text_field(TextSetting::Leading, cx)))
         .child(labeled_row("Tracking", text_field(TextSetting::Tracking, cx)))
         .child(paint_row("fill", "Fill", style.fill, ColorTarget::TextFill(id), move |this, fill| this.state.set_text_fill(id, fill), cx))
         .child(paint_row("stroke", "Stroke", style.stroke.map(|(color, _)| color), ColorTarget::TextStroke(id), move |this, color| this.state.set_text_stroke(id, color.map(|color| (color, stroke_width))), cx))
-        .when(style.stroke.is_some(), |rows| rows.child(labeled_row("Stroke Width", text_field(TextSetting::StrokeWidth, cx))))
+        .child(stroke_option_rows("text", id, style, workspace, cx))
         .child(divider())
         .child(section("Paragraph", None))
         .child(labeled_row(

@@ -7,5 +7,85 @@
          when it asks for the microphone. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Omina Motion records your microphone when you record a voiceover.</string>
+    <!-- Omina Motion projects (.omim): this app's own file type, so Finder shows them as "Omina Motion Project" with
+         the omim-document icon (assets/icon, made by scripts/make-document-icon.py) and double-clicking
+         one opens it here. -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.oddomens.omina-motion.project</string>
+            <key>UTTypeDescription</key>
+            <string>Omina Motion Project</string>
+            <key>UTTypeIconFile</key>
+            <string>omim-document</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>omim</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/x-omina-motion</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.oddomens.studio.project</string>
+            <key>UTTypeDescription</key>
+            <string>Omina Motion Project (older)</string>
+            <key>UTTypeIconFile</key>
+            <string>omim-document</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>studio</string>
+                </array>
+                <key>public.mime-type</key>
+                <string>application/x-omina-motion</string>
+            </dict>
+        </dict>
+    </array>
+    <!-- Projects saved before .omim (.studio) still open here, with the same icon. -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Omina Motion Project</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleTypeIconFile</key>
+            <string>omim-document</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.oddomens.omina-motion.project</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Omina Motion Project (older)</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleTypeIconFile</key>
+            <string>omim-document</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.oddomens.studio.project</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

@@ -166,10 +166,12 @@ pub fn parse_cube(text: &str) -> Result<Lut, String> {
 /// The looks Studio has built in, in groups as menus and the LUT browser show them. Each is a
 /// LUT made from a few grading moves (see `look_color`).
 pub const LOOK_GROUPS: &[(&str, &[&str])] = &[
-    ("Cinematic", &["Teal & Orange", "Blockbuster", "Moody Green", "Desaturated Drama", "Bleach Bypass", "Day for Night", "Neon Night"]),
-    ("Film", &["Warm Film", "Print Film", "Faded Matte", "Vintage", "Cross Process", "Instant Photo", "Super 8"]),
+    ("Cinematic", &["Teal & Orange", "Blockbuster", "Moody Green", "Desaturated Drama", "Bleach Bypass", "Day for Night", "Neon Night", "Thriller", "Epic Blue", "Western"]),
+    ("Film", &["Warm Film", "Print Film", "Faded Matte", "Vintage", "Cross Process", "Instant Photo", "Super 8", "Slide Film", "Expired Film"]),
+    ("Portrait", &["Bright & Airy", "Soft Skin", "Warm Portrait", "Rosé", "Clean Commercial"]),
     ("Warm & Cool", &["Golden Hour", "Sunset", "Summer", "Autumn", "Desert", "Cool Night", "Arctic"]),
-    ("Black & White", &["Noir", "Silver", "Sepia", "Selenium", "Infrared"]),
+    ("Creative", &["Cyberpunk", "Lavender Haze", "Emerald", "Retro 80s", "Duotone"]),
+    ("Black & White", &["Noir", "Silver", "Sepia", "Selenium", "Infrared", "High Contrast", "Cyanotype"]),
     ("Vivid & Soft", &["Vivid", "Crisp", "Pastel", "Dreamy", "Muted Earth"]),
 ];
 
@@ -241,6 +243,12 @@ fn look_color(name: &str, c: [f32; 3]) -> [f32; 3] {
         "Bleach Bypass" => contrast(saturate(c, 0.45), 0.5),
         "Day for Night" => midtones(filter(saturate(c, 0.4), [0.45, 0.55, 0.8]), 1.2),
         "Neon Night" => contrast(saturate(split_tone(c, [0.08, -0.04, 0.14], [-0.06, 0.08, 0.10]), 1.3), 0.3),
+        // Sickly green shadows, washed-out color, hard contrast.
+        "Thriller" => contrast(filter(split_tone(saturate(c, 0.55), [-0.03, 0.04, 0.0], [0.0; 3]), [0.95, 1.02, 1.0]), 0.45),
+        // Deep blue shadows under warm, bright highlights.
+        "Epic Blue" => contrast(split_tone(saturate(c, 0.85), [-0.08, 0.0, 0.12], [0.04, 0.02, -0.02]), 0.35),
+        // Dusty amber, as if shot through a sun-baked haze.
+        "Western" => contrast(fade(saturate(filter(c, [1.1, 0.98, 0.78]), 0.75), 0.04, 0.97), 0.3),
         // Film
         "Warm Film" => fade(contrast(split_tone(c, [0.04, 0.01, -0.03], [0.06, 0.02, -0.05]), 0.15), 0.04, 0.96),
         "Print Film" => fade(saturate(filter(contrast(split_tone(c, [-0.03, 0.01, 0.03], [0.0; 3]), 0.35), [1.03, 1.0, 0.94]), 0.9), 0.02, 0.97),
@@ -257,6 +265,16 @@ fn look_color(name: &str, c: [f32; 3]) -> [f32; 3] {
         }
         "Instant Photo" => fade(saturate(split_tone(c, [-0.02, 0.03, 0.06], [0.05, 0.05, -0.03]), 0.85), 0.07, 0.95),
         "Super 8" => fade(saturate(contrast(filter(c, [1.08, 1.0, 0.82]), 0.3), 1.1), 0.05, 0.93),
+        // Slide (reversal) film: rich color and deep contrast, slightly cool shadows.
+        "Slide Film" => contrast(saturate(split_tone(c, [-0.02, 0.0, 0.04], [0.02, 0.01, -0.02]), 1.25), 0.45),
+        // Film past its date: green-cyan shadows, warm highlights, lifted and faded.
+        "Expired Film" => fade(saturate(split_tone(filter(c, [1.02, 1.05, 0.9]), [0.0, 0.04, 0.06], [0.06, 0.02, -0.06]), 0.8), 0.08, 0.93),
+        // Portrait
+        "Bright & Airy" => fade(filter(saturate(midtones(c, 0.8), 0.85), [1.02, 1.0, 0.98]), 0.05, 1.0),
+        "Soft Skin" => contrast(split_tone(fade(saturate(c, 0.9), 0.03, 0.98), [0.02, 0.0, -0.01], [0.04, 0.02, 0.0]), -0.1),
+        "Warm Portrait" => contrast(saturate(filter(c, [1.06, 1.0, 0.92]), 1.05), 0.15),
+        "Rosé" => split_tone(fade(saturate(c, 0.85), 0.04, 0.97), [0.04, -0.02, 0.03], [0.06, 0.0, 0.03]),
+        "Clean Commercial" => contrast(saturate(filter(c, [0.99, 1.0, 1.02]), 1.12), 0.18),
         // Warm & Cool
         "Golden Hour" => saturate(split_tone(c, [0.05, 0.01, -0.04], [0.12, 0.06, -0.10]), 1.1),
         "Sunset" => saturate(split_tone(c, [0.06, -0.02, 0.06], [0.14, 0.02, -0.06]), 1.15),
@@ -268,6 +286,13 @@ fn look_color(name: &str, c: [f32; 3]) -> [f32; 3] {
             split_tone(cool, [-0.04, 0.0, 0.10], [-0.03, 0.0, 0.06])
         }
         "Arctic" => fade(midtones(filter(saturate(c, 0.75), [0.9, 0.98, 1.1]), 0.92), 0.03, 1.0),
+        // Creative
+        "Cyberpunk" => contrast(saturate(split_tone(c, [0.10, -0.06, 0.16], [0.12, -0.02, 0.14]), 1.25), 0.35),
+        "Lavender Haze" => fade(split_tone(saturate(c, 0.75), [0.05, 0.0, 0.10], [0.06, 0.02, 0.08]), 0.06, 0.96),
+        "Emerald" => contrast(split_tone(filter(saturate(c, 0.9), [0.92, 1.06, 0.96]), [-0.04, 0.06, 0.02], [0.0, 0.03, -0.02]), 0.25),
+        "Retro 80s" => fade(saturate(split_tone(c, [0.06, -0.02, 0.10], [0.10, 0.04, -0.04]), 1.2), 0.05, 0.95),
+        // Two inks: deep purple shadows to warm cream highlights.
+        "Duotone" => contrast(toned(luma(c), [0.2, 0.05, 0.35], [1.0, 0.88, 0.72]), 0.2),
         // Black & White
         "Noir" => {
             let y = luma(c);
@@ -285,6 +310,12 @@ fn look_color(name: &str, c: [f32; 3]) -> [f32; 3] {
             let y = (1.6 * c[1] - 0.3 * c[0] - 0.5 * c[2]).clamp(0.0, 1.0);
             contrast(midtones([y; 3], 0.75), 0.4)
         }
+        "High Contrast" => {
+            let y = luma(c);
+            contrast(contrast([y; 3], 0.9), 0.3)
+        }
+        // A blueprint print: Prussian blue to paper white.
+        "Cyanotype" => toned(luma(c), [0.05, 0.2, 0.4], [0.85, 0.92, 1.0]),
         // Vivid & Soft
         "Vivid" => contrast(saturate(c, 1.35), 0.2),
         "Crisp" => filter(contrast(saturate(c, 1.1), 0.35), [1.0, 1.01, 1.03]),
@@ -299,6 +330,81 @@ fn look_color(name: &str, c: [f32; 3]) -> [f32; 3] {
 /// The built-in look called `name` as a LUT, or `None` if there is no such look.
 pub fn look(name: &str) -> Option<Lut> {
     looks().any(|look| look == name).then(|| Lut::from_fn(name, BUILT_SIZE, |c| look_color(name, c)))
+}
+
+/// A curve through `points` (input, output; 0–1) sampled at 256 inputs: smooth through every
+/// point, flat beyond the first and last, and never overshooting between two points (monotone
+/// cubic, Fritsch–Carlson), so a curve that only rises never dips. Fewer than two points is a
+/// straight line from black to white.
+pub fn curve_table(points: &[[f32; 2]]) -> [f32; 256] {
+    let mut sorted: Vec<[f32; 2]> = points.iter().copied().filter(|p| p[0].is_finite() && p[1].is_finite()).collect();
+    sorted.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    sorted.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-4);
+    let mut table = [0.0_f32; 256];
+    if sorted.len() < 2 {
+        for (index, value) in table.iter_mut().enumerate() {
+            *value = index as f32 / 255.0;
+        }
+        return table;
+    }
+    let count = sorted.len();
+    // Slopes between points, then tangents limited so the curve never overshoots.
+    let deltas: Vec<f32> = sorted.windows(2).map(|pair| (pair[1][1] - pair[0][1]) / (pair[1][0] - pair[0][0]).max(1e-6)).collect();
+    let mut tangents = vec![0.0_f32; count];
+    tangents[0] = deltas[0];
+    tangents[count - 1] = deltas[count - 2];
+    for index in 1..count - 1 {
+        tangents[index] = if deltas[index - 1] * deltas[index] <= 0.0 { 0.0 } else { (deltas[index - 1] + deltas[index]) * 0.5 };
+    }
+    for index in 0..count - 1 {
+        if deltas[index].abs() < 1e-9 {
+            tangents[index] = 0.0;
+            tangents[index + 1] = 0.0;
+            continue;
+        }
+        let (a, b) = (tangents[index] / deltas[index], tangents[index + 1] / deltas[index]);
+        let length = a.hypot(b);
+        if length > 3.0 {
+            let factor = 3.0 / length;
+            tangents[index] = factor * a * deltas[index];
+            tangents[index + 1] = factor * b * deltas[index];
+        }
+    }
+    for (index, value) in table.iter_mut().enumerate() {
+        let x = index as f32 / 255.0;
+        *value = if x <= sorted[0][0] {
+            sorted[0][1]
+        } else if x >= sorted[count - 1][0] {
+            sorted[count - 1][1]
+        } else {
+            // A cubic Hermite piece between the two points around `x`.
+            let segment = sorted.windows(2).position(|pair| x <= pair[1][0]).unwrap_or(count - 2);
+            let ([x0, y0], [x1, y1]) = (sorted[segment], sorted[segment + 1]);
+            let h = (x1 - x0).max(1e-6);
+            let t = (x - x0) / h;
+            let (t2, t3) = (t * t, t * t * t);
+            (2.0 * t3 - 3.0 * t2 + 1.0) * y0 + (t3 - 2.0 * t2 + t) * h * tangents[segment] + (-2.0 * t3 + 3.0 * t2) * y1 + (t3 - t2) * h * tangents[segment + 1]
+        }
+        .clamp(0.0, 1.0);
+    }
+    table
+}
+
+/// Reads a 256-entry curve at a 0–1 input, blending between entries.
+fn read_curve(table: &[f32; 256], value: f32) -> f32 {
+    let position = value.clamp(0.0, 1.0) * 255.0;
+    let index = position.floor() as usize;
+    let fraction = position - index as f32;
+    table[index] * (1.0 - fraction) + table[(index + 1).min(255)] * fraction
+}
+
+/// A Curves effect's curves as a lookup table: each channel through its own curve, then all
+/// three through the brightness (RGB) curve, as Photoshop applies them.
+pub fn curves_lut(curves: &crate::model::ToneCurves) -> Lut {
+    use crate::model::CurveChannel;
+    let master = curve_table(&curves.points(CurveChannel::Master));
+    let channels = [CurveChannel::Red, CurveChannel::Green, CurveChannel::Blue].map(|channel| curve_table(&curves.points(channel)));
+    Lut::from_fn("Curves", BUILT_SIZE, |rgb| std::array::from_fn(|c| read_curve(&master, read_curve(&channels[c], rgb[c]))))
 }
 
 /// How strongly Basic Correction's Temperature and Tint change the channels: at ±100 a channel
@@ -413,5 +519,35 @@ mod tests {
         let gains = white_balance_gains(60.0, -30.0);
         assert!((luma(gains) - 1.0).abs() < 1e-4);
         assert!(gains[0] > gains[2], "warmer has more red than blue");
+    }
+
+    #[test]
+    fn curves_pass_through_their_points_smoothly_and_never_overshoot() {
+        // An S-curve: darker shadows, brighter highlights.
+        let table = curve_table(&[[0.0, 0.0], [0.25, 0.15], [0.75, 0.85], [1.0, 1.0]]);
+        assert!((table[64] - 0.15).abs() < 0.01 && (table[191] - 0.85).abs() < 0.01, "through its points: {} {}", table[64], table[191]);
+        assert!(table.windows(2).all(|pair| pair[1] >= pair[0] - 1e-6), "a rising curve never dips");
+        // Smooth: no corner at a point (the slope either side of it nearly matches).
+        let before = table[64] - table[63];
+        let after = table[65] - table[64];
+        assert!((before - after).abs() < 0.002, "{before} vs {after}");
+        // With too few points it changes nothing.
+        let straight = curve_table(&[[0.5, 0.5]]);
+        assert!((straight[128] - 128.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_curves_lut_applies_each_channel_then_brightness() {
+        use crate::model::{CurveChannel, ToneCurves};
+        assert!(close(curves_lut(&ToneCurves::default()).apply([0.2, 0.5, 0.8]), [0.2, 0.5, 0.8]), "straight curves change nothing");
+        let mut curves = ToneCurves::default();
+        // Red lifted at its middle; brightness left alone.
+        curves.set_points(CurveChannel::Red, &[[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]);
+        let out = curves_lut(&curves).apply([0.5, 0.5, 0.5]);
+        assert!((out[0] - 0.7).abs() < 0.02 && (out[1] - 0.5).abs() < 0.01 && (out[2] - 0.5).abs() < 0.01, "{out:?}");
+        // Brightness pulled down at the middle darkens every channel after its own curve.
+        curves.set_points(CurveChannel::Master, &[[0.0, 0.0], [0.5, 0.4], [1.0, 1.0]]);
+        let out = curves_lut(&curves).apply([0.5, 0.5, 0.5]);
+        assert!(out[1] < 0.45 && out[0] > out[1], "{out:?}");
     }
 }

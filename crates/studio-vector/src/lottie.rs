@@ -10,7 +10,7 @@
 
 use serde_json::{Map, Value, json};
 use studio_core::animation::Vec2;
-use studio_core::model::{BlendMode, Id, Paint, Project, Rgba, TextAlign};
+use studio_core::model::{BlendMode, Id, Paint, Project, Rgba, StrokeCap, StrokeJoin, StrokePosition, TextAlign};
 
 use crate::encode::{data_url, zip};
 use crate::geometry::Geometry;
@@ -91,6 +91,24 @@ fn point(v: Vec2) -> Value {
 }
 
 /// A constant property.
+/// Lottie's number for a stroke's ends: 1 flat, 2 round, 3 square.
+fn line_cap(cap: StrokeCap) -> u8 {
+    match cap {
+        StrokeCap::Butt => 1,
+        StrokeCap::Round => 2,
+        StrokeCap::Square => 3,
+    }
+}
+
+/// Lottie's number for a stroke's corners: 1 sharp (miter), 2 round, 3 beveled.
+fn line_join(join: StrokeJoin) -> u8 {
+    match join {
+        StrokeJoin::Miter => 1,
+        StrokeJoin::Round => 2,
+        StrokeJoin::Bevel => 3,
+    }
+}
+
 fn fixed(value: Value) -> Value {
     json!({ "a": 0, "k": value })
 }
@@ -328,7 +346,7 @@ impl Writer {
                     Value::Object(object)
                 }
             },
-            PaintOp::Stroke { paint, width, round_joins, round_caps, .. } => {
+            PaintOp::Stroke { paint, width, line, .. } => {
                 let mut object = match paint {
                     Paint::Solid(rgba) => {
                         let mut object = Map::new();
@@ -347,9 +365,13 @@ impl Writer {
                     }
                 };
                 object.insert("w".into(), fixed(num(f64::from(*width))));
-                object.insert("lc".into(), json!(if *round_caps { 2 } else { 1 }));
-                object.insert("lj".into(), json!(if *round_joins { 2 } else { 1 }));
-                object.insert("ml".into(), json!(4));
+                object.insert("lc".into(), json!(line_cap(line.cap)));
+                object.insert("lj".into(), json!(line_join(line.join)));
+                object.insert("ml".into(), json!(num(f64::from(line.miter_limit))));
+                if let Some((dash, gap)) = line.dash {
+                    let length = |name: &str, value: f32| json!({ "n": name, "nm": name, "v": fixed(num(f64::from(value))) });
+                    object.insert("d".into(), json!([length("d", dash), length("g", gap), length("o", 0.0)]));
+                }
                 Value::Object(object)
             }
         }
@@ -386,9 +408,13 @@ impl Writer {
             document["fc"] = nums(&[f64::from(fill.r), f64::from(fill.g), f64::from(fill.b)]);
         }
         if let Some((rgba, width)) = stroke {
+            // As `scene::text_paints` writes outlined text: an outside stroke under a fill is
+            // doubled under it; others are centered, over the fill when set so.
+            let options = style.stroke_options;
+            let outside_under_fill = style.fill.is_some() && options.position == StrokePosition::Outside;
             document["sc"] = nums(&[f64::from(rgba.r), f64::from(rgba.g), f64::from(rgba.b)]);
-            document["sw"] = num(f64::from(width) * if style.fill.is_some() { 2.0 } else { 1.0 });
-            document["of"] = json!(style.fill.is_none());
+            document["sw"] = num(f64::from(width) * if outside_under_fill { 2.0 } else { 1.0 });
+            document["of"] = json!(style.fill.is_none() || (options.over_fill && !outside_under_fill));
         }
         let x = match style.align {
             TextAlign::Left => 0.0,

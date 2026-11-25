@@ -518,6 +518,7 @@ impl Builder<'_> {
             tracking: 0.0,
             fill: Some(Self::color(color)),
             stroke: None,
+            stroke_options: Default::default(),
             align,
             template: None,
         };

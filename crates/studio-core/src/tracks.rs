@@ -10,6 +10,9 @@
 //!
 //! With the magnetic main track on, clips on track 0 are kept packed together from frame 0, so
 //! removing, trimming or moving one closes the gap, as in CapCut.
+//!
+//! A track whose last clip is dragged elsewhere stays as an empty row (the composition's
+//! `empty_tracks`) until something goes back on it or it is removed; other empty tracks close up.
 
 use crate::model::{Composition, Id, Layer, LayerContent, TrackMatte};
 
@@ -61,8 +64,9 @@ pub fn normalize(composition: &mut Composition) {
         .map(|pair| (pair[0].id, pair[1].id))
         .collect();
 
-    // Close up gaps in the numbering, above and below the main track separately.
-    let mut used: Vec<i32> = composition.layers.iter().map(|layer| layer.track).collect();
+    // Close up gaps in the numbering, above and below the main track separately. Tracks kept as
+    // empty rows count as used, and are renumbered with the rest.
+    let mut used: Vec<i32> = composition.layers.iter().map(|layer| layer.track).chain(composition.empty_tracks.iter().copied()).collect();
     used.sort_unstable();
     used.dedup();
     let renumber = |track: i32| -> i32 {
@@ -74,10 +78,19 @@ pub fn normalize(composition: &mut Composition) {
     };
     // The main track stays track 0 even when it is empty, so other tracks don't fall onto it.
     let has_main = used.contains(&MAIN_TRACK);
+    let place = |track: i32| {
+        let renumbered = renumber(track);
+        if track > MAIN_TRACK && !has_main { renumbered + 1 } else { renumbered }
+    };
     for layer in &mut composition.layers {
-        let track = renumber(layer.track);
-        layer.track = if layer.track > MAIN_TRACK && !has_main { track + 1 } else { track };
+        layer.track = place(layer.track);
     }
+    let mut kept: Vec<i32> = composition.empty_tracks.iter().map(|&track| place(track)).collect();
+    // A kept track something went back on is an ordinary track again.
+    kept.retain(|track| !composition.layers.iter().any(|layer| layer.track == *track));
+    kept.sort_unstable();
+    kept.dedup();
+    composition.empty_tracks = kept;
 
     composition.layers.sort_by_key(|layer| std::cmp::Reverse(layer.track));
 
@@ -91,10 +104,11 @@ pub fn normalize(composition: &mut Composition) {
     }
 }
 
-/// Every track in use, top row first (highest track number first), with the main track always
-/// included so there is somewhere to put the first clip.
+/// Every track in use or kept as an empty row, top row first (highest track number first), with
+/// the main track always included so there is somewhere to put the first clip.
 pub fn tracks(composition: &Composition) -> Vec<i32> {
-    let mut tracks: Vec<i32> = composition.layers.iter().map(|layer| layer.track).chain([MAIN_TRACK]).collect();
+    let mut tracks: Vec<i32> =
+        composition.layers.iter().map(|layer| layer.track).chain(composition.empty_tracks.iter().copied()).chain([MAIN_TRACK]).collect();
     tracks.sort_unstable_by(|a, b| b.cmp(a));
     tracks.dedup();
     tracks
@@ -126,6 +140,25 @@ pub fn make_room_at(composition: &mut Composition, stack_index: usize, sound: bo
     track
 }
 
+/// Moves `layer_id` to `track` at `in_frame` as `place_clip` does, and if that leaves the track it
+/// was on with nothing on it, keeps that track as an empty row (a clip dragged off a track).
+pub fn move_clip_keeping_track(composition: &mut Composition, layer_id: Id, track: i32, in_frame: i64) -> Option<i32> {
+    let from = composition.layer(layer_id)?.track;
+    let alone = !composition.layers.iter().any(|other| other.id != layer_id && other.track == from);
+    if track != from && alone && !composition.empty_tracks.contains(&from) {
+        composition.empty_tracks.push(from);
+    }
+    // `place_clip` renumbers the tracks, carrying the kept one along (and dropping it again if
+    // the clip ends up back on it).
+    place_clip(composition, layer_id, track, in_frame)
+}
+
+/// Removes an empty track kept on the timeline; the tracks around it close up.
+pub fn remove_empty_track(composition: &mut Composition, track: i32) {
+    composition.empty_tracks.retain(|&kept| kept != track);
+    normalize(composition);
+}
+
 /// Where a clip lands when moved to `track` starting at `in_frame`: that track if the clip fits
 /// there without overlapping another, otherwise a new track just above it (just below, for
 /// sound tracks). Picture clips stay on picture tracks and sound on sound tracks. Returns the
@@ -136,6 +169,21 @@ pub fn place_clip(composition: &mut Composition, layer_id: Id, track: i32, in_fr
         return Some(layer.track);
     }
     let sound = is_sound_only(&layer);
+    // A picture clip let go below the picture tracks starts a new bottom picture track: every
+    // picture track moves up one to make room, and the new one becomes the main track.
+    if !sound && track < MAIN_TRACK {
+        for other in composition.layers.iter_mut().filter(|other| other.id != layer_id && other.track >= MAIN_TRACK) {
+            other.track += 1;
+        }
+        for kept in composition.empty_tracks.iter_mut().filter(|kept| **kept >= MAIN_TRACK) {
+            *kept += 1;
+        }
+        let moved = composition.layer_mut(layer_id)?;
+        moved.shift_in_time(in_frame - moved.in_frame);
+        moved.track = MAIN_TRACK;
+        normalize(composition);
+        return composition.layer(layer_id).map(|layer| layer.track);
+    }
     // Picture belongs at or above the main track, sound below it.
     let track = if sound { track.min(-1) } else { track.max(MAIN_TRACK) };
     let out_frame = in_frame + (layer.out_frame - layer.in_frame);
@@ -296,5 +344,45 @@ mod tests {
         compact_main_track(&mut composition);
         let main: Vec<(i64, i64)> = composition.layers.iter().map(|l| (l.in_frame, l.out_frame)).collect();
         assert_eq!(main, vec![(0, 10), (50, 60), (60, 70)]);
+    }
+
+    #[test]
+    fn a_clip_dragged_below_the_bottom_track_gets_a_new_one_and_leaves_its_track_empty() {
+        // Three picture tracks, top first: 502 on track 2, 501 on 1, 500 alone on the main track.
+        let mut composition = comp(&[(2, 0, 100), (1, 10, 40), (0, 60, 90)]);
+        normalize(&mut composition);
+        // Drag the main track's clip down past the bottom row (a track number below the main track).
+        let landed = move_clip_keeping_track(&mut composition, Id(502), -1, 60);
+        assert_eq!(landed, Some(MAIN_TRACK), "it becomes the new bottom track");
+        assert_eq!(rows(&composition), [(500, 3, 0), (501, 2, 10), (502, 0, 60)]);
+        assert_eq!(composition.empty_tracks, [1], "the track it left stays, empty, above it");
+        assert_eq!(tracks(&composition), [3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn an_emptied_track_stays_until_removed_or_filled() {
+        let mut composition = comp(&[(1, 0, 40), (0, 0, 100)]);
+        normalize(&mut composition);
+        // Drag the top clip onto a new track above it: its old track stays empty.
+        move_clip_keeping_track(&mut composition, Id(500), 2, 0);
+        assert_eq!(tracks(&composition), [2, 1, 0]);
+        assert_eq!(composition.empty_tracks, [1]);
+        // Back onto the empty track: it's an ordinary track again, and the one it left is kept.
+        move_clip_keeping_track(&mut composition, Id(500), 1, 0);
+        assert_eq!(rows(&composition)[0].1, 1);
+        assert_eq!(composition.empty_tracks, [2]);
+        // Removing the empty track closes the gap.
+        remove_empty_track(&mut composition, 2);
+        assert!(composition.empty_tracks.is_empty());
+        assert_eq!(tracks(&composition), [1, 0]);
+    }
+
+    #[test]
+    fn a_clip_moved_within_its_own_track_keeps_nothing() {
+        let mut composition = comp(&[(1, 0, 40), (0, 0, 100)]);
+        normalize(&mut composition);
+        move_clip_keeping_track(&mut composition, Id(500), 1, 50);
+        assert!(composition.empty_tracks.is_empty());
+        assert_eq!(rows(&composition)[0], (500, 1, 50));
     }
 }

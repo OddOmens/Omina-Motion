@@ -81,6 +81,10 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         // Stabilize is for one video layer; once on, the menu offers to take it off instead.
         let footage = single.and_then(|layer| workspace.state.composition().layer(layer)).filter(|layer| matches!(layer.content, studio_core::model::LayerContent::Footage { .. }));
         let stabilized = footage.is_some_and(|layer| layer.stabilization.is_some());
+        // Separate Audio is for a video clip with sound. It can't be done on a sped-up or slowed
+        // clip (the separated sound plays at normal speed), or once its sound is already off.
+        let with_sound = footage.filter(|layer| layer.has_audio);
+        let can_separate = with_sound.is_some_and(|layer| layer.time.is_normal() && layer.switches.audio);
         let analysing = workspace.ui.analysis_job.is_some();
         // Morph To works on two shapes, the first morphing into the second (see `panels::morph`).
         let can_morph = layers.len() == 2 && studio_core::morph::can_morph(workspace.state.composition(), layers[0], layers[1]).is_ok();
@@ -145,6 +149,13 @@ pub fn build(clicked: Option<Id>, weak: WeakEntity<Workspace>) -> impl Fn(PopupM
         menu = menu
             .separator()
             .item(item("Split at Playhead", &layers, some, &weak, |this, window, cx| this.split_layer(window, cx)))
+            .when(with_sound.is_some(), |menu| {
+                menu.item(item("Separate Audio", &layers, can_separate, &weak, |this, _, _| {
+                    if let Some(&layer) = this.state.selected_layers.first() {
+                        this.state.separate_audio(layer);
+                    }
+                }))
+            })
             .item(item("Delete", &layers, some, &weak, |this, _, _| {
                 this.state.delete_selection();
             }))

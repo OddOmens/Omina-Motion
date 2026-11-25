@@ -376,7 +376,7 @@ fn text_key(text: &str, style: &TextStyle, raster_scale: f32) -> u64 {
     for value in [style.font_size, style.line_height, style.tracking, (raster_scale * 16.0).round()] {
         value.to_bits().hash(&mut hasher);
     }
-    format!("{:?}{:?}{:?}", style.fill, style.stroke, style.align).hash(&mut hasher);
+    format!("{:?}{:?}{:?}{:?}", style.fill, style.stroke, style.stroke_options, style.align).hash(&mut hasher);
     hasher.finish()
 }
 
@@ -559,6 +559,16 @@ impl Renderer {
     /// The text box size for a style, in source pixels (no GPU work).
     pub fn measure_text(&mut self, text: &str, style: &TextStyle) -> Vec2 {
         self.text.measure(text, style)
+    }
+
+    /// The weights the installed font family `family` comes in, lightest first.
+    pub fn font_weights(&self, family: &str) -> Vec<u16> {
+        self.text.weights(family)
+    }
+
+    /// The weight `family` is drawn at when `wanted` is asked for (see `TextRenderer::nearest_weight`).
+    pub fn nearest_weight(&mut self, family: &str, wanted: u16) -> u16 {
+        self.text.nearest_weight(family, wanted)
     }
 
     /// Where carets and selections go in `text` drawn with `style` (no GPU work).
@@ -1192,7 +1202,7 @@ impl Renderer {
     /// draw nothing) until their file changes.
     fn prepare_lut(&mut self, source: &LutSource) {
         let modified = match source {
-            LutSource::Look(_) => None,
+            LutSource::Look(_) | LutSource::Curves(_) => None,
             LutSource::File(path) => std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok(),
         };
         if self.luts.get(source).is_some_and(|(loaded_at, _)| *loaded_at == modified) {
@@ -1201,6 +1211,7 @@ impl Renderer {
         let table = match source {
             LutSource::Look(name) => studio_core::grade::look(name),
             LutSource::File(path) => read_cube(path).ok(),
+            LutSource::Curves(curves) => Some(studio_core::grade::curves_lut(curves)),
         };
         let texture = table.map(|table| self.upload_lut(&table));
         self.luts.insert(source.clone(), (modified, texture));

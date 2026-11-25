@@ -1,13 +1,16 @@
 //! Small pictures of what each LUT does, for the LUT browser in the Color panel and the LUTs in
-//! the Effects panel.
+//! the Effects panel. Each shows before and after: the left half as it is, the right half with
+//! the LUT, split by a thin line.
 //!
-//! The current frame is drawn small once, without the Apply LUT effect the Color panel is
-//! choosing for (so the previews show each look in its place rather than on top of it). Then
-//! each LUT is applied to that picture on the CPU, a few per redraw, as the GPU would. A frame
-//! with nothing in it is swapped for a sample scene (sky, skin and leaves) so the looks still
-//! show. Nothing is redrawn while playing or dragging; the pictures catch up afterwards.
+//! They are made from a picture the person chose (Settings keeps it), or else the current
+//! frame, drawn small once without the Apply LUT effect the Color panel is choosing for (so the
+//! previews show each look in its place rather than on top of it). Then each LUT is applied to
+//! that picture on the CPU, a few per redraw, as the GPU would. A frame with nothing in it is
+//! swapped for a sample scene (sky, skin and leaves) so the looks still show. Nothing is redrawn
+//! while playing or dragging; the pictures catch up afterwards.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::{Context, RenderImage, Window};
@@ -59,6 +62,9 @@ pub struct LutPreviews {
     fresh: HashSet<LutSource>,
     /// The lookup tables read so far (`None` for files that can't be read).
     tables: HashMap<LutSource, Option<Arc<Lut>>>,
+    /// The chosen picture the previews were last made from, and whether it could be read (a
+    /// picture that can't be falls back to the frame).
+    picture: Option<(PathBuf, bool)>,
 }
 
 impl LutPreviews {
@@ -74,6 +80,7 @@ impl LutPreviews {
             .or_insert_with(|| match source {
                 LutSource::Look(name) => studio_core::grade::look(name).map(Arc::new),
                 LutSource::File(path) => studio_render::read_cube(path).ok().map(Arc::new),
+                LutSource::Curves(curves) => Some(Arc::new(studio_core::grade::curves_lut(curves))),
             })
             .clone()
     }
@@ -115,9 +122,24 @@ pub fn keep_up(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
     if !wanted(workspace) || workspace.state.is_playing() || dragging {
         return;
     }
-    notice_changes(workspace);
-    if workspace.ui.lut_previews.redraw {
-        draw_frame(workspace);
+    // A chosen picture stands in for the frame; one that can't be read falls back to the frame.
+    let chosen = workspace.ui.settings.lut_preview_picture.clone();
+    let using_picture = match &chosen {
+        Some(path) => use_picture(&mut workspace.ui.lut_previews, path),
+        None => {
+            if workspace.ui.lut_previews.picture.take().is_some() {
+                // Back to the frame: draw it again.
+                workspace.ui.lut_previews.drawn = None;
+                workspace.ui.lut_previews.seen = None;
+            }
+            false
+        }
+    };
+    if !using_picture {
+        notice_changes(workspace);
+        if workspace.ui.lut_previews.redraw {
+            draw_frame(workspace);
+        }
     }
     if workspace.ui.lut_previews.base.is_none() {
         return;
@@ -137,6 +159,38 @@ pub fn keep_up(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
     if missing.len() > PICTURES_PER_FRAME || workspace.ui.lut_previews.redraw {
         cx.on_next_frame(window, |_, _, cx| cx.notify());
     }
+}
+
+/// Makes the chosen picture at `path` the previews' base, reading it the first time (or when the
+/// choice changes). Returns whether it is in use: `false` when it can't be read.
+fn use_picture(previews: &mut LutPreviews, path: &Path) -> bool {
+    if let Some((seen, readable)) = &previews.picture
+        && seen == path
+    {
+        return *readable;
+    }
+    let base = picture_base(path);
+    let readable = base.is_some();
+    previews.picture = Some((path.to_path_buf(), readable));
+    if let Some(base) = base {
+        previews.base = Some(base);
+        previews.fresh.clear();
+    } else {
+        // Fall back to the frame, drawn afresh.
+        previews.drawn = None;
+        previews.seen = None;
+    }
+    readable
+}
+
+/// A picture file drawn at preview size, as display colors; `None` if it can't be read.
+fn picture_base(path: &Path) -> Option<Base> {
+    let picture = image::open(path).ok()?.to_rgb8();
+    let (width, height) = picture.dimensions();
+    let preview_height = ((PREVIEW_WIDTH as f32 * height as f32 / width.max(1) as f32).round() as u32).clamp(1, PREVIEW_WIDTH * 2);
+    let small = image::imageops::resize(&picture, PREVIEW_WIDTH, preview_height, image::imageops::FilterType::Triangle);
+    let pixels = small.pixels().map(|pixel| pixel.0.map(|channel| f32::from(channel) / 255.0)).collect();
+    Some(Base { width: PREVIEW_WIDTH, height: preview_height, pixels })
 }
 
 /// Checks whether the project, frame or left-out effect changed since the last look, and if the
@@ -228,14 +282,24 @@ fn sample_scene(width: u32, height: u32) -> Base {
     Base { width, height, pixels }
 }
 
-/// The frame with `table` applied, as a picture for the screen.
+/// The picture before and after `table`: the left half as it is, the right half with the LUT,
+/// and a thin white line between them.
 fn apply(table: &Lut, base: &Base) -> Option<Arc<RenderImage>> {
     let to_byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let split = base.width / 2;
     let bgra: Vec<u8> = base
         .pixels
         .iter()
-        .flat_map(|&pixel| {
-            let [r, g, b] = table.apply(pixel);
+        .enumerate()
+        .flat_map(|(index, &pixel)| {
+            let x = index as u32 % base.width.max(1);
+            let [r, g, b] = if x == split {
+                [1.0; 3]
+            } else if x > split {
+                table.apply(pixel)
+            } else {
+                pixel
+            };
             [to_byte(b), to_byte(g), to_byte(r), 255]
         })
         .collect();
@@ -257,13 +321,34 @@ mod tests {
     }
 
     #[test]
-    fn previews_show_the_lut_applied() {
-        let base = Base { width: 2, height: 1, pixels: vec![[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]] };
+    fn previews_show_before_on_the_left_and_the_lut_on_the_right() {
+        // Five red pixels in a row: two before, the white split line, two after.
+        let base = Base { width: 5, height: 1, pixels: vec![[1.0, 0.0, 0.0]; 5] };
         // Swaps red and blue.
         let swap = Lut::from_fn("Swap", 5, |[r, g, b]| [b, g, r]);
         let picture = apply(&swap, &base).unwrap();
         let bytes = picture.as_bytes(0).unwrap();
-        // Stored blue, green, red, alpha: the red pixel is now blue, the blue one red.
-        assert_eq!(&bytes[..8], &[255, 0, 0, 255, 0, 0, 255, 255]);
+        // Stored blue, green, red, alpha.
+        let pixel = |x: usize| &bytes[x * 4..x * 4 + 4];
+        assert_eq!(pixel(0), [0, 0, 255, 255], "before: still red");
+        assert_eq!(pixel(2), [255, 255, 255, 255], "the split line");
+        assert_eq!(pixel(4), [255, 0, 0, 255], "after: red became blue");
+    }
+
+    #[test]
+    fn a_chosen_picture_is_read_at_preview_size_and_a_bad_one_falls_back() {
+        let folder = std::env::temp_dir().join(format!("motion-lut-picture-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("Beach.png");
+        image::RgbImage::from_pixel(400, 200, image::Rgb([200, 120, 40])).save(&path).unwrap();
+        let mut previews = LutPreviews::default();
+        assert!(use_picture(&mut previews, &path));
+        let base = previews.base.as_ref().unwrap();
+        assert_eq!((base.width, base.height), (PREVIEW_WIDTH, PREVIEW_WIDTH / 2), "kept in proportion");
+        assert!((base.pixels[0][0] - 200.0 / 255.0).abs() < 0.01);
+        let broken = folder.join("Broken.png");
+        std::fs::write(&broken, "not a picture").unwrap();
+        assert!(!use_picture(&mut previews, &broken), "a picture that can't be read isn't used");
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 }

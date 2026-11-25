@@ -301,6 +301,34 @@ fn outlined_text_without_a_fill_stays_hollow() {
 }
 
 #[test]
+fn text_stroke_corners_and_dashes_are_exported() {
+    use studio_core::model::{StrokeJoin, StrokePosition, TextStrokeOptions};
+    let (mut project, comp, _) = keyframed_rectangle();
+    let text = edit::add_text_layer(&mut project, comp, "O", Vec2::new(200.0, 100.0), 0).unwrap();
+    let layer = project.composition_mut(comp).unwrap().layer_mut(text).unwrap();
+    layer.out_frame = 60;
+    if let studio_core::model::LayerContent::Text { style, .. } = &mut layer.content {
+        style.fill = None;
+        style.stroke = Some((Rgba::hex(0xff0000), 4.0));
+        style.stroke_options = TextStrokeOptions { join: StrokeJoin::Miter, miter_limit: 6.0, dash: 9.0, gap: 3.0, ..TextStrokeOptions::default() };
+    }
+    let file = svg(&project, &options(comp, 0..60), &mut FakeResources).unwrap().file;
+    assert!(file.contains("stroke-linejoin=\"miter\"") && file.contains("stroke-miterlimit=\"6\""), "sharp corners");
+    assert!(file.contains("stroke-dasharray=\"9 3\""), "dashes");
+    let json = parse(&lottie(&project, &options(comp, 0..60), &mut FakeResources).unwrap().file);
+    let letters = json["layers"].as_array().unwrap().iter().find(|layer| layer["nm"] == "O").expect("the text layer").to_string();
+    assert!(letters.contains("\"lj\":1") && letters.contains("\"d\":["), "sharp corners and dashes: {letters}");
+    // An inside stroke on filled text can't be written exactly, and says so.
+    let layer = project.composition_mut(comp).unwrap().layer_mut(text).unwrap();
+    if let studio_core::model::LayerContent::Text { style, .. } = &mut layer.content {
+        style.fill = Some(Rgba::hex(0x000000));
+        style.stroke_options.position = StrokePosition::Inside;
+    }
+    let left_out = svg(&project, &options(comp, 0..60), &mut FakeResources).unwrap().left_out;
+    assert!(left_out.iter().any(|line| line.starts_with("Inside text strokes")), "{left_out:?}");
+}
+
+#[test]
 fn emoji_and_shape_morphs_are_listed_as_left_out() {
     let (mut project, comp, _) = keyframed_rectangle();
     let text = edit::add_text_layer(&mut project, comp, "Party 🎉", Vec2::new(200.0, 100.0), 0).unwrap();

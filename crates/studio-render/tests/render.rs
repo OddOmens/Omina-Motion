@@ -60,6 +60,7 @@ fn project(layers: Vec<Layer>) -> Project {
         markers: Vec::new(),
         motion_blur: Default::default(),
         linear_blending: true,
+        empty_tracks: Vec::new(),
     };
     Project::new(Vec::new(), vec![composition])
 }
@@ -351,6 +352,33 @@ fn luts_grade_through_adjustment_layers() {
     let _ = std::fs::remove_dir_all(folder);
 }
 
+/// A full-frame solid of `rgb` under an adjustment layer with a Curves effect of `curves`.
+fn curves_frame(curves: studio_core::model::ToneCurves, rgb: u32) -> [u8; 3] {
+    let mut grade = full(2, 0x000000);
+    grade.content = LayerContent::Adjustment;
+    let mut effect = effects::instantiate(effects::find("Curves").unwrap(), Id(9));
+    effect.lut = Some(studio_core::model::LutSource::Curves(curves));
+    grade.effects.push(effect);
+    pixel(&render(&project(vec![grade, full(3, rgb)])), 50, 50)
+}
+
+#[test]
+fn curves_bend_brightness_and_each_channel() {
+    use studio_core::model::{CurveChannel, ToneCurves};
+    assert!(close(curves_frame(ToneCurves::default(), 0x808080), [0x80, 0x80, 0x80]), "straight curves change nothing");
+    // Brightness lifted in the middle: mid gray gets lighter, black and white stay put.
+    let mut lifted = ToneCurves::default();
+    lifted.set_points(CurveChannel::Master, &[[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]]);
+    let gray = curves_frame(lifted.clone(), 0x808080);
+    assert!(gray[0] > 0x80 + 40 && gray[0] == gray[1] && gray[1] == gray[2], "{gray:?}");
+    assert!(close(curves_frame(lifted.clone(), 0x000000), [0, 0, 0]) && close(curves_frame(lifted, 0xffffff), [255, 255, 255]));
+    // Only the blue curve pulled down: a gray turns warm.
+    let mut warm = ToneCurves::default();
+    warm.set_points(CurveChannel::Blue, &[[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]]);
+    let warmed = curves_frame(warm, 0x808080);
+    assert!(warmed[2] + 30 < warmed[0] && warmed[0].abs_diff(0x80) <= 2, "{warmed:?}");
+}
+
 #[test]
 fn gaussian_blur_softens_edges() {
     let mut square = solid(2, 0xffffff, Vec2::new(40.0, 40.0), Vec2::new(50.0, 50.0));
@@ -514,9 +542,14 @@ fn every_rendered_effect_changes_the_picture() {
             continue;
         }
         let mut template = effects::instantiate(definition, Id(9));
-        // Apply LUT draws nothing until a table is chosen.
+        // Apply LUT draws nothing until a table is chosen, and new Curves are straight lines.
         if definition.name == "Apply LUT" {
             template.lut = Some(studio_core::model::LutSource::Look("Noir".into()));
+        }
+        if definition.name == "Curves" {
+            let mut curves = studio_core::model::ToneCurves::default();
+            curves.set_points(studio_core::model::CurveChannel::Master, &[[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]]);
+            template.lut = Some(studio_core::model::LutSource::Curves(curves));
         }
         let changed = (0..3).any(|trial| {
             let mut effect = template.clone();
@@ -1187,6 +1220,7 @@ fn clear_comp(id: u64, layers: Vec<Layer>) -> Composition {
         markers: Vec::new(),
         motion_blur: Default::default(),
         linear_blending: true,
+        empty_tracks: Vec::new(),
     }
 }
 

@@ -506,6 +506,60 @@ fn audio_effects_are_added_from_effect_controls_and_reach_the_mix(cx: &mut TestA
     assert!(visual.update(|window, _| window.try_find_by_label("This effect is not drawn by the renderer yet; its settings are kept.")).is_none());
 }
 
+/// The Color tab's Curves are point curves: clicking the graph adds a point on the curve,
+/// dragging it bends the curve, and each channel has a curve of its own.
+#[gpui_kit::test]
+fn curves_are_shaped_with_points_on_the_graph(cx: &mut TestAppContext) {
+    use studio_core::model::{CurveChannel, LutSource};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let a_cam = Id(104);
+    let curves = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.select_layer(a_cam, false);
+        let (_, curves) = ws.state.add_grade_effect("Curves").unwrap();
+        cx.notify();
+        curves
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name("tab:Properties:2".into()), cx));
+    render(visual);
+    let read = |visual: &mut VisualTestContext| visual.update(|_, cx| match workspace.read(cx).state.effect_lut(a_cam, curves) {
+        Some(LutSource::Curves(curves)) => curves.clone(),
+        other => panic!("not curves: {other:?}"),
+    });
+    assert!(read(visual).is_identity(), "a new Curves changes nothing");
+
+    // Click the middle of the graph: a point on the (straight) curve.
+    let graph = bounds_of(visual, ElementId::Name(format!("curve-graph:{}", curves.0).into()));
+    visual.update(|window, cx| {
+        window.pointer_down(graph.center(), MouseButton::Left, cx);
+        window.pointer_up(graph.center(), MouseButton::Left, cx);
+    });
+    render(visual);
+    let points = read(visual).points(CurveChannel::Master);
+    assert_eq!(points.len(), 3, "{points:?}");
+    assert!((points[1][0] - points[1][1]).abs() < 0.02, "the new point sits on the curve: {points:?}");
+
+    // Drag it up: the middle gets brighter.
+    let handle = center_of(visual, ElementId::Name(format!("curve-point:{}:1", curves.0).into()));
+    visual.update(|window, cx| window.drag(handle, point(handle.x, handle.y - graph.size.height * 0.2), cx));
+    render(visual);
+    let points = read(visual).points(CurveChannel::Master);
+    assert!(points[1][1] > points[1][0] + 0.1, "lifted: {points:?}");
+
+    // The red curve is its own, untouched until it's picked and shaped.
+    visual.update(|window, cx| window.click(ElementId::Name(format!("curve-channel:{}:Red", curves.0).into()), cx));
+    render(visual);
+    assert_eq!(read(visual).points(CurveChannel::Red).len(), 2);
+    visual.update(|window, cx| {
+        window.pointer_down(graph.center(), MouseButton::Left, cx);
+        window.pointer_up(graph.center(), MouseButton::Left, cx);
+    });
+    render(visual);
+    let shaped = read(visual);
+    assert_eq!((shaped.points(CurveChannel::Red).len(), shaped.points(CurveChannel::Master).len()), (3, 3));
+}
+
 #[gpui_kit::test]
 fn color_corrections_show_as_one_line_in_the_effects_tab(cx: &mut TestAppContext) {
     use crate::workspace::PanelId;
@@ -1476,6 +1530,40 @@ fn make_an_edit(workspace: &Entity<Workspace>, visual: &mut VisualTestContext) {
     render(visual);
 }
 
+/// A saved project with unsaved changes gets timed copies in a folder beside it; the project
+/// itself stays as it was saved, and still has unsaved changes.
+#[gpui_kit::test]
+fn a_saved_project_auto_saves_copies_in_a_folder_beside_it(cx: &mut TestAppContext) {
+    let folder = scratch_folder("auto-save");
+    let (workspace, visual) = open(cx);
+    make_an_edit(&workspace, visual);
+    visual.update(|window, cx| window.press("cmd-s", cx));
+    visual.run_until_parked();
+    let chosen = folder.join("Promo");
+    visual.simulate_new_path_selection(|_| Some(chosen.clone()));
+    visual.run_until_parked();
+    render(visual);
+    let project = folder.join("Promo.omim");
+    let saved = std::fs::read_to_string(&project).unwrap();
+    let auto_save_now = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| workspace.update(cx, |ws, cx| {
+            ws.ui.last_auto_save_at = None;
+            ws.keep_work_safe(window, cx);
+        }));
+    };
+    auto_save_now(visual);
+    assert!(crate::auto_save::saves(&project).is_empty(), "nothing changed since the save, so no copy");
+
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.set_property_component(TITLE, ROTATION, 0, 61.0); cx.notify(); }));
+    auto_save_now(visual);
+    let copies = crate::auto_save::saves(&project);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(copies[0].parent(), Some(folder.join("Promo Auto-Save").as_path()));
+    assert_ne!(std::fs::read_to_string(&copies[0]).unwrap(), saved, "the copy has the new change");
+    assert_eq!(std::fs::read_to_string(&project).unwrap(), saved, "the project file is untouched");
+    assert!(has_unsaved_changes(&workspace, visual), "an auto-save isn't a save");
+}
+
 #[gpui_kit::test]
 fn saving_asks_where_the_first_time_then_saves_in_place(cx: &mut TestAppContext) {
     let folder = scratch_folder("save");
@@ -1490,7 +1578,7 @@ fn saving_asks_where_the_first_time_then_saves_in_place(cx: &mut TestAppContext)
     visual.run_until_parked();
     render(visual);
 
-    let saved = folder.join("Promo.studio");
+    let saved = folder.join("Promo.omim");
     assert!(saved.exists(), "the extension is added");
     assert!(!has_unsaved_changes(&workspace, visual));
     visual.update(|_, cx| assert_eq!(workspace.read(cx).ui.window_title, "Promo — Omina Motion"));
@@ -2019,6 +2107,106 @@ fn project_items_drop_onto_the_track_under_the_pointer(cx: &mut TestAppContext) 
     let added = visual.update(|_, cx| workspace.read(cx).state.selected_layers[0]);
     assert_ne!(added, solid);
     assert_eq!(track_of(&workspace, visual, added), studio_core::tracks::MAIN_TRACK, "it landed on the main track");
+}
+
+/// The timeline always has an empty track at the top to drop into, Add Track adds more, and a
+/// project item dropped on an empty row starts a new track there without any other change.
+#[gpui_kit::test]
+fn empty_track_rows_take_drops_and_add_track_adds_more(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let in_use = visual.update(|_, cx| studio_core::tracks::tracks(workspace.read(cx).state.composition()));
+    let top = in_use[0];
+    let header = |track: i32| ElementId::Name(format!("track-header:{track}").into());
+    // One empty row above the top track, and the layers are untouched by it.
+    let empty = bounds_of(visual, header(top + 1));
+    assert!(empty.bottom() <= bounds_of(visual, header(top)).top() + px(1.0), "the empty row sits above the top track");
+    visual.update(|window, cx| window.click("tracks-add", cx));
+    render(visual);
+    assert!(bounds_of(visual, header(top + 2)).bottom() <= bounds_of(visual, header(top + 1)).top() + px(1.0), "Add Track adds a row above");
+    let tracks_now = visual.update(|_, cx| studio_core::tracks::tracks(workspace.read(cx).state.composition()));
+    assert_eq!(tracks_now, in_use, "empty rows aren't tracks until something is on them");
+
+    // Drop the gray solid on the nearest empty row: it becomes a new top track.
+    let item = center_of(visual, ("project-item", studio_core::sample::ids::GRAY_SOLID.0 as usize));
+    let row = bounds_of(visual, header(top + 1));
+    let target = point(bounds_of(visual, ("clip", TITLE.0 as usize)).center().x, row.center().y);
+    visual.update(|window, cx| window.drag(item, target, cx));
+    render(visual);
+    let added = visual.update(|_, cx| workspace.read(cx).state.selected_layers[0]);
+    assert_eq!(track_of(&workspace, visual, added), top + 1, "it starts a new track on top");
+    // The row asked for with Add Track is still there, empty, above it.
+    assert!(bounds_of(visual, header(top + 2)).bottom() <= bounds_of(visual, header(top + 1)).top() + px(1.0));
+}
+
+/// Dragging a clip off its track into the row below the bottom track makes a new bottom track
+/// and leaves the old one as an empty row, until its × removes it.
+#[gpui_kit::test]
+fn a_clip_dragged_into_the_bottom_row_leaves_its_track_empty(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    let solid = main_clip(&workspace, visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| { ws.state.magnetic_main_track = false; cx.notify(); }));
+    render(visual);
+    let before = visual.update(|_, cx| studio_core::tracks::tracks(workspace.read(cx).state.composition()));
+    let header = |track: i32| ElementId::Name(format!("track-header:{track}").into());
+    // The empty row below everything.
+    let bottom_row = bounds_of(visual, header(before.last().copied().unwrap() - 1));
+    let start = center_of(visual, ("clip", solid.0 as usize));
+    visual.update(|window, cx| window.drag(start, point(start.x, bottom_row.center().y), cx));
+    render(visual);
+    let (track, kept) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.composition().layer(solid).unwrap().track, state.composition().empty_tracks.clone())
+    });
+    assert_eq!(track, studio_core::tracks::MAIN_TRACK, "the clip is on a new bottom track");
+    assert_eq!(kept, [1], "the track it left is kept, empty, just above it");
+    // The kept row has a × that removes it.
+    visual.update(|window, cx| window.click(ElementId::Name("track-remove:1".into()), cx));
+    render(visual);
+    let after = visual.update(|_, cx| workspace.read(cx).state.composition().empty_tracks.clone());
+    assert!(after.is_empty());
+}
+
+/// Scrolling sideways over the tracks (a mouse's side wheel, a trackpad, or Shift with the
+/// wheel) moves through time at the same zoom; scrolling up and down doesn't.
+#[gpui_kit::test]
+fn sideways_scrolling_moves_the_timeline_through_time(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_view_range(studio_core::time::FrameRange::new(30.0, 60.0));
+        cx.notify();
+    }));
+    render(visual);
+    let view = |visual: &mut VisualTestContext| visual.update(|_, cx| workspace.read(cx).state.view_range);
+    // A point over the main track's row, just right of its header.
+    let header = bounds_of(visual, ElementId::Name("track-header:0".into()));
+    let over_rows = point(header.right() + px(120.0), header.center().y);
+    let scroll = |visual: &mut VisualTestContext, across: f32, down: f32, shift: bool| {
+        visual.update(|window, cx| {
+            let event = gpui_kit::ScrollEvent {
+                position: over_rows,
+                delta: gpui_kit::ScrollDelta::Pixels(point(px(across), px(down))),
+                modifiers: gpui_kit::Modifiers { shift, ..Default::default() },
+                ..Default::default()
+            };
+            window.dispatch_event(gpui_kit::InputEvent::to_platform_input(event), cx);
+        });
+        render(visual);
+    };
+    let before = view(visual);
+    scroll(visual, -80.0, 0.0, false);
+    let later = view(visual);
+    assert!(later.start > before.start + 0.5, "scrolled toward later frames: {before:?} → {later:?}");
+    assert!((later.len() - before.len()).abs() < 1e-6, "the zoom is kept");
+    // Shift with a plain wheel moves through time too.
+    scroll(visual, 0.0, 80.0, true);
+    assert!(view(visual).start < later.start - 0.5, "Shift-scroll moved back toward earlier frames");
+    // A plain wheel leaves the time alone.
+    let settled = view(visual);
+    scroll(visual, 0.0, -60.0, false);
+    assert_eq!(view(visual), settled);
 }
 
 #[gpui_kit::test]
@@ -4276,6 +4464,42 @@ fn separate_audio_moves_the_sound_to_its_own_clip(cx: &mut TestAppContext) {
     assert!(!video_plays, "the video went quiet");
     let content = visual.update(|_, cx| workspace.read(cx).state.composition().layer(audio).unwrap().content.clone());
     assert!(matches!(content, LayerContent::Audio { .. }));
+}
+
+/// A video clip's right-click menu separates its sound onto a clip of its own, once.
+#[gpui_kit::test]
+fn separate_audio_is_in_a_video_clips_right_click_menu(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    let video = add_video_with_sound(&workspace, visual);
+    tall_window(visual);
+    // The Properties panel has a Separate Audio button too; this clicks the menu's.
+    let click_menu_item = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| {
+            let button = window.try_find("separate-audio").map(|found| found.bounds());
+            let matches = window.find_all_by_label("Separate Audio");
+            let item = matches.iter().map(|found| found.bounds()).find(|bounds| Some(*bounds) != button).expect("the menu item");
+            window.pointer_down(item.center(), MouseButton::Left, cx);
+            window.pointer_up(item.center(), MouseButton::Left, cx);
+        });
+    };
+    visual.update(|window, cx| window.right_click(("clip-body", video.0 as usize), cx));
+    render(visual);
+    click_menu_item(visual);
+    render(visual);
+    let (audio, video_plays, layers) = visual.update(|_, cx| {
+        let state = &workspace.read(cx).state;
+        (state.selected_layers[0], state.composition().layer(video).unwrap().switches.audio, state.composition().layers.len())
+    });
+    assert_ne!(audio, video, "the new sound clip is selected");
+    assert!(!video_plays, "the video went quiet");
+    let content = visual.update(|_, cx| workspace.read(cx).state.composition().layer(audio).unwrap().content.clone());
+    assert!(matches!(content, LayerContent::Audio { .. }));
+    // Its sound is already separated: the item is still there, but does nothing a second time.
+    visual.update(|window, cx| window.right_click(("clip-body", video.0 as usize), cx));
+    render(visual);
+    click_menu_item(visual);
+    render(visual);
+    assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), layers, "no second copy of the sound");
 }
 
 #[gpui_kit::test]
@@ -6930,7 +7154,7 @@ fn packaging_zips_the_project_with_its_media_and_the_copy_reopens(cx: &mut TestA
     assert!(std::fs::read_to_string(package.join("Missing files.txt")).unwrap().contains("score.wav"));
 
     // The packaged project opens from where it was unzipped, with its media found there.
-    let file = package.join("Untitled.studio");
+    let file = package.join("Untitled.omim");
     let missing = visual.update(|_, cx| workspace.update(cx, |ws, _| ws.state.open_project(&std::fs::read_to_string(&file).unwrap(), file.clone()).unwrap().0));
     assert_eq!(missing, [media.join("missing/score.wav")], "only the missing music is reported, at its old path");
     visual.update(|_, cx| {
@@ -7165,7 +7389,7 @@ fn earlier_versions_are_kept_and_restored(cx: &mut TestAppContext) {
     visual.simulate_new_path_selection(|_| Some(saved.clone()));
     visual.run_until_parked();
     render(visual);
-    let file = folder.join("Versions Demo.studio");
+    let file = folder.join("Versions Demo.omim");
     assert_eq!(crate::versions::list(Some(&file)).len(), 1, "saving keeps a version");
 
     // Working on: a version is kept while it changes, once the time comes.
@@ -9824,4 +10048,91 @@ fn iris_hands_frames_to_the_other_apps_and_brings_in_what_they_send(cx: &mut Tes
     visual.run_until_parked();
     assert_eq!(visual.update(|_, cx| workspace.read(cx).state.composition().layers.len()), layers + 1);
     std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// Making text bigger refits its box before the frame is drawn, so the picture on screen
+/// shows the text at its new size, not stretched into the old box.
+#[gpui_kit::test]
+fn text_made_bigger_is_drawn_in_a_box_that_fits_it(cx: &mut TestAppContext) {
+    use studio_core::animation::Vec2;
+    let (workspace, visual) = open(cx);
+    let layer = visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let layer = ws.state.add_text_layer("TIDE KEEP", Vec2::new(400.0, 300.0)).unwrap();
+        cx.notify();
+        layer
+    }));
+    for _ in 0..3 {
+        draw_frame(visual);
+    }
+    let size_before = visual.update(|_, cx| workspace.read(cx).state.composition().layer(layer).unwrap().size);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let comp = ws.state.composition().id;
+        studio_core::edit::edit_text(ws.state.project.composition_mut(comp).unwrap(), layer, |_, style| style.font_size *= 2.0);
+        cx.notify();
+    }));
+    for _ in 0..3 {
+        draw_frame(visual);
+    }
+    visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        let size_after = ws.state.composition().layer(layer).unwrap().size;
+        assert!(size_after.x > size_before.x * 1.5, "the box grew with the text: {size_before:?} to {size_after:?}");
+        assert!(ws.render.drawn_project() == Some(&ws.state.project), "the frame on screen was drawn before the box was refitted");
+    });
+}
+
+/// Choosing a font that doesn't come in the text's weight moves the text to the nearest weight
+/// the font has.
+#[gpui_kit::test]
+fn a_new_font_without_the_texts_weight_takes_its_nearest_weight(cx: &mut TestAppContext) {
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    // A family made only in regular that macOS installs; with none, there is nothing to check.
+    let regular_only = visual.update(|_, cx| {
+        let ws = workspace.read(cx);
+        ["Academy Engraved LET", "Chalkduster", "Papyrus", "Herculanum"].into_iter().find(|family| ws.render.font_weights(family) == [400]).map(str::to_owned)
+    });
+    let Some(regular_only) = regular_only else { return };
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        let current = ws.state.text_of(TITLE).unwrap().1.font_family.clone();
+        ws.state.set_font(TITLE, &current, 700);
+        // The test window lists no installed fonts, so it is given the one to choose.
+        ws.ui.font_families = vec![current, regular_only.clone()];
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("font-family", cx));
+    render(visual);
+    visual.update(|window, cx| window.click(ElementId::Name(format!("font-{regular_only}").into()), cx));
+    render(visual);
+    let style = visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().1.clone());
+    assert_eq!((style.font_family.as_str(), style.font_weight), (regular_only.as_str(), 400));
+}
+
+/// A text stroke's options show once the text has a stroke: dashes switch on in proportion
+/// to its width, and the stroke can be set over the fill and moved inside the letters.
+#[gpui_kit::test]
+fn a_text_stroke_has_options_for_position_corners_and_dashes(cx: &mut TestAppContext) {
+    use studio_core::model::{Rgba, StrokePosition, TextStrokeOptions};
+    let (workspace, visual) = open(cx);
+    tall_window(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.set_text_stroke(TITLE, Some((Rgba::hex(0xff0000), 5.0)));
+        ws.state.select_layer(TITLE, false);
+        cx.notify();
+    }));
+    render(visual);
+    visual.update(|window, cx| window.click("text-stroke-dashed", cx));
+    render(visual);
+    visual.update(|window, cx| window.click("text-stroke-over-fill", cx));
+    render(visual);
+    visual.update(|_, cx| workspace.update(cx, |ws, cx| {
+        ws.state.edit_text_stroke_options(TITLE, |options| options.position = StrokePosition::Inside);
+        ws.state.set_text_setting(TITLE, crate::state::TextSetting::StrokeGap, 4.0);
+        cx.notify();
+    }));
+    render(visual);
+    let style = visual.update(|_, cx| workspace.read(cx).state.text_of(TITLE).unwrap().1.clone());
+    assert_eq!(style.stroke_options, TextStrokeOptions { position: StrokePosition::Inside, dash: 15.0, gap: 4.0, over_fill: true, ..TextStrokeOptions::default() });
 }

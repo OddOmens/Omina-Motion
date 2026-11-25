@@ -275,11 +275,13 @@ pub fn add_lut(project: &mut Project, comp_id: Id, layer_id: Id, lut: crate::mod
     Some(id)
 }
 
-/// Sets which lookup table an Apply LUT effect uses. Other effects have none, so they are left alone.
+/// Sets which lookup table an Apply LUT effect uses, or a Curves effect's curves. Other effects
+/// have none, so they are left alone; so is a Curves effect given anything but curves.
 pub fn set_effect_lut(composition: &mut Composition, layer_id: Id, effect_id: Id, lut: Option<crate::model::LutSource>) -> bool {
     let effect = composition.layer_mut(layer_id).and_then(|layer| layer.effects.iter_mut().find(|effect| effect.id == effect_id));
+    let curves = matches!(lut, Some(crate::model::LutSource::Curves(_)));
     match effect {
-        Some(effect) if effect.name == "Apply LUT" => {
+        Some(effect) if effect.name == "Apply LUT" || (effect.name == "Curves" && curves) => {
             effect.lut = lut;
             true
         }
@@ -539,6 +541,7 @@ pub fn new_composition(project: &mut Project, settings: &CompositionSettings) ->
         markers: Vec::new(),
         motion_blur: Default::default(),
         linear_blending: true,
+        empty_tracks: Vec::new(),
     });
     project.items.push(ProjectItem {
         id,

@@ -110,7 +110,8 @@ impl FieldTarget {
                 let (step, decimals, unit) = match setting {
                     TextSetting::FontSize | TextSetting::Leading => (0.5, 0, "px"),
                     TextSetting::Tracking => (1.0, 0, ""),
-                    TextSetting::StrokeWidth => (0.1, 1, "px"),
+                    TextSetting::StrokeWidth | TextSetting::StrokeDash | TextSetting::StrokeGap => (0.1, 1, "px"),
+                    TextSetting::StrokeMiter => (0.05, 1, ""),
                 };
                 Some((setting.get(style), FieldFormat { step, decimals, unit, rotation: false }))
             }

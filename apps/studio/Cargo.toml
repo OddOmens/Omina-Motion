@@ -9,6 +9,10 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+# Local time, for the names of auto-save copies.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# The channel that hands files the system asks to open over to the window.
+futures = "0.3"
 studio-core.workspace = true
 # Iris, the assistant shared with Canvas and Develop: her help, matching and shared settings.
 iris.workspace = true
@@ -49,7 +53,17 @@ icons = ["../../assets/icon/studio-512@2x.png", "../../assets/icon/studio-512.pn
 out-dir = "../../target/packages"
 binaries-dir = "../../target/release"
 binaries = [{ path = "studio", main = true }]
-resources = ["../../LICENSE", "../../THIRD_PARTY_NOTICES.md"]
+resources = ["../../LICENSE", "../../THIRD_PARTY_NOTICES.md", "../../assets/icon/omim-document.icns"]
+
+# Double-clicking a project opens it in Omina Motion. Windows and Linux installers register this;
+# on macOS, Info.plist declares the file type in full (it replaces what this would write).
+# Projects are .omim; .studio is the older extension, still opened.
+[[package.metadata.packager.file-associations]]
+extensions = ["omim", "studio"]
+name = "Omina Motion Project"
+description = "Omina Motion Project"
+mime-type = "application/x-omina-motion"
+role = "editor"
 
 [package.metadata.packager.macos]
 minimum-system-version = "13.0"

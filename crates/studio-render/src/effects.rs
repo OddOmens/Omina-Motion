@@ -86,7 +86,8 @@ pub fn passes(effect: &Effect, frame: f64, scale: f32, layer_box: [Vec2; 4]) -> 
         "Color Wheels" => shader(53, &(0..9).map(v).collect::<Vec<_>>()),
         "Tone Curve" => shader(54, &[v(0), v(1), v(2), v(3)]),
         "Levels" => shader(55, &[v(0), v(1), v(2), v(3), v(4)]),
-        "Apply LUT" => Pass::Lut { intensity: v(0) / 100.0 },
+        // Curves are drawn as the lookup table they make (see `grade::curves_lut`).
+        "Apply LUT" | "Curves" => Pass::Lut { intensity: v(0) / 100.0 },
         "Bulge" => shader(11, &[v(0), px(1)]),
         "Wave Warp" => shader(12, &[px(0), px(1), v(2)]),
         "Turbulent Displace" => shader(13, &[px(0), px(1)]),

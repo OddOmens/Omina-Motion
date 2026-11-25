@@ -166,6 +166,10 @@ pub struct AppSettings {
     pub shortcuts: crate::keymap::Shortcuts,
     /// Earlier versions of projects, kept to roll back to (see `versions`).
     pub versions: VersionSettings,
+    /// Timed copies of a saved project in a folder beside it (see `auto_save`).
+    pub auto_save: AutoSaveSettings,
+    /// A picture the LUT previews are made from, instead of the current frame (`None`: the frame).
+    pub lut_preview_picture: Option<PathBuf>,
     /// Memory set aside for frames rendered ahead of the playhead, in megabytes (0 is off).
     pub render_ahead_mb: u32,
     /// The movie an export was writing when Studio last ran, until it finished: if Studio quit
@@ -310,6 +314,23 @@ impl Default for VersionSettings {
     }
 }
 
+/// Auto-save: copies of a saved project with unsaved changes, every few minutes, in an
+/// "<project> Auto-Save" folder beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoSaveSettings {
+    pub on: bool,
+    pub every_minutes: u32,
+    /// How many copies each project's folder keeps; the oldest go first.
+    pub how_many: u32,
+}
+
+impl Default for AutoSaveSettings {
+    fn default() -> Self {
+        Self { on: true, every_minutes: 5, how_many: 10 }
+    }
+}
+
 /// What new compositions start as.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -448,6 +469,8 @@ impl Default for AppSettings {
             features_off: std::collections::BTreeSet::new(),
             shortcuts: crate::keymap::Shortcuts::default(),
             versions: VersionSettings::default(),
+            auto_save: AutoSaveSettings::default(),
+            lut_preview_picture: None,
             // Tests turn it on where they need it, so the viewer stays predictable elsewhere.
             render_ahead_mb: if cfg!(test) { 0 } else { 2048 },
             export_in_progress: None,

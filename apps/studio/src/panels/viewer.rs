@@ -116,6 +116,12 @@ impl ViewerRender {
 }
 
 impl ViewerRender {
+    /// The project the frame on screen was drawn from, if one is.
+    #[cfg(test)]
+    pub fn drawn_project(&self) -> Option<&studio_core::model::Project> {
+        self.drawn.as_ref().map(|drawn| &drawn.project)
+    }
+
     /// A small picture of an element (see `studio_core::elements`) on a plain square, `size`
     /// pixels a side, for the Elements panel.
     pub fn element_picture(&mut self, index: usize, size: u32) -> Option<Arc<RenderImage>> {
@@ -141,6 +147,18 @@ impl ViewerRender {
             .collect();
         let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(size, size, bgra)?;
         Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+    }
+
+    /// The weights `family` comes in, for the Weight menu. Empty when the renderer couldn't start.
+    pub fn font_weights(&self, family: &str) -> Vec<u16> {
+        self.renderer.as_ref().map_or_else(|_| Vec::new(), |renderer| renderer.font_weights(family))
+    }
+
+    /// The weight `family` can be drawn at nearest to `wanted`, so choosing a font that doesn't
+    /// come in the text's weight moves the text to one it does. `wanted` when the renderer
+    /// couldn't start.
+    pub fn nearest_weight(&mut self, family: &str, wanted: u16) -> u16 {
+        self.renderer.as_mut().map_or(wanted, |renderer| renderer.nearest_weight(family, wanted))
     }
 
     /// Where carets and selections go in `text` drawn with `style`, for typing in the viewer.
@@ -377,11 +395,29 @@ fn render_frame(workspace: &mut Workspace, width: u32, height: u32, window: &mut
     }
     workspace.render.drawn = rendered.is_ok().then(|| DrawnFrame { frame: state.current_frame, comp: state.active_comp, width, height, media, project: shown.clone() });
     match rendered {
-        Ok(frame) => {
+        Ok(mut frame) => {
+            // Keep text layer bounds matching the measured text. The renderer stretches text to
+            // its layer's box, so when a box changed (a new font or size, say) the frame is
+            // drawn again with the fitted box rather than left showing the text squeezed into
+            // the old one. A preview copy (a LUT, say) isn't refitted, so it isn't redrawn.
+            let refitted = workspace.state.apply_text_sizes(&frame.text_sizes);
+            if refitted && previewed.is_none() {
+                let state = &workspace.state;
+                let Ok(renderer) = workspace.render.renderer.as_mut() else { return };
+                match renderer.render(&state.project, state.active_comp, state.current_frame, width, height, &workspace.render.media) {
+                    Ok(redrawn) => {
+                        frame = redrawn;
+                        workspace.render.drawn = Some(DrawnFrame { frame: state.current_frame, comp: state.active_comp, width, height, media, project: state.project.clone() });
+                    }
+                    Err(error) => {
+                        workspace.render.drawn = None;
+                        workspace.render.last_error = Some(error.to_string());
+                        return;
+                    }
+                }
+            }
             workspace.render.last_error = None;
             workspace.render.showing_proxy = frame.used_proxy;
-            // Keep text layer bounds matching the measured text.
-            workspace.state.apply_text_sizes(&frame.text_sizes);
             let Some(buffer) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, frame.bgra) else { return };
             let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
             // Free the previous frame's texture; otherwise every frame would stay in GPU memory.

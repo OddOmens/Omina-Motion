@@ -149,12 +149,36 @@ fn shown_properties(workspace: &Workspace, layer: &Layer) -> Vec<(PropertyPath, 
     properties
 }
 
+/// Every track row, top first: the tracks in use, empty picture rows above them (one, or as
+/// many as Add Track asked for) and an empty sound row below. An empty row is a track number
+/// nothing is on yet, so a clip dropped there starts a new track; the project only changes
+/// when one is.
+pub(crate) fn row_tracks(workspace: &Workspace) -> Vec<i32> {
+    let in_use = tracks::tracks(workspace.state.composition());
+    let top = in_use.first().copied().unwrap_or(MAIN_TRACK);
+    let bottom = in_use.last().copied().unwrap_or(MAIN_TRACK).min(MAIN_TRACK);
+    let picture_in_use = in_use.iter().filter(|&&track| track >= MAIN_TRACK).count();
+    let spare = workspace.ui.timeline.wanted_picture_tracks.saturating_sub(picture_in_use).max(1) as i32;
+    (1..=spare).rev().map(|above| top + above).chain(in_use).chain([bottom - 1]).collect()
+}
+
+/// Whether `track` is one of the empty rows `row_tracks` adds.
+fn is_spare(workspace: &Workspace, track: i32) -> bool {
+    !tracks::tracks(workspace.state.composition()).contains(&track)
+}
+
+/// Adds an empty picture track at the top of the timeline (Add Track).
+pub(crate) fn add_track(workspace: &mut Workspace) {
+    let shown = row_tracks(workspace).iter().filter(|&&track| track >= MAIN_TRACK).count();
+    workspace.ui.timeline.wanted_picture_tracks = shown + 1;
+}
+
 /// Every row top to bottom with its height: a track's own height plus room for the keyframe
 /// rows of any expanded clip on it.
 fn layout(workspace: &Workspace) -> Vec<(i32, f32)> {
     let composition = workspace.state.composition();
     let expanded = &workspace.ui.timeline.expanded_clips;
-    tracks::tracks(composition)
+    row_tracks(workspace)
         .into_iter()
         .map(|track| {
             let rows = composition
@@ -174,8 +198,8 @@ pub(super) fn first_row_height(workspace: &Workspace) -> f32 {
     layout(workspace).first().map_or(base_height(0, workspace.ui.settings.compact_timeline), |(_, height)| *height)
 }
 
-/// The track under window y position `y`. Above the top row is a new track above it; below
-/// the bottom row, a new track below it.
+/// The track under window y position `y` (an empty row's track number when over one). Above the
+/// top row is a new track above it; below the bottom row, a new track below it.
 pub fn track_at(workspace: &Workspace, y: f32) -> i32 {
     let rows = layout(workspace);
     let mut top = workspace.ui.timeline.rows.get().top;
@@ -285,6 +309,10 @@ pub fn toolbar(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
             crate::app_settings::update(|settings| settings.compact_timeline = compact);
             cx.notify();
         })))
+        .child(icon_button("tracks-add", IconName::Plus, "Add Track: an empty track at the top to drop clips into", false, cx.listener(|this, _, _, cx| {
+            add_track(this);
+            cx.notify();
+        })))
         .child(icon_button("snapping", IconName::Magnet, "Snapping (S)", state.snapping, cx.listener(|this, _, _, cx| {
             this.state.snapping = !this.state.snapping;
             cx.notify();
@@ -334,7 +362,7 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
     workspace.ui.timeline.media.free_retired(window, cx);
     let state = &workspace.state;
     let composition = state.composition();
-    let existing = tracks::tracks(composition);
+    let existing = row_tracks(workspace);
     let dragging = state.clip_drag_target();
     let hovered = workspace.ui.timeline.track_drop.filter(|_| cx.has_active_drag()).map(|(track, _)| track);
 
@@ -364,12 +392,35 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
                 .filter(|layer| layer.out_frame as f64 >= view.start && layer.in_frame as f64 <= view.end)
                 .flat_map(|layer| clip(layer, track, workspace, cx))
                 .collect();
+            // An empty row says what it's for, until something is headed into it.
+            let kept_empty = composition.empty_tracks.contains(&track) && clips.is_empty();
+            let spare = (is_spare(workspace, track) || kept_empty) && clips.is_empty();
+            let hint = spare.then(|| {
+                let text = if kept_empty {
+                    "Empty track"
+                } else if track < MAIN_TRACK {
+                    "Drop a clip or sound here for a new track"
+                } else {
+                    "Drop a clip here for a new track"
+                };
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .text_size(px(crate::theme::size::CAPTION_TEXT))
+                    .text_color(hsla(color::MUTED))
+                    .child(text)
+            });
             div()
                 .relative()
                 .h(px(height))
                 .border_b_1()
                 .border_color(hsla(color::BORDER))
                 .bg(hsla(if hovered == Some(track) { color::HOVER } else if track == MAIN_TRACK { color::PANEL } else { color::INSET }))
+                .when(spare, |row| row.opacity(0.75))
+                .children(hint)
                 .children(clips)
                 .into_any_element()
         })
@@ -392,6 +443,9 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
         .when(holding, |rows| rows.cursor(gpui_kit::CursorStyle::ClosedHand))
         .flex_1()
         .min_w_0()
+        // Clips that start before the time shown (scrolled or zoomed past) are cut off at the
+        // edge rather than drawn over the track headers.
+        .overflow_hidden()
         .flex()
         .flex_col()
         // Pressing empty track space moves the playhead (and scrubs while dragging).
@@ -458,7 +512,17 @@ pub fn rows(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspa
 pub fn headers(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let state = &workspace.state;
     let compact = workspace.ui.settings.compact_timeline;
-    let rows = layout(workspace).into_iter().enumerate().map(|(index, (track, height))| {
+    // Tracks in use are numbered from 01 at the top; empty rows get no number of their own.
+    let mut number = 0;
+    let rows = layout(workspace).into_iter().map(|(track, height)| {
+        let spare = is_spare(workspace, track);
+        let kept_empty = state.composition().empty_tracks.contains(&track);
+        let label = if spare {
+            "+".to_owned()
+        } else {
+            number += 1;
+            track_number(number - 1)
+        };
         div()
             .id(ElementId::Name(format!("track-header:{track}").into()))
             .h(px(height))
@@ -482,11 +546,19 @@ pub fn headers(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoE
                             .font_family(crate::theme::MONO_FONT)
                             .text_size(px(crate::theme::size::SMALL_TEXT))
                             .text_color(hsla(color::MUTED))
-                            .child(track_number(index))
+                            .child(label)
                             .test_support(),
                     )
-                    .child(track_toggle(state, Some(track), Switch::Visible, cx))
-                    .child(track_toggle(state, Some(track), Switch::Audio, cx)),
+                    .when(!spare && !kept_empty, |header| {
+                        header.child(track_toggle(state, Some(track), Switch::Visible, cx)).child(track_toggle(state, Some(track), Switch::Audio, cx))
+                    })
+                    // An empty track kept after its last clip was dragged away can be removed.
+                    .when(kept_empty, |header| {
+                        header.child(icon_button(ElementId::Name(format!("track-remove:{track}").into()), IconName::X, "Remove this empty track", false, cx.listener(move |this, _, _, cx| {
+                            this.state.remove_empty_track(track);
+                            cx.notify();
+                        })))
+                    }),
             )
             .test_support()
             .into_any_element()

@@ -99,18 +99,6 @@ impl EditorState {
         }
     }
 
-    /// Sets the font of those of `layers` that are text to `family`, keeping their weights.
-    /// Returns how many were text.
-    pub fn set_font_of(&mut self, layers: &[Id], family: &str) -> usize {
-        let mut count = 0;
-        for &layer in layers {
-            let Some(weight) = self.text_of(layer).map(|(_, style)| style.font_weight) else { continue };
-            self.set_font(layer, family, weight);
-            count += 1;
-        }
-        count
-    }
-
     pub fn rename_library_item(&mut self, id: LinkId, name: &str) {
         if self.libraries.rename(id, name) {
             self.library_changed();

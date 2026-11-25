@@ -137,6 +137,9 @@ pub(super) fn effect_body(layer: Id, effect: &studio_core::model::Effect, worksp
     if effect.name == "Apply LUT" {
         body = body.child(super::color_grade::lut_chooser(layer, effect_id, workspace, cx));
     }
+    if effect.name == "Curves" {
+        body = body.child(super::curves::editor(layer, effect_id, workspace, cx));
+    }
     if effect.name == "Keyer" {
         body = body.child(key_color_row(layer, effect_id, workspace, cx));
     }
@@ -266,5 +269,9 @@ pub(crate) fn reset_effect(workspace: &mut Workspace, layer: Id, effect: Id) {
     for (parameter, (_, default)) in definition.parameters.iter().enumerate() {
         let path = PropertyPath::Effect { effect, parameter };
         workspace.state.set_property_component(layer, path, 0, *default);
+    }
+    // Curves go back to straight lines.
+    if name == "Curves" {
+        workspace.state.set_effect_lut(layer, effect, Some(studio_core::model::LutSource::Curves(Default::default())));
     }
 }

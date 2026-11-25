@@ -61,6 +61,9 @@ pub struct TimelineUi {
     drag_anchor: Option<DragAnchor>,
     /// With the Cut tool, the clip under the pointer and the frame a click would cut it at.
     pub(crate) cut_hover: Option<(Id, i64)>,
+    /// How many picture tracks the Add Track button asked for, counting the ones in use. Empty
+    /// rows make up the difference at the top (always at least one), ready to drop clips into.
+    pub(crate) wanted_picture_tracks: usize,
 }
 
 /// Drag kinds that move something inside the timeline rather than carrying data.
@@ -366,6 +369,15 @@ fn navigator(workspace: &Workspace, cx: &mut Context<Workspace>) -> impl IntoEle
     )
 }
 
+/// Moves the time shown by `pixels` of sideways scrolling, keeping the zoom: scrolling one way
+/// shows later frames, the other earlier ones, and it stops at the start and end.
+fn pan_timeline(workspace: &mut Workspace, pixels: f32) {
+    let graph = workspace.ui.timeline.graph.get();
+    let view = workspace.state.view_range;
+    let frames = f64::from(pixels) / f64::from(graph.width.max(1.0)) * view.len();
+    workspace.state.set_view_range(FrameRange::new(view.start - frames, view.end - frames));
+}
+
 pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> impl IntoElement + use<> {
     let ui = &workspace.ui.timeline;
     let band = |height: f32| div().h(px(height)).flex_none().flex().border_b_1().border_color(hsla(color::HAIRLINE));
@@ -379,8 +391,18 @@ pub fn render(workspace: &Workspace, window: &mut Window, cx: &mut Context<Works
         .child(tracks::headers(workspace, cx))
         .child(div().w(px(EDGE_GUTTER)).flex_none())
         .child(ui.rows.probe())
-        // Alt + scroll zooms around the pointer.
+        // Alt + scroll zooms around the pointer. Scrolling sideways (a mouse's side wheel, a
+        // trackpad swipe, or Shift with the wheel) moves through time.
         .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+            let delta = event.delta.pixel_delta(px(16.0));
+            let (across, down) = (f32::from(delta.x), f32::from(delta.y));
+            let sideways = if event.modifiers.shift && across == 0.0 { down } else { across };
+            if !event.modifiers.alt && sideways != 0.0 && sideways.abs() >= down.abs() {
+                pan_timeline(this, sideways);
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
             if !event.modifiers.alt {
                 // Plain scrolling: rows coming into view are drawn (only those near the view
                 // are), once now and again when the new position has been measured.

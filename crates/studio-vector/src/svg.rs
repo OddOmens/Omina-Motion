@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 
 use studio_core::animation::Vec2;
-use studio_core::model::{BlendMode, Paint, Project, Rgba, TextAlign};
+use studio_core::model::{BlendMode, Paint, Project, Rgba, StrokeCap, StrokeJoin, StrokePosition, TextAlign};
 
 use crate::encode::data_url;
 use crate::geometry::Geometry;
@@ -434,7 +434,7 @@ impl Writer<'_> {
                 }
                 attributes
             }
-            PaintOp::Stroke { paint, area, width, round_joins, round_caps } => {
+            PaintOp::Stroke { paint, area, width, line } => {
                 let mut attributes = match paint {
                     Paint::Solid(rgba) => {
                         let opacity = if rgba.a < 0.999 { format!(" stroke-opacity=\"{}\"", num(f64::from(rgba.a))) } else { String::new() };
@@ -444,11 +444,15 @@ impl Writer<'_> {
                 };
                 let _ = write!(
                     attributes,
-                    " stroke-width=\"{}\" stroke-linejoin=\"{}\" stroke-linecap=\"{}\" stroke-miterlimit=\"4\"",
+                    " stroke-width=\"{}\" stroke-linejoin=\"{}\" stroke-linecap=\"{}\" stroke-miterlimit=\"{}\"",
                     num(f64::from(*width)),
-                    if *round_joins { "round" } else { "miter" },
-                    if *round_caps { "round" } else { "butt" }
+                    line_join(line.join),
+                    line_cap(line.cap),
+                    num(f64::from(line.miter_limit))
                 );
+                if let Some((dash, gap)) = line.dash {
+                    let _ = write!(attributes, " stroke-dasharray=\"{} {}\"", num(f64::from(dash)), num(f64::from(gap)));
+                }
                 if alone {
                     attributes.insert_str(0, " fill=\"none\"");
                 }
@@ -570,6 +574,24 @@ fn path_data(shapes: &[Geometry]) -> String {
     d
 }
 
+/// SVG's name for a stroke's corners.
+fn line_join(join: StrokeJoin) -> &'static str {
+    match join {
+        StrokeJoin::Miter => "miter",
+        StrokeJoin::Round => "round",
+        StrokeJoin::Bevel => "bevel",
+    }
+}
+
+/// SVG's name for a stroke's ends.
+fn line_cap(cap: StrokeCap) -> &'static str {
+    match cap {
+        StrokeCap::Butt => "butt",
+        StrokeCap::Round => "round",
+        StrokeCap::Square => "square",
+    }
+}
+
 /// Live text, when no outlines were available: lines as `<tspan>`s, placed from an estimated
 /// baseline, in the player's copy of the font.
 fn live_text(text: &LiveText) -> String {
@@ -583,12 +605,29 @@ fn live_text(text: &LiveText) -> String {
     if style.fill.is_none() && stroke.is_none() {
         return String::new();
     }
-    // Without a fill the letters are hollow, as Studio draws them; under a fill the outline is
-    // doubled, since the fill covers its inner half.
+    // Without a fill the letters are hollow, as Studio draws them. As `scene::text_paints`
+    // writes outlined text: an outside stroke under a fill is doubled under it; others are
+    // centered, over the fill when set so.
     let mut attributes = style.fill.map_or_else(|| " fill=\"none\"".to_owned(), fill_attributes);
     if let Some((rgba, width)) = stroke {
-        let width = f64::from(width) * if style.fill.is_some() { 2.0 } else { 1.0 };
-        let _ = write!(attributes, " stroke=\"{}\" stroke-width=\"{}\" stroke-linejoin=\"round\" paint-order=\"stroke\"", hex(rgba), num(width));
+        let options = style.stroke_options;
+        let outside_under_fill = style.fill.is_some() && options.position == StrokePosition::Outside;
+        let width = f64::from(width) * if outside_under_fill { 2.0 } else { 1.0 };
+        let _ = write!(
+            attributes,
+            " stroke=\"{}\" stroke-width=\"{}\" stroke-linejoin=\"{}\" stroke-linecap=\"{}\" stroke-miterlimit=\"{}\"",
+            hex(rgba),
+            num(width),
+            line_join(options.join),
+            line_cap(options.cap),
+            num(f64::from(options.miter_limit))
+        );
+        if options.dashed() {
+            let _ = write!(attributes, " stroke-dasharray=\"{} {}\"", num(f64::from(options.dash)), num(f64::from(options.gap)));
+        }
+        if !(options.over_fill && !outside_under_fill) {
+            attributes.push_str(" paint-order=\"stroke\"");
+        }
     }
     let lines: String = text
         .text

@@ -2,7 +2,7 @@
 //! selected clip. To grade the whole video, select an adjustment layer over it and grade that.
 //!
 //! Like the Properties tab, it is a list of cards, one per kind of correction (Basic
-//! Correction, a LUT, Color Wheels, Tone Curve, Levels, Vignette), each one catalog effect on
+//! Correction, a LUT, Color Wheels, Curves, Levels, Vignette), each one catalog effect on
 //! the clip. A correction the clip has shows its controls, with buttons in its heading to turn
 //! it off, reset it or remove it; the ones it has are listed first, in the order they apply.
 //! A correction it doesn't have yet is a folded card with a + to add it. The controls are
@@ -46,7 +46,7 @@ const SECTIONS: [Section; 6] = [
     Section { effect: "Basic Correction", title: "Basic Correction", key: "grade-basic", icon: IconName::Sun, about: "White balance, light and saturation" },
     Section { effect: "Apply LUT", title: "Creative Look (LUT)", key: "grade-lut", icon: IconName::Palette, about: "A film look, or your own .cube" },
     Section { effect: "Color Wheels", title: "Color Wheels", key: "grade-wheels", icon: IconName::CircleDot, about: "Tint shadows, midtones, highlights" },
-    Section { effect: "Tone Curve", title: "Curves", key: "grade-curve", icon: IconName::Spline, about: "Lift or lower bands of brightness" },
+    Section { effect: "Curves", title: "Curves", key: "grade-curve", icon: IconName::Spline, about: "Shape brightness and each color with points on a curve" },
     Section { effect: "Levels", title: "Levels", key: "grade-levels", icon: IconName::ChartColumn, about: "Set the black and white points" },
     Section { effect: "Vignette", title: "Vignette", key: "grade-vignette", icon: IconName::Aperture, about: "Darken the edges of the frame" },
 ];
@@ -264,6 +264,51 @@ fn lut_tile(index: usize, source: LutSource, chosen: bool, (layer, effect): (Id,
         .into_any_element()
 }
 
+/// What the LUT previews are made from (the current frame, or a chosen picture), with buttons to
+/// choose a picture or go back to the frame. Each preview shows before (left) and after (right).
+fn preview_picture_row(workspace: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let chosen = workspace.ui.settings.lut_preview_picture.clone();
+    let label = match &chosen {
+        Some(path) => format!("Previews: {}", path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())),
+        None => "Previews: the current frame".to_owned(),
+    };
+    let choose = Button::new("lut-preview-choose").ghost().small().label("Choose Picture…").on_click(cx.listener(|_, _, window, cx| {
+        let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use for LUT Previews".into()) });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            this.update(cx, |this, cx| {
+                set_preview_picture(this, Some(path));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }));
+    let back = chosen.is_some().then(|| {
+        Button::new("lut-preview-frame").ghost().small().label("Use Frame").on_click(cx.listener(|this, _, _, cx| {
+            set_preview_picture(this, None);
+            cx.notify();
+        }))
+    });
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .pt_1()
+        .child(div().flex_1().min_w_0().truncate().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(label))
+        .child(choose)
+        .children(back)
+        .into_any_element()
+}
+
+/// Makes the LUT previews from `picture` (or the current frame, with `None`), remembered in
+/// Settings for next time.
+fn set_preview_picture(workspace: &mut Workspace, picture: Option<std::path::PathBuf>) {
+    workspace.ui.settings.lut_preview_picture = picture.clone();
+    crate::app_settings::update(|settings| settings.lut_preview_picture = picture);
+}
+
 /// The Color panel's LUT: the chosen one's picture and name, and a Browse button that opens
 /// every LUT as a picture of the current frame, grouped as the looks are, then the imported
 /// ones and Import.
@@ -292,6 +337,7 @@ fn lut_browser(layer: Id, effect: Id, workspace: &Workspace, cx: &mut Context<Wo
     if !open {
         return browser.into_any_element();
     }
+    browser = browser.child(preview_picture_row(workspace, cx));
     let group_heading = |title: &'static str| div().pt_1().text_size(px(size::SMALL_TEXT)).text_color(hsla(color::MUTED)).child(title);
     let grid = || div().grid().grid_cols(3).gap_x_1p5().gap_y_1();
     let mut index = 0;
@@ -640,6 +686,7 @@ fn controls(section: &Section, layer: Id, effect: Id, workspace: &Workspace, cx:
         "Basic Correction" => basic_correction(layer, effect, workspace, cx),
         "Apply LUT" => div().child(lut_browser(layer, effect, workspace, cx)).children(sliders(&|_| Track::Plain, cx)),
         "Color Wheels" => div().child(wheels(layer, effect, workspace, cx)),
+        "Curves" => div().child(super::curves::editor(layer, effect, workspace, cx)).children(sliders(&|_| Track::Plain, cx)),
         // Gamma is the one Levels setting that isn't a black or white point.
         "Levels" => div().children(sliders(&|parameter| if parameter == 2 { Track::Plain } else { Track::Light }, cx)),
         _ => div().children(sliders(&|_| Track::Plain, cx)),

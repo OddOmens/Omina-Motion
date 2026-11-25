@@ -721,6 +721,10 @@ pub struct UiState {
     pub recovery_offered: bool,
     /// When the last version of the project was kept (see `versions`).
     pub last_version_at: Option<std::time::Instant>,
+    /// When the project was last saved or auto-saved (see `auto_save`), and whether the last
+    /// auto-save failed (said once, until it works again).
+    pub last_auto_save_at: Option<std::time::Instant>,
+    pub auto_save_failing: bool,
     /// Render & Play is rendering the work area, to play it once every frame is ready.
     pub render_then_play: bool,
     /// A library save that failed, to try again (with whether to back up first).
@@ -835,6 +839,10 @@ pub struct UiState {
     pub lut_previews: panels::lut_previews::LutPreviews,
     /// The Apply LUT effect whose LUT browser is open in the Color panel.
     pub lut_browser: Option<Id>,
+    /// Which curve the Curves editor shows (brightness or one channel), and where its graph
+    /// was drawn, for placing points under the pointer.
+    pub curve_channel: studio_core::model::CurveChannel,
+    pub curve_bounds: panels::chrome::MeasuredBounds,
     /// The LUT under the pointer in the Effects panel, which the viewer shows on the picture
     /// until the pointer leaves it (see `viewer::lut_preview`).
     pub lut_hover: Option<studio_core::model::LutSource>,
@@ -1124,6 +1132,8 @@ impl Workspace {
         }
         // Iris's recipes' shortcuts work from the start, before her chat is ever opened.
         cx.defer_in(window, |this, _, cx| panels::assistant_automation::start(this, cx));
+        // Projects double-clicked in Finder while Motion is running open as they arrive.
+        crate::opened_files::watch(window, cx, crate::project_files::open_handed_over);
         // Pick up where the last session left off, and keep a recovery copy of unsaved work.
         // (Not in headless tests, which start fresh and must not touch real settings.)
         #[cfg(not(test))]
@@ -1272,6 +1282,8 @@ impl Workspace {
                 recovery_failing: false,
                 recovery_offered: false,
                 last_version_at: None,
+                last_auto_save_at: None,
+                auto_save_failing: false,
                 render_then_play: false,
                 library_save_failed: None,
                 mockups: Default::default(),
@@ -1325,6 +1337,8 @@ impl Workspace {
                 user_luts: crate::lut_library::list(),
                 lut_previews: Default::default(),
                 lut_browser: None,
+                curve_channel: Default::default(),
+                curve_bounds: Default::default(),
                 lut_hover: None,
                 quit_after_export: false,
             },

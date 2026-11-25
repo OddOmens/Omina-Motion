@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use studio_core::animation::{Animated, CubicBezier, Easing, Lerp, Vec2};
-use studio_core::model::{BlendMode, Composition, Id, Layer, LayerContent, MaskMode, Paint, Project, Rgba, ShapeKind, TextStyle, TrackMatte};
+use studio_core::model::{BlendMode, Composition, Id, Layer, LayerContent, MaskMode, Paint, Project, Rgba, ShapeKind, StrokeCap, StrokeJoin, StrokePosition, TextStyle, TrackMatte};
 use studio_core::text_animation::{self, TextMotion, TextUnit, UnitPose};
 use studio_core::time::FrameRate;
 
@@ -244,7 +244,24 @@ pub(crate) enum Matte {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PaintOp {
     Fill { paint: Paint, area: Vec2 },
-    Stroke { paint: Paint, area: Vec2, width: f32, round_joins: bool, round_caps: bool },
+    Stroke { paint: Paint, area: Vec2, width: f32, line: LineStyle },
+}
+
+/// How a stroke's corners, ends and dashes are drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LineStyle {
+    pub join: StrokeJoin,
+    pub cap: StrokeCap,
+    pub miter_limit: f32,
+    /// Dash and gap lengths, for a dashed line.
+    pub dash: Option<(f32, f32)>,
+}
+
+impl LineStyle {
+    /// Solid, with the given corners and ends and the usual miter limit.
+    pub fn solid(join: StrokeJoin, cap: StrokeCap) -> Self {
+        Self { join, cap, miter_limit: 4.0, dash: None }
+    }
 }
 
 /// Outlines drawn with paints, and groups inside it. A group has either outlines and paints
@@ -566,7 +583,8 @@ impl Builder<'_> {
                 if let Some(stroke) = style.stroke.filter(|stroke| stroke.width.is_finite() && stroke.width > 0.0) {
                     // Drawn shapes get round outer corners from their distance field; pen paths
                     // are stroked with mitred joins, and round ends when open.
-                    paints.push(PaintOp::Stroke { paint: stroke.paint, area: layer.size, width: stroke.width, round_joins: !pen, round_caps: pen && open });
+                    let line = LineStyle::solid(if pen { StrokeJoin::Miter } else { StrokeJoin::Round }, if pen && open { StrokeCap::Round } else { StrokeCap::Butt });
+                    paints.push(PaintOp::Stroke { paint: stroke.paint, area: layer.size, width: stroke.width, line });
                 }
                 if paints.is_empty() {
                     return None;
@@ -631,6 +649,9 @@ impl Builder<'_> {
         let name = quoted(&layer.name);
         if layer.text_path.is_some() {
             self.notes.add("Text set along a path was exported in a straight line", name.clone());
+        }
+        if !text_stroke_is_exact(style) {
+            self.notes.add("Inside text strokes, and outside ones over the fill, were written centered on the letters’ edges", name.clone());
         }
         let animated = layer.animation.text_in.is_some() || layer.animation.text_out.is_some();
         let Some(outline) = self.resources.text(text, style) else {
@@ -725,22 +746,34 @@ impl Builder<'_> {
     }
 }
 
-/// A text style's paints, bottom first: the outline under the fill. Studio draws the outline
-/// outside the letters only. Under a fill that is matched by a stroke twice as wide, whose
-/// inner half the fill covers. Text with an outline and no fill is hollow, as Studio draws it:
-/// neither format can stroke only the outside, so the outline is centred on the letters' edges
-/// at Studio's width.
+/// A text style's paints, bottom first. Neither format can keep a stroke to one side of the
+/// letters' edges, so: an outside stroke under a fill is written twice as wide under it, which
+/// the fill's covering of its inner half makes look the same; any other stroke is centered on
+/// the edges at its width, under or over the fill as set. Text with a stroke and no fill is
+/// hollow, as Studio draws it.
 fn text_paints(style: &TextStyle, area: Vec2) -> Vec<PaintOp> {
     let stroke = style.stroke.filter(|(_, width)| width.is_finite() && *width > 0.0);
-    let mut paints = Vec::new();
-    if let Some((color, width)) = stroke {
-        let width = if style.fill.is_some() { width * 2.0 } else { width };
-        paints.push(PaintOp::Stroke { paint: Paint::Solid(color), area, width, round_joins: true, round_caps: true });
-    }
-    if let Some(color) = style.fill {
-        paints.push(PaintOp::Fill { paint: Paint::Solid(color), area });
-    }
-    paints
+    let options = style.stroke_options;
+    let outside_under_fill = style.fill.is_some() && options.position == StrokePosition::Outside;
+    let stroke_paint = stroke.map(|(color, width)| {
+        let width = if outside_under_fill { width * 2.0 } else { width };
+        let dash = options.dashed().then_some((options.dash, options.gap));
+        let line = LineStyle { join: options.join, cap: options.cap, miter_limit: options.miter_limit, dash };
+        PaintOp::Stroke { paint: Paint::Solid(color), area, width, line }
+    });
+    let fill_paint = style.fill.map(|color| PaintOp::Fill { paint: Paint::Solid(color), area });
+    let stroke_on_top = options.over_fill && !outside_under_fill;
+    let (bottom, top) = if stroke_on_top { (fill_paint, stroke_paint) } else { (stroke_paint, fill_paint) };
+    bottom.into_iter().chain(top).collect()
+}
+
+/// Whether Studio's text stroke can be written exactly: SVG and Lottie only center strokes on
+/// the outline, which matches an outside stroke under a fill, a centered one, and any stroke on
+/// hollow text, but not an inside one or an outside one over a fill.
+pub(crate) fn text_stroke_is_exact(style: &TextStyle) -> bool {
+    let Some(_) = style.stroke else { return true };
+    let options = style.stroke_options;
+    style.fill.is_none() || options.position == StrokePosition::Center || (options.position == StrokePosition::Outside && !options.over_fill)
 }
 
 /// The middle of piece `index` of `pieces` (byte ranges of the text), as the renderer turns and

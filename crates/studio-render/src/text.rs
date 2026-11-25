@@ -1,13 +1,15 @@
 //! Text layers: shaping and layout with cosmic-text (real fonts, weight, size, leading,
 //! tracking and alignment), rasterized on the CPU into a straight-alpha sRGB image.
-//! Stroke is drawn around the glyphs from a distance map, so it is evenly thick.
+//! The stroke follows the letters' own outlines (with its position, corners and dashes);
+//! color glyphs (emoji), which have none, get an even outline from a distance map instead.
 
 use std::collections::HashMap;
 
 use cosmic_text::{Attrs, Buffer, Command, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight};
 use studio_core::animation::Vec2;
-use studio_core::model::{Rgba, TextAlign, TextStyle};
+use studio_core::model::{Rgba, StrokeCap, StrokeJoin, StrokePosition, TextAlign, TextStrokeOptions, TextStyle};
 use studio_core::path::{PathPoint, ShapePath};
+use tiny_skia::{FillRule, PathBuilder, Pixmap, Transform};
 
 /// A rasterized text layer, ready to upload as a texture.
 pub struct TextImage {
@@ -89,24 +91,50 @@ pub struct GlyphPath {
     pub contours: Vec<ShapePath>,
 }
 
-/// A glyph's outline commands (y up, from its origin) as closed contours in the text's pixels
-/// (y down), placed at `origin`. Quadratic curves become the equivalent cubic ones.
-/// Whether the face at `index` of a font file is a variable font (has an "fvar" table). A
-/// collection ("ttcf") is looked up at that face's own table directory.
-fn is_variable(data: &[u8], index: u32) -> bool {
-    let read_u32 = |at: usize| data.get(at..at + 4).map(|bytes| u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-    let start = if data.get(..4) == Some(b"ttcf".as_slice()) {
-        match read_u32(12 + index as usize * 4) {
-            Some(offset) => offset as usize,
-            None => return false,
-        }
-    } else {
-        0
-    };
-    let tables = data.get(start + 4..start + 6).map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]) as usize);
-    (0..tables).any(|table| data.get(start + 12 + table * 16..start + 16 + table * 16) == Some(b"fvar".as_slice()))
+/// Whether the face at `index` of a font file is a variable font whose weight axis reaches
+/// `weight`, judged as cosmic-text judges it when choosing a face. (Some older Apple fonts
+/// measure that axis on a scale of their own, so their range rarely covers 100 to 900.)
+fn weight_axis_covers(data: &[u8], index: u32, weight: u16) -> bool {
+    use cosmic_text::skrifa::{MetadataProvider, Tag};
+    let Ok(font) = cosmic_text::skrifa::FontRef::from_index(data, index) else { return false };
+    font.axes().get_by_tag(Tag::new(b"wght")).is_some_and(|axis| (axis.min_value()..=axis.max_value()).contains(&f32::from(weight)))
 }
 
+/// How many characters the face at `index` of a font file has shapes for.
+fn characters_covered(data: &[u8], index: u32) -> usize {
+    use cosmic_text::skrifa::MetadataProvider;
+    cosmic_text::skrifa::FontRef::from_index(data, index).map_or(0, |font| font.charmap().mappings().count())
+}
+
+/// Loads the installed fonts, leaving out faces that would hide a family's real face. Some
+/// families install an ornament face under the same name, weight and style as their regular
+/// face (Hoefler Text Ornaments, for one). A layout can only ever pick one face for a given
+/// family, weight and style, and if it picks the ornaments, ordinary text comes out as
+/// ornaments and the system font. So of faces that are asked for the same way, only the one
+/// covering the most characters is kept. (Omina Edit loads its fonts the same way.)
+fn load_fonts() -> FontSystem {
+    let mut fonts = FontSystem::new();
+    let db = fonts.db_mut();
+    // Faces grouped by how a layout asks for them: family, weight, style and width.
+    let mut alike: HashMap<(String, u16, String, u16), Vec<cosmic_text::fontdb::ID>> = HashMap::new();
+    for face in db.faces() {
+        let Some((family, _)) = face.families.first() else { continue };
+        alike.entry((family.clone(), face.weight.0, format!("{:?}", face.style), face.stretch.to_number())).or_default().push(face.id);
+    }
+    for ids in alike.into_values().filter(|ids| ids.len() > 1) {
+        let coverage: Vec<usize> = ids.iter().map(|id| db.with_face_data(*id, characters_covered).unwrap_or(0)).collect();
+        let fullest = (0..ids.len()).max_by_key(|at| coverage[*at]).unwrap_or(0);
+        for (at, id) in ids.iter().enumerate() {
+            if at != fullest {
+                db.remove_face(*id);
+            }
+        }
+    }
+    fonts
+}
+
+/// A glyph's outline commands (y up, from its origin) as closed contours in the text's pixels
+/// (y down), placed at `origin`. Quadratic curves become the equivalent cubic ones.
 fn contours(commands: &[Command], origin: Vec2) -> Vec<ShapePath> {
     let place = |x: f32, y: f32| Vec2::new(origin.x + x, origin.y - y);
     let mut contours: Vec<ShapePath> = Vec::new();
@@ -167,11 +195,21 @@ impl Default for TextRenderer {
 impl TextRenderer {
     /// Loads the system's fonts. This takes a moment, so it is done once.
     pub fn new() -> Self {
-        Self { fonts: FontSystem::new(), glyphs: SwashCache::new(), drawn_weights: HashMap::new() }
+        Self { fonts: load_fonts(), glyphs: SwashCache::new(), drawn_weights: HashMap::new() }
+    }
+
+    /// The weights (100 to 900) the installed family `family` comes in, lightest first. A
+    /// variable font reports only the weights of its named faces. Empty if the family isn't
+    /// installed.
+    pub fn weights(&self, family: &str) -> Vec<u16> {
+        let mut weights: Vec<u16> = self.fonts.db().faces().filter(|face| face.families.iter().any(|(name, _)| name == family)).map(|face| face.weight.0).collect();
+        weights.sort_unstable();
+        weights.dedup();
+        weights
     }
 
     /// The weight `family` is drawn at when `wanted` is asked for: `wanted` itself when the family
-    /// has it (or is a variable font, which can make any weight in its range), otherwise the
+    /// has it (or is a variable font whose weight axis reaches it), otherwise the
     /// family's nearest weight, the heavier one on a tie. Without this, asking for a weight a
     /// family doesn't come in (bold, in a font made only in regular) would make the layout pass
     /// the family over and draw the text in the system font instead.
@@ -183,7 +221,7 @@ impl TextRenderer {
         }
         let db = self.fonts.db();
         let faces: Vec<_> = db.faces().filter(|face| face.families.iter().any(|(name, _)| name == family)).collect();
-        let weight = if faces.is_empty() || faces.iter().any(|face| face.weight.0 == wanted) || faces.iter().any(|face| db.with_face_data(face.id, is_variable) == Some(true)) {
+        let weight = if faces.is_empty() || faces.iter().any(|face| face.weight.0 == wanted) || faces.iter().any(|face| db.with_face_data(face.id, |data, index| weight_axis_covers(data, index, wanted)) == Some(true)) {
             wanted
         } else {
             faces.iter().map(|face| face.weight.0).min_by_key(|weight| (weight.abs_diff(wanted), std::cmp::Reverse(*weight))).unwrap_or(wanted)
@@ -321,10 +359,16 @@ impl TextRenderer {
         let mut highlighted = vec![0.0_f32; if highlight.is_some() { width * height } else { 0 }];
         // Color glyphs (emoji) keep their own colors: kept apart, drawn over the rest at the end.
         let mut colored: Vec<[u8; 4]> = Vec::new();
+        // The letters' outlines, gathered only when there is a stroke to draw along them.
+        let mut outline = PathBuilder::new();
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let lit = highlight.as_ref().is_some_and(|(range, _)| range.contains(&glyph.start));
                 let physical = glyph.physical((pad as f32, pad as f32 + run.line_y), 1.0);
+                if stroke.is_some() && let Some(commands) = self.glyphs.get_outline_commands(&mut self.fonts, physical.cache_key) {
+                    let origin = Vec2::new(pad as f32 + glyph.x + glyph.font_size * glyph.x_offset, pad as f32 + run.line_y + glyph.y - glyph.font_size * glyph.y_offset);
+                    add_glyph_outline(&mut outline, commands, origin);
+                }
                 let Some(image) = self.glyphs.get_image(&mut self.fonts, physical.cache_key).as_ref() else { continue };
                 let (left, top) = (physical.x + image.placement.left, physical.y - image.placement.top);
                 let (glyph_w, glyph_h) = (image.placement.width as i32, image.placement.height as i32);
@@ -360,20 +404,37 @@ impl TextRenderer {
             }
         }
 
-        // A stroke goes around color glyphs too (a sticker outline).
-        let shape: Vec<f32> = if colored.is_empty() { coverage.clone() } else { coverage.iter().zip(&colored).map(|(&c, pixel)| c.max(f32::from(pixel[3]) / 255.0)).collect() };
-        let mut stroke_coverage = stroke.map(|(_, stroke_width)| stroke_mask(&shape, width, height, stroke_width.max(0.0)));
-        // Without a fill, the stroke is only the ring around each letter, so outlined words are
-        // hollow; with one, the fill covers the stroke's inside anyway.
-        if style.fill.is_none()
-            && let Some(mask) = stroke_coverage.as_mut()
-        {
-            for (ring, &inside) in mask.iter_mut().zip(&shape) {
-                *ring *= 1.0 - inside;
+        let options = style.stroke_options;
+        let stroke_coverage = stroke.map(|(_, stroke_width)| {
+            let stroke_width = stroke_width.max(0.0);
+            let mut mask = match outline.finish() {
+                Some(path) => outline_stroke(&path, width, height, stroke_width, &options, scale),
+                None => vec![0.0; width * height],
+            };
+            // Color glyphs have no outline to follow; they get an even ring instead, as far out
+            // as the stroke reaches (a sticker outline).
+            if !colored.is_empty() {
+                let emoji: Vec<f32> = colored.iter().map(|pixel| f32::from(pixel[3]) / 255.0).collect();
+                let reach = match options.position {
+                    StrokePosition::Inside => 0.0,
+                    StrokePosition::Center => stroke_width * 0.5,
+                    StrokePosition::Outside => stroke_width,
+                };
+                for (cover, ring) in mask.iter_mut().zip(stroke_mask(&emoji, width, height, reach)) {
+                    *cover = cover.max(ring);
+                }
             }
-        }
+            // An outside stroke under an opaque fill also runs under the letters, so no seam
+            // shows where the soft edges of the two meet.
+            if options.position == StrokePosition::Outside && !options.over_fill && style.fill.is_some_and(|fill| fill.a >= 0.999) {
+                for (cover, &letter) in mask.iter_mut().zip(&coverage) {
+                    *cover = cover.max(letter);
+                }
+            }
+            mask
+        });
         let lit = highlight.map(|(_, color)| (highlighted.as_slice(), color));
-        let mut pixels = paint(&coverage, stroke_coverage.as_deref(), style.fill, stroke.map(|(color, _)| color), lit);
+        let mut pixels = paint(&coverage, stroke_coverage.as_deref(), style.fill, stroke.map(|(color, _)| color), options.over_fill, lit);
         over(&mut pixels, &colored);
         TextImage { width: width as u32, height: height as u32, pixels, size, scale }
     }
@@ -385,11 +446,78 @@ impl TextRenderer {
         let (buffer, size) = self.layout(text, style, scale);
         // Leave room around the glyphs for the stroke.
         let stroke = style.stroke.map(|(color, width)| (color, width * scale));
-        let pad = stroke.map_or(0.0, |(_, width)| width).ceil() as i32 + 1;
+        let pad = stroke.map_or(0.0, |(_, width)| style.stroke_options.reach(width)).ceil() as i32 + 1;
         let width = (size.x * scale).ceil() as i32 + pad * 2;
         let height = (size.y * scale).ceil() as i32 + pad * 2;
         (buffer, size, width.max(1) as usize, height.max(1) as usize, pad, stroke)
     }
+}
+
+/// Adds one glyph's outline to `path`, with the glyph's origin (on its baseline) at `origin`.
+/// Font outlines point up; the image's rows go down, so the outline is flipped.
+fn add_glyph_outline(path: &mut PathBuilder, commands: &[Command], origin: Vec2) {
+    let at = |x: f32, y: f32| (origin.x + x, origin.y - y);
+    for command in commands {
+        match *command {
+            Command::MoveTo(to) => {
+                let (x, y) = at(to.x, to.y);
+                path.move_to(x, y);
+            }
+            Command::LineTo(to) => {
+                let (x, y) = at(to.x, to.y);
+                path.line_to(x, y);
+            }
+            Command::QuadTo(control, to) => {
+                let ((cx, cy), (x, y)) = (at(control.x, control.y), at(to.x, to.y));
+                path.quad_to(cx, cy, x, y);
+            }
+            Command::CurveTo(first, second, to) => {
+                let ((ax, ay), (bx, by), (x, y)) = (at(first.x, first.y), at(second.x, second.y), at(to.x, to.y));
+                path.cubic_to(ax, ay, bx, by, x, y);
+            }
+            Command::Close => path.close(),
+        }
+    }
+}
+
+/// Coverage (0-1) of a stroke `stroke_width` pixels wide along the letters' `outline`, in a
+/// `width` × `height` image: centered on the outline, or kept to its inside or outside, with
+/// the options' corners, ends and dashes (dash lengths are multiplied by `scale`).
+fn outline_stroke(outline: &tiny_skia::Path, width: usize, height: usize, stroke_width: f32, options: &TextStrokeOptions, scale: f32) -> Vec<f32> {
+    let Some(mut pixmap) = Pixmap::new(width as u32, height as u32) else { return vec![0.0; width * height] };
+    let one_sided = options.position != StrokePosition::Center;
+    let dash = options.dashed().then(|| tiny_skia::StrokeDash::new(vec![options.dash * scale, options.gap * scale], 0.0)).flatten();
+    let stroke = tiny_skia::Stroke {
+        // One-sided strokes are drawn twice as wide, then cut to one side of the outline.
+        width: if one_sided { stroke_width * 2.0 } else { stroke_width },
+        miter_limit: options.miter_limit.max(1.0),
+        line_cap: match options.cap {
+            StrokeCap::Butt => tiny_skia::LineCap::Butt,
+            StrokeCap::Round => tiny_skia::LineCap::Round,
+            StrokeCap::Square => tiny_skia::LineCap::Square,
+        },
+        line_join: match options.join {
+            StrokeJoin::Miter => tiny_skia::LineJoin::Miter,
+            StrokeJoin::Round => tiny_skia::LineJoin::Round,
+            StrokeJoin::Bevel => tiny_skia::LineJoin::Bevel,
+        },
+        dash,
+    };
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(255, 255, 255, 255);
+    paint.anti_alias = true;
+    let side = one_sided
+        .then(|| {
+            let mut mask = tiny_skia::Mask::new(width as u32, height as u32)?;
+            mask.fill_path(outline, FillRule::Winding, true, Transform::identity());
+            if options.position == StrokePosition::Outside {
+                mask.invert();
+            }
+            Some(mask)
+        })
+        .flatten();
+    pixmap.stroke_path(outline, &paint, &stroke, Transform::identity(), side.as_ref());
+    pixmap.data().chunks_exact(4).map(|pixel| f32::from(pixel[3]) / 255.0).collect()
 }
 
 /// Coverage of a stroke `radius` pixels wide around `coverage`, from a two-pass chamfer distance map.
@@ -454,8 +582,9 @@ fn over(pixels: &mut [u8], top: &[[u8; 4]]) {
     }
 }
 
-/// Fill over stroke, as straight sRGB RGBA bytes.
-fn paint(fill_coverage: &[f32], stroke_coverage: Option<&[f32]>, fill: Option<Rgba>, stroke: Option<Rgba>, highlight: Option<(&[f32], Rgba)>) -> Vec<u8> {
+/// The fill and stroke together, the fill over the stroke unless `stroke_over_fill`, as
+/// straight sRGB RGBA bytes.
+fn paint(fill_coverage: &[f32], stroke_coverage: Option<&[f32]>, fill: Option<Rgba>, stroke: Option<Rgba>, stroke_over_fill: bool, highlight: Option<(&[f32], Rgba)>) -> Vec<u8> {
     let mut pixels = Vec::with_capacity(fill_coverage.len() * 4);
     for (index, &coverage) in fill_coverage.iter().enumerate() {
         // Highlighted glyphs take the highlight's color instead of the fill.
@@ -468,14 +597,15 @@ fn paint(fill_coverage: &[f32], stroke_coverage: Option<&[f32]>, fill: Option<Rg
             (Some(color), Some(mask)) => color.a * mask[index],
             _ => 0.0,
         };
-        let alpha = fill_alpha + stroke_alpha * (1.0 - fill_alpha);
+        let ((top, top_alpha), (bottom, bottom_alpha)) = if stroke_over_fill { ((stroke, stroke_alpha), (fill, fill_alpha)) } else { ((fill, fill_alpha), (stroke, stroke_alpha)) };
+        let alpha = top_alpha + bottom_alpha * (1.0 - top_alpha);
         let channel = |pick: fn(&Rgba) -> f32| {
             if alpha <= 0.0 {
                 return 0.0;
             }
-            let fill_part = fill.map_or(0.0, |c| pick(&c)) * fill_alpha;
-            let stroke_part = stroke.map_or(0.0, |c| pick(&c)) * stroke_alpha * (1.0 - fill_alpha);
-            (fill_part + stroke_part) / alpha
+            let top_part = top.map_or(0.0, |c| pick(&c)) * top_alpha;
+            let bottom_part = bottom.map_or(0.0, |c| pick(&c)) * bottom_alpha * (1.0 - top_alpha);
+            (top_part + bottom_part) / alpha
         };
         let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
         pixels.extend_from_slice(&[byte(channel(|c| c.r)), byte(channel(|c| c.g)), byte(channel(|c| c.b)), byte(alpha)]);
@@ -512,6 +642,37 @@ mod tests {
         let Some(family) = single else { return };
         assert_eq!(text.nearest_weight(&family, 700), 400);
         assert!(in_family(&mut text, &family, 700), "bold {family} is drawn in {family}, not the system font");
+    }
+
+    #[test]
+    fn every_installed_font_with_the_letters_draws_them_itself() {
+        // Fonts with quirks this covers, where installed: Skia, an old Apple variable font with
+        // a weight scale of its own, and Hoefler Text, whose ornament face shares its name.
+        let mut text = TextRenderer::new();
+        let mut families: Vec<String> = text.fonts.db().faces().filter_map(|face| face.families.first().map(|(name, _)| name.clone())).collect();
+        families.sort();
+        families.dedup();
+        let mut wrong = Vec::new();
+        for family in families {
+            let has_letters = text.fonts.db().faces().filter(|face| face.families.iter().any(|(name, _)| *name == family)).any(|face| {
+                text.fonts.db().with_face_data(face.id, |data, index| {
+                    use cosmic_text::skrifa::MetadataProvider;
+                    cosmic_text::skrifa::FontRef::from_index(data, index).is_ok_and(|font| "Tide".chars().all(|letter| font.charmap().map(letter).is_some()))
+                }) == Some(true)
+            });
+            if !has_letters {
+                continue;
+            }
+            for weight in [400, 700] {
+                let style = TextStyle { font_family: family.clone(), font_weight: weight, ..TextStyle::default() };
+                let (buffer, _) = text.layout("Tide", &style, 1.0);
+                let font_ids: Vec<_> = buffer.layout_runs().flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_id).collect::<Vec<_>>()).collect();
+                if let Some(other) = font_ids.iter().filter_map(|id| text.fonts.db().face(*id)).find(|face| !face.families.iter().any(|(name, _)| *name == family)) {
+                    wrong.push(format!("{family} at {weight}: drawn in {}", other.post_script_name));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     #[test]
@@ -600,6 +761,58 @@ mod tests {
         let ink = |image: &TextImage| image.pixels.chunks(4).filter(|px| px[3] > 128).count();
         assert!(ink(&outlined) > 100, "the ring is drawn");
         assert!(ink(&outlined) < ink(&filled) * 3 / 4, "but not the letter inside it: {} vs {}", ink(&outlined), ink(&filled));
+    }
+
+    /// A heavy black "O" with a red stroke `width` wide and `options`.
+    fn outlined_o(width: f32, options: TextStrokeOptions) -> TextStyle {
+        TextStyle { font_size: 120.0, line_height: 144.0, fill: Some(Rgba::hex(0x000000)), stroke: Some((Rgba::hex(0xff0000), width)), stroke_options: options, ..style() }
+    }
+
+    /// Counts solid pixels that are mostly red, and mostly black.
+    fn red_and_black(image: &TextImage) -> (usize, usize) {
+        let red = image.pixels.chunks(4).filter(|px| px[3] > 200 && px[0] > 200 && px[1] < 60).count();
+        let black = image.pixels.chunks(4).filter(|px| px[3] > 200 && px[0] < 40).count();
+        (red, black)
+    }
+
+    #[test]
+    fn an_inside_stroke_stays_within_the_letters() {
+        let mut text = TextRenderer::new();
+        let plain = text.rasterize("O", &TextStyle { stroke: None, ..outlined_o(0.0, TextStrokeOptions::default()) }, 1.0, 8192);
+        let inside = text.rasterize("O", &outlined_o(6.0, TextStrokeOptions { position: StrokePosition::Inside, over_fill: true, ..TextStrokeOptions::default() }), 1.0, 8192);
+        let ink = |image: &TextImage| image.pixels.chunks(4).filter(|px| px[3] > 128).count();
+        let (red, _) = red_and_black(&inside);
+        assert!(red > 300, "the stroke is drawn ({red} red pixels)");
+        let (plain_ink, inside_ink) = (ink(&plain), ink(&inside));
+        assert!(inside_ink.abs_diff(plain_ink) * 20 < plain_ink, "the letters keep their size (give or take their soft edges): {inside_ink} vs {plain_ink}");
+    }
+
+    #[test]
+    fn a_stroke_over_the_fill_covers_part_of_the_letters() {
+        let mut text = TextRenderer::new();
+        let centered = TextStrokeOptions { position: StrokePosition::Center, ..TextStrokeOptions::default() };
+        let (under_red, under_black) = red_and_black(&text.rasterize("O", &outlined_o(8.0, centered), 1.0, 8192));
+        let (over_red, over_black) = red_and_black(&text.rasterize("O", &outlined_o(8.0, TextStrokeOptions { over_fill: true, ..centered }), 1.0, 8192));
+        assert!(over_red > under_red + 100, "more of the stroke shows: {over_red} vs {under_red}");
+        assert!(over_black + 100 < under_black, "less of the fill shows: {over_black} vs {under_black}");
+    }
+
+    #[test]
+    fn a_dashed_stroke_leaves_gaps() {
+        let mut text = TextRenderer::new();
+        let hollow = |options| TextStyle { fill: None, ..outlined_o(4.0, options) };
+        let (solid, _) = red_and_black(&text.rasterize("O", &hollow(TextStrokeOptions::default()), 1.0, 8192));
+        let (dashed, _) = red_and_black(&text.rasterize("O", &hollow(TextStrokeOptions { dash: 6.0, gap: 6.0, ..TextStrokeOptions::default() }), 1.0, 8192));
+        assert!(dashed * 10 < solid * 7, "gaps leave out part of the line: {dashed} vs {solid}");
+    }
+
+    #[test]
+    fn sharp_corners_reach_further_than_round_ones() {
+        let mut text = TextRenderer::new();
+        let hollow = |join| TextStyle { fill: None, ..outlined_o(10.0, TextStrokeOptions { join, ..TextStrokeOptions::default() }) };
+        let (round, _) = red_and_black(&text.rasterize("V", &hollow(StrokeJoin::Round), 1.0, 8192));
+        let (miter, _) = red_and_black(&text.rasterize("V", &hollow(StrokeJoin::Miter), 1.0, 8192));
+        assert!(miter > round, "the V's points stick out: {miter} vs {round}");
     }
 
     #[test]

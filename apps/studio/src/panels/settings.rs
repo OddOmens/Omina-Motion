@@ -330,6 +330,12 @@ fn general(shown: &SharedShown, workspace: &WeakEntity<Workspace>) -> gpui_kit::
             setting("Every", "How often a version is kept while a project changes.", menu("general-versions-every", [5, 10, 15, 30].iter().map(|&minutes| (format!("{minutes} minutes"), minutes)).collect(), now.versions.every_minutes, shown, workspace, |settings, minutes| settings.versions.every_minutes = minutes)),
             setting("Keep", "How many each project keeps. The oldest go first.", menu("general-versions-count", [10, 30, 100].iter().map(|&count| (format!("{count} versions"), count)).collect(), now.versions.how_many, shown, workspace, |settings, count| settings.versions.how_many = count)),
         ]))
+        .child(group_title("Auto-save"))
+        .child(card(vec![
+            setting("Auto-save", "While a saved project has unsaved changes, a copy goes in a folder beside it named \u{201c}<project> Auto-Save\u{201d}. The project itself is only changed when you save.", switch("general-auto-save", now.auto_save.on, shown, workspace, |settings, on| settings.auto_save.on = on)),
+            setting("Every", "How often a copy is written while the project changes.", menu("general-auto-save-every", [1, 2, 5, 10, 15, 20].iter().map(|&minutes| (if minutes == 1 { "1 minute".to_owned() } else { format!("{minutes} minutes") }, minutes)).collect(), now.auto_save.every_minutes, shown, workspace, |settings, minutes| settings.auto_save.every_minutes = minutes)),
+            setting("Keep", "How many copies the folder keeps. The oldest go first.", menu("general-auto-save-count", [5, 10, 20, 50].iter().map(|&count| (format!("{count} copies"), count)).collect(), now.auto_save.how_many, shown, workspace, |settings, count| settings.auto_save.how_many = count)),
+        ]))
         .child(group_title("New compositions"))
         .child(card(vec![
             setting("Frame size", "What new compositions and new projects start at.", menu("general-size", sizes, (size.width, size.height), shown, workspace, |settings, (width, height)| (settings.new_composition.width, settings.new_composition.height) = (width, height))),

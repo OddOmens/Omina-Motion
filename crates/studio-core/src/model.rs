@@ -524,6 +524,9 @@ pub struct TextStyle {
     pub tracking: f32,
     pub fill: Option<Rgba>,
     pub stroke: Option<(Rgba, f32)>,
+    /// How the stroke is drawn: where it sits on the letters' edges, its corners and dashes.
+    #[serde(default, skip_serializing_if = "TextStrokeOptions::is_default")]
+    pub stroke_options: TextStrokeOptions,
     pub align: TextAlign,
     /// The library text style this follows (font, weight, size, leading, tracking and fill).
     /// Changing one of those by hand unlinks it.
@@ -542,6 +545,7 @@ impl TextStyle {
             && within(self.line_height, LINE_HEIGHT_RANGE)
             && within(self.tracking, TRACKING_RANGE)
             && self.stroke.is_none_or(|(_, width)| width.is_finite() && (0.0..=MAX_STROKE_WIDTH).contains(&width))
+            && self.stroke_options.is_sound()
     }
 
     pub fn estimate_size(&self, text: &str) -> Vec2 {
@@ -569,9 +573,96 @@ impl Default for TextStyle {
             tracking: 0.0,
             fill: Some(Rgba::hex(0xffffff)),
             stroke: None,
+            stroke_options: TextStrokeOptions::default(),
             align: TextAlign::Center,
             template: None,
         }
+    }
+}
+
+/// Where a text stroke sits on the letters' edges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum StrokePosition {
+    /// All of the stroke is inside the letters, which keep their size.
+    Inside,
+    /// Half inside, half outside, as in After Effects.
+    Center,
+    /// All of the stroke is around the letters, which keep their shape.
+    #[default]
+    Outside,
+}
+
+/// How the corners of a stroke are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum StrokeJoin {
+    Miter,
+    #[default]
+    Round,
+    Bevel,
+}
+
+/// How the ends of a dashed stroke's dashes are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum StrokeCap {
+    #[default]
+    Butt,
+    Round,
+    Square,
+}
+
+/// A text stroke's options beyond its color and width. The defaults draw the stroke all
+/// around the letters with rounded corners, which is how text strokes looked before these
+/// options existed.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TextStrokeOptions {
+    pub position: StrokePosition,
+    pub join: StrokeJoin,
+    /// How far a sharp (miter) corner may stick out, as a multiple of the stroke width.
+    pub miter_limit: f32,
+    pub cap: StrokeCap,
+    /// Dash and gap lengths in pixels; a dash of 0 is a solid line.
+    pub dash: f32,
+    pub gap: f32,
+    /// Draws the stroke over the fill instead of under it (After Effects' "Stroke Over Fill").
+    pub over_fill: bool,
+}
+
+impl Default for TextStrokeOptions {
+    fn default() -> Self {
+        Self { position: StrokePosition::Outside, join: StrokeJoin::Round, miter_limit: 4.0, cap: StrokeCap::Butt, dash: 0.0, gap: 0.0, over_fill: false }
+    }
+}
+
+/// The highest miter limit allowed, and the longest dash or gap, in pixels.
+pub const MAX_MITER_LIMIT: f32 = 100.0;
+pub const MAX_DASH_LENGTH: f32 = 1000.0;
+
+impl TextStrokeOptions {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Whether the stroke is drawn in dashes.
+    pub fn dashed(&self) -> bool {
+        self.dash > 0.0
+    }
+
+    /// How far a stroke `width` wide can reach outside the letters' edges.
+    pub fn reach(&self, width: f32) -> f32 {
+        let outside = match self.position {
+            StrokePosition::Inside => 0.0,
+            StrokePosition::Center => width * 0.5,
+            StrokePosition::Outside => width,
+        };
+        // Sharp corners can poke out further, up to the miter limit.
+        if self.join == StrokeJoin::Miter { outside * self.miter_limit.max(1.0) } else { outside }
+    }
+
+    /// Whether the numbers are ones the renderer can draw.
+    pub fn is_sound(&self) -> bool {
+        let within = |value: f32, high: f32| value.is_finite() && (0.0..=high).contains(&value);
+        self.miter_limit.is_finite() && (1.0..=MAX_MITER_LIMIT).contains(&self.miter_limit) && within(self.dash, MAX_DASH_LENGTH) && within(self.gap, MAX_DASH_LENGTH)
     }
 }
 
@@ -750,17 +841,20 @@ pub struct Effect {
     pub name: String,
     pub enabled: bool,
     pub properties: Vec<EffectProperty>,
-    /// The lookup table an Apply LUT effect uses; `None` for every other effect, and for an
-    /// Apply LUT whose table has not been chosen yet.
+    /// The lookup table an Apply LUT effect uses, or a Curves effect's curves (made into a lookup
+    /// table to draw); `None` for every other effect, and for an Apply LUT whose table has not
+    /// been chosen yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lut: Option<LutSource>,
 }
 
-/// Where a LUT comes from: one of Studio's built-in looks (see `grade::LOOK_GROUPS`), or a `.cube` file.
+/// Where a LUT comes from: one of Studio's built-in looks (see `grade::LOOK_GROUPS`), a `.cube`
+/// file, or a Curves effect's curves.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LutSource {
     Look(String),
     File(std::path::PathBuf),
+    Curves(ToneCurves),
 }
 
 impl LutSource {
@@ -769,7 +863,87 @@ impl LutSource {
         match self {
             Self::Look(name) => name.clone(),
             Self::File(path) => path.file_stem().map_or_else(|| path.display().to_string(), |stem| stem.to_string_lossy().into_owned()),
+            Self::Curves(_) => "Curves".to_owned(),
         }
+    }
+}
+
+/// Which of a Curves effect's curves: the one for brightness (all three channels together), or
+/// one channel's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CurveChannel {
+    #[default]
+    Master,
+    Red,
+    Green,
+    Blue,
+}
+
+impl CurveChannel {
+    pub const ALL: [CurveChannel; 4] = [Self::Master, Self::Red, Self::Green, Self::Blue];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Master => "RGB",
+            Self::Red => "Red",
+            Self::Green => "Green",
+            Self::Blue => "Blue",
+        }
+    }
+}
+
+/// A Curves effect's curves, as in Photoshop or Resolve: points on a graph of input (across) to
+/// output (up) for brightness and for each channel, joined by a smooth curve (see
+/// `grade::curve_table`). Points are kept in thousandths (0–1000), so they compare and hash
+/// exactly and save as plain numbers.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ToneCurves {
+    pub master: Vec<[u16; 2]>,
+    pub red: Vec<[u16; 2]>,
+    pub green: Vec<[u16; 2]>,
+    pub blue: Vec<[u16; 2]>,
+}
+
+impl Default for ToneCurves {
+    /// Straight lines from black to white: no change.
+    fn default() -> Self {
+        let straight = vec![[0, 0], [1000, 1000]];
+        Self { master: straight.clone(), red: straight.clone(), green: straight.clone(), blue: straight }
+    }
+}
+
+impl ToneCurves {
+    fn points_mut(&mut self, channel: CurveChannel) -> &mut Vec<[u16; 2]> {
+        match channel {
+            CurveChannel::Master => &mut self.master,
+            CurveChannel::Red => &mut self.red,
+            CurveChannel::Green => &mut self.green,
+            CurveChannel::Blue => &mut self.blue,
+        }
+    }
+
+    /// One curve's points, as fractions (0–1), left to right.
+    pub fn points(&self, channel: CurveChannel) -> Vec<[f32; 2]> {
+        let points = match channel {
+            CurveChannel::Master => &self.master,
+            CurveChannel::Red => &self.red,
+            CurveChannel::Green => &self.green,
+            CurveChannel::Blue => &self.blue,
+        };
+        points.iter().map(|&[x, y]| [f32::from(x) / 1000.0, f32::from(y) / 1000.0]).collect()
+    }
+
+    /// Replaces one curve's points (fractions, kept within 0–1 and sorted left to right).
+    pub fn set_points(&mut self, channel: CurveChannel, points: &[[f32; 2]]) {
+        let to_thousandths = |value: f32| (value.clamp(0.0, 1.0) * 1000.0).round() as u16;
+        let mut stored: Vec<[u16; 2]> = points.iter().filter(|[x, y]| x.is_finite() && y.is_finite()).map(|&[x, y]| [to_thousandths(x), to_thousandths(y)]).collect();
+        stored.sort_by_key(|point| point[0]);
+        *self.points_mut(channel) = stored;
+    }
+
+    /// Whether every curve is a straight line from black to white.
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -1248,6 +1422,10 @@ pub struct Composition {
     /// looks darker. Compositions brought in from those keep their look with it off.
     #[serde(default = "crate::model::linear_by_default", skip_serializing_if = "crate::model::is_linear")]
     pub linear_blending: bool,
+    /// Tracks kept as empty rows on the timeline: ones whose last clip was dragged to another
+    /// track, until something goes back on them or they're removed (see `tracks`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub empty_tracks: Vec<i32>,
 }
 
 /// Compositions blend in linear light unless they say otherwise (see `Composition::linear_blending`).

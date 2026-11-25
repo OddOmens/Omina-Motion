@@ -1,6 +1,6 @@
 //! Writing a File ▸ Package… zip. `studio_core::package` plans where each linked file goes; this
 //! copies them into `<name>.zip` under a top folder `<name>/`, beside the project saved as
-//! `<name>.studio` with its media paths pointing at the copies, and a `Missing files.txt` note
+//! `<name>.omim` with its media paths pointing at the copies, and a `Missing files.txt` note
 //! when some linked files weren't found. It runs on a background thread (see
 //! `panels::package`), reporting progress and stopping when asked to.
 
@@ -235,7 +235,7 @@ mod tests {
 
         let entries = entries(&request.target);
         let names: Vec<_> = entries.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["Promo/Footage/A-cam_01.mov", "Promo/Footage/logo.png", "Promo/Missing files.txt", "Promo/Promo.studio"]);
+        assert_eq!(names, ["Promo/Footage/A-cam_01.mov", "Promo/Footage/logo.png", "Promo/Missing files.txt", "Promo/Promo.omim"]);
         assert_eq!(entries[0].1, b"a-cam frames");
         let note = String::from_utf8(entries[2].1.clone()).unwrap();
         assert!(note.contains("B-roll_02.mov"), "{note}");

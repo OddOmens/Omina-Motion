@@ -156,6 +156,7 @@ pub fn sample_project() -> Project {
         markers: Vec::new(),
         motion_blur: Default::default(),
         linear_blending: true,
+        empty_tracks: Vec::new(),
     };
 
     let footage = Some(ids::FOOTAGE_FOLDER);

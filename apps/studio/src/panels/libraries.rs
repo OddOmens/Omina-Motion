@@ -289,7 +289,7 @@ fn fonts_section(mut section: Div, brand: &Brand, text_layer: Option<Id>, worksp
                 .hover(|style| style.bg(hsla(color::HOVER)))
                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                     let layers = this.state.selected_layers.clone();
-                    if event.click_count() == 1 && this.state.set_font_of(&layers, &apply) > 0 {
+                    if event.click_count() == 1 && super::properties::choose_font_of(this, &layers, &apply) > 0 {
                         cx.notify();
                     }
                 }))

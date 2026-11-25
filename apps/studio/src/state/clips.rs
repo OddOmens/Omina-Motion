@@ -52,12 +52,17 @@ impl EditorState {
     }
 
     /// Drops the dragged clip onto its target track (or a new track next to it, if it would
-    /// overlap a clip there).
+    /// overlap a clip there). A track it leaves with nothing on stays as an empty row.
     pub fn end_clip_drag(&mut self) {
         let Some(drag) = self.clip_drag.take() else { return };
         self.clear_snap_line();
         let Some(in_frame) = self.composition().layer(drag.layer).map(|layer| layer.in_frame) else { return };
-        tracks::place_clip(self.composition_mut(), drag.layer, drag.target_track, in_frame);
+        tracks::move_clip_keeping_track(self.composition_mut(), drag.layer, drag.target_track, in_frame);
+    }
+
+    /// Removes an empty track kept on the timeline (the × on its header).
+    pub fn remove_empty_track(&mut self, track: i32) {
+        tracks::remove_empty_track(self.composition_mut(), track);
     }
 
     /// The clip being dragged and the track it is headed for, for the view to draw it there.

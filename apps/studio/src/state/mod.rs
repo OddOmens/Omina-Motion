@@ -184,6 +184,11 @@ pub enum TextSetting {
     Leading,
     Tracking,
     StrokeWidth,
+    /// How far a stroke's sharp corners may stick out, as a multiple of its width.
+    StrokeMiter,
+    /// The length of a dashed stroke's dashes, and of the gaps between them.
+    StrokeDash,
+    StrokeGap,
 }
 
 impl TextSetting {
@@ -193,7 +198,15 @@ impl TextSetting {
             Self::Leading => style.line_height,
             Self::Tracking => style.tracking,
             Self::StrokeWidth => style.stroke.map_or(0.0, |(_, width)| width),
+            Self::StrokeMiter => style.stroke_options.miter_limit,
+            Self::StrokeDash => style.stroke_options.dash,
+            Self::StrokeGap => style.stroke_options.gap,
         }
+    }
+
+    /// Whether the setting is part of the stroke, which library text styles don't set.
+    pub fn is_stroke(self) -> bool {
+        matches!(self, Self::StrokeWidth | Self::StrokeMiter | Self::StrokeDash | Self::StrokeGap)
     }
 
     fn set(self, style: &mut TextStyle, value: f32) {
@@ -211,6 +224,10 @@ impl TextSetting {
                     *width = value.clamp(0.0, 1000.0);
                 }
             }
+            Self::StrokeMiter => style.stroke_options.miter_limit = value.clamp(1.0, studio_core::model::MAX_MITER_LIMIT),
+            // A dash can't be shorter than a tenth of a pixel, or it would read as a solid line.
+            Self::StrokeDash => style.stroke_options.dash = value.clamp(0.1, studio_core::model::MAX_DASH_LENGTH),
+            Self::StrokeGap => style.stroke_options.gap = value.clamp(0.0, studio_core::model::MAX_DASH_LENGTH),
         }
     }
 }
@@ -853,8 +870,8 @@ impl EditorState {
     pub fn set_text_setting(&mut self, layer: Id, setting: TextSetting, value: f32) {
         edit::edit_text(self.composition_mut(), layer, |_, style| {
             setting.set(style, value);
-            // Changing what a library text style sets unlinks it (stroke width is not part of one).
-            if setting != TextSetting::StrokeWidth {
+            // Changing what a library text style sets unlinks it (the stroke is not part of one).
+            if !setting.is_stroke() {
                 style.template = None;
             }
         });
@@ -880,6 +897,11 @@ impl EditorState {
 
     pub fn set_text_stroke(&mut self, layer: Id, stroke: Option<(studio_core::model::Rgba, f32)>) {
         edit::edit_text(self.composition_mut(), layer, |_, style| style.stroke = stroke);
+    }
+
+    /// Changes how a text or caption layer's stroke is drawn: its position, corners and dashes.
+    pub fn edit_text_stroke_options(&mut self, layer: Id, change: impl FnOnce(&mut studio_core::model::TextStrokeOptions)) {
+        edit::edit_text(self.composition_mut(), layer, |_, style| change(&mut style.stroke_options));
     }
 
     pub fn shape_of(&self, layer: Id) -> Option<&ShapeStyle> {

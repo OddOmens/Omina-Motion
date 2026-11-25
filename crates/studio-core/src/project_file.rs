@@ -15,8 +15,19 @@ use crate::effects;
 use crate::model::{Id, Project};
 use crate::time::FrameRange;
 
-/// The file name extension for project files.
-pub const EXTENSION: &str = "studio";
+/// The file name extension for project files: Omina Motion's own, so double-clicking one opens Motion.
+pub const EXTENSION: &str = "omim";
+
+/// Extensions projects were saved with before, still opened (and still listed with macOS as this app's), so
+/// existing projects keep working. New projects are always saved with `EXTENSION`.
+pub const OLDER_EXTENSIONS: &[&str] = &["studio"];
+
+/// Whether a path names a project file, by its extension (new or older, any letter case).
+pub fn is_project_path(path: &std::path::Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        extension.eq_ignore_ascii_case(EXTENSION) || OLDER_EXTENSIONS.iter().any(|older| extension.eq_ignore_ascii_case(older))
+    })
+}
 /// Identifies a Studio project file.
 const FORMAT: &str = "studio-project";
 /// Bumped whenever the format changes in a way older versions cannot read.
@@ -849,5 +860,20 @@ mod tests {
         assert!(crate::motion_blur::set_motion_blur(&mut project, ids::MAIN_COMP, MotionBlur { shutter_angle: -1.0, samples: 8 }).is_err());
         let damaged = open_damaged(|file| file["project"]["compositions"][0]["motion_blur"] = serde_json::json!({ "shutter_angle": 180.0, "samples": 100_000 }));
         assert!(damaged.unwrap_err().contains("samples"));
+    }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn new_and_older_project_files_are_both_projects() {
+        assert!(is_project_path(Path::new("/tmp/Poster.omim")));
+        assert!(is_project_path(Path::new("/tmp/POSTER.OMIM")), "letter case doesn't matter");
+        assert!(is_project_path(Path::new("/tmp/Poster.studio")), "projects saved before .omim still open");
+        assert!(!is_project_path(Path::new("/tmp/Poster.png")));
+        assert!(!is_project_path(Path::new("/tmp/Poster")));
     }
 }

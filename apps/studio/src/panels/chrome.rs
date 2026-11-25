@@ -206,7 +206,9 @@ impl Render for EmptyDragView {
     }
 }
 
-/// A small ghost icon button with a tooltip.
+/// A small ghost icon button with a tooltip. When `active` (a setting switched on, or the tool
+/// in use) its icon takes the accent colour on an accent-tinted background, so it reads as on at
+/// a glance.
 pub fn icon_button(
     id: impl Into<ElementId>,
     icon: IconName,
@@ -214,10 +216,11 @@ pub fn icon_button(
     active: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Button {
+    let icon = if active { Icon::new(icon).text_color(hsla(color::ACCENT)) } else { Icon::new(icon) };
     Button::new(id)
         .ghost()
         .small()
-        .icon(Icon::new(icon))
+        .icon(icon)
         .tooltip(tooltip)
         .selected(active)
         .on_click(on_click)

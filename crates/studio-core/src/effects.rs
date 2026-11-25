@@ -144,6 +144,9 @@ pub const CATEGORIES: &[EffectCategory] = &[
                     (param("Shadows", "", 0.5, -100.0, 100.0, 0), 0.0),
                 ],
             },
+            // Point curves, as in Photoshop or Resolve: brightness and each channel shaped by
+            // points joined by a smooth curve (`Effect::lut` holds them), mixed in by Intensity.
+            EffectDefinition { name: "Curves", parameters: &[(param("Intensity", "%", 0.5, PERCENT.0, PERCENT.1, 0), 100.0)] },
             EffectDefinition {
                 name: "Levels",
                 parameters: &[
@@ -711,7 +714,8 @@ pub fn instantiate(definition: &EffectDefinition, id: Id) -> Effect {
             .iter()
             .map(|&(info, default)| EffectProperty { name: info.name.to_owned(), info, value: Animated::constant(default) })
             .collect(),
-        lut: None,
+        // Curves start as straight lines; an Apply LUT has no table until one is chosen.
+        lut: (definition.name == "Curves").then(|| crate::model::LutSource::Curves(crate::model::ToneCurves::default())),
     }
 }
 

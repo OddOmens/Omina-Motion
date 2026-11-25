@@ -88,6 +88,10 @@ fn encode_proxy(source: &Path, partial: &Path, width: u32, progress: &dyn Fn(f32
     let matrix = crate::color::matrix(decoder.color_space(), info.height);
     encoder.set_colorspace(matrix);
     encoder.set_color_range(ffmpeg::util::color::Range::MPEG);
+    // An HDR source's curve and colours go with it, so its proxy is tone-mapped the same way
+    // (see `hdr`) instead of showing washed out.
+    encoder.set_color_transfer_characteristic(decoder.color_transfer_characteristic());
+    encoder.set_color_primaries(decoder.color_primaries());
     encoder.set_time_base(in_time_base);
     let rate = info.frame_rate;
     encoder.set_frame_rate(Some(ffmpeg::Rational::new(rate.numerator as i32, rate.denominator as i32)));
@@ -180,6 +184,10 @@ pub fn default_cache_root() -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir).join("Studio")
 }
 
+/// Bumped when proxies are written differently, so older ones are made again rather than reused.
+/// 2: an HDR source's curve and colours are kept, so its proxy is tone-mapped like the original.
+const PROXY_FORMAT: u32 = 2;
+
 /// The proxy file for `source`: named from its path, size and modification time, so editing the
 /// source (or replacing it) produces a different name and a fresh proxy.
 pub fn proxy_path(cache: &Path, source: &Path) -> PathBuf {
@@ -189,6 +197,7 @@ pub fn proxy_path(cache: &Path, source: &Path) -> PathBuf {
     metadata.as_ref().map(std::fs::Metadata::len).hash(&mut hasher);
     metadata.and_then(|m| m.modified().ok()).hash(&mut hasher);
     PROXY_WIDTH.hash(&mut hasher);
+    PROXY_FORMAT.hash(&mut hasher);
     cache.join(format!("{:016x}.mov", hasher.finish()))
 }
 

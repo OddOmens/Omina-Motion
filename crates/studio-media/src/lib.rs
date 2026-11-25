@@ -12,6 +12,7 @@ mod decode;
 mod encode;
 mod exact;
 mod hardware;
+mod hdr;
 mod mixer;
 mod motion;
 mod peaks;

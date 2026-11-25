@@ -45,6 +45,14 @@ fn starting_folder(current: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Opens the projects the system hands over once Motion is running. Motion shows one project
+/// at a time, so of several, the first is opened (after offering to save unsaved changes).
+pub fn open_handed_over(workspace: &mut Workspace, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Workspace>) {
+    if let Some(path) = paths.into_iter().next() {
+        crate::panels::start_screen::open_recent(workspace, path, window, cx);
+    }
+}
+
 impl Workspace {
     /// How the editor is set up: the state's settings plus the timeline's open clips.
     pub fn editor_settings(&self) -> EditorSettings {
@@ -86,6 +94,10 @@ impl Workspace {
                     this.ui.recovery_offered = false;
                     if restore {
                         this.restore_recovery(&text, settings.recovery_of, window, cx);
+                        // A project double-clicked to launch Motion opens next, offering to
+                        // save the restored changes first.
+                        let handed_over = crate::opened_files::take_at_launch();
+                        open_handed_over(this, handed_over, window, cx);
                     } else {
                         app_settings::clear_recovery();
                         this.start(&settings, window, cx);
@@ -99,13 +111,16 @@ impl Workspace {
         self.start(&settings, window, cx);
     }
 
-    /// Opens the last project if Settings asks for that and it is still there; otherwise shows
+    /// Opens a project the system handed over (double-clicked, or named on the command line),
+    /// else the last project if Settings asks for that and it is still there; otherwise shows
     /// the start screen.
     /// The very first time, the welcome setup shows over it.
     fn start(&mut self, settings: &app_settings::AppSettings, window: &mut Window, cx: &mut Context<Self>) {
+        let handed_over = crate::opened_files::take_at_launch().into_iter().next();
         let last = settings.last_project.clone().filter(|path| path.exists());
-        match last {
-            Some(last) if settings.start_with == app_settings::StartWith::LastProject => self.open_file(last, window, cx),
+        match (handed_over, last) {
+            (Some(path), _) => self.open_file(path, window, cx),
+            (None, Some(last)) if settings.start_with == app_settings::StartWith::LastProject => self.open_file(last, window, cx),
             _ => crate::panels::start_screen::show(self, window, cx),
         }
         if !settings.onboarded {
@@ -166,6 +181,31 @@ impl Workspace {
         }
     }
 
+    /// Writes an auto-save copy beside the project (see `auto_save`) when Settings has it on, the
+    /// project has been saved somewhere, it has changed since, and the last save or auto-save is
+    /// older than Settings asks for. Says once if copies can't be written (a read-only folder).
+    fn auto_save_if_due(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.ui.settings.auto_save;
+        let Some(file) = self.state.file().map(Path::to_path_buf) else { return };
+        let due = self.ui.last_auto_save_at.is_none_or(|at| at.elapsed().as_secs() >= u64::from(settings.every_minutes.max(1)) * 60);
+        if !settings.on || !due || !self.state.has_unsaved_changes() {
+            return;
+        }
+        let written = self
+            .state
+            .project_text_with(&self.editor_settings())
+            .and_then(|text| crate::auto_save::write(&file, &text, settings.how_many as usize, chrono::Local::now()).map_err(|error| error.to_string()));
+        self.ui.last_auto_save_at = Some(std::time::Instant::now());
+        match written {
+            Ok(_) => self.ui.auto_save_failing = false,
+            Err(error) if !self.ui.auto_save_failing => {
+                self.ui.auto_save_failing = true;
+                window.push_notification(format!("Auto-save couldn't write a copy beside the project: {error}").as_str(), cx);
+            }
+            Err(_) => {}
+        }
+    }
+
     /// Restores version `version` of the project as unsaved changes, after keeping the work as
     /// it is now as a version too (so the restore can be undone by restoring that).
     pub fn restore_version(&mut self, version: &crate::versions::Version, window: &mut Window, cx: &mut Context<Self>) {
@@ -198,6 +238,7 @@ impl Workspace {
     /// disk), and tries again to save libraries that failed to save.
     pub fn keep_work_safe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.keep_timed_version();
+        self.auto_save_if_due(window, cx);
         let recovery = if self.ui.settings.recovery_seconds == 0 || self.ui.recovery_offered { Ok(()) } else { self.keep_recovery_copy() };
         match recovery {
             Ok(()) => self.ui.recovery_failing = false,
@@ -321,10 +362,15 @@ impl Workspace {
                     self.keep_version(text, Some(path));
                 }
                 self.state.mark_saved(path.to_path_buf(), cx.has_active_drag());
+                // The next auto-save is a full interval after this save.
+                self.ui.last_auto_save_at = Some(std::time::Instant::now());
                 // Saved: nothing left to recover, and this is the project to reopen next time.
                 app_settings::clear_recovery();
                 app_settings::note_project_used(path);
                 self.save_thumbnail(path);
+                // A brief notice, so a save (⌘S especially) is seen to have worked.
+                let name = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
+                window.push_notification(format!("Saved “{name}”").as_str(), cx);
                 crate::workspace::refresh_menus(cx);
                 cx.notify();
                 true
